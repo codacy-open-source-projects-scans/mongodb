@@ -326,7 +326,6 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         _autoDb.refreshDbReferenceIfNull(opCtx);
     }
 
-    checkCollectionUUIDMismatch(opCtx, _resolvedNss, _coll, options._expectedUUID);
     verifyDbAndCollection(
         opCtx, modeColl, nsOrUUID, _resolvedNss, _coll.get(), _autoDb.getDb(), verifyWriteEligible);
     for (auto& secondaryNssOrUUID : secondaryNssOrUUIDs) {
@@ -358,6 +357,8 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
             _coll.setShardKeyPattern(collDesc.getKeyPattern());
         }
 
+        checkCollectionUUIDMismatch(opCtx, *catalog, _resolvedNss, _coll, options._expectedUUID);
+
         return;
     }
 
@@ -387,7 +388,6 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                                   << " is a view therefore the shard "
                                   << "version attached to the request must be unset or UNSHARDED",
                     !receivedShardVersion || *receivedShardVersion == ShardVersion::UNSHARDED());
-
             return;
         }
     }
@@ -413,6 +413,8 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
                           << "version attached to the request must be unset, UNSHARDED or IGNORED",
             !receivedShardVersion || *receivedShardVersion == ShardVersion::UNSHARDED() ||
                 ShardVersion::isPlacementVersionIgnored(*receivedShardVersion));
+
+    checkCollectionUUIDMismatch(opCtx, *catalog, _resolvedNss, _coll, options._expectedUUID);
 }
 
 Collection* AutoGetCollection::getWritableCollection(OperationContext* opCtx) {
@@ -450,8 +452,7 @@ struct CollectionWriter::SharedImpl {
     std::function<Collection*()> _writableCollectionInitializer;
 };
 
-CollectionWriter::CollectionWriter(OperationContext* opCtx,
-                                   ScopedCollectionAcquisition* acquisition)
+CollectionWriter::CollectionWriter(OperationContext* opCtx, CollectionAcquisition* acquisition)
     : _acquisition(acquisition),
       _collection(&_storedCollection),
       _managed(true),
@@ -462,8 +463,9 @@ CollectionWriter::CollectionWriter(OperationContext* opCtx,
     _storedCollection.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, _storedCollection));
 
     _sharedImpl->_writableCollectionInitializer = [this, opCtx]() mutable {
-        invariant(!_fence);
-        _fence = std::make_unique<ScopedLocalCatalogWriteFence>(opCtx, _acquisition);
+        if (!_fence) {
+            _fence = std::make_unique<ScopedLocalCatalogWriteFence>(opCtx, _acquisition);
+        }
 
         return CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForMetadataWrite(
             opCtx, _acquisition->nss());
@@ -542,7 +544,6 @@ Collection* CollectionWriter::getWritableCollection(OperationContext* opCtx) {
                 [shared = _sharedImpl](OperationContext* opCtx, boost::optional<Timestamp>) {
                     if (shared->_parent) {
                         shared->_parent->_writableCollection = nullptr;
-                        shared->_parent->_fence.reset();
 
                         // Make the stored collection yieldable again as we now operate with the
                         // same instance as is in the catalog.
@@ -554,7 +555,6 @@ Collection* CollectionWriter::getWritableCollection(OperationContext* opCtx) {
                     OperationContext* opCtx) mutable {
                     if (shared->_parent) {
                         shared->_parent->_writableCollection = nullptr;
-                        shared->_parent->_fence.reset();
 
                         // Restore stored collection to its previous state. The rollback
                         // instance is already yieldable.

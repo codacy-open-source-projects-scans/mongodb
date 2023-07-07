@@ -4,10 +4,7 @@
  *   uses_change_streams,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/config_shard_util.js");
+import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
 
 const dbName = jsTestName();
 const setupShardedCluster = (shards = 1) => {
@@ -85,12 +82,6 @@ assert.commandFailedWithCode(
 assert.commandFailedWithCode(assert.throws(() => pscWatch(sdb, "coll", 42)),
                                           ErrorCodes.TypeMismatch);
 
-const isConfigShardEnabled = ConfigShardUtil.isEnabledIgnoringFCV(st);
-if (!isConfigShardEnabled) {
-    // Can't open a per shard cursor on the config RS.
-    assert.commandFailedWithCode(assert.throws(() => pscWatch(sdb, "coll", "config")), 6273803);
-}
-
 // The shardId should be a valid shard.
 assert.commandFailedWithCode(
     assert.throws(() => pscWatch(sdb, "coll", "Dwane 'the Shard' Johnson")),
@@ -111,18 +102,16 @@ for (let i = 1; i <= 4; i++) {
 }
 assert(!c.hasNext());
 
-if (isConfigShardEnabled) {
-    // Can open a per shard cursor on the config server.
-    const configDB = st.s0.getDB("config");
-    c = pscWatch(configDB, "coll", "config", undefined /* options */, {allowToRunOnConfigDB: true});
-    for (let i = 1; i <= 4; i++) {
-        configDB.coll.insertOne({location: 2, i});
-        assert(!c.isExhausted());
-        assert.soon(() => c.hasNext());
-        c.next();
-    }
-    assert(!c.hasNext());
+// Can open a per shard cursor on the config server.
+const configDB = st.s0.getDB("config");
+c = pscWatch(configDB, "coll", "config", undefined /* options */, {allowToRunOnConfigDB: true});
+for (let i = 1; i <= 4; i++) {
+    configDB.coll.insertOne({location: 2, i});
+    assert(!c.isExhausted());
+    assert.soon(() => c.hasNext());
+    c.next();
 }
+assert(!c.hasNext());
 
 // Simple database level watch
 c = pscWatch(sdb, 1, shardId);
@@ -214,4 +203,3 @@ assert(!c.isExhausted());
 assert(!c.hasNext());
 
 st.stop();
-})();

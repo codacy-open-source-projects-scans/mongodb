@@ -215,13 +215,8 @@ public:
         OrderedPathSet paths;
 
         // Mappings from the old name of a path before applying this expression, to the new one
-        // after applying this expression. This map includes solely simple field renaming
-        // expression.
+        // after applying this expression.
         StringMap<std::string> renames;
-
-        // Mappings from the old name of a path before applying this expression. This map includes
-        // expressions which have dotted notation on the right side.
-        StringMap<std::string> complexRenames;
     };
 
     virtual ~Expression(){};
@@ -3643,33 +3638,16 @@ public:
         return visitor->visit(this);
     }
 
+    /* Returns "trim"/"ltrim"/"rtrim" based on the expression name without the $ sign. */
+    std::string getTrimTypeString() const {
+        return _name.substr(1, _name.size());
+    }
+
+    bool hasCharactersExpr() const {
+        return _children[_kCharacters] != nullptr;
+    }
+
 private:
-    /**
-     * Returns true if the unicode character found at index 'indexIntoInput' of 'input' is equal to
-     * 'testCP'.
-     */
-    static bool codePointMatchesAtIndex(const StringData& input,
-                                        std::size_t indexIntoInput,
-                                        const StringData& testCP);
-
-    /**
-     * Given the input string and the code points to trim from that string, returns a substring of
-     * 'input' with any code point from 'trimCPs' trimmed from the left.
-     */
-    static StringData trimFromLeft(StringData input, const std::vector<StringData>& trimCPs);
-
-    /**
-     * Given the input string and the code points to trim from that string, returns a substring of
-     * 'input' with any code point from 'trimCPs' trimmed from the right.
-     */
-    static StringData trimFromRight(StringData input, const std::vector<StringData>& trimCPs);
-
-    /**
-     * Returns the trimmed version of 'input', with all code points in 'trimCPs' removed from the
-     * front, back, or both - depending on _trimType.
-     */
-    StringData doTrim(StringData input, const std::vector<StringData>& trimCPs) const;
-
     static constexpr size_t _kInput = 0;
     static constexpr size_t _kCharacters = 1;  // Optional, null if not specified.
 

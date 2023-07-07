@@ -31,7 +31,9 @@
 #include <absl/container/node_hash_set.h>
 #include <algorithm>
 #include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 #include <cstdint>
 #include <fmt/format.h>
 #include <functional>
@@ -40,9 +42,6 @@
 #include <ostream>
 #include <utility>
 #include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -101,7 +100,6 @@
 #include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
-
 
 namespace mongo {
 namespace repl {
@@ -939,10 +937,10 @@ TEST_F(RollbackImplTest,
     // Insert another document so the collection count is 2.
     const Timestamp time = Timestamp(2, 2);
     ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss.db().toString(), uuid}, {BSON("_id" << 2), time}, time.asULL()));
+        _opCtx.get(), {nss.db_forTest().toString(), uuid}, {BSON("_id" << 2), time}, time.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss.db().toString(), uuid})));
+                  _opCtx.get(), {nss.db_forTest().toString(), uuid})));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2});
     auto truncateAfterPoint =
@@ -1399,13 +1397,15 @@ TEST_F(RollbackImplTest, RollbackSetsMultipleCollectionCounts) {
     _insertDocAndGenerateOplogEntry(obj1, uuid1, nss1, 2);
 
     const Timestamp time1 = Timestamp(2, 2);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss1.db().toString(), uuid1}, {BSON("_id" << 2), time1}, time1.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss1.db_forTest().toString(), uuid1},
+                                                {BSON("_id" << 2), time1},
+                                                time1.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss1.db().toString(), uuid1})));
-    ASSERT_OK(
-        _storageInterface->setCollectionCount(_opCtx.get(), {nss1.db().toString(), uuid1}, 2));
+                  _opCtx.get(), {nss1.db_forTest().toString(), uuid1})));
+    ASSERT_OK(_storageInterface->setCollectionCount(
+        _opCtx.get(), {nss1.db_forTest().toString(), uuid1}, 2));
 
     auto uuid2 = UUID::gen();
     auto nss2 = NamespaceString::createNamespaceString_forTest("test.coll2");
@@ -1413,17 +1413,19 @@ TEST_F(RollbackImplTest, RollbackSetsMultipleCollectionCounts) {
     const auto coll2 = _initializeCollection(_opCtx.get(), uuid2, nss2);
     const Timestamp time2 = Timestamp(3, 3);
     ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss2.db().toString(), uuid2}, {obj2, time2}, time2.asULL()));
+        _opCtx.get(), {nss2.db_forTest().toString(), uuid2}, {obj2, time2}, time2.asULL()));
     _deleteDocAndGenerateOplogEntry(obj2["_id"], uuid2, nss2, 3);
 
     const Timestamp time3 = Timestamp(4, 4);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss2.db().toString(), uuid2}, {BSON("_id" << 2), time3}, time3.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss2.db_forTest().toString(), uuid2},
+                                                {BSON("_id" << 2), time3},
+                                                time3.asULL()));
     ASSERT_EQ(1ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss2.db().toString(), uuid2})));
-    ASSERT_OK(
-        _storageInterface->setCollectionCount(_opCtx.get(), {nss2.db().toString(), uuid2}, 1));
+                  _opCtx.get(), {nss2.db_forTest().toString(), uuid2})));
+    ASSERT_OK(_storageInterface->setCollectionCount(
+        _opCtx.get(), {nss2.db_forTest().toString(), uuid2}, 1));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3});
 
@@ -1444,7 +1446,7 @@ TEST_F(RollbackImplTest, CountChangesCancelOut) {
     const auto obj = BSON("_id" << 2);
     const Timestamp time = Timestamp(2, 2);
     ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss.db().toString(), uuid}, {obj, time}, time.asULL()));
+        _opCtx.get(), {nss.db_forTest().toString(), uuid}, {obj, time}, time.asULL()));
 
     _insertDocAndGenerateOplogEntry(BSON("_id" << 1), uuid, nss, 2);
     _deleteDocAndGenerateOplogEntry(obj["_id"], uuid, nss, 3);
@@ -1461,7 +1463,7 @@ TEST_F(RollbackImplTest, CountChangesCancelOut) {
 
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss.db().toString(), uuid})));
+                  _opCtx.get(), {nss.db_forTest().toString(), uuid})));
     ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {"", uuid}, 2));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3, 4, 5});
@@ -1484,11 +1486,13 @@ TEST_F(RollbackImplTest, RollbackIgnoresSetCollectionCountError) {
     _insertDocAndGenerateOplogEntry(obj1, uuid1, nss1, 2);
 
     const Timestamp time1 = Timestamp(2, 2);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss1.db().toString(), uuid1}, {BSON("_id" << 2), time1}, time1.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss1.db_forTest().toString(), uuid1},
+                                                {BSON("_id" << 2), time1},
+                                                time1.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss1.db().toString(), uuid1})));
+                  _opCtx.get(), {nss1.db_forTest().toString(), uuid1})));
     ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {"", uuid1}, 2));
 
     auto uuid2 = UUID::gen();
@@ -1498,11 +1502,13 @@ TEST_F(RollbackImplTest, RollbackIgnoresSetCollectionCountError) {
     _insertDocAndGenerateOplogEntry(obj2, uuid2, nss2, 3);
 
     const Timestamp time2 = Timestamp(3, 3);
-    ASSERT_OK(_storageInterface->insertDocument(
-        _opCtx.get(), {nss2.db().toString(), uuid2}, {BSON("_id" << 2), time2}, time2.asULL()));
+    ASSERT_OK(_storageInterface->insertDocument(_opCtx.get(),
+                                                {nss2.db_forTest().toString(), uuid2},
+                                                {BSON("_id" << 2), time2},
+                                                time2.asULL()));
     ASSERT_EQ(2ULL,
               unittest::assertGet(_storageInterface->getCollectionCount(
-                  _opCtx.get(), {nss2.db().toString(), uuid2})));
+                  _opCtx.get(), {nss2.db_forTest().toString(), uuid2})));
     ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {"", uuid2}, 2));
 
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3});
@@ -1616,7 +1622,8 @@ RollbackImplTest::_setUpUnpreparedTransactionForCountTest(UUID collId) {
     ASSERT_OK(_insertOplogEntry(commitApplyOpsOplogEntry.toBSON()));
     ops.push_back(std::make_pair(commitApplyOpsOplogEntry.toBSON(), insertOp3.second));
 
-    ASSERT_OK(_storageInterface->setCollectionCount(nullptr, {nss.db().toString(), collId}, 3));
+    ASSERT_OK(
+        _storageInterface->setCollectionCount(nullptr, {nss.db_forTest().toString(), collId}, 3));
     _assertDocsInOplog(_opCtx.get(), {1, 2, 3});
 
     return ops;
@@ -1960,7 +1967,7 @@ public:
         auto doc = BSON("_id" << 1);
         const Timestamp time = Timestamp(2, 1);
         ASSERT_OK(_storageInterface->insertDocument(
-            _opCtx.get(), {nss.db().toString(), collId}, {doc, time}, time.asULL()));
+            _opCtx.get(), {nss.db_forTest().toString(), collId}, {doc, time}, time.asULL()));
 
         BSONObjBuilder bob;
         bob.append("ts", time);
@@ -2386,7 +2393,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordShardIdentityRollbackFo
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsConfigVersionRollback) {
-    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     const auto uuid = UUID::gen();
     const auto nss = VersionType::ConfigNS;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2421,7 +2428,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackFo
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackForNonInsert) {
-    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     const auto uuid = UUID::gen();
     const auto nss = VersionType::ConfigNS;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);

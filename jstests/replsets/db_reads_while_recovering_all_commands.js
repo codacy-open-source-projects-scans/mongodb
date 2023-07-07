@@ -103,8 +103,6 @@ const allCommands = {
     _shardsvrDropGlobalIndex: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isPrimaryOnly},
     _shardsvrCreateCollection: {skip: isPrimaryOnly},
-    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
-    _shardsvrDropCollectionIfUUIDNotMatching: {skip: isNotAUserDataRead},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isNotAUserDataRead},
     _shardsvrDropCollectionParticipant: {skip: isPrimaryOnly},
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isPrimaryOnly},
@@ -180,6 +178,7 @@ const allCommands = {
     cloneCollectionAsCapped: {skip: isPrimaryOnly},
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},

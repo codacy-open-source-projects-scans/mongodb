@@ -29,8 +29,8 @@
 
 #include "mongo/db/catalog/collection_impl.h"
 
-// IWYU pragma: no_include "ext/alloc_traits.h"
 #include <absl/container/flat_hash_map.h>
+#include <algorithm>
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
@@ -42,10 +42,10 @@
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <algorithm>
 #include <map>
 #include <mutex>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -60,7 +60,7 @@
 #include "mongo/db/catalog/index_catalog_impl.h"
 #include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/catalog/uncommitted_multikey.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"  // IWYU pragma: keep
 #include "mongo/db/client.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
@@ -192,13 +192,6 @@ Status validateChangeStreamPreAndPostImagesOptionIsPermitted(const NamespaceStri
                            "changeStreamPreAndPostImages");
     if (validationStatus != Status::OK()) {
         return validationStatus;
-    }
-
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        !gFeatureFlagCatalogShard.isEnabled(serverGlobalParams.featureCompatibility)) {
-        return {
-            ErrorCodes::InvalidOptions,
-            "changeStreamPreAndPostImages collection option is not supported on config servers"};
     }
 
     return Status::OK();
@@ -812,6 +805,21 @@ boost::optional<bool> CollectionImpl::getTimeseriesBucketsMayHaveMixedSchemaData
     return _metadata->timeseriesBucketsMayHaveMixedSchemaData;
 }
 
+bool CollectionImpl::timeseriesBucketingParametersMayHaveChanged() const {
+    return _metadata->timeseriesBucketingParametersHaveChanged
+        ? *_metadata->timeseriesBucketingParametersHaveChanged
+        : true;
+}
+
+void CollectionImpl::setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
+                                                             boost::optional<bool> value) {
+    tassert(7625800, "This is not a time-series collection", _metadata->options.timeseries);
+
+    _writeMetadata(opCtx, [&](BSONCollectionCatalogEntry::MetaData& md) {
+        md.timeseriesBucketingParametersHaveChanged = value;
+    });
+}
+
 void CollectionImpl::setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
                                                                 boost::optional<bool> setting) {
     uassert(6057500, "This is not a time-series collection", _metadata->options.timeseries);
@@ -986,7 +994,7 @@ void CollectionImpl::registerCappedInserts(OperationContext* opCtx,
     // we never get here while holding an uninterruptible, read-ticketed lock. That would indicate
     // that we are operating with the wrong global lock semantics, and either hold too weak a lock
     // (e.g. IS) or that we upgraded in a way we shouldn't (e.g. IS -> IX).
-    invariant(opCtx->lockState()->isNoop() || !opCtx->lockState()->hasReadTicket() ||
+    invariant(!opCtx->lockState()->hasReadTicket() ||
               !opCtx->lockState()->uninterruptibleLocksRequested());
 
     auto* uncommitted =

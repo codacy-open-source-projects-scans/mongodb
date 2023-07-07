@@ -167,12 +167,6 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
 
 class OpObserverMock : public OpObserverNoop {
 public:
-    std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment> preTransactionPrepare(
-        OperationContext* opCtx,
-        const std::vector<OplogSlot>& reservedSlots,
-        const TransactionOperations& transactionOperations,
-        Date_t wallClockTime) override;
-
     void onTransactionPrepare(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
@@ -223,14 +217,6 @@ public:
 
     const repl::OpTime dropOpTime = {Timestamp(Seconds(100), 1U), 1LL};
 };
-
-std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>
-OpObserverMock::preTransactionPrepare(OperationContext* opCtx,
-                                      const std::vector<OplogSlot>& reservedSlots,
-                                      const TransactionOperations& transactionOperations,
-                                      Date_t wallClockTime) {
-    return std::make_unique<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>(/*prepare=*/true);
-}
 
 void OpObserverMock::onTransactionPrepare(
     OperationContext* opCtx,
@@ -785,7 +771,7 @@ TEST_F(TxnParticipantTest, PrepareSucceedsWithNestedLocks) {
 
 TEST_F(TxnParticipantTest, PrepareFailsOnTemporaryCollection) {
     NamespaceString tempCollNss =
-        NamespaceString::createNamespaceString_forTest(kNss.db(), "tempCollection");
+        NamespaceString::createNamespaceString_forTest(kNss.db_forTest(), "tempCollection");
     UUID tempCollUUID = UUID::gen();
 
     // Create a temporary collection so that we can write to it.
@@ -1935,7 +1921,7 @@ class ConfigTxnParticipantTest : public ShardedClusterParticipantTest {
 protected:
     void setUp() final {
         TxnParticipantTest::setUp();
-        serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     }
 
     void tearDown() final {

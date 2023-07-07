@@ -66,7 +66,6 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
@@ -394,6 +393,17 @@ public:
      */
     virtual void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
                                                             boost::optional<bool> setting) = 0;
+
+    virtual bool timeseriesBucketingParametersMayHaveChanged() const = 0;
+
+    /**
+     * Sets the 'timeseriesBucketingParametersHaveChanged' catalog entry flag to 'value' for this
+     * collection.
+     *
+     * Throws if this is not a time-series collection.
+     */
+    virtual void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
+                                                         boost::optional<bool> value) = 0;
 
     /**
      * Returns true if the passed in time-series bucket document contains mixed-schema data.

@@ -3,19 +3,15 @@
  * multitenancySupport in a rolling fashion in a replica set.
  */
 
-(function() {
-"use strict";
-
 load("jstests/aggregation/extras/utils.js");
 load("jstests/replsets/rslib.js");
-load("jstests/libs/feature_flag_util.js");
 
 // In production, we will upgrade to start using multitenancySupport before enabling this feature
 // flag, and this test is meant to exercise that upgrade behavior, so don't run if the feature flag
 // is enabled.
 const featureFlagRequireTenantId = TestData.setParameters.featureFlagRequireTenantID;
 if (featureFlagRequireTenantId) {
-    return;
+    quit();
 }
 
 /*
@@ -46,12 +42,11 @@ function runFindAndModOnPrefixedDb(conn, prefixedDb, collName, query, update, ex
  * tenantId.
  */
 function runFindUsingDollarTenant(conn, db, collName, tenantId, expectedDocsReturned) {
-    const res = assert.commandWorked(conn.getDB(db).runCommand(
-        {find: collName, filter: {}, $tenant: tenantId, expectPrefix: true}));
+    const res = assert.commandWorked(
+        conn.getDB(db).runCommand({find: collName, filter: {}, $tenant: tenantId}));
     assert(arrayEq(expectedDocsReturned, res.cursor.firstBatch), tojson(res));
     const namespace = db + "." + collName;
-    // TODO SERVER-74284 Uncomment the line below
-    // assert.eq(res.cursor.ns, namespace);
+    assert.eq(res.cursor.ns, namespace);
 }
 
 /*
@@ -158,10 +153,10 @@ assertFindBothTenantsUsingDollarTenant(
     originalSecondary, kDbName, kCollName, kTenant1, kTenant2, tenant1Docs, tenant2Docs);
 
 // Also assert both tenants find the new doc on the secondary using $tenant and a prefixed db.
-// TODO SERVER-74284 Uncomment the lines below
-// runFindUsingDollarTenantAndPrefix(originalSecondary, tenant1DbPrefixed, kCollName, kTenant1,
-// tenant1Docs); runFindUsingDollarTenantAndPrefix(originalSecondary, tenant2DbPrefixed, kCollName,
-// kTenant2, tenant2Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant1DbPrefixed, kCollName, kTenant1, tenant1Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant2DbPrefixed, kCollName, kTenant2, tenant2Docs);
 
 // Now insert a new doc for both tenants using the prefixed db, and assert that we can find it
 // on both the primary and secondary.
@@ -195,10 +190,10 @@ assertFindBothTenantsUsingDollarTenant(
     originalSecondary, kDbName, kCollName, kTenant1, kTenant2, allTenant1Docs, allTenant2Docs);
 
 // Assert both tenants find the new doc on the secondary using $tenant and a prefixed db.
-// TODO SERVER-74284 Uncomment the lines below
-// runFindUsingDollarTenantAndPrefix(originalSecondary, tenant1DbPrefixed, kCollName, kTenant1,
-// allTenant1Docs); runFindUsingDollarTenantAndPrefix(originalSecondary, tenant2DbPrefixed,
-// kCollName, kTenant2, allTenant2Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant1DbPrefixed, kCollName, kTenant1, allTenant1Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant2DbPrefixed, kCollName, kTenant2, allTenant2Docs);
 
 // Now run findAndModify on one doc using a prefixed db and check that we can read from the
 // secondary using just $tenant and $tenant and a prefix.
@@ -225,10 +220,10 @@ assertFindBothTenantsUsingDollarTenant(originalSecondary,
                                        modifiedTenant1Docs,
                                        modifiedTenant2Docs);
 
-// TODO SERVER-74284 Uncomment the lines below
-// runFindUsingDollarTenantAndPrefix(originalSecondary, tenant1DbPrefixed, kCollName, kTenant1,
-// modifiedTenant1Docs); runFindUsingDollarTenantAndPrefix(originalSecondary, tenant2DbPrefixed,
-// kCollName, kTenant2, modifiedTenant2Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant1DbPrefixed, kCollName, kTenant1, modifiedTenant1Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant2DbPrefixed, kCollName, kTenant2, modifiedTenant2Docs);
 
 // Now, restart the primary and enable multitenancySupport. The secondary will step up to
 // become primary.
@@ -273,13 +268,13 @@ assertFindBothTenantsUsingDollarTenant(originalSecondary,
 
 // Also check that both tenants find the new doc on the primary and secondary using $tenant and
 // a prefixed db.
-// TODO SERVER-74284 Uncomment the lines below.
-// runFindUsingDollarTenantAndPrefix(originalPrimary, tenant1DbPrefixed, kCollName, kTenant1,
-// modifiedTenant1Docs); runFindUsingDollarTenantAndPrefix(originalSecondary, tenant2DbPrefixed,
-// kCollName, kTenant2, modifiedTenant2Docs); runFindUsingDollarTenantAndPrefix(originalPrimary,
-// tenant1DbPrefixed, kCollName, kTenant1, modifiedTenant1Docs);
-// runFindUsingDollarTenantAndPrefix(originalSecondary, tenant2DbPrefixed, kCollName, kTenant2,
-// modifiedTenant2Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalPrimary, tenant1DbPrefixed, kCollName, kTenant1, modifiedTenant1Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant2DbPrefixed, kCollName, kTenant2, modifiedTenant2Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalPrimary, tenant1DbPrefixed, kCollName, kTenant1, modifiedTenant1Docs);
+runFindUsingDollarTenantAndPrefix(
+    originalSecondary, tenant2DbPrefixed, kCollName, kTenant2, modifiedTenant2Docs);
 
 rst.stopSet();
-})();

@@ -40,6 +40,7 @@
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/interval.h"
 #include "mongo/db/query/interval_evaluation_tree.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/stdx/unordered_set.h"
@@ -111,6 +112,13 @@ bool isWildcardObjectSubpathScan(const IndexScanNode* node);
  * 'index' must be a WILDCARD index.
  */
 BSONElement getWildcardField(const IndexEntry& index);
+
+/**
+ * This helper generates index intervals for the "$_path" field to scan all keys indexing a
+ * document. The index intervals will be ['[MinKey, MinKey]', '["", {})]' ]. The "MinKey" key value
+ * is for documents missing the wildcard field.
+ */
+std::vector<Interval> makeAllValuesForPath();
 
 /**
  * If the compound wildcard index is expanded to any known field and the index is used to answer a

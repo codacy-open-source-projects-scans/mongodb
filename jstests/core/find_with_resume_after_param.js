@@ -7,12 +7,9 @@
  * ]
  */
 
-(function() {
-"use strict";
-
 load("jstests/libs/collection_drop_recreate.js");  // For assertDropCollection.
-load("jstests/libs/sbe_util.js");                  // For checkSBEEnabled.
-load("jstests/libs/feature_flag_util.js");
+import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 const clustered = db.clusteredColl;
 const nonClustered = db.normalColl;
@@ -24,9 +21,6 @@ assertDropCollection(db, nonClusteredName);
 
 db.createCollection(clusteredName, {clusteredIndex: {key: {_id: 1}, unique: true}});
 db.createCollection(nonClusteredName);
-
-// TODO: SERVER-78103 remove check.
-const isSBEEnabled = checkSBEEnabled(db);
 
 // Insert some documents.
 const docs = [{_id: 1, a: 1}, {_id: 2, a: 2}, {_id: 3, a: 3}];
@@ -84,8 +78,6 @@ function testResumeAfter(validateFunction) {
         errorCode: ErrorCodes.KeyNotFound
     });
 
-    // TODO SERVER-78103: Added test for $recordId:null
-
     // Confirm $_resumeAfter will fail for normal collections if it is of type BinData.
     validateFunction({
         collName: nonClusteredName,
@@ -101,7 +93,9 @@ function testResumeAfter(validateFunction) {
         errorCode: ErrorCodes.KeyNotFound
     });
 
-    if (isSBEEnabled) {
+    if (checkSBEEnabled(db)) {
+        // This case really means that 'forceClassicEngine' has not been set. It does not mean any
+        // SBE-specific feature flags are turned on.
         validateFunction({
             collName: nonClusteredName,
             resumeAfterSpec: {'$recordId': null},
@@ -133,7 +127,7 @@ function testResumeAfter(validateFunction) {
 }
 
 testResumeAfter(validateFailedResumeAfterInFind);
-if (FeatureFlagUtil.isEnabled(db, "ReshardingImprovements")) {
+// TODO(SERVER-77873): remove "featureFlagReshardingImprovements"
+if (FeatureFlagUtil.isPresentAndEnabled(db, "ReshardingImprovements")) {
     testResumeAfter(validateFailedResumeAfterInAggregate);
 }
-}());

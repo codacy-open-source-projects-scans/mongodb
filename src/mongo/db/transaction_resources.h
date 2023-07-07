@@ -29,14 +29,13 @@
 
 #pragma once
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 #include <list>
 #include <memory>
 #include <utility>
 #include <variant>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -126,8 +125,7 @@ struct AcquiredCollection {
           collectionDescription(std::move(collectionDescription)),
           ownershipFilter(std::move(ownershipFilter)),
           collectionPtr(std::move(collectionPtr)),
-          invalidated(false),
-          sharedImpl(std::make_shared<SharedImpl>()) {}
+          invalidated(false) {}
 
     AcquiredCollection(AcquisitionPrerequisites prerequisites,
                        std::shared_ptr<Lock::DBLock> dbLock,
@@ -159,13 +157,9 @@ struct AcquiredCollection {
     // was unable to restore it on rollback.
     bool invalidated;
 
-    // Used by the ScopedLocalCatalogWriteFence to track the lifetime of AcquiredCollection.
-    // ScopedLocalCatalogWriteFence will hold a weak_ptr pointing to 'sharedImpl'. The 'onRollback'
-    // handler it installs will use that weak_ptr to determine if the AcquiredCollection is still
-    // alive.
-    // TODO: (jordist) SERVER-XXXXX Rework this.
-    struct SharedImpl {};
-    std::shared_ptr<SharedImpl> sharedImpl;
+    // Maintains a reference count to how many references there are to this acquisition by the
+    // CollectionAcquisition class.
+    mutable int64_t refCount = 0;
 };
 
 struct AcquiredView {
@@ -175,6 +169,10 @@ struct AcquiredView {
     boost::optional<Lock::CollectionLock> collectionLock;
 
     std::shared_ptr<const ViewDefinition> viewDefinition;
+
+    // Maintains a reference count to how many references there are to this acquisition by the
+    // ViewAcquisition class.
+    mutable int64_t refCount = 0;
 };
 
 /**
@@ -224,6 +222,12 @@ struct TransactionResources {
 
     ~TransactionResources();
 
+    static TransactionResources& get(OperationContext* opCtx);
+
+    static std::unique_ptr<TransactionResources> detachFromOpCtx(OperationContext* opCtx);
+    static void attachToOpCtx(OperationContext* opCtx,
+                              std::unique_ptr<TransactionResources> transactionResources);
+
     AcquiredCollection& addAcquiredCollection(AcquiredCollection&& acquiredCollection);
     const AcquiredView& addAcquiredView(AcquiredView&& acquiredView);
 
@@ -236,8 +240,23 @@ struct TransactionResources {
      */
     void assertNoAcquiredCollections() const;
 
-    // Indicates whether yield has been performed on these resources
-    bool yielded{false};
+    /**
+     * Transaction resources can only be in one of 4 states:
+     * - EMPTY: This state is equivalent to a brand new constructed transaction resources which have
+     *   never received an acquisition.
+     * - ACTIVE: There is at least one acquisition in use and the resources have not been yielded.
+     * - YIELDED: The resources are either yielded or in the process of reacquisition after a yield.
+     * - FAILED: The reacquisition after a yield failed, we cannot perform any new acquisitions and
+     *   the operation must release all acquisitions. The operation must effectively cancel the
+     *   current operation.
+     *
+     * The set of valid transitions are:
+     * - EMPTY <-> ACTIVE <-> YIELDED
+     * - YIELDED -> FAILED -> EMPTY
+     */
+    enum class State { EMPTY, ACTIVE, YIELDED, FAILED };
+
+    State state{State::EMPTY};
 
     ////////////////////////////////////////////////////////////////////////////////////////
     // Global resources (cover all collections for the operation)
@@ -249,24 +268,27 @@ struct TransactionResources {
     // Set of locks acquired by the operation or nullptr if yielded.
     std::unique_ptr<Locker> locker;
 
-    // If '_locker' has been yielded, contains a snapshot of the locks which have been yielded.
-    // Otherwise boost::none.
-    boost::optional<Locker::LockSnapshot> yieldedLocker;
-
-    // The storage engine snapshot associated with this transaction (when yielded).
-    struct YieldedRecoveryUnit {
-        std::unique_ptr<RecoveryUnit> recoveryUnit;
-        WriteUnitOfWork::RecoveryUnitState recoveryUnitState;
-    };
-
-    boost::optional<YieldedRecoveryUnit> yieldedRecoveryUnit;
-
     ////////////////////////////////////////////////////////////////////////////////////////
     // Per-collection resources
 
     // Set of all collections which are currently acquired
     std::list<AcquiredCollection> acquiredCollections;
     std::list<AcquiredView> acquiredViews;
+
+    // Reference counters used for controlling how many references there are to the
+    // TransactionResources object.
+    int64_t collectionAcquisitionReferences = 0;
+    int64_t viewAcquisitionReferences = 0;
+
+    ////////////////////////////////////////////////////////////////////////////////////////
+    // Yield/restore logic
+
+    // If this value is set, indicates that yield has been performed on the owning
+    // TransactionResources resources and the yielded state is contained in the structure below.
+    struct YieldedStateHolder {
+        Locker::LockSnapshot yieldedLocker;
+    };
+    boost::optional<YieldedStateHolder> yielded;
 };
 
 }  // namespace shard_role_details

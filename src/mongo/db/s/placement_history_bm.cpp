@@ -34,8 +34,6 @@
 #include <string>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -79,7 +77,6 @@ namespace {
 // _doTest has empty implementation to honor the abstract class, but it is not used in the benchmark
 // framework.
 class BenchmarkConfigServerTestFixture : public ConfigServerTestFixture {
-
 public:
     BenchmarkConfigServerTestFixture() : ConfigServerTestFixture() {
         ConfigServerTestFixture::setUp();
@@ -199,11 +196,7 @@ private:
 }  // namespace
 
 void BM_initPlacementHistory(benchmark::State& state) {
-
-    RAIIServerParameterControllerForTest featureFlagHistoricalPlacementShardingCatalog{
-        "featureFlagHistoricalPlacementShardingCatalog", true};
-
-    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
 
     BenchmarkConfigServerTestFixture fixture;
 

@@ -45,7 +45,6 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/util/builder.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/collection_options.h"
@@ -95,7 +94,6 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction/transaction_participant_gen.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -1019,6 +1017,11 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
             writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), imageToWrite);
         }
 
+        SessionTxnRecord sessionTxnRecord;
+        sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
+        sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
+        onWriteOpCompleted(opCtx, args.updateArgs->stmtIds, sessionTxnRecord);
+
         // Write a pre-image to the change streams pre-images collection when following conditions
         // are met:
         // 1. The collection has 'changeStreamPreAndPostImages' enabled.
@@ -1043,11 +1046,6 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
 
             writeChangeStreamPreImageEntry(opCtx, args.coll->ns().tenantId(), preImage);
         }
-
-        SessionTxnRecord sessionTxnRecord;
-        sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
-        sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
-        onWriteOpCompleted(opCtx, args.updateArgs->stmtIds, sessionTxnRecord);
     }
 
     if (opAccumulator) {
@@ -1167,6 +1165,11 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
             writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), imageToWrite);
         }
 
+        SessionTxnRecord sessionTxnRecord;
+        sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
+        sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
+        onWriteOpCompleted(opCtx, std::vector<StmtId>{stmtId}, sessionTxnRecord);
+
         // Write a pre-image to the change streams pre-images collection when following conditions
         // are met:
         // 1. The collection has 'changeStreamPreAndPostImages' enabled.
@@ -1188,11 +1191,6 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
             writeChangeStreamPreImageEntry(opCtx, nss.tenantId(), preImage);
         }
-
-        SessionTxnRecord sessionTxnRecord;
-        sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
-        sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
-        onWriteOpCompleted(opCtx, std::vector<StmtId>{stmtId}, sessionTxnRecord);
     }
 }
 
@@ -1565,36 +1563,6 @@ void writeChangeStreamPreImagesForApplyOpsEntries(
 
 /**
  * Returns maximum number of operations to pack into a single oplog entry,
- * when multi-oplog format for transactions is in use.
- *
- * Stop packing when either number of transaction operations is reached, or when the
- * next one would make the total size of operations larger than the maximum BSON Object
- * User Size. We rely on the headroom between BSONObjMaxUserSize and
- * BSONObjMaxInternalSize to cover the BSON overhead and the other "applyOps" entry
- * fields. But if a single operation in the set exceeds BSONObjMaxUserSize, we still fit
- * it, as a single max-length operation should be able to be packed into an "applyOps"
- * entry.
- */
-std::size_t getMaxNumberOfTransactionOperationsInSingleOplogEntry() {
-    tassert(6278503,
-            "gMaxNumberOfTransactionOperationsInSingleOplogEntry should be positive number",
-            gMaxNumberOfTransactionOperationsInSingleOplogEntry > 0);
-    return static_cast<std::size_t>(gMaxNumberOfTransactionOperationsInSingleOplogEntry);
-}
-
-/**
- * Returns maximum size (bytes) of operations to pack into a single oplog entry,
- * when multi-oplog format for transactions is in use.
- *
- * Refer to getMaxNumberOfTransactionOperationsInSingleOplogEntry() comments for a
- * description on packing transaction operations into "applyOps" entries.
- */
-std::size_t getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes() {
-    return static_cast<std::size_t>(BSONObjMaxUserSize);
-}
-
-/**
- * Returns maximum number of operations to pack into a single oplog entry,
  * when multi-oplog format for batched writes is in use.
  */
 std::size_t getMaxNumberOfBatchedOperationsInSingleOplogEntry() {
@@ -1844,22 +1812,22 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
                                               &imageToWrite);
     invariant(numOplogEntries > 0);
 
-    // Write change stream pre-images. At this point the pre-images will be written at the
-    // transaction commit timestamp as driven (implicitly) by the last written "applyOps" oplog
-    // entry.
-    writeChangeStreamPreImagesForTransaction(
-        opCtx, statements, applyOpsOplogSlotAndOperationAssignment, wallClockTime);
-
-    if (imageToWrite) {
-        writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), *imageToWrite);
-    }
-
     repl::OpTime commitOpTime = oplogSlots[numOplogEntries - 1];
     invariant(!commitOpTime.isNull());
     if (opAccumulator) {
         opAccumulator->opTime.writeOpTime = commitOpTime;
         opAccumulator->opTime.wallClockTime = wallClockTime;
     }
+
+    if (imageToWrite) {
+        writeToImageCollection(opCtx, *opCtx->getLogicalSessionId(), *imageToWrite);
+    }
+
+    // Write change stream pre-images. At this point the pre-images will be written at the
+    // transaction commit timestamp as driven (implicitly) by the last written "applyOps" oplog
+    // entry.
+    writeChangeStreamPreImagesForTransaction(
+        opCtx, statements, applyOpsOplogSlotAndOperationAssignment, wallClockTime);
 }
 
 void OpObserverImpl::onBatchedWriteStart(OperationContext* opCtx) {
@@ -2007,21 +1975,14 @@ void OpObserverImpl::onPreparedTransactionCommit(
         opCtx, &oplogEntry, DurableTxnStateEnum::kCommitted, _oplogWriter.get());
 }
 
-std::unique_ptr<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>
-OpObserverImpl::preTransactionPrepare(OperationContext* opCtx,
-                                      const std::vector<OplogSlot>& reservedSlots,
-                                      const TransactionOperations& transactionOperations,
-                                      Date_t wallClockTime) {
-    auto applyOpsOplogSlotAndOperationAssignment = transactionOperations.getApplyOpsInfo(
-        reservedSlots,
-        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
-        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
-        /*prepare=*/true);
+void OpObserverImpl::preTransactionPrepare(
+    OperationContext* opCtx,
+    const TransactionOperations& transactionOperations,
+    const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+    Date_t wallClockTime) {
     const auto& statements = transactionOperations.getOperationsForOpObserver();
     writeChangeStreamPreImagesForTransaction(
-        opCtx, statements, applyOpsOplogSlotAndOperationAssignment, wallClockTime);
-    return std::make_unique<OpObserver::ApplyOpsOplogSlotAndOperationAssignment>(
-        std::move(applyOpsOplogSlotAndOperationAssignment));
+        opCtx, statements, applyOpsOperationAssignment, wallClockTime);
 }
 
 void OpObserverImpl::onTransactionPrepare(

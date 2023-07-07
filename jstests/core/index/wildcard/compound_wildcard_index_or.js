@@ -11,11 +11,8 @@
  *   requires_fcv_70,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/aggregation/extras/utils.js");     // For arrayEq().
-load("jstests/libs/wildcard_index_helpers.js");  // For WildcardIndexHelpers.
+load("jstests/aggregation/extras/utils.js");  // For arrayEq().
+import {getPlanStages, getWinningPlan} from "jstests/libs/analyze_plan.js";
 
 const documentList = [
     {
@@ -83,7 +80,7 @@ for (const stage of planStages) {
         assert.eq(stage.keyPattern, expectedKeyPattern, stage);
         // The index bounds of "$_path" should always be expanded to "all-value" bounds no matter
         // whether the CWI's key pattern being expanded to a known field or not.
-        assert.eq(stage.indexBounds["$_path"], ["[MinKey, MaxKey]"], stage);
+        assert.eq(stage.indexBounds["$_path"], ["[MinKey, MinKey]", "[\"\", {})"], stage);
     }
     if (stage.indexName === "obj.obj.obj.$**_1") {
         idxUsedCnt++;
@@ -139,7 +136,7 @@ for (const stage of planStages) {
         assert.eq(stage.indexBounds["num"], ["[1.0, inf.0]"], stage);
         // The CWI used to answer a $or query should be expanded to include all paths and all keys
         // for the wildcard field.
-        assert.eq(stage.indexBounds["$_path"], ["[MinKey, MaxKey]"], stage);
+        assert.eq(stage.indexBounds["$_path"], ["[MinKey, MinKey]", "[\"\", {})"], stage);
     }
 }
 assert.eq(idxUsedCnt, 2, winningPlan);
@@ -169,7 +166,7 @@ for (const stage of planStages) {
         } else {
             const expectedKeyPattern = {"num": 1, "$_path": 1};
             assert.eq(stage.keyPattern, expectedKeyPattern, stage);
-            assert.eq(stage.indexBounds["$_path"], ["[MinKey, MaxKey]"], stage);
+            assert.eq(stage.indexBounds["$_path"], ["[MinKey, MinKey]", "[\"\", {})"], stage);
         }
     }
     if (stage.indexName === "str_1_sub.$**_1") {
@@ -183,9 +180,8 @@ for (const stage of planStages) {
         } else {
             const expectedKeyPattern = {"str": 1, "$_path": 1};
             assert.eq(stage.keyPattern, expectedKeyPattern, stage);
-            assert.eq(stage.indexBounds["$_path"], ["[MinKey, MaxKey]"], stage);
+            assert.eq(stage.indexBounds["$_path"], ["[MinKey, MinKey]", "[\"\", {})"], stage);
         }
     }
 }
 assert.eq(idxUsedCnt, 2, winningPlan);
-})();

@@ -116,23 +116,21 @@ let testCases = {
     },
     analyze: {skip: "primary only"},
     analyzeShardKey: {
-        // TODO: Re-enable multiversion testing for PM-1858.
-        skip: "not implemented"
-        // setUp: function(mongosConn) {
-        //     const docs = [];
-        //     for (let i = 1; i <= 1000; i++) {
-        //         docs.push({x: i});
-        //     }
-        //     assert.commandWorked(mongosConn.getCollection(nss).insert(docs));
-        // },
-        // command: {analyzeShardKey: nss, key: {x: 1}},
-        // runsAgainstAdminDb: true,
-        // checkResults: function(res) {
-        //     // The command should work and return correct results.
-        //     assert.commandWorked(res);
-        //     assert.eq(res.numDocs, 1000, res);
-        // },
-        // behavior: "versioned"
+        setUp: function(mongosConn) {
+            const docs = [];
+            for (let i = 1; i <= 1000; i++) {
+                docs.push({x: i});
+            }
+            assert.commandWorked(mongosConn.getCollection(nss).insert(docs));
+        },
+        command: {analyzeShardKey: nss, key: {x: 1}},
+        runsAgainstAdminDb: true,
+        checkResults: function(res) {
+            // The command should work and return correct results.
+            assert.commandWorked(res);
+            assert.eq(res.keyCharacteristics.numDocsTotal, 1000, res);
+        },
+        behavior: "versioned"
     },
     appendOplogNote: {skip: "primary only"},
     applyOps: {skip: "primary only"},
@@ -143,7 +141,7 @@ let testCases = {
     balancerStatus: {skip: "primary only"},
     balancerStop: {skip: "primary only"},
     buildInfo: {skip: "does not return user data"},
-    bulkWrite: {skip: "not yet implemented"},
+    bulkWrite: {skip: "primary only"},
     captrunc: {skip: "primary only"},
     checkMetadataConsistency: {skip: "primary only"},
     checkShardingIndex: {skip: "primary only"},
@@ -156,6 +154,7 @@ let testCases = {
     cloneCollectionAsCapped: {skip: "primary only"},
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},

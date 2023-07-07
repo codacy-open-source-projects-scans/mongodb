@@ -426,8 +426,7 @@ public:
     void setAllowMigrationsAndBumpOneChunk(OperationContext* opCtx,
                                            const NamespaceString& nss,
                                            const boost::optional<UUID>& collectionUUID,
-                                           bool allowMigrations,
-                                           const std::string& cmdName);
+                                           bool allowMigrations);
 
     /**
      * Bump the minor version of the newest chunk on each shard
@@ -857,13 +856,6 @@ private:
                                                            const ChunkType& origChunk,
                                                            const ChunkVersion& collPlacementVersion,
                                                            const std::vector<BSONObj>& splitPoints);
-
-    /**
-     * Performs a noop write locally on the current process and waits for all nodes to replicate it.
-     *
-     * TODO SERVER-75391: Remove.
-     */
-    void _performLocalNoopWriteWithWAllWriteConcern(OperationContext* opCtx, StringData msg);
 
     // The owning service context
     ServiceContext* const _serviceContext;

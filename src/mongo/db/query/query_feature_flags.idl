@@ -43,13 +43,6 @@ feature_flags:
       default: false
       shouldBeFCVGated: false
 
-    featureFlagBucketUnpackWithSort:
-      description: "Enables a time-series optimization that allows for partially-blocking sort on time"
-      cpp_varname: gFeatureFlagBucketUnpackWithSort
-      default: true
-      version: 6.0
-      shouldBeFCVGated: true
-
     featureFlagColumnstoreIndexes:
       description: "Enables creation of a new columnstore index type"
       cpp_varname: gFeatureFlagColumnstoreIndexes
@@ -107,4 +100,10 @@ feature_flags:
       cpp_varname: gFeatureFlagVectorSearchPublicPreview
       default: false
       # TODO SERVER-78294 Toggle this once we've backported the feature.
+      shouldBeFCVGated: true
+
+    featureFlagSearchInSbe:
+      description: "Feature flag to enable $search execution in SBE"
+      cpp_varname: gFeatureFlagSearchInSbe
+      default: false
       shouldBeFCVGated: true

@@ -1333,11 +1333,6 @@ std::shared_ptr<repl::PrimaryOnlyService::Instance> ReshardingCoordinatorService
 ExecutorFuture<void> ReshardingCoordinatorService::_rebuildService(
     std::shared_ptr<executor::ScopedTaskExecutor> executor, const CancellationToken& token) {
 
-    // We don't need a unique index on "active" any more since checkIfConflictsWithOtherInstances
-    // was implemented, and once we allow quiesced instances it breaks them, so don't create it.
-    if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-            serverGlobalParams.featureCompatibility))
-        return SemiFuture<void>::makeReady().thenRunOn(**executor);
     return AsyncTry([this] {
                auto nss = getStateDocumentsNS();
 
@@ -1346,15 +1341,30 @@ ExecutorFuture<void> ReshardingCoordinatorService::_rebuildService(
                auto opCtx = opCtxHolder.get();
                DBDirectClient client(opCtx);
                BSONObj result;
-               client.runCommand(
-                   nss.dbName(),
-                   BSON("createIndexes"
-                        << nss.coll().toString() << "indexes"
-                        << BSON_ARRAY(BSON("key" << BSON("active" << 1) << "name"
-                                                 << kReshardingCoordinatorActiveIndexName
-                                                 << "unique" << true))),
-                   result);
-               uassertStatusOK(getStatusFromCommandResult(result));
+               // We don't need a unique index on "active" any more since
+               // checkIfConflictsWithOtherInstances was implemented, and once we allow quiesced
+               // instances it breaks them, so don't create it.
+               //
+               // TODO(SERVER-67712): We create the collection only to make index creation during
+               // downgrade simpler, so we can remove all of this initialization when the flag is
+               // removed.
+               if (!resharding::gFeatureFlagReshardingImprovements.isEnabled(
+                       serverGlobalParams.featureCompatibility)) {
+                   client.runCommand(
+                       nss.dbName(),
+                       BSON("createIndexes"
+                            << nss.coll().toString() << "indexes"
+                            << BSON_ARRAY(BSON("key" << BSON("active" << 1) << "name"
+                                                     << kReshardingCoordinatorActiveIndexName
+                                                     << "unique" << true))),
+                       result);
+                   uassertStatusOK(getStatusFromCommandResult(result));
+               } else {
+                   client.runCommand(nss.dbName(), BSON("create" << nss.coll().toString()), result);
+                   const auto& status = getStatusFromCommandResult(result);
+                   if (status.code() != ErrorCodes::NamespaceExists)
+                       uassertStatusOK(status);
+               }
            })
         .until([token](Status status) { return shouldStopAttemptingToCreateIndex(status, token); })
         .withBackoffBetweenIterations(kExponentialBackoff)
@@ -1438,13 +1448,15 @@ void ReshardingCoordinator::installCoordinatorDoc(
                                            kMajorityWriteConcern);
 }
 
-void markCompleted(const Status& status, ReshardingMetrics* metrics) {
+void markCompleted(const Status& status,
+                   ReshardingMetrics* metrics,
+                   const bool isSameKeyResharding) {
     if (status.isOK()) {
-        metrics->onSuccess();
+        metrics->onSuccess(isSameKeyResharding);
     } else if (status == ErrorCodes::ReshardCollectionAborted) {
-        metrics->onCanceled();
+        metrics->onCanceled(isSameKeyResharding);
     } else {
-        metrics->onFailure();
+        metrics->onFailure(isSameKeyResharding);
     }
 }
 
@@ -1585,7 +1597,9 @@ ExecutorFuture<void> ReshardingCoordinator::_initializeCoordinator(
                         sharding_ddl_util_deserializeErrorStatusFromBSON(
                             BSON("status" << *originalAbortReason).firstElement()));
                 }
-                markCompleted(*_originalReshardingStatus, _metrics.get());
+                const bool isSameKeyResharding = _coordinatorDoc.getForceRedistribution() &&
+                    *_coordinatorDoc.getForceRedistribution();
+                markCompleted(*_originalReshardingStatus, _metrics.get(), isSameKeyResharding);
                 // We must return status here, not _originalReshardingStatus, because the latter
                 // may be Status::OK() and not abort the future flow.
                 return ExecutorFuture<void>(**executor, status);
@@ -1941,7 +1955,9 @@ ExecutorFuture<void> ReshardingCoordinator::_onAbortCoordinatorOnly(
                auto opCtx = _cancelableOpCtxFactory->makeOperationContext(&cc());
 
                // Notify metrics as the operation is now complete for external observers.
-               markCompleted(status, _metrics.get());
+               const bool isSameKeyResharding = _coordinatorDoc.getForceRedistribution() &&
+                   *_coordinatorDoc.getForceRedistribution();
+               markCompleted(status, _metrics.get(), isSameKeyResharding);
 
                // The temporary collection and its corresponding entries were never created. Only
                // the coordinator document and reshardingFields require cleanup.
@@ -2143,8 +2159,11 @@ void ReshardingCoordinator::_insertCoordDocAndChangeOrigCollEntry() {
 
     {
         // Note: don't put blocking or interruptible code in this block.
+        const bool isSameKeyResharding =
+            _coordinatorDoc.getForceRedistribution() && *_coordinatorDoc.getForceRedistribution();
         _coordinatorDocWrittenPromise.emplaceValue();
-        _metrics->onStarted();
+        _metrics->onStarted(isSameKeyResharding);
+        _metrics->setIsSameKeyResharding(isSameKeyResharding);
     }
 
     pauseAfterInsertCoordinatorDoc.pauseWhileSet();
@@ -2468,12 +2487,14 @@ ExecutorFuture<void> ReshardingCoordinator::_awaitAllParticipantShardsDone(
                     Grid::get(opCtx.get())->shardRegistry()->getAllShardIds(opCtx.get());
                 const auto& nss = coordinatorDoc.getSourceNss();
                 const auto& notMatchingThisUUID = coordinatorDoc.getReshardingUUID();
-                const auto cmd =
-                    ShardsvrDropCollectionIfUUIDNotMatchingRequest(nss, notMatchingThisUUID);
+                const auto cmd = ShardsvrDropCollectionIfUUIDNotMatchingWithWriteConcernRequest(
+                    nss, notMatchingThisUUID);
 
-                auto opts = std::make_shared<
-                    async_rpc::AsyncRPCOptions<ShardsvrDropCollectionIfUUIDNotMatchingRequest>>(
-                    cmd, **executor, _ctHolder->getStepdownToken());
+                async_rpc::GenericArgs args;
+                async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
+                auto opts = std::make_shared<async_rpc::AsyncRPCOptions<
+                    ShardsvrDropCollectionIfUUIDNotMatchingWithWriteConcernRequest>>(
+                    cmd, **executor, _ctHolder->getStepdownToken(), args);
                 _reshardingCoordinatorExternalState->sendCommandToShards(
                     opCtx.get(), opts, allShardIds);
             }
@@ -2482,7 +2503,10 @@ ExecutorFuture<void> ReshardingCoordinator::_awaitAllParticipantShardsDone(
                 opCtx.get(), _ctHolder->getStepdownToken());
 
             // Notify metrics as the operation is now complete for external observers.
-            markCompleted(abortReason ? *abortReason : Status::OK(), _metrics.get());
+            const bool isSameKeyResharding = _coordinatorDoc.getForceRedistribution() &&
+                *_coordinatorDoc.getForceRedistribution();
+            markCompleted(
+                abortReason ? *abortReason : Status::OK(), _metrics.get(), isSameKeyResharding);
 
             _removeOrQuiesceCoordinatorDocAndRemoveReshardingFields(opCtx.get(), abortReason);
         });

@@ -78,6 +78,7 @@
 #include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/db/storage/key_string.h"
 #include "mongo/util/str.h"
@@ -1119,25 +1120,26 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
             }
             MONGO_UNREACHABLE;
         }();
-        return sbe::makeS<sbe::ScanStage>(nss.uuid(),
-                                          rootSlot,
-                                          scanRidSlot,
-                                          boost::none,
-                                          boost::none,
-                                          boost::none,
-                                          boost::none,
-                                          boost::none,
-                                          fields,
-                                          vars,
-                                          seekRecordIdSlot,
-                                          boost::none /* minRecordIdSlot */,
-                                          boost::none /* maxRecordIdSlot */,
-                                          forwardScan,
-                                          nullptr /*yieldPolicy*/,
-                                          planNodeId,
-                                          callbacks,
-                                          false, /* lowPriority */
-                                          _scanOrder == ScanOrder::Random);
+        return sbe::makeS<sbe::ScanStage>(
+            nss.uuid(),
+            rootSlot,
+            scanRidSlot,
+            boost::none,
+            boost::none,
+            boost::none,
+            boost::none,
+            boost::none,
+            fields,
+            vars,
+            seekRecordIdSlot,
+            boost::none /* minRecordIdSlot */,
+            boost::none /* maxRecordIdSlot */,
+            forwardScan,
+            nullptr /*yieldPolicy*/,
+            planNodeId,
+            callbacks,
+            gDeprioritizeUnboundedUserCollectionScans.load(), /* lowPriority */
+            _scanOrder == ScanOrder::Random);
     } else {
         tasserted(6624355, "Unknown scan type.");
     }
@@ -1171,17 +1173,17 @@ std::unique_ptr<sbe::EExpression> SBENodeLowering::convertBoundsToExpr(
         ksFnArgs.emplace_back(exprLower.optimize(expr));
     }
 
-    KeyString::Discriminator discriminator;
+    key_string::Discriminator discriminator;
     // For a reverse scan, we start from the high bound and iterate until the low bound.
     if (isLower != reversed) {
         // For the start point, we want to seek ExclusiveBefore iff the bound is inclusive,
         // so that values equal to the seek value are included.
-        discriminator = bound.isInclusive() ? KeyString::Discriminator::kExclusiveBefore
-                                            : KeyString::Discriminator::kExclusiveAfter;
+        discriminator = bound.isInclusive() ? key_string::Discriminator::kExclusiveBefore
+                                            : key_string::Discriminator::kExclusiveAfter;
     } else {
         // For the end point we want the opposite.
-        discriminator = bound.isInclusive() ? KeyString::Discriminator::kExclusiveAfter
-                                            : KeyString::Discriminator::kExclusiveBefore;
+        discriminator = bound.isInclusive() ? key_string::Discriminator::kExclusiveAfter
+                                            : key_string::Discriminator::kExclusiveBefore;
     }
 
     ksFnArgs.emplace_back(sbe::makeE<sbe::EConstant>(

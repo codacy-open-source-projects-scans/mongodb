@@ -9,6 +9,7 @@ const commandsRemovedFromMongodSinceLastLTS = [
     "_configsvrRepairShardedCollectionChunksHistory",
     "_configsvrTransitionToCatalogShard",
     "_configsvrRenameCollectionMetadata",
+    "_shardsvrDropCollectionIfUUIDNotMatching",
     "mapreduce.shardedfinish",
     "getLastError",
     "driverOIDTest",
@@ -19,6 +20,7 @@ const commandsRemovedFromMongodSinceLastLTS = [
 const commandsAddedToMongodSinceLastLTS = [
     "clusterAbortTransaction",
     "clusterAggregate",
+    "clusterBulkWrite",
     "clusterCommitTransaction",
     "clusterCount",
     "clusterDelete",

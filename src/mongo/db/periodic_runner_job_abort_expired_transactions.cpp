@@ -28,13 +28,11 @@
  */
 
 
+#include <boost/preprocessor/control/iif.hpp>
 #include <ratio>
 #include <string>
 
-#include <boost/preprocessor/control/iif.hpp>
-
 #include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_context.h"
@@ -76,6 +74,10 @@ Milliseconds getPeriod(const Argument& transactionLifetimeLimitSeconds) {
 }
 
 }  // namespace
+
+// Tracks the number of passes the "abortExpiredTransactions" thread makes to abort expired
+// transactions.
+CounterMetric abortExpiredTransactionsPasses("abortExpiredTransactions.passes");
 
 auto PeriodicThreadToAbortExpiredTransactions::get(ServiceContext* serviceContext)
     -> PeriodicThreadToAbortExpiredTransactions& {
@@ -125,6 +127,7 @@ void PeriodicThreadToAbortExpiredTransactions::_init(ServiceContext* serviceCont
 
             try {
                 killAllExpiredTransactions(opCtx.get());
+                abortExpiredTransactionsPasses.increment(1);
             } catch (ExceptionForCat<ErrorCategory::CancellationError>& ex) {
                 LOGV2_DEBUG(4684101, 2, "Periodic job canceled", "{reason}"_attr = ex.reason());
             }

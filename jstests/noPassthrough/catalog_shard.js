@@ -4,14 +4,10 @@
  * @tags: [
  *   requires_persistence,
  *   requires_fcv_70,
- *   featureFlagCatalogShard,
  *   featureFlagTransitionToCatalogShard,
  * ]
  */
-(function() {
-"use strict";
-
-load("jstests/libs/config_shard_util.js");
+import {ConfigShardUtil} from "jstests/libs/config_shard_util.js";
 load("jstests/libs/fail_point_util.js");
 load("jstests/libs/write_concern_util.js");
 
@@ -346,39 +342,5 @@ const newShardName =
                        [{_id: 1}, {oldKey: 1}, {newKey: 1}]);
 }
 
-{
-    //
-    // transitionFromDedicatedConfigServer requires replication to all config server nodes.
-    //
-    // TODO SERVER-75391: Remove.
-    //
-
-    // Transition to dedicated mode so the config server can transition back to config shard mode.
-    let removeRes = assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
-    assert.eq("started", removeRes.state);
-    assert.commandWorked(st.s.adminCommand(
-        {moveChunk: ns, find: {skey: 0}, to: newShardName, _waitForDelete: true}));
-    assert.commandWorked(st.s.adminCommand(
-        {moveChunk: ns, find: {skey: 5}, to: newShardName, _waitForDelete: true}));
-    assert.commandWorked(st.s.adminCommand(
-        {moveChunk: indexedNs, find: {_id: 0}, to: newShardName, _waitForDelete: true}));
-    assert.commandWorked(st.s.adminCommand({movePrimary: "directDB", to: newShardName}));
-    assert.commandWorked(st.s.adminCommand({transitionToDedicatedConfigServer: 1}));
-
-    // transitionFromDedicatedConfigServer times out with a lagged config secondary despite having a
-    // majority of its set still replicating.
-    const laggedSecondary = st.configRS.getSecondary();
-    st.configRS.awaitReplication();
-    stopServerReplication(laggedSecondary);
-    assert.commandFailedWithCode(
-        st.s.adminCommand({transitionFromDedicatedConfigServer: 1, maxTimeMS: 1000}),
-        ErrorCodes.MaxTimeMSExpired);
-    restartServerReplication(laggedSecondary);
-
-    // Now it succeeds.
-    assert.commandWorked(st.s.adminCommand({transitionFromDedicatedConfigServer: 1}));
-}
-
 st.stop();
 newShardRS.stopSet();
-}());

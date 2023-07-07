@@ -270,7 +270,7 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
         auto shardFilterer = [&]() -> std::unique_ptr<ShardFilterer> {
             if (collections.isAcquisition()) {
                 return std::make_unique<ShardFiltererImpl>(
-                    *collections.getMainAcquisition()->getShardingFilter());
+                    *collections.getMainAcquisition().getShardingFilter());
             } else {
                 const auto& collection = collections.getMainCollection();
                 tassert(6108307,
@@ -734,7 +734,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto indexAccessMethod =
         collection->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod()->asSortedData();
 
-    std::unique_ptr<KeyString::Value> lowKey, highKey;
+    std::unique_ptr<key_string::Value> lowKey, highKey;
     if (csn->iets.empty()) {
         std::tie(lowKey, highKey) =
             makeKeyStringPair(csn->startKey,

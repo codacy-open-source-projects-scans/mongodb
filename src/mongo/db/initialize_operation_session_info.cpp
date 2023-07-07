@@ -55,16 +55,17 @@
 namespace mongo {
 
 OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* opCtx,
-                                                              const BSONObj& requestBody,
+                                                              const OpMsgRequest& opMsgRequest,
                                                               bool requiresAuth,
                                                               bool attachToOpCtx,
                                                               bool isReplSetMemberOrMongos) {
     auto osi = OperationSessionInfoFromClient::parse(IDLParserContext{"OperationSessionInfo"},
-                                                     requestBody);
+                                                     opMsgRequest.body);
     auto isAuthorizedForInternalClusterAction =
         AuthorizationSession::get(opCtx->getClient())
-            ->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                               ActionType::internal);
+            ->isAuthorizedForActionsOnResource(
+                ResourcePattern::forClusterResource(opMsgRequest.getValidatedTenantId()),
+                ActionType::internal);
 
     if (opCtx->getClient()->isInDirectClient()) {
         uassert(50891,
@@ -86,14 +87,14 @@ OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* 
         // logical sessions are disabled. A client may authenticate as the __sytem user,
         // or as an externally authorized user.
         if (authSession->isUsingLocalhostBypass() && !authSession->isAuthenticated()) {
-            return {};
+            return OperationSessionInfoFromClient();
         }
 
         // Do not initialize lsid when auth is enabled and no user is logged in since
         // there is no sensible uid that can be assigned to it.
         if (AuthorizationManager::get(opCtx->getServiceContext())->isAuthEnabled() &&
             !authSession->isAuthenticated() && !requiresAuth) {
-            return {};
+            return OperationSessionInfoFromClient();
         }
     }
 
@@ -104,7 +105,7 @@ OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* 
         if (!lsc) {
             // Ignore session information if the logical session cache has not been set up, e.g. on
             // the embedded version of mongod.
-            return {};
+            return OperationSessionInfoFromClient();
         }
 
         // If osi lsid includes the uid, makeLogicalSessionId will also verify that the hash
@@ -112,7 +113,7 @@ OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* 
         auto lsid = makeLogicalSessionId(osi.getSessionId().value(), opCtx);
 
         if (!attachToOpCtx) {
-            return {};
+            return OperationSessionInfoFromClient();
         }
 
         if (isChildSession(lsid)) {
@@ -182,7 +183,7 @@ OperationSessionInfoFromClient initializeOperationSessionInfo(OperationContext* 
                 osi.getStartTransaction().value());
     }
 
-    return osi;
+    return OperationSessionInfoFromClient(std::move(osi));
 }
 
 }  // namespace mongo

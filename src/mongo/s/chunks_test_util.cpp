@@ -30,16 +30,44 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 #include "mongo/s/chunks_test_util.h"
-#include "mongo/db/namespace_string.h"
+
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <algorithm>
+#include <cstdlib>
+#include <iterator>
+#include <utility>
+
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/logv2/log.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
 #include "mongo/platform/random.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/unittest/unittest.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/bson_test_util.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 namespace mongo::chunks_test_util {
 namespace {
 
 PseudoRandom _random{SecureRandom().nextInt64()};
+
+std::vector<ChunkHistory> genChunkHistory(const ShardId& currentShard,
+                                          const Timestamp& onCurrentShardSince,
+                                          size_t numShards,
+                                          size_t maxLenght) {
+    std::vector<ChunkHistory> history;
+    const auto historyLength = _random.nextInt64(maxLenght);
+    auto lastTime = onCurrentShardSince;
+    for (int64_t i = 0; i < historyLength; i++) {
+        auto shard = i == 0 ? currentShard : getShardId(_random.nextInt64(numShards));
+        history.emplace_back(onCurrentShardSince, shard);
+        lastTime = lastTime - 1 - _random.nextInt64(10000);
+    }
+    return history;
+}
 
 }  // namespace
 
@@ -50,6 +78,7 @@ void assertEqualChunkInfo(const ChunkInfo& x, const ChunkInfo& y) {
     ASSERT_EQ(x.getShardId(), y.getShardId());
     ASSERT_EQ(x.getLastmod(), y.getLastmod());
     ASSERT_EQ(x.isJumbo(), y.isJumbo());
+    ASSERT_EQ(x.getHistory(), y.getHistory());
 }
 
 ShardId getShardId(int shardIdx) {
@@ -118,10 +147,34 @@ std::vector<ChunkType> genChunkVector(const UUID& uuid,
         auto maxKey = splitPoints.at(i + 1);
         const auto shard = getShardId(_random.nextInt64(numShards));
         const auto version = versions.at(i);
-        chunks.emplace_back(uuid, ChunkRange{minKey, maxKey}, version, shard);
+        ChunkType chunk{uuid, ChunkRange{minKey, maxKey}, version, shard};
+        chunk.setHistory(
+            genChunkHistory(shard, Timestamp{Date_t::now()}, numShards, 10 /* maxLenght */));
+        chunks.emplace_back(std::move(chunk));
         minKey = std::move(maxKey);
     }
     return chunks;
+}
+
+std::map<ShardId, Timestamp> calculateShardsMaxValidAfter(
+    const std::vector<ChunkType>& chunkVector) {
+
+    std::map<ShardId, Timestamp> vaMap;
+    for (const auto& chunk : chunkVector) {
+        if (chunk.getHistory().empty())
+            continue;
+
+        const auto& chunkMaxValidAfter = chunk.getHistory().front().getValidAfter();
+        auto mapIt = vaMap.find(chunk.getShard());
+        if (mapIt == vaMap.end()) {
+            vaMap.emplace(chunk.getShard(), chunkMaxValidAfter);
+            continue;
+        }
+        if (chunkMaxValidAfter > mapIt->second) {
+            mapIt->second = chunkMaxValidAfter;
+        }
+    }
+    return vaMap;
 }
 
 ChunkVersion calculateCollVersion(const std::map<ShardId, ChunkVersion>& shardVersions) {
@@ -226,6 +279,11 @@ void performRandomChunkOperations(std::vector<ChunkType>* chunksPtr, size_t numO
         auto newShard = getShardId(_random.nextInt64(chunks.size()));
         chunkToMigrate.setShard(newShard);
         chunkToMigrate.setVersion(collVersion);
+        chunkToMigrate.setHistory([&] {
+            auto history = chunkToMigrate.getHistory();
+            history.emplace(history.begin(), Timestamp{Date_t::now()}, newShard);
+            return history;
+        }());
     };
 
     auto splitChunk = [&] {

@@ -29,12 +29,32 @@
 
 #include "mongo/s/chunk_manager.h"
 
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
+#include <algorithm>
+#include <compare>
+#include <cstdint>
+#include <iterator>
+#include <tuple>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/query/collation/collation_index_key.h"
-#include "mongo/db/storage/key_string.h"
-#include "mongo/logv2/log.h"
 #include "mongo/s/mongod_and_mongos_server_parameters_gen.h"
 #include "mongo/s/shard_invalidated_for_targeting_exception.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -131,29 +151,31 @@ ShardPlacementVersionMap ChunkMap::constructShardPlacementVersionMap() const {
         // Tracks the max placement version for the shard on which the current range will reside
         auto placementVersionIt = placementVersions.find(currentRangeShardId);
         if (placementVersionIt == placementVersions.end()) {
-            placementVersionIt =
-                placementVersions
-                    .emplace(std::piecewise_construct,
-                             std::forward_as_tuple(currentRangeShardId),
-                             std::forward_as_tuple(_collectionPlacementVersion.epoch(),
-                                                   _collectionPlacementVersion.getTimestamp()))
-                    .first;
+            placementVersionIt = placementVersions
+                                     .emplace(std::piecewise_construct,
+                                              std::forward_as_tuple(currentRangeShardId),
+                                              std::forward_as_tuple(CollectionGeneration{
+                                                  _collectionPlacementVersion.epoch(),
+                                                  _collectionPlacementVersion.getTimestamp()}))
+                                     .first;
         }
 
         auto& maxPlacementVersion = placementVersionIt->second.placementVersion;
+        auto& maxValidAfter = placementVersionIt->second.validAfter;
 
-        current =
-            std::find_if(current,
-                         _chunkMap.cend(),
-                         [&currentRangeShardId, &maxPlacementVersion](const auto& currentChunk) {
-                             if (currentChunk->getShardIdAt(boost::none) != currentRangeShardId)
-                                 return true;
+        current = std::find_if(current, _chunkMap.cend(), [&](const auto& currentChunk) {
+            if (currentChunk->getShardIdAt(boost::none) != currentRangeShardId)
+                return true;
 
-                             if (maxPlacementVersion.isOlderThan(currentChunk->getLastmod()))
-                                 maxPlacementVersion = currentChunk->getLastmod();
+            if (maxPlacementVersion.isOlderThan(currentChunk->getLastmod()))
+                maxPlacementVersion = currentChunk->getLastmod();
 
-                             return false;
-                         });
+            if (auto& history = currentChunk->getHistory();
+                !history.empty() && maxValidAfter < history.front().getValidAfter())
+                maxValidAfter = history.front().getValidAfter();
+
+            return false;
+        });
 
         const auto rangeLast = *std::prev(current);
 
@@ -318,9 +340,8 @@ ChunkMap::_overlappingBounds(const BSONObj& min, const BSONObj& max, bool isMaxI
     return {itMin, itMax};
 }
 
-PlacementVersionTargetingInfo::PlacementVersionTargetingInfo(const OID& epoch,
-                                                             const Timestamp& timestamp)
-    : placementVersion({epoch, timestamp}, {0, 0}) {}
+PlacementVersionTargetingInfo::PlacementVersionTargetingInfo(const CollectionGeneration& generation)
+    : placementVersion(generation, {0, 0}) {}
 
 RoutingTableHistory::RoutingTableHistory(
     NamespaceString nss,
@@ -363,6 +384,8 @@ void RoutingTableHistory::setAllShardsRefreshed() {
 Chunk ChunkManager::findIntersectingChunk(const BSONObj& shardKey,
                                           const BSONObj& collation,
                                           bool bypassIsFieldHashedCheck) const {
+    tassert(7626418, "Expected routing table to be initialized", _rt->optRt);
+
     const bool hasSimpleCollation = (collation.isEmpty() && !_rt->optRt->getDefaultCollator()) ||
         SimpleBSONObjComparator::kInstance.evaluate(collation == CollationSpec::kSimpleSpec);
     if (!hasSimpleCollation) {
@@ -397,6 +420,8 @@ Chunk ChunkManager::findIntersectingChunk(const BSONObj& shardKey,
 }
 
 bool ChunkManager::keyBelongsToShard(const BSONObj& shardKey, const ShardId& shardId) const {
+    tassert(7626419, "Expected routing table to be initialized", _rt->optRt);
+
     if (shardKey.isEmpty())
         return false;
 
@@ -413,6 +438,8 @@ void ChunkManager::getShardIdsForRange(const BSONObj& min,
                                        const BSONObj& max,
                                        std::set<ShardId>* shardIds,
                                        std::set<ChunkRange>* chunkRanges) const {
+    tassert(7626420, "Expected routing table to be initialized", _rt->optRt);
+
     // If our range is [MinKey, MaxKey], we can simply return all shard ids right away. However,
     // this optimization does not apply when we are reading from a snapshot because
     // _placementVersions contains shards with chunks and is built based on the last refresh.
@@ -446,6 +473,8 @@ void ChunkManager::getShardIdsForRange(const BSONObj& min,
 }
 
 bool ChunkManager::rangeOverlapsShard(const ChunkRange& range, const ShardId& shardId) const {
+    tassert(7626421, "Expected routing table to be initialized", _rt->optRt);
+
     bool overlapFound = false;
 
     _rt->optRt->forEachOverlappingChunk(
@@ -463,6 +492,8 @@ bool ChunkManager::rangeOverlapsShard(const ChunkRange& range, const ShardId& sh
 
 boost::optional<Chunk> ChunkManager::getNextChunkOnShard(const BSONObj& shardKey,
                                                          const ShardId& shardId) const {
+    tassert(7626422, "Expected routing table to be initialized", _rt->optRt);
+
     boost::optional<Chunk> optChunk;
     forEachChunk(
         [&](const Chunk& chunk) {
@@ -478,6 +509,8 @@ boost::optional<Chunk> ChunkManager::getNextChunkOnShard(const BSONObj& shardKey
 }
 
 ShardId ChunkManager::getMinKeyShardIdWithSimpleCollation() const {
+    tassert(7626423, "Expected routing table to be initialized", _rt->optRt);
+
     auto minKey = getShardKeyPattern().getKeyPattern().globalMin();
     return findIntersectingChunkWithSimpleCollation(minKey).getShardId();
 }
@@ -512,22 +545,15 @@ std::string ChunkManager::toString() const {
     return _rt->optRt ? _rt->optRt->toString() : "UNSHARDED";
 }
 
-bool RoutingTableHistory::compatibleWith(const RoutingTableHistory& other,
-                                         const ShardId& shardName) const {
-    // Return true if the placement version is the same in the two chunk managers
-    // TODO: This doesn't need to be so strong, just major vs
-    return other.getVersion(shardName) == getVersion(shardName);
-}
-
-ChunkVersion RoutingTableHistory::_getVersion(const ShardId& shardName,
-                                              bool throwOnStaleShard) const {
+PlacementVersionTargetingInfo RoutingTableHistory::_getVersion(const ShardId& shardName,
+                                                               bool throwOnStaleShard) const {
     auto it = _placementVersions.find(shardName);
     if (it == _placementVersions.end()) {
         // Shards without explicitly tracked placement versions (meaning they have no chunks) always
-        // have a version of (0, 0, epoch, timestamp)
-        const auto collPlacementVersion = _chunkMap.getVersion();
-        return ChunkVersion({collPlacementVersion.epoch(), collPlacementVersion.getTimestamp()},
-                            {0, 0});
+        // have a version of (epoch, timestamp, 0, 0)
+        auto collPlacementVersion = _chunkMap.getVersion();
+        return PlacementVersionTargetingInfo(ChunkVersion(collPlacementVersion, {0, 0}),
+                                             Timestamp(0, 0));
     }
 
     if (throwOnStaleShard && gEnableFinerGrainedCatalogCacheRefresh) {
@@ -536,15 +562,9 @@ ChunkVersion RoutingTableHistory::_getVersion(const ShardId& shardName,
                 !it->second.isStale.load());
     }
 
-    return it->second.placementVersion;
-}
-
-ChunkVersion RoutingTableHistory::getVersion(const ShardId& shardName) const {
-    return _getVersion(shardName, true);
-}
-
-ChunkVersion RoutingTableHistory::getVersionForLogging(const ShardId& shardName) const {
-    return _getVersion(shardName, false);
+    const auto& placementVersionTargetingInfo = it->second;
+    return PlacementVersionTargetingInfo(placementVersionTargetingInfo.placementVersion,
+                                         placementVersionTargetingInfo.validAfter);
 }
 
 std::string RoutingTableHistory::toString() const {
@@ -556,7 +576,8 @@ std::string RoutingTableHistory::toString() const {
 
     sb << "Shard placement versions:\n";
     for (const auto& entry : _placementVersions) {
-        sb << "\t" << entry.first << ": " << entry.second.placementVersion.toString() << '\n';
+        sb << "\t" << entry.first << ": " << entry.second.placementVersion.toString() << " @ "
+           << entry.second.validAfter.toString() << '\n';
     }
 
     return sb.str();

@@ -428,9 +428,6 @@ export const authCommandsLib = {
           testname: 'transitionFromDedicatedConfigServer',
           command: {transitionFromDedicatedConfigServer: 1},
           skipUnlessSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagCatalogShard;
-          },
           testcases: [
             {
               runOnDb: adminDbName,
@@ -445,9 +442,6 @@ export const authCommandsLib = {
           testname: "_configsvrTransitionFromDedicatedConfigServer",
           command: {_configsvrTransitionFromDedicatedConfigServer: 1},
           skipSharded: true,
-          skipTest: (conn) => {
-            return !TestData.setParameters.featureFlagCatalogShard;
-          },
           testcases: [
               {
                 runOnDb: adminDbName,
@@ -4984,6 +4978,25 @@ export const authCommandsLib = {
                 roles: roles_monitoring,
                 privileges: [{resource: {cluster: true}, actions: ["hostInfo"]}]
               }
+          ]
+        },
+        {
+          testname: "clusterBulkWrite",
+          command: {
+            clusterBulkWrite: 1,
+            ops: [
+              {insert: 0, document: {skey: "MongoDB"}},
+              {insert: 1, document: {skey: "MongoDB"}}],
+            nsInfo: [{ns: firstDbName + ".coll"}, {ns: secondDbName + ".coll1"}],
+          },
+          skipSharded: true,
+          testcases: [
+            {
+              runOnDb: adminDbName,
+              roles: {__system: 1},
+              privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+              expectFail: true,
+            },
           ]
         },
         {

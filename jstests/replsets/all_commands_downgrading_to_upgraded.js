@@ -10,13 +10,10 @@
  * ]
  */
 
-(function() {
-"use strict";
-
 // This will verify the completeness of our map and run all tests.
 load("jstests/libs/all_commands_test.js");
-load("jstests/libs/fixture_helpers.js");    // For isSharded and isReplSet
-load("jstests/libs/feature_flag_util.js");  // For isPresentAndEnabled
+load("jstests/libs/fixture_helpers.js");  // For isSharded and isReplSet
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 load('jstests/replsets/rslib.js');
 
 const name = jsTestName();
@@ -110,8 +107,6 @@ const allCommands = {
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollection: {skip: isAnInternalCommand},
     _shardsvrCreateGlobalIndex: {skip: isAnInternalCommand},
-    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
-    _shardsvrDropCollectionIfUUIDNotMatching: {skip: isAnInternalCommand},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isAnInternalCommand},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropGlobalIndex: {skip: isAnInternalCommand},
@@ -230,11 +225,7 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
         },
         command: {analyze: collName},
-        expectFailure: true,
-        expectedErrorCode: [
-            6660400,
-            6765500
-        ],  // Analyze command requires common query framework feature flag to be enabled.
+        checkFeatureFlag: "CommonQueryFramework",
         teardown: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
@@ -422,6 +413,7 @@ const allCommands = {
     },
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
@@ -1551,8 +1543,6 @@ const allCommands = {
     transitionFromDedicatedConfigServer: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
-        // TODO SERVER-66060: Remove check when this feature flag is removed.
-        checkFeatureFlag: "CatalogShard",
         command: {transitionFromDedicatedConfigServer: 1},
         isShardedOnly: true,
         isAdminCommand: true,
@@ -1560,8 +1550,6 @@ const allCommands = {
     transitionToDedicatedConfigServer: {
         // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
         skip: commandIsDisabledOnLastLTS,
-        // TODO SERVER-66060: Remove check when this feature flag is removed.
-        checkFeatureFlag: "CatalogShard",
         command: {transitionToDedicatedConfigServer: 1},
         isShardedOnly: true,
         isAdminCommand: true,
@@ -1869,4 +1857,3 @@ let runShardedClusterTest = function() {
 runStandaloneTest();
 runReplicaSetTest();
 runShardedClusterTest();
-})();

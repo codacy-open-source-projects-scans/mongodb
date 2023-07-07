@@ -80,6 +80,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_parser.h"
@@ -1774,23 +1775,27 @@ TransactionParticipant::Participant::prepareTransaction(
             hangAfterReservingPrepareTimestamp.pauseWhileSet();
         }
     }
+    auto applyOpsOplogSlotAndOperationAssignment = completedTransactionOperations->getApplyOpsInfo(
+        reservedSlots,
+        getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
+        getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
+        /*prepare=*/true);
+
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
     const auto wallClockTime = opCtx->getServiceContext()->getFastClockSource()->now();
-    auto applyOpsOplogSlotAndOperationAssignment = opObserver->preTransactionPrepare(
-        opCtx, reservedSlots, *completedTransactionOperations, wallClockTime);
+    opObserver->preTransactionPrepare(opCtx,
+                                      *completedTransactionOperations,
+                                      applyOpsOplogSlotAndOperationAssignment,
+                                      wallClockTime);
 
     opCtx->recoveryUnit()->setPrepareTimestamp(prepareOplogSlot.getTimestamp());
     opCtx->getWriteUnitOfWork()->prepare();
     p().needToWriteAbortEntry = true;
 
-    tassert(6278510,
-            "Operation assignments to applyOps entries should be present",
-            applyOpsOplogSlotAndOperationAssignment);
-
     opObserver->onTransactionPrepare(opCtx,
                                      reservedSlots,
                                      *completedTransactionOperations,
-                                     *applyOpsOplogSlotAndOperationAssignment,
+                                     applyOpsOplogSlotAndOperationAssignment,
                                      p().transactionOperations.getNumberOfPrePostImagesToWrite(),
                                      wallClockTime);
 
@@ -3532,7 +3537,10 @@ void TransactionParticipant::Participant::handleWouldChangeOwningShardError(
         invariant(opCtx->getTxnNumber());
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         _resetRetryableWriteState();
-    } else if (_isInternalSessionForRetryableWrite()) {
+    } else if (_isInternalSessionForRetryableWrite() &&
+               // (Ignore FCV check): The feature flag is fully disabled.
+               feature_flags::gFeatureFlagUpdateDocumentShardKeyUsingTransactionApi
+                   .isEnabledAndIgnoreFCVUnsafe()) {
         // If this was a retryable transaction, add a sentinel noop to the transaction's operations
         // so retries can detect that a WouldChangeOwningShard error was thrown and know to throw
         // IncompleteTransactionHistory.
@@ -3631,6 +3639,17 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
                                     << " due to failpoint. The write must not be reflected.");
         }
     });
+}
+
+std::size_t getMaxNumberOfTransactionOperationsInSingleOplogEntry() {
+    tassert(6278503,
+            "gMaxNumberOfTransactionOperationsInSingleOplogEntry should be positive number",
+            gMaxNumberOfTransactionOperationsInSingleOplogEntry > 0);
+    return static_cast<std::size_t>(gMaxNumberOfTransactionOperationsInSingleOplogEntry);
+}
+
+std::size_t getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes() {
+    return static_cast<std::size_t>(BSONObjMaxUserSize);
 }
 
 }  // namespace mongo

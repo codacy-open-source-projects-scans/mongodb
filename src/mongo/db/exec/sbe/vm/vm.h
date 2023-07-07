@@ -696,6 +696,9 @@ enum class Builtin : uint8_t {
     coerceToString,
     concat,
     concatArrays,
+    trim,
+    ltrim,
+    rtrim,
 
     // Agg function to concatenate arrays, failing when the accumulator reaches a specified size.
     aggConcatArraysCapped,
@@ -805,6 +808,8 @@ enum class Builtin : uint8_t {
     aggDenseRank,
     aggDenseRankColl,
     aggRankFinalize,
+    aggExpMovingAvg,
+    aggExpMovingAvgFinalize,
 };
 
 std::string builtinToString(Builtin b);
@@ -946,6 +951,11 @@ enum AggRankElems { kLastValue, kLastRank, kSameRankCount, kRankArraySize };
  * size of accumulated values, such as 'addToArrayCapped' and 'addToSetCapped'.
  */
 enum class AggArrayWithSize { kValues = 0, kSizeOfValues, kLast = kSizeOfValues + 1 };
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for $expMovingAvg accumulator
+ */
+enum class AggExpMovingAvgElems { kResult, kAlpha, kIsDecimal, kSizeOfArray };
 
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
@@ -1657,6 +1667,9 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinRound(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcat(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcatArrays(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinTrim(ArityType arity,
+                                                               bool trimLeft,
+                                                               bool trimRight);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggConcatArraysCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnionCapped(ArityType arity);
@@ -1752,6 +1765,8 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDenseRank(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDenseRankColl(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRankFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggExpMovingAvg(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggExpMovingAvgFinalize(ArityType arity);
 
     FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f, ArityType arity);
 

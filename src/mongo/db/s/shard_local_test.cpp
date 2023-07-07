@@ -97,7 +97,7 @@ private:
 void ShardLocalTest::setUp() {
     ServiceContextMongoDTest::setUp();
     _opCtx = getGlobalServiceContext()->makeOperationContext(&cc());
-    serverGlobalParams.clusterRole = ClusterRole::ConfigServer;
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     _shardLocal = std::make_unique<ShardLocal>(ShardId::kConfigServerId);
     const repl::ReplSettings replSettings = {};
     repl::ReplicationCoordinator::set(
@@ -138,7 +138,7 @@ StatusWith<Shard::CommandResponse> ShardLocalTest::runFindAndModifyRunCommand(Na
     return _shardLocal->runCommandWithFixedRetryAttempts(
         _opCtx.get(),
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        nss.db().toString(),
+        nss.db_forTest().toString(),
         findAndModifyRequest.toBSON({}),
         Shard::RetryPolicy::kNoRetry);
 }
@@ -147,7 +147,7 @@ StatusWith<std::vector<BSONObj>> ShardLocalTest::getIndexes(NamespaceString nss)
     auto response = _shardLocal->runCommandWithFixedRetryAttempts(
         _opCtx.get(),
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-        nss.db().toString(),
+        nss.db_forTest().toString(),
         BSON("listIndexes" << nss.coll().toString()),
         Shard::RetryPolicy::kIdempotent);
     if (!response.isOK()) {

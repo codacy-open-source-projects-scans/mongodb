@@ -163,7 +163,6 @@
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -2311,12 +2310,12 @@ TEST_F(StorageTimestampTest, TimestampMultiIndexBuildsDuringRename) {
     // Empty temporary collections generate createIndexes oplog entry even if the node
     // supports 2 phase index build.
     const auto createIndexesDocument =
-        queryOplog(BSON("ns" << renamedNss.db() + ".$cmd"
+        queryOplog(BSON("ns" << renamedNss.db_forTest() + ".$cmd"
                              << "o.createIndexes" << BSON("$exists" << true) << "o.name"
                              << "b_1"));
     const auto tmpCollName =
         createIndexesDocument.getObjectField("o").getStringField("createIndexes");
-    tmpName = NamespaceString::createNamespaceString_forTest(renamedNss.db(), tmpCollName);
+    tmpName = NamespaceString::createNamespaceString_forTest(renamedNss.db_forTest(), tmpCollName);
     indexCommitTs = createIndexesDocument["ts"].timestamp();
     const Timestamp indexCreateInitTs = queryOplog(BSON("op"
                                                         << "c"
@@ -2420,12 +2419,12 @@ TEST_F(StorageTimestampTest, TimestampAbortIndexBuild) {
     // Confirm that startIndexBuild and abortIndexBuild oplog entries have been written to the
     // oplog.
     auto indexStartDocument =
-        queryOplog(BSON("ns" << nss.db() + ".$cmd"
+        queryOplog(BSON("ns" << nss.db_forTest() + ".$cmd"
                              << "o.startIndexBuild" << nss.coll() << "o.indexes.0.name"
                              << "a_1"));
     auto indexStartTs = indexStartDocument["ts"].timestamp();
     auto indexAbortDocument =
-        queryOplog(BSON("ns" << nss.db() + ".$cmd"
+        queryOplog(BSON("ns" << nss.db_forTest() + ".$cmd"
                              << "o.abortIndexBuild" << nss.coll() << "o.indexes.0.name"
                              << "a_1"));
     auto indexAbortTs = indexAbortDocument["ts"].timestamp();
@@ -3066,7 +3065,8 @@ TEST_F(StorageTimestampTest, ViewCreationSeparateTransaction) {
 
     const Timestamp systemViewsCreateTs = queryOplog(BSON("op"
                                                           << "c"
-                                                          << "ns" << (viewNss.db() + ".$cmd")
+                                                          << "ns"
+                                                          << (viewNss.db_forTest() + ".$cmd")
                                                           << "o.create"
                                                           << "system.views"))["ts"]
                                               .timestamp();
@@ -3319,8 +3319,6 @@ protected:
 };
 
 TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdate) {
-    RAIIServerParameterControllerForTest storeImageInSideCollection(
-        "storeFindAndModifyImagesInSideCollection", true);
     AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
     CollectionWriter collection(_opCtx, autoColl);
     const auto criteria = BSON("_id" << 0);
@@ -3366,8 +3364,6 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdate) {
 
 TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdateWithDamages) {
     namespace mmb = mongo::mutablebson;
-    RAIIServerParameterControllerForTest storeImageInSideCollection(
-        "storeFindAndModifyImagesInSideCollection", true);
     const auto bsonObj = BSON("_id" << 0 << "a" << 1);
     // Create a new document representing BSONObj with the above contents.
     mmb::Document doc(bsonObj, mmb::Document::kInPlaceEnabled);
@@ -3426,8 +3422,6 @@ TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyUpdateWithDamages) {
 }
 
 TEST_F(RetryableFindAndModifyTest, RetryableFindAndModifyDelete) {
-    RAIIServerParameterControllerForTest storeImageInSideCollection(
-        "storeFindAndModifyImagesInSideCollection", true);
     AutoGetCollection autoColl(_opCtx, nss, LockMode::MODE_X);
     CollectionWriter collection(_opCtx, autoColl);
     const auto bsonObj = BSON("_id" << 0 << "a" << 1);

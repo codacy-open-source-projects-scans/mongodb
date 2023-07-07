@@ -8,12 +8,13 @@
  *   uses_change_streams
  * ]
  */
-(function() {
-"use strict";
+import {
+    generateChangeStreamWriteWorkload,
+    getAllChangeStreamEvents,
+    isPlainObject
+} from "jstests/libs/change_stream_rewrite_util.js";
 
-load("jstests/libs/change_stream_rewrite_util.js");  // For rewrite helpers.
-
-const dbName = "change_stream_rewrite_null_existence_test";
+const dbName = "rewrite_null_existence_test";
 const collName = "coll1";
 const testDB = db.getSiblingDB(dbName);
 
@@ -211,4 +212,3 @@ for (let csConfig of [{fullDocument: "updateLookup", showExpandedEvents: true}])
 
 // Assert that there were no failed test cases.
 assert(failedTestCases.length == 0, failedTestCases);
-})();

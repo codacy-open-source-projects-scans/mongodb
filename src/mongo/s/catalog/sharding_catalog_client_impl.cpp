@@ -29,57 +29,80 @@
 
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
 
+#include <absl/container/node_hash_map.h>
+#include <algorithm>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/preprocessor/control/iif.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <cstdint>
 #include <fmt/format.h>
-#include <iomanip>
+#include <iterator>
+#include <type_traits>
+#include <variant>
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bson_field.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/catalog_shard_feature_flag_gen.h"
+#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_facet.h"
 #include "mongo/db/pipeline/document_source_group.h"
+#include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/document_source_union_with.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/session/logical_session_cache.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/vector_clock.h"
-#include "mongo/executor/network_interface.h"
+#include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
+#include "mongo/s/catalog/type_collection_gen.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/catalog/type_namespace_placement_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote_gen.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/shard_util.h"
-#include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/stdx/variant.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/pcre.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/namespace_string_util.h"
 #include "mongo/util/pcre_util.h"
 #include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
+#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -496,14 +519,6 @@ std::vector<BSONObj> ShardingCatalogClientImpl::runCatalogAggregation(
     aggRequest.setWriteConcern(WriteConcernOptions());
 
     const auto readPref = [&]() -> ReadPreferenceSetting {
-        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            // When the feature flag is on, the config server may read from any node in its replica
-            // set, so we should use the typical config server read preference.
-            return {};
-        }
-
         const auto vcTime = VectorClock::get(opCtx)->getTime();
         ReadPreferenceSetting readPref{kConfigReadSelector};
         readPref.minClusterTime = vcTime.configTime().asTimestamp();
@@ -920,16 +935,8 @@ std::vector<NamespaceString> ShardingCatalogClientImpl::getAllNssThatHaveZonesFo
 
     // Run the aggregation
     const auto readConcern = [&]() -> repl::ReadConcernArgs {
-        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            // When the feature flag is on, the config server may read from a secondary which may
-            // need to wait for replication, so we should use afterClusterTime.
-            return {repl::ReadConcernLevel::kMajorityReadConcern};
-        } else {
-            const auto time = VectorClock::get(opCtx)->getTime();
-            return {time.configTime(), repl::ReadConcernLevel::kMajorityReadConcern};
-        }
+        const auto time = VectorClock::get(opCtx)->getTime();
+        return {time.configTime(), repl::ReadConcernLevel::kMajorityReadConcern};
     }();
 
     auto aggResult = runCatalogAggregation(opCtx, aggRequest, readConcern);
@@ -1551,16 +1558,8 @@ HistoricalPlacement ShardingCatalogClientImpl::getHistoricalPlacement(
 
     // Run the aggregation
     const auto readConcern = [&]() -> repl::ReadConcernArgs {
-        // (Ignore FCV check): Config servers always use ShardRemote for themselves in 7.0.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-            !gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            // When the feature flag is on, the config server may read from a secondary which may
-            // need to wait for replication, so we should use afterClusterTime.
-            return {repl::ReadConcernLevel::kSnapshotReadConcern};
-        } else {
-            const auto vcTime = VectorClock::get(opCtx)->getTime();
-            return {vcTime.configTime(), repl::ReadConcernLevel::kSnapshotReadConcern};
-        }
+        const auto vcTime = VectorClock::get(opCtx)->getTime();
+        return {vcTime.configTime(), repl::ReadConcernLevel::kSnapshotReadConcern};
     }();
 
     auto aggrResult = runCatalogAggregation(opCtx, aggRequest, readConcern);

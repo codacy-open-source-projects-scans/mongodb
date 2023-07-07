@@ -163,8 +163,6 @@ let viewsCommandTests = {
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
-    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
-    _shardsvrDropCollectionIfUUIDNotMatching: {skip: isUnrelated},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isUnrelated},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
@@ -291,6 +289,7 @@ let viewsCommandTests = {
     },
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},
@@ -307,12 +306,10 @@ let viewsCommandTests = {
     configureFailPoint: {skip: isUnrelated},
     configureCollectionBalancing: {skip: isUnrelated},
     configureQueryAnalyzer: {
-        // TODO: Re-enable multiversion testing for PM-1858.
-        skip: "not implemented"
-        // command: {configureQueryAnalyzer: "test.view", mode: "full", samplesPerSecond: 1},
-        // skipStandalone: true,
-        // expectFailure: true,
-        // isAdminCommand: true,
+        command: {configureQueryAnalyzer: "test.view", mode: "full", samplesPerSecond: 1},
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true,
     },
     connPoolStats: {skip: isUnrelated},
     connPoolSync: {skip: isUnrelated},

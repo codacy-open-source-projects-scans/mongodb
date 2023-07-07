@@ -15,10 +15,23 @@
  * ]
  */
 
-(function() {
-"use strict";
-
-load("jstests/core/timeseries/libs/timeseries_writes_util.js");
+import {
+    doc1_a_nofields,
+    doc2_a_f101,
+    doc3_a_f102,
+    doc4_b_f103,
+    doc5_b_f104,
+    doc6_c_f105,
+    doc7_c_f106,
+    generateTimeValue,
+    getCallerName,
+    metaFieldName,
+    prepareShardedCollection,
+    setUpShardedCluster,
+    tearDownShardedCluster,
+    testDB,
+    timeFieldName
+} from "jstests/core/timeseries/libs/timeseries_writes_util.js";
 
 const docs = [
     doc1_a_nofields,
@@ -63,12 +76,9 @@ setUpShardedCluster();
     const coll = prepareShardedCollection(
         {collName: getCallerName(1), initialDocList: docs, includeMeta: true});
 
-    // TODO SERVER-78364 Run this as a retryable write instead of inside a transaction.
-    // Update one command in a transaction can modify the shard key.
-    const session = testDB.getMongo().startSession();
+    // Update one command as retryable write can modify the shard key.
+    const session = testDB.getMongo().startSession({retryWrites: true});
     const sessionDB = session.getDatabase(testDB.getName());
-
-    session.startTransaction();
 
     // This update command tries to update doc5_b_f104 into {_id: 5, meta: "A", f: 104}. The owning
     // shard would be the shard that owns (MinKey, meta: "A"].
@@ -77,10 +87,13 @@ setUpShardedCluster();
 
     jsTestLog(`Running updateOne: {q: ${tojson(query)}, u: ${tojson(update)}}`);
 
-    const result = assert.commandWorked(sessionDB[coll.getName()].updateOne(query, update));
-    assert.eq(1, result.modifiedCount, tojson(result));
-
-    session.commitTransaction();
+    const result = assert.commandWorked(sessionDB.runCommand({
+        update: coll.getName(),
+        updates: [{q: query, u: update, multi: false}],
+        lsid: session.getSessionId(),
+        txnNumber: NumberLong(1)
+    }));
+    assert.eq(1, result.nModified, tojson(result));
 
     assert.docEq({_id: 5, [metaFieldName]: "A", f: 104, [timeFieldName]: generateTimeValue(5)},
                  coll.findOne({_id: 5}),
@@ -166,4 +179,3 @@ setUpShardedCluster();
 })();
 
 tearDownShardedCluster();
-})();

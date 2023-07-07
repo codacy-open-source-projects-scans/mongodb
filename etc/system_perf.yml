@@ -1711,7 +1711,7 @@ buildvariants:
   - name: linux-intel-1-node-replSet-classic-query-engine
     display_name: Linux Intel 1-Node ReplSet (Classic Query Engine)
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: &linux-1-node-repl-cron  "0 0 * * 4" # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1805,7 +1805,9 @@ buildvariants:
 
   - name: atlas-like-replica.2022-10
     display_name: M60-like-replica.2022-10 3-Node ReplSet
-    cron: "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
+    # TODO SERVER-74399 Reduce frequency back to baseline.
+    # cron: &atlas-like-repl-cron "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
+    cron: &atlas-like-repl-cron "0 0 * * *"  # Every day at 00:00
     modules: *modules
     expansions:
       mongodb_setup: atlas-like-replica.2022-10
@@ -1828,6 +1830,67 @@ buildvariants:
       - name: tpcc
       - name: tpcc_majority
       - name: linkbench
+      - name: linkbench2
+
+  - name: atlas-like-replica-query-stats.2022-10
+    display_name: M60-like-replica.2022-10 3-Node ReplSet (Query Stats)
+    cron: *atlas-like-repl-cron
+    modules: *modules
+    expansions:
+      mongodb_setup: atlas-like-replica-query-stats.2022-10
+      infrastructure_provisioning: M60-like-replica.2023-04
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: -arm64
+    run_on:
+      - "rhel70-perf-M60-like"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks:  # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup.
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB
+      - name: tpcc
+      - name: tpcc_majority
+      - name: linkbench
+      - name: linkbench2
+
+  - name: atlas-M30-real
+    display_name: M30-Atlas ReplSet AWS
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday, Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: atlas
+      canaries: none
+      atlas_setup: M30-repl
+      use_custom_build: true
+      infrastructure_provisioning: workload_client_arm.2023-04
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-atlas-large"
+    depends_on:
+      - name: compile
+        variant: compile-amazon2
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+      - name: compile
+        variant: compile-amazon-linux2-arm64
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+    tasks: # Cannot use *3nodetasks because secondary_performance uses a special mongodb setup
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: tpcc
       - name: linkbench2
 
   - name: atlas-M60-real
@@ -1877,7 +1940,7 @@ buildvariants:
       atlas_setup: M60-repl-azure
       use_custom_build_azure: true
       compile_variant: -rhel70
-      infrastructure_provisioning: workload_client
+      infrastructure_provisioning: workload_client_intel.2023-04
       infrastructure_provisioning_release: 2022-11
       workload_setup: 2022-11
       platform: linux
@@ -2129,7 +2192,7 @@ buildvariants:
 
   - name: linux-intel-1-node-replSet-sampling-bonsai
     display_name: Linux Intel 1-Node ReplSet (Bonsai with Sampling CE)
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2148,7 +2211,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-sampling-bonsai.2022-11
     display_name: Linux 1-Node ReplSet (Bonsai with Sampling CE) 2022-11
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2168,7 +2231,7 @@ buildvariants:
 
   - name: linux-intel-1-node-replSet-heuristic-bonsai
     display_name: Linux Intel 1-Node ReplSet (Bonsai with Heuristic CE)
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2187,7 +2250,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-heuristic-bonsai.2022-11
     display_name: Linux 1-Node ReplSet (Bonsai with Heuristic CE) 2022-11
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2208,7 +2271,7 @@ buildvariants:
   - name: linux-1-node-replSet-classic-query-engine.2022-11
     display_name: Linux 1-Node ReplSet (Classic Query Engine) 2022-11
     # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2269,6 +2332,7 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
       - name: ycsb_60GB
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
@@ -2323,7 +2387,7 @@ buildvariants:
 
   - name: linux-1-node-replSet.2022-11
     display_name: Linux 1-Node ReplSet 2022-11
-    cron: &linux-1-node-repl-cron "0 0 * * 4"  # 00:00 on Thursday
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2458,6 +2522,7 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
       - name: ycsb_60GB
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
@@ -2700,6 +2765,7 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
       - name: crud_workloads_majority
       - name: crud_workloads_w1
       - name: mixed_workloads
@@ -3377,6 +3443,7 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
       - name: ycsb_60GB
       - name: ycsb_60GB.long
       - name: crud_workloads_majority

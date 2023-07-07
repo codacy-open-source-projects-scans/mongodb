@@ -33,6 +33,7 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "mongo/base/error_codes.h"
@@ -52,6 +53,8 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/executor/task_executor.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
@@ -95,7 +98,8 @@ bool handleError(OperationContext* opCtx,
                  WriteResult* out);
 
 bool getFleCrudProcessed(OperationContext* opCtx,
-                         const boost::optional<EncryptionInformation>& encryptionInfo);
+                         const boost::optional<EncryptionInformation>& encryptionInfo,
+                         const boost::optional<TenantId>& tenantId);
 
 /**
  * Returns true if caller should try to insert more documents. Does nothing else if batch is empty.
@@ -190,7 +194,7 @@ Status performAtomicTimeseriesWrites(OperationContext* opCtx,
  * Assumes the update command is a retryable write and targeted on the time-series view namespace.
  */
 void runTimeseriesRetryableUpdates(OperationContext* opCtx,
-                                   const NamespaceString& ns,
+                                   const NamespaceString& bucketNs,
                                    const write_ops::UpdateCommandRequest& wholeOp,
                                    std::shared_ptr<executor::TaskExecutor> executor,
                                    write_ops_exec::WriteResult* reply);

@@ -1,5 +1,3 @@
-'use strict';
-
 /**
  * Performs a series of CRUD operations while DDL commands are running in the background
  * and verifies guarantees are not broken.
@@ -19,9 +17,9 @@
 
 load("jstests/concurrency/fsm_workload_helpers/state_transition_utils.js");
 load("jstests/libs/uuid_util.js");
-load('jstests/libs/feature_flag_util.js');
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
-var $config = (function() {
+export const $config = (function() {
     function threadCollectionName(prefix, tid) {
         return prefix + tid;
     }
@@ -196,6 +194,7 @@ var $config = (function() {
             } catch (e) {
                 const exceptionCode = e.code;
                 if (exceptionCode == ErrorCodes.ConflictingOperationInProgress ||
+                    exceptionCode == ErrorCodes.ReshardCollectionInProgress ||
                     exceptionCode == ErrorCodes.NamespaceNotSharded) {
                     // It is fine for a resharding operation to throw ConflictingOperationInProgress
                     // if a concurrent resharding with the same collection is ongoing.

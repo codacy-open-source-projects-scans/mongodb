@@ -162,8 +162,6 @@ let testCases = {
     _shardsvrCreateGlobalIndex: {skip: "internal command"},
     _shardsvrDropGlobalIndex: {skip: "internal command"},
     _shardsvrDropCollection: {skip: "internal command"},
-    // TODO SERVER-74324: deprecate _shardsvrDropCollectionIfUUIDNotMatching after 7.0 is lastLTS.
-    _shardsvrDropCollectionIfUUIDNotMatching: {skip: "internal command"},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: "internal command"},
     _shardsvrDropCollectionParticipant: {skip: "internal command"},
     _shardsvrUnregisterIndex: {skip: "internal command"},
@@ -264,7 +262,25 @@ let testCases = {
     balancerStatus: {skip: "does not accept read or write concern"},
     balancerStop: {skip: "does not accept read or write concern"},
     buildInfo: {skip: "does not accept read or write concern"},
-    bulkWrite: {skip: "not yet implemented"},
+    bulkWrite: {
+        // TODO SERVER-52419: Run this test and remove the skip.
+        // setUp: function(conn) {
+        //     assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w:
+        //     1}}));
+        // },
+        // db: "admin",
+        // command: {
+        //     bulkWrite: 1,
+        //     ops: [{insert: 0, document: {_id: ObjectId()}}],
+        //     nsInfo: [{ns: db + "." + coll}]
+        // },
+        // checkReadConcern: false,
+        // checkWriteConcern: true,
+        // // TODO SERVER-78258: Depending on what profiling behavior we implement we may be able to
+        // // use profiler output here instead rather than logs.
+        // useLogs: true,
+        skip: "requires feature flag"
+    },
     captrunc: {skip: "test command"},
     checkMetadataConsistency: {skip: "does not accept read or write concern"},
     checkShardingIndex: {skip: "does not accept read or write concern"},
@@ -284,6 +300,7 @@ let testCases = {
     },
     clusterAbortTransaction: {skip: "already tested by 'abortTransaction' tests on mongos"},
     clusterAggregate: {skip: "already tested by 'aggregate' tests on mongos"},
+    clusterBulkWrite: {skip: "already tested by 'bulkWrite' tests on mongos"},
     clusterCommitTransaction: {skip: "already tested by 'commitTransaction' tests on mongos"},
     clusterCount: {skip: "already tested by 'count' tests on mongos"},
     clusterDelete: {skip: "already tested by 'delete' tests on mongos"},

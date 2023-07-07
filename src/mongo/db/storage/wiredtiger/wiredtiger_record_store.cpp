@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #define LOGV2_FOR_RECOVERY(ID, DLEVEL, MESSAGE, ...) \
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kStorageRecovery}, MESSAGE, ##__VA_ARGS__)
 
@@ -110,12 +109,9 @@
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
-
 namespace mongo {
 
 using namespace fmt::literals;
-using std::string;
-using std::unique_ptr;
 
 namespace {
 
@@ -213,6 +209,8 @@ WiredTigerRecordStore::OplogTruncateMarkers::createOplogTruncateMarkers(Operatio
             fmt::format("Cannot create oplog of size less than {} bytes", numTruncateMarkersToKeep),
             minBytesPerTruncateMarker > 0);
 
+    // We need to read the whole oplog, override the recoveryUnit's oplogVisibleTimestamp.
+    ScopedOplogVisibleTimestamp scopedOplogVisibleTimestamp(opCtx->recoveryUnit(), boost::none);
     UnyieldableCollectionIterator iterator(opCtx, rs);
     auto initialSetOfMarkers = CollectionTruncateMarkers::createFromCollectionIterator(
         opCtx,
@@ -642,7 +640,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
         const std::string wtTableConfig =
             uassertStatusOK(WiredTigerUtil::getMetadataCreate(ctx, _uri));
         const bool wtTableConfigMatchesStringKeyFormat =
-            wtTableConfig.find("key_format=u") != string::npos;
+            wtTableConfig.find("key_format=u") != std::string::npos;
         invariant(wtTableConfigMatchesStringKeyFormat);
     }
 
@@ -854,7 +852,8 @@ bool WiredTigerRecordStore::findRecord(OperationContext* opCtx,
 }
 
 void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const RecordId& id) {
-    invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
+    invariant(opCtx->lockState()->inAWriteUnitOfWork());
+
     // SERVER-48453: Initialize the next record id counter before deleting. This ensures we won't
     // reuse record ids, which can be problematic for the _mdb_catalog.
     if (_keyFormat == KeyFormat::Long) {
@@ -1039,7 +1038,7 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
                                              Record* records,
                                              const Timestamp* timestamps,
                                              size_t nRecords) {
-    invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
+    invariant(opCtx->lockState()->inAWriteUnitOfWork());
 
     int64_t totalLength = 0;
     for (size_t i = 0; i < nRecords; i++)
@@ -1193,7 +1192,6 @@ StatusWith<Timestamp> WiredTigerRecordStore::getLatestOplogTimestamp(
     OperationContext* opCtx) const {
     invariant(_isOplog);
     invariant(_keyFormat == KeyFormat::Long);
-    dassert(opCtx->lockState()->isReadLocked());
 
     // Using this function inside a UOW is not supported because the main reason to call it is to
     // synchronize to the last op before waiting for write concern, so it makes little sense to do
@@ -1268,7 +1266,7 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
                                              const RecordId& id,
                                              const char* data,
                                              int len) {
-    invariant(opCtx->lockState()->inAWriteUnitOfWork() || opCtx->lockState()->isNoop());
+    invariant(opCtx->lockState()->inAWriteUnitOfWork());
 
     WiredTigerCursor curwrap(_uri, _tableId, true, opCtx);
     curwrap.assertInActiveTxn();
@@ -2297,7 +2295,6 @@ bool WiredTigerRecordStoreCursorBase::isVisible(const RecordId& id) {
 void WiredTigerRecordStoreCursorBase::initCappedVisibility(OperationContext* opCtx) {
     if (_isOplog) {
         auto wtRu = WiredTigerRecoveryUnit::get(opCtx);
-        wtRu->setIsOplogReader();
         if (_forward) {
             _oplogVisibleTs = wtRu->getOplogVisibilityTs();
         }
@@ -2439,11 +2436,6 @@ void StandardWiredTigerRecordStore::setKey(WT_CURSOR* cursor, const CursorKey* k
 
 std::unique_ptr<SeekableRecordCursor> StandardWiredTigerRecordStore::getCursor(
     OperationContext* opCtx, bool forward) const {
-    if (_isOplog && forward) {
-        WiredTigerRecoveryUnit* wru = WiredTigerRecoveryUnit::get(opCtx);
-        wru->setIsOplogReader();
-    }
-
     return std::make_unique<WiredTigerRecordStoreStandardCursor>(opCtx, *this, forward);
 }
 

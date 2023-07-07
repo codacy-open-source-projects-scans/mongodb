@@ -176,8 +176,6 @@
 #include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/migration_util.h"
-#include "mongo/db/s/move_primary/move_primary_donor_service.h"
-#include "mongo/db/s/move_primary/move_primary_recipient_service.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
 #include "mongo/db/s/query_analysis_op_observer_configsvr.h"
 #include "mongo/db/s/query_analysis_op_observer_rs.h"
@@ -193,6 +191,7 @@
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/serverless/multitenancy_check.h"
 #include "mongo/db/serverless/shard_split_donor_op_observer.h"
 #include "mongo/db/serverless/shard_split_donor_service.h"
 #include "mongo/db/service_context.h"
@@ -426,8 +425,6 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
         services.push_back(std::make_unique<ShardingDDLCoordinatorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingDonorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingRecipientService>(serviceContext));
-        services.push_back(std::make_unique<MovePrimaryDonorService>(serviceContext));
-        services.push_back(std::make_unique<MovePrimaryRecipientService>(serviceContext));
         if (getGlobalReplSettings().isServerless()) {
             services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
             services.push_back(
@@ -1335,11 +1332,6 @@ void setUpObservers(ServiceContext* serviceContext) {
     }
 
     if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        if (!gFeatureFlagCatalogShard.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
-            opObserverRegistry->addObserver(
-                std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
-        }
-
         opObserverRegistry->addObserver(std::make_unique<ConfigServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
         if (!gMultitenancySupport) {
@@ -1806,6 +1798,7 @@ int mongod_main(int argc, char* argv[]) {
     setUpCatalog(service);
     setUpReplication(service);
     setUpObservers(service);
+    setUpMultitenancyCheck(service, gMultitenancySupport);
     service->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>(service));
 
     ErrorExtraInfo::invariantHaveAllParsers();

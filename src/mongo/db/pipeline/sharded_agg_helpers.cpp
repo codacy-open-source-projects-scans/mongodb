@@ -27,15 +27,18 @@
  *    it in the license file.
  */
 
-
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 
 #include <absl/container/flat_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <algorithm>
 #include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 #include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <functional>
 #include <iterator>
@@ -44,11 +47,6 @@
 #include <ratio>
 #include <set>
 #include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -61,7 +59,6 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
@@ -94,7 +91,6 @@
 #include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/vector_clock.h"
@@ -228,11 +224,12 @@ BSONObj genericTransformForShards(MutableDocument&& cmdForShards,
     }
 
     if (expCtx->opCtx->getTxnNumber()) {
-        invariant(cmdForShards.peek()[OperationSessionInfo::kTxnNumberFieldName].missing(),
-                  str::stream() << "Command for shards unexpectedly had the "
-                                << OperationSessionInfo::kTxnNumberFieldName
-                                << " field set: " << cmdForShards.peek().toString());
-        cmdForShards[OperationSessionInfo::kTxnNumberFieldName] =
+        invariant(
+            cmdForShards.peek()[OperationSessionInfoFromClient::kTxnNumberFieldName].missing(),
+            str::stream() << "Command for shards unexpectedly had the "
+                          << OperationSessionInfoFromClient::kTxnNumberFieldName
+                          << " field set: " << cmdForShards.peek().toString());
+        cmdForShards[OperationSessionInfoFromClient::kTxnNumberFieldName] =
             Value(static_cast<long long>(*expCtx->opCtx->getTxnNumber()));
     }
 
@@ -253,6 +250,7 @@ std::vector<RemoteCursor> establishShardCursors(
     const BSONObj& cmdObj,
     const boost::optional<analyze_shard_key::TargetedSampleId>& sampleId,
     const ReadPreferenceSetting& readPref,
+    AsyncRequestsSender::ShardHostMap designatedHostsMap,
     bool targetEveryShardServer) {
     LOGV2_DEBUG(20904,
                 1,
@@ -265,6 +263,8 @@ std::vector<RemoteCursor> establishShardCursors(
     invariant(cri || mustRunOnAllShards);
 
     if (targetEveryShardServer) {
+        // If we are running on all shard servers we should never designate a particular server.
+        invariant(designatedHostsMap.empty());
         if (MONGO_unlikely(shardedAggregateHangBeforeEstablishingShardCursors.shouldFail())) {
             LOGV2(
                 7355704,
@@ -329,7 +329,9 @@ std::vector<RemoteCursor> establishShardCursors(
                             readPref,
                             requests,
                             false /* do not allow partial results */,
-                            getDesiredRetryPolicy(opCtx));
+                            getDesiredRetryPolicy(opCtx),
+                            {} /* providedOpKeys */,
+                            designatedHostsMap);
 }
 
 std::set<ShardId> getTargetedShards(boost::intrusive_ptr<ExpressionContext> expCtx,
@@ -1106,7 +1108,8 @@ DispatchShardPipelineResults dispatchShardPipeline(
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
     boost::optional<ExplainOptions::Verbosity> explain,
     ShardTargetingPolicy shardTargetingPolicy,
-    boost::optional<BSONObj> readConcern) {
+    boost::optional<BSONObj> readConcern,
+    AsyncRequestsSender::ShardHostMap designatedHostsMap) {
     auto expCtx = pipeline->getContext();
 
     // The process is as follows:
@@ -1274,6 +1277,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                             targetedCommand,
                                             targetedSampleId,
                                             ReadPreferenceSetting::get(opCtx),
+                                            designatedHostsMap,
                                             targetEveryShardServer);
 
         } catch (const ExceptionFor<ErrorCodes::StaleConfig>& e) {
@@ -1333,23 +1337,20 @@ AsyncResultsMergerParams buildArmParams(boost::intrusive_ptr<ExpressionContext> 
     armParams.setTailableMode(expCtx->tailableMode);
     armParams.setNss(expCtx->ns);
 
-    OperationSessionInfoFromClient sessionInfo;
-    boost::optional<LogicalSessionFromClient> lsidFromClient;
+    if (auto lsid = expCtx->opCtx->getLogicalSessionId()) {
+        OperationSessionInfoFromClient sessionInfo([&] {
+            LogicalSessionFromClient lsidFromClient(lsid->getId());
+            lsidFromClient.setUid(lsid->getUid());
+            return lsidFromClient;
+        }());
+        sessionInfo.setTxnNumber(expCtx->opCtx->getTxnNumber());
 
-    auto lsid = expCtx->opCtx->getLogicalSessionId();
-    if (lsid) {
-        lsidFromClient.emplace(lsid->getId());
-        lsidFromClient->setUid(lsid->getUid());
+        if (TransactionRouter::get(expCtx->opCtx)) {
+            sessionInfo.setAutocommit(false);
+        }
+
+        armParams.setOperationSessionInfo(sessionInfo);
     }
-
-    sessionInfo.setSessionId(lsidFromClient);
-    sessionInfo.setTxnNumber(expCtx->opCtx->getTxnNumber());
-
-    if (TransactionRouter::get(expCtx->opCtx)) {
-        sessionInfo.setAutocommit(false);
-    }
-
-    armParams.setOperationSessionInfo(sessionInfo);
 
     // Convert owned cursors into a vector of remote cursors to be transferred to the merge
     // pipeline.
@@ -1680,21 +1681,11 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
             const auto& cm = cri.cm;
             auto pipelineToTarget = pipeline->clone();
 
-            if (!cm.isSharded() &&
-                // TODO SERVER-75391: Remove this condition.
-                (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
-                 expCtx->ns != NamespaceString::kConfigsvrCollectionsNamespace)) {
+            if (!cm.isSharded()) {
                 // If the collection is unsharded and we are on the primary, we should be able to
                 // do a local read. The primary may be moved right after the primary shard check,
                 // but the local read path will do a db version check before it establishes a cursor
                 // to catch this case and ensure we fail to read locally.
-                //
-                // There is the case where we are in config.collections (collection unsharded) and
-                // we want to broadcast to all shards for the $shardedDataDistribution pipeline. In
-                // this case we don't want to do a local read and we must target the config servers.
-                // In 7.0, only the config server will be targeted for this collection, but in a
-                // mixed version cluster, an older binary mongos may still target a shard, so if the
-                // current node is not the config server, we force remote targeting.
                 try {
                     auto expectUnshardedCollection(
                         expCtx->mongoProcessInterface->expectUnshardedCollectionInScope(

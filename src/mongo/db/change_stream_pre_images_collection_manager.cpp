@@ -106,7 +106,7 @@ const auto getPreImagesCollectionManager =
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getDeleteExpiredPreImagesExecutor(
     OperationContext* opCtx,
-    const ScopedCollectionAcquisition& preImageColl,
+    CollectionAcquisition preImageColl,
     const MatchExpression* filterPtr,
     Timestamp maxRecordIdTimestamp,
     UUID currentCollectionUUID) {
@@ -124,7 +124,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getDeleteExpiredPreImagesEx
 
     return InternalPlanner::deleteWithCollectionScan(
         opCtx,
-        preImageColl,
+        std::move(preImageColl),
         std::move(params),
         PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
         InternalPlanner::Direction::FORWARD,
@@ -330,7 +330,7 @@ void ChangeStreamPreImagesCollectionManager::performExpiredChangeStreamPreImages
 
 size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollScanCommon(
     OperationContext* opCtx,
-    const ScopedCollectionAcquisition& preImageColl,
+    const CollectionAcquisition& preImageColl,
     const MatchExpression* filterPtr,
     Timestamp maxRecordIdTimestamp) {
     size_t numberOfRemovals = 0;
@@ -367,6 +367,12 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
 
 size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollScan(
     OperationContext* opCtx, Date_t currentTimeForTimeBasedExpiration) {
+    // Change stream collections can multiply the amount of user data inserted and deleted on each
+    // node. It is imperative that removal is prioritized so it can keep up with inserts and prevent
+    // users from running out of disk space.
+    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                        AdmissionContext::Priority::kImmediate);
+
     // Acquire intent-exclusive lock on the change collection.
     const auto preImageColl = acquireCollection(
         opCtx,
@@ -415,7 +421,11 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
 
 size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollScanForTenants(
     OperationContext* opCtx, const TenantId& tenantId, Date_t currentTimeForTimeBasedExpiration) {
-
+    // Change stream collections can multiply the amount of user data inserted and deleted on each
+    // node. It is imperative that removal is prioritized so it can keep up with inserts and prevent
+    // users from running out of disk space.
+    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                        AdmissionContext::Priority::kImmediate);
     // Acquire intent-exclusive lock on the change collection.
     const auto preImageColl =
         acquireCollection(opCtx,
@@ -447,6 +457,11 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
 
 size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithTruncate(
     OperationContext* opCtx, boost::optional<TenantId> tenantId) {
+    // Change stream collections can multiply the amount of user data inserted and deleted
+    // on each node. It is imperative that removal is prioritized so it can keep up with
+    // inserts and prevent users from running out of disk space.
+    ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                        AdmissionContext::Priority::kImmediate);
     const auto preImagesColl = acquireCollection(
         opCtx,
         CollectionAcquisitionRequest(NamespaceString::makePreImageCollectionNSS(tenantId),

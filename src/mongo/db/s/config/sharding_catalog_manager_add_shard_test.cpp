@@ -37,7 +37,6 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <future>
 #include <map>
 #include <memory>
 #include <numeric>
@@ -213,7 +212,7 @@ protected:
     void expectCollectionDrop(const HostAndPort& target, const NamespaceString& nss) {
         onCommandForAddShard([&](const RemoteCommandRequest& request) {
             ASSERT_EQ(request.target, target);
-            ASSERT_EQ(request.dbname, nss.db());
+            ASSERT_EQ(request.dbname, nss.db_forTest());
             ASSERT_BSONOBJ_EQ(request.cmdObj,
                               BSON("drop" << nss.coll() << "writeConcern"
                                           << BSON("w"
@@ -515,7 +514,7 @@ protected:
             ASSERT_EQUALS(expectedHost, request.target);
 
             // Check that the db name in the request matches the expected db name.
-            ASSERT_EQUALS(expectedNss.db(), request.dbname);
+            ASSERT_EQUALS(expectedNss.db_forTest(), request.dbname);
 
             const auto addShardOpMsgRequest =
                 OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
@@ -569,7 +568,7 @@ protected:
             ASSERT_EQUALS(expectedHost, request.target);
 
             // Check that the db name in the request matches the expected db name.
-            ASSERT_EQUALS(expectedNss.db(), request.dbname);
+            ASSERT_EQUALS(expectedNss.db_forTest(), request.dbname);
 
             const auto opMsgRequest = OpMsgRequest::fromDBAndBody(request.dbname, request.cmdObj);
             const auto updateOp = UpdateOp::parse(opMsgRequest);

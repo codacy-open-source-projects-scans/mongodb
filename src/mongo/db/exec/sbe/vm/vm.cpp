@@ -86,6 +86,7 @@
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/str_trim_utils.h"
 #include "mongo/db/storage/column_store.h"
 #include "mongo/db/storage/key_string.h"
 #include "mongo/logv2/log.h"
@@ -2262,8 +2263,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericNewKeyString(
         return {false, value::TypeTags::Nothing, 0};
     }
 
-    auto ksVersion = static_cast<KeyString::Version>(version);
-    auto ksDiscriminator = static_cast<KeyString::Discriminator>(discriminator);
+    auto ksVersion = static_cast<key_string::Version>(version);
+    auto ksDiscriminator = static_cast<key_string::Discriminator>(discriminator);
 
     uint32_t orderingBits = value::numericCast<int32_t>(tagOrdering, valOrdering);
     BSONObjBuilder bb;
@@ -2271,7 +2272,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericNewKeyString(
         bb.append(""_sd, (orderingBits & 1) ? -1 : 1);
     }
 
-    KeyString::HeapBuilder kb{ksVersion, Ordering::make(bb.done())};
+    key_string::HeapBuilder kb{ksVersion, Ordering::make(bb.done())};
 
     const auto stringTransformFn = [&](StringData stringData) {
         return collator->getComparisonString(stringData);
@@ -2432,7 +2433,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericNewKeyString(
 
     return {true,
             value::TypeTags::ksValue,
-            value::bitcastFrom<KeyString::Value*>(new KeyString::Value(kb.release()))};
+            value::bitcastFrom<key_string::Value*>(new key_string::Value(kb.release()))};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewKeyString(ArityType arity) {
@@ -4036,6 +4037,26 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinConcatArrays(Ari
     return {true, resTag, resVal};
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTrim(ArityType arity,
+                                                                     bool trimLeft,
+                                                                     bool trimRight) {
+    auto [ownedChars, tagChars, valChars] = getFromStack(1);
+    auto [ownedInput, tagInput, valInput] = getFromStack(0);
+
+    if (!value::isString(tagInput)) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto replacementChars = !value::isNullish(tagChars)
+        ? str_trim_utils::extractCodePointsFromChars(value::getStringView(tagChars, valChars))
+        : str_trim_utils::kDefaultTrimWhitespaceChars;
+    auto inputString = value::getStringView(tagInput, valInput);
+
+    auto [strTag, strValue] = sbe::value::makeNewString(
+        str_trim_utils::doTrim(inputString, replacementChars, trimLeft, trimRight));
+    return {true, strTag, strValue};
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggConcatArraysCapped(
     ArityType arity) {
     auto [ownArr, tagArr, valArr] = getFromStack(0);
@@ -5326,8 +5347,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinGenerateSortKey(
 
     return {true,
             value::TypeTags::ksValue,
-            value::bitcastFrom<KeyString::Value*>(
-                new KeyString::Value(sortSpec->generateSortKey(bsonObj, collator)))};
+            value::bitcastFrom<key_string::Value*>(
+                new key_string::Value(sortSpec->generateSortKey(bsonObj, collator)))};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponentVectorGetElement(
@@ -6745,6 +6766,87 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRankFinalize(
     return {true, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(lastRank)};
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggExpMovingAvg(ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto [fieldOwned, fieldTag, fieldVal] = getFromStack(1);
+    if (!value::isNumber(fieldTag)) {
+        stateGuard.reset();
+        return {true, stateTag, stateVal};
+    }
+
+    uassert(7821200, "State should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+    uassert(7821201,
+            "Unexpected state array size",
+            state->size() == static_cast<size_t>(AggExpMovingAvgElems::kSizeOfArray));
+
+    auto [alphaTag, alphaVal] = state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kAlpha));
+    uassert(7821202, "alpha is not of decimal type", alphaTag == value::TypeTags::NumberDecimal);
+    auto alpha = value::bitcastTo<Decimal128>(alphaVal);
+
+    value::TypeTags currentResultTag;
+    value::Value currentResultVal;
+    std::tie(currentResultTag, currentResultVal) =
+        state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kResult));
+
+    auto decimalVal = value::numericCast<Decimal128>(fieldTag, fieldVal);
+    auto result = [&]() {
+        if (currentResultTag == value::TypeTags::Null) {
+            // Accumulator result has not been yet initialised. We will now
+            // set it to decimalVal
+            return decimalVal;
+        } else {
+            uassert(7821203,
+                    "currentResultTag is not of decimal type",
+                    currentResultTag == value::TypeTags::NumberDecimal);
+            auto currentResult = value::bitcastTo<Decimal128>(currentResultVal);
+            currentResult = decimalVal.multiply(alpha).add(
+                currentResult.multiply(Decimal128(1).subtract(alpha)));
+            return currentResult;
+        }
+    }();
+
+    auto [resultTag, resultVal] = value::makeCopyDecimal(result);
+
+    state->setAt(static_cast<size_t>(AggExpMovingAvgElems::kResult), resultTag, resultVal);
+    if (fieldTag == value::TypeTags::NumberDecimal) {
+        state->setAt(static_cast<size_t>(AggExpMovingAvgElems::kIsDecimal),
+                     value::TypeTags::Boolean,
+                     value::bitcastFrom<bool>(true));
+    }
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggExpMovingAvgFinalize(
+    ArityType arity) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+
+    uassert(7821204, "State should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+
+    auto [resultTag, resultVal] = state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kResult));
+    if (resultTag == value::TypeTags::Null) {
+        return {false, value::TypeTags::Null, 0};
+    }
+    uassert(7821205, "Unexpected result type", resultTag == value::TypeTags::NumberDecimal);
+
+    auto [isDecimalTag, isDecimalVal] =
+        state->getAt(static_cast<size_t>(AggExpMovingAvgElems::kIsDecimal));
+    uassert(7821206, "Unexpected isDecimal type", isDecimalTag == value::TypeTags::Boolean);
+
+    if (value::bitcastTo<bool>(isDecimalVal)) {
+        std::tie(resultTag, resultVal) = value::copyValue(resultTag, resultVal);
+        return {true, resultTag, resultVal};
+    } else {
+        auto result = value::bitcastTo<Decimal128>(resultVal).toDouble();
+        return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
+    }
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin f,
                                                                          ArityType arity) {
     switch (f) {
@@ -6854,6 +6956,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinToUpper(arity);
         case Builtin::toLower:
             return builtinToLower(arity);
+        case Builtin::trim:
+            return builtinTrim(arity, true, true);
+        case Builtin::ltrim:
+            return builtinTrim(arity, true, false);
+        case Builtin::rtrim:
+            return builtinTrim(arity, false, true);
         case Builtin::coerceToBool:
             return builtinCoerceToBool(arity);
         case Builtin::coerceToString:
@@ -7061,6 +7169,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinAggDenseRankColl(arity);
         case Builtin::aggRankFinalize:
             return builtinAggRankFinalize(arity);
+        case Builtin::aggExpMovingAvg:
+            return builtinAggExpMovingAvg(arity);
+        case Builtin::aggExpMovingAvgFinalize:
+            return builtinAggExpMovingAvgFinalize(arity);
     }
 
     MONGO_UNREACHABLE;
@@ -7175,6 +7287,12 @@ std::string builtinToString(Builtin b) {
             return "toUpper";
         case Builtin::toLower:
             return "toLower";
+        case Builtin::trim:
+            return "trim";
+        case Builtin::ltrim:
+            return "ltrim";
+        case Builtin::rtrim:
+            return "rtrim";
         case Builtin::coerceToBool:
             return "coerceToBool";
         case Builtin::coerceToString:
@@ -7383,6 +7501,10 @@ std::string builtinToString(Builtin b) {
             return "aggDenseRankColl";
         case Builtin::aggRankFinalize:
             return "aggRankFinalize";
+        case Builtin::aggExpMovingAvg:
+            return "aggExpMovingAvg";
+        case Builtin::aggExpMovingAvgFinalize:
+            return "aggExpMovingAvgFinalize";
         default:
             MONGO_UNREACHABLE;
     }

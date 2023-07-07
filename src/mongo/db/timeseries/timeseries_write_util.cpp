@@ -320,6 +320,17 @@ std::shared_ptr<bucket_catalog::WriteBatch>& extractFromSelf(
 }
 }  // namespace
 
+write_ops::UpdateCommandRequest buildSingleUpdateOp(const write_ops::UpdateCommandRequest& wholeOp,
+                                                    size_t opIndex) {
+    write_ops::UpdateCommandRequest singleUpdateOp(wholeOp.getNamespace(),
+                                                   {wholeOp.getUpdates()[opIndex]});
+    auto commandBase = singleUpdateOp.getWriteCommandRequestBase();
+    commandBase.setOrdered(wholeOp.getOrdered());
+    commandBase.setBypassDocumentValidation(wholeOp.getBypassDocumentValidation());
+
+    return singleUpdateOp;
+}
+
 void assertTimeseriesBucketsCollection(const Collection* bucketsColl) {
     uassert(ErrorCodes::NamespaceNotFound,
             "Could not find time-series buckets collection for write",
@@ -710,7 +721,12 @@ void performAtomicWrites(
         std::vector<InsertStatement> insertStatements;
         for (auto& op : insertOps) {
             invariant(op.getDocuments().size() == 1);
-            insertStatements.emplace_back(op.getDocuments().front());
+            if (modificationOp) {
+                insertStatements.emplace_back(op.getDocuments().front());
+            } else {
+                // Appends the stmtId for upsert.
+                insertStatements.emplace_back(stmtId, op.getDocuments().front());
+            }
         }
         uassertStatusOK(collection_internal::insertDocuments(
             opCtx, coll, insertStatements.begin(), insertStatements.end(), &curOp->debug()));

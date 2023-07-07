@@ -28,13 +28,20 @@
  */
 
 #include <benchmark/benchmark.h>
+// IWYU pragma: no_include "cxxabi.h"
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
 
-#include "mongo/db/concurrency/locker_noop_client_observer.h"
-#include "mongo/logv2/log.h"
+#include "mongo/base/status.h"
+#include "mongo/db/service_context.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/transport/service_executor.h"
 #include "mongo/transport/service_executor_synchronous.h"
 #include "mongo/unittest/barrier.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/processinfo.h"
-#include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT mongo::logv2::LogComponent::kTest
 
@@ -74,10 +81,9 @@ struct Notification {
 class ServiceExecutorSynchronousBm : public benchmark::Fixture {
 public:
     void firstSetup() {
-        auto usc = ServiceContext::make();
-        sc = usc.get();
-        usc->registerClientObserver(std::make_unique<LockerNoopClientObserver>());
-        setGlobalServiceContext(std::move(usc));
+        auto service = ServiceContext::make();
+        sc = service.get();
+        setGlobalServiceContext(std::move(service));
         (void)executor()->start();
     }
 
@@ -175,7 +181,10 @@ BENCHMARK_REGISTER_F(ServiceExecutorSynchronousBm, ScheduleAndWait)->ThreadRange
 BENCHMARK_REGISTER_F(ServiceExecutorSynchronousBm, ChainedSchedule)
     ->Range(1, kMaxChainSize)
     ->ThreadRange(1, kMaxThreads);
+#else
+BENCHMARK_REGISTER_F(ServiceExecutorSynchronousBm, ScheduleTask)->ThreadRange(1, 1);
 #endif
+
 
 }  // namespace
 }  // namespace mongo::transport
