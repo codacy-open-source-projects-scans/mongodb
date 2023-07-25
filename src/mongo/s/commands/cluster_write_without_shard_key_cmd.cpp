@@ -86,7 +86,6 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/s/request_types/cluster_commands_without_shard_key_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -160,7 +159,7 @@ BSONObj _createCmdObj(OperationContext* opCtx,
 
     // Parse into OpMsgRequest to append the $db field, which is required for command
     // parsing.
-    const auto opMsgRequest = OpMsgRequest::fromDBAndBody(nss.db(), writeCmd);
+    const auto opMsgRequest = OpMsgRequest::fromDBAndBody(nss.dbName(), writeCmd);
 
     // Parse original write command and set _id as query filter for new command object.
     if (commandName == write_ops::UpdateCommandRequest::kCommandName) {
@@ -300,7 +299,7 @@ public:
         Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
                     "_clusterWriteWithoutShardKey can only be run on Mongos",
-                    isMongos());
+                    serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
 
             uassert(ErrorCodes::IllegalOperation,
                     "_clusterWriteWithoutShardKey must be run in a transaction.",
@@ -348,7 +347,7 @@ public:
             const auto writeCmdObj = [&] {
                 const auto explainCmdObj = request().getWriteCmd();
                 const auto opMsgRequestExplainCmd =
-                    OpMsgRequest::fromDBAndBody(ns().db(), explainCmdObj);
+                    OpMsgRequest::fromDBAndBody(ns().dbName(), explainCmdObj);
                 auto explainRequest = ExplainCommandRequest::parse(
                     IDLParserContext("_clusterWriteWithoutShardKeyExplain"),
                     opMsgRequestExplainCmd.body);

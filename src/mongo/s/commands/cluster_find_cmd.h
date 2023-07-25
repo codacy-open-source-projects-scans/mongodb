@@ -37,6 +37,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/query_shape.h"
 #include "mongo/db/query/query_stats.h"
@@ -48,7 +49,6 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/query/cluster_aggregate.h"
 #include "mongo/s/query/cluster_find.h"
 
@@ -157,7 +157,7 @@ public:
                         opCtx, findCommand->getNamespaceOrUUID().nss()));
                 shardResponses = scatterGatherVersionedTargetByRoutingTable(
                     opCtx,
-                    findCommand->getNamespaceOrUUID().nss().db(),
+                    findCommand->getNamespaceOrUUID().nss().db_forSharding(),
                     findCommand->getNamespaceOrUUID().nss(),
                     cri,
                     explainCmd,
@@ -184,17 +184,9 @@ public:
                 auto bodyBuilder = result->getBodyBuilder();
                 bodyBuilder.resetToEmpty();
 
-                auto aggCmdOnView =
-                    uassertStatusOK(query_request_helper::asAggregationCommand(*findCommand));
-                auto viewAggregationCommand =
-                    OpMsgRequestBuilder::create(_dbName, aggCmdOnView).body;
-
-                auto aggRequestOnView = aggregation_request_helper::parseFromBSON(
-                    opCtx,
-                    ns(),
-                    viewAggregationCommand,
-                    verbosity,
-                    APIParameters::get(opCtx).getAPIStrict().value_or(false));
+                auto aggRequestOnView =
+                    query_request_conversion::asAggregateCommandRequest(*findCommand);
+                aggRequestOnView.setExplain(verbosity);
 
                 // An empty PrivilegeVector is acceptable because these privileges are only checked
                 // on getMore and explain will not open a cursor.
@@ -258,17 +250,8 @@ public:
             } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& ex) {
                 result->reset();
 
-                auto aggCmdOnView = uassertStatusOK(
-                    query_request_helper::asAggregationCommand(cq->getFindCommandRequest()));
-                auto viewAggregationCommand =
-                    OpMsgRequestBuilder::create(_dbName, aggCmdOnView).body;
-
-                auto aggRequestOnView = aggregation_request_helper::parseFromBSON(
-                    opCtx,
-                    ns(),
-                    viewAggregationCommand,
-                    boost::none,
-                    APIParameters::get(opCtx).getAPIStrict().value_or(false));
+                auto aggRequestOnView = query_request_conversion::asAggregateCommandRequest(
+                    cq->getFindCommandRequest());
 
                 auto bodyBuilder = result->getBodyBuilder();
                 uassertStatusOK(ClusterAggregate::retryOnViewError(

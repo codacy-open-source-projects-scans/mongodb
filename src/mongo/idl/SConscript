@@ -112,6 +112,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/commands/create_command',
         '$BUILD_DIR/mongo/db/op_observer/op_observer',
+        '$BUILD_DIR/mongo/db/query/query_settings_manager',
         '$BUILD_DIR/mongo/db/repl/oplog',
         '$BUILD_DIR/mongo/db/repl/oplog_interface_local',
         '$BUILD_DIR/mongo/db/repl/replmocks',
@@ -172,5 +173,18 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
         'cluster_server_parameter',
+    ],
+)
+
+env.Benchmark(
+    target='idl_parser_bm',
+    source=[
+        'idl_parser_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authprivilege',
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+        '$BUILD_DIR/mongo/db/query/query_request',
+        'idl_parser',
     ],
 )

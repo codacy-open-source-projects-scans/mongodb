@@ -95,7 +95,6 @@
 #include "mongo/s/query/establish_cursors.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/shard_version.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
@@ -213,7 +212,8 @@ public:
             // Need to retrieve a list of databases which this shard is primary for and run the
             // command on each of them.
             for (const auto& db : getDatabasesThisShardIsPrimaryFor(opCtx)) {
-                const NamespaceString dbNss{db.getName(), nss.coll()};
+                const auto dbNss = NamespaceStringUtil::parseNamespaceFromRequest(
+                    boost::none, db.getName(), nss.coll());
                 ScopedSetShardRole scopedSetShardRole(opCtx,
                                                       dbNss,
                                                       boost::none /* shardVersion */,
@@ -273,13 +273,12 @@ public:
                                   appendOpKey(configOpKey, configRequest.toBSON({})));
 
             // Take a DDL lock on the database
-            static constexpr StringData kLockReason{"checkMetadataConsistency"_sd};
-            const LockMode mode = (feature_flags::gMultipleGranularityDDLLocking.isEnabled(
-                                       serverGlobalParams.featureCompatibility)
-                                       ? MODE_S
-                                       : MODE_X);
             const DDLLockManager::ScopedDatabaseDDLLock dbDDLLock{
-                opCtx, nss.dbName(), kLockReason, mode, DDLLockManager::kDefaultLockTimeout};
+                opCtx,
+                nss.dbName(),
+                "checkMetadataConsistency",
+                MODE_S,
+                DDLLockManager::kDefaultLockTimeout};
 
             return establishCursors(opCtx,
                                     Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),

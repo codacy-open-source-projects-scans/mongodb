@@ -192,10 +192,12 @@ void startTransactionWithNoopFind(OperationContext* opCtx,
     findCommand.setBatchSize(0);
     findCommand.setSingleBatch(true);
 
-    auto res =
-        runCommandInLocalTxn(
-            opCtx, nss.db(), true /*startTransaction*/, txnNumber, findCommand.toBSON(BSONObj()))
-            .body;
+    auto res = runCommandInLocalTxn(opCtx,
+                                    nss.db_forSharding(),
+                                    true /*startTransaction*/,
+                                    txnNumber,
+                                    findCommand.toBSON(BSONObj()))
+                   .body;
     uassertStatusOK(getStatusFromCommandResult(res));
 }
 
@@ -765,11 +767,6 @@ Status ShardingCatalogManager::_initConfigVersion(OperationContext* opCtx) {
     VersionType newVersion;
     newVersion.setClusterId(OID::gen());
 
-    if (!feature_flags::gStopUsingConfigVersion.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
-        newVersion.setCurrentVersion(VersionType::CURRENT_CONFIG_VERSION);
-        newVersion.setMinCompatibleVersion(VersionType::MIN_COMPATIBLE_CONFIG_VERSION);
-    }
     auto insertStatus = _localCatalogClient->insertConfigDocument(
         opCtx, VersionType::ConfigNS, newVersion.toBSON(), kNoWaitWriteConcern);
     return insertStatus;
@@ -1104,9 +1101,10 @@ BSONObj ShardingCatalogManager::writeToConfigDocumentInTxn(OperationContext* opC
                                                            const BatchedCommandRequest& request,
                                                            TxnNumber txnNumber) {
     invariant(nss.dbName() == DatabaseName::kConfig);
-    auto response = runCommandInLocalTxn(
-                        opCtx, nss.db(), false /* startTransaction */, txnNumber, request.toBSON())
-                        .body;
+    auto response =
+        runCommandInLocalTxn(
+            opCtx, nss.db_forSharding(), false /* startTransaction */, txnNumber, request.toBSON())
+            .body;
 
     uassertStatusOK(getStatusFromWriteCommandReply(response));
 
@@ -1155,10 +1153,12 @@ boost::optional<BSONObj> ShardingCatalogManager::findOneConfigDocumentInTxn(
     findCommand.setSingleBatch(true);
     findCommand.setLimit(1);
 
-    auto res =
-        runCommandInLocalTxn(
-            opCtx, nss.db(), false /*startTransaction*/, txnNumber, findCommand.toBSON(BSONObj()))
-            .body;
+    auto res = runCommandInLocalTxn(opCtx,
+                                    nss.db_forSharding(),
+                                    false /*startTransaction*/,
+                                    txnNumber,
+                                    findCommand.toBSON(BSONObj()))
+                   .body;
     uassertStatusOK(getStatusFromCommandResult(res));
 
     auto cursor = uassertStatusOK(CursorResponse::parseFromBSON(res));
@@ -1498,7 +1498,7 @@ void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
                      &earliestClusterTime](const std::vector<BSONObj>& batch,
                                            const boost::optional<BSONObj>& postBatchResumeToken) {
         for (const auto& obj : batch) {
-            const auto nss = NamespaceString(obj["_id"].String());
+            const auto nss = NamespaceStringUtil::deserialize(boost::none, obj["_id"].String());
             const auto timeOfMostRecentDoc = obj["mostRecentTimestamp"].timestamp();
             write_ops::DeleteOpEntry stmt;
 

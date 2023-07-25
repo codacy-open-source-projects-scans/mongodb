@@ -504,13 +504,20 @@ public:
         }
     }
 
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       const TransactionOperations& transactionOperations,
-                                       OpStateAccumulator* opAccumulator = nullptr) override {
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        const TransactionOperations& transactionOperations,
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        OpStateAccumulator* opAccumulator = nullptr) override {
         ReservedTimes times{opCtx};
         OpStateAccumulator opStateAccumulator;
         for (auto& o : _observers)
-            o->onUnpreparedTransactionCommit(opCtx, transactionOperations, &opStateAccumulator);
+            o->onUnpreparedTransactionCommit(opCtx,
+                                             reservedSlots,
+                                             transactionOperations,
+                                             applyOpsOperationAssignment,
+                                             &opStateAccumulator);
     }
 
     void onPreparedTransactionCommit(
@@ -550,6 +557,15 @@ public:
                                            applyOpsOperationAssignment,
                                            numberOfPrePostImagesToWrite,
                                            wallClockTime);
+        }
+    }
+
+    void postTransactionPrepare(OperationContext* opCtx,
+                                const std::vector<OplogSlot>& reservedSlots,
+                                const TransactionOperations& transactionOperations) override {
+        ReservedTimes times{opCtx};
+        for (auto& observer : _observers) {
+            observer->postTransactionPrepare(opCtx, reservedSlots, transactionOperations);
         }
     }
 

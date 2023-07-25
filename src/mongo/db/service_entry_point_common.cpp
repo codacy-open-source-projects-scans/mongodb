@@ -361,7 +361,7 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
     };
 
     auto shouldApplyDefaults = (startTransaction || !opCtx->inMultiDocumentTransaction()) &&
-        repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() &&
+        repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
         !opCtx->getClient()->isInDirectClient();
 
     if (readConcernSupport.defaultReadConcernPermit.isOK() && shouldApplyDefaults) {
@@ -477,8 +477,7 @@ StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
  */
 LogicalTime getClientOperationTime(OperationContext* opCtx) {
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet =
-        replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
+    const bool isReplSet = replCoord->getSettings().isReplSet();
 
     if (!isReplSet) {
         return LogicalTime();
@@ -498,8 +497,7 @@ LogicalTime getClientOperationTime(OperationContext* opCtx) {
  */
 LogicalTime computeOperationTime(OperationContext* opCtx, LogicalTime startOperationTime) {
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet =
-        replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
+    const bool isReplSet = replCoord->getSettings().isReplSet();
     invariant(isReplSet);
 
     auto operationTime = getClientOperationTime(opCtx);
@@ -533,8 +531,7 @@ void appendClusterAndOperationTime(OperationContext* opCtx,
                                    BSONObjBuilder* commandBodyFieldsBob,
                                    BSONObjBuilder* metadataBob,
                                    LogicalTime startTime) {
-    if (repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-            repl::ReplicationCoordinator::modeReplSet ||
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
         !VectorClock::get(opCtx)->isEnabled()) {
         return;
     }
@@ -588,8 +585,7 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
     // since we only increment the topologyVersion at shutdown and alert waiting isMaster/hello
     // commands if the server enters quiesce mode.
     const auto shouldAppendTopologyVersion =
-        (replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet &&
-         isNotPrimaryError) ||
+        (replCoord->getSettings().isReplSet() && isNotPrimaryError) ||
         (isShutdownError && replCoord->inQuiesceMode());
 
     if (!shouldAppendTopologyVersion) {
@@ -604,7 +600,7 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
 void appendAdditionalParticipants(OperationContext* opCtx,
                                   BSONObjBuilder* commandBodyFieldsBob,
                                   const std::string& commandName,
-                                  StringData ns) {
+                                  const NamespaceString& nss) {
     // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns.
     if (gFeatureFlagAdditionalParticipants.isEnabledAndIgnoreFCVUnsafe()) {
         std::vector<BSONElement> shardIdsFromFpData;
@@ -613,8 +609,8 @@ void appendAdditionalParticipants(OperationContext* opCtx,
                     if (data.hasField("cmdName") && data.hasField("ns") &&
                         data.hasField("shardId")) {
                         shardIdsFromFpData = data.getField("shardId").Array();
-                        return ((data.getStringField("cmdName") == commandName) &&
-                                (data.getStringField("ns") == ns));
+                        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns");
+                        return ((data.getStringField("cmdName") == commandName) && (fpNss == nss));
                     }
                     return false;
                 }))) {
@@ -1305,8 +1301,7 @@ void RunCommandImpl::_epilogue() {
         });
 
     behaviors.waitForLinearizableReadConcern(opCtx);
-    const DatabaseName requestDbName =
-        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase());
+    const DatabaseName requestDbName = request.getDbName();
     tenant_migration_access_blocker::checkIfLinearizableReadWasAllowedOrThrow(opCtx, requestDbName);
 
     // Wait for data to satisfy the read concern level, if necessary.
@@ -1339,8 +1334,7 @@ void RunCommandImpl::_epilogue() {
                                             _isInternalClient(),
                                             _ecd->getLastOpBeforeRun(),
                                             _ecd->getLastOpAfterRun());
-        appendAdditionalParticipants(
-            opCtx, &body, command->getName(), _ecd->getInvocation()->ns().ns());
+        appendAdditionalParticipants(opCtx, &body, command->getName(), _ecd->getInvocation()->ns());
     }
 
     auto commandBodyBob = replyBuilder->getBodyBuilder();
@@ -1554,8 +1548,7 @@ void ExecCommandDatabase::_initiateCommand() {
                                                      request,
                                                      command->requiresAuth(),
                                                      command->attachLogicalSessionsToOpCtx(),
-                                                     replCoord->getReplicationMode() ==
-                                                         repl::ReplicationCoordinator::modeReplSet);
+                                                     replCoord->getSettings().isReplSet());
 
     // Start authz contract tracking before we evaluate failpoints
     auto authzSession = AuthorizationSession::get(client);
@@ -1563,8 +1556,7 @@ void ExecCommandDatabase::_initiateCommand() {
 
     CommandHelpers::evaluateFailCommandFailPoint(opCtx, _invocation.get());
 
-    const auto dbName =
-        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase());
+    const auto dbName = request.getDbName();
     uassert(ErrorCodes::InvalidNamespace,
             fmt::format("Invalid database name: '{}'", dbName.toStringForErrorMsg()),
             NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow));
@@ -1665,8 +1657,7 @@ void ExecCommandDatabase::_initiateCommand() {
             uassert(ErrorCodes::NotWritablePrimary, msg, canRunHere);
         }
 
-        if (!command->maintenanceOk() &&
-            replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet &&
+        if (!command->maintenanceOk() && replCoord->getSettings().isReplSet() &&
             !replCoord->canAcceptWritesForDatabase_UNSAFE(opCtx, dbName) &&
             !replCoord->getMemberState().secondary()) {
 
@@ -2053,7 +2044,7 @@ void ExecCommandDatabase::_handleFailure(Status status) {
                                         getLastOpBeforeRun(),
                                         getLastOpAfterRun());
     appendAdditionalParticipants(
-        opCtx, &_extraFieldsBuilder, command->getName(), _execContext->nsString().ns());
+        opCtx, &_extraFieldsBuilder, command->getName(), _execContext->nsString());
 
     BSONObjBuilder metadataBob;
     behaviors.appendReplyMetadata(opCtx, request, &metadataBob);
@@ -2105,8 +2096,7 @@ void curOpCommandSetup(OperationContext* opCtx, const OpMsgRequest& request) {
 
     // We construct a legacy $cmd namespace so we can fill in curOp using
     // the existing logic that existed for OP_QUERY commands
-    NamespaceString nss(NamespaceString::makeCommandNamespace(
-        DatabaseNameUtil::deserialize(request.getValidatedTenantId(), request.getDatabase())));
+    NamespaceString nss(NamespaceString::makeCommandNamespace(request.getDbName()));
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     curop->setNS_inlock(nss);

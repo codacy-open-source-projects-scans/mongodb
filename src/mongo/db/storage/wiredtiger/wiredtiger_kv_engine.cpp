@@ -199,7 +199,7 @@ bool WiredTigerFileVersion::shouldDowngrade(bool hasRecoveryTimestamp) {
         return false;
     }
 
-    if (getGlobalReplSettings().usingReplSets()) {
+    if (getGlobalReplSettings().isReplSet()) {
         // If this process is run with `--replSet`, it must have run any startup replication
         // recovery and downgrading at this point is safe.
         return true;
@@ -1409,7 +1409,7 @@ void WiredTigerKVEngine::syncSizeInfo(bool sync) const {
     while (true) {
         try {
             return _sizeStorer->flush(sync);
-        } catch (const WriteConflictException&) {
+        } catch (const StorageUnavailableException&) {
             if (!sync) {
                 // ignore, we'll try again later.
                 return;
@@ -1601,7 +1601,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::getRecordStore(OperationContext
     bool isLogged;
     if (nss.size() == 0) {
         fassert(8423353, ident.startsWith("internal-"));
-        isLogged = !getGlobalReplSettings().usingReplSets() &&
+        isLogged = !getGlobalReplSettings().isReplSet() &&
             !repl::ReplSettings::shouldRecoverFromOplogAsStandalone();
     } else {
         isLogged = WiredTigerUtil::useTableLogging(nss);
@@ -1803,7 +1803,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     const bool isLogged = false;
     StatusWith<std::string> swConfig =
         WiredTigerRecordStore::generateCreateString(_canonicalName,
-                                                    NamespaceString("") /* internal table */,
+                                                    NamespaceString() /* internal table */,
                                                     ident,
                                                     CollectionOptions(),
                                                     _rsOptions,
@@ -1823,7 +1823,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
     uassertStatusOK(wtRCToStatus(session->create(session, uri.c_str(), config.c_str()), session));
 
     WiredTigerRecordStore::Params params;
-    params.nss = NamespaceString("");
+    params.nss = NamespaceString();
     params.uuid = boost::none;
     params.ident = ident.toString();
     params.engineName = _canonicalName;
@@ -2050,8 +2050,8 @@ void WiredTigerKVEngine::_checkpoint(OperationContext* opCtx, WT_SESSION* sessio
             _oplogNeededForCrashRecovery.store(oplogNeededForRollback.getValue().asULL());
         }
     }
-} catch (const WriteConflictException&) {
-    LOGV2_WARNING(22346, "Checkpoint encountered a write conflict exception.");
+} catch (const StorageUnavailableException&) {
+    LOGV2_WARNING(7754200, "Checkpoint encountered a StorageUnavailableException.");
 } catch (const AssertionException& exc) {
     invariant(ErrorCodes::isShutdownError(exc.code()), exc.what());
 }

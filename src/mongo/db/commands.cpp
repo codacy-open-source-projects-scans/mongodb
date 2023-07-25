@@ -289,11 +289,12 @@ std::string CommandHelpers::parseNsFullyQualified(const BSONObj& cmdObj) {
     uassert(ErrorCodes::BadValue,
             str::stream() << "collection name has invalid type " << typeName(first.type()),
             first.canonicalType() == canonicalizeBSONType(mongo::String));
-    const NamespaceString nss(first.valueStringData());
+    const auto ns = first.valueStringData();
+    const NamespaceString nss(ns);
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "Invalid namespace specified '" << nss.toStringForErrorMsg() << "'",
             nss.isValid());
-    return nss.ns().toString();
+    return ns.toString();
 }
 
 NamespaceString CommandHelpers::parseNsCollectionRequired(const DatabaseName& dbName,
@@ -328,15 +329,14 @@ NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(const DatabaseName& dbName,
         const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid collection name specified '" << nss.toStringForErrorMsg(),
-                !(nss.ns().find('$') != std::string::npos && nss.ns() != "local.oplog.$main"));
+                !(NamespaceStringUtil::serialize(nss).find('$') != std::string::npos &&
+                  nss != NamespaceString::kLocalOplogDollarMain));
         return nss;
     }
 }
 
-std::string CommandHelpers::parseNsFromCommand(StringData dbname, const BSONObj& cmdObj) {
-    return parseNsFromCommand(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj)
-        .ns()
-        .toString();
+NamespaceString CommandHelpers::parseNsFromCommand(StringData dbname, const BSONObj& cmdObj) {
+    return parseNsFromCommand(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj);
 }
 
 NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
@@ -895,8 +895,7 @@ void CommandInvocation::checkAuthorization(OperationContext* opCtx,
                 namespace mmb = mutablebson;
                 mmb::Document cmdToLog(request.body, mmb::Document::kInPlaceDisabled);
                 c->snipForLogging(&cmdToLog);
-                auto dbName = DatabaseNameUtil::deserialize(request.getValidatedTenantId(),
-                                                            request.getDatabase());
+                auto dbName = request.getDbName();
                 uasserted(ErrorCodes::Unauthorized,
                           str::stream() << "not authorized on " << dbName.toStringForErrorMsg()
                                         << " to execute command " << redact(cmdToLog.getObject()));
@@ -925,8 +924,7 @@ public:
         : CommandInvocation(command),
           _command(command),
           _request(request),
-          _dbName(DatabaseNameUtil::deserialize(_request.getValidatedTenantId(),
-                                                _request.getDatabase())) {}
+          _dbName(request.getDbName()) {}
 
 private:
     void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {

@@ -75,7 +75,6 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
@@ -105,12 +104,10 @@ std::pair<multiversion::FeatureCompatibilityVersion,
 getFCVAndClusterParametersFromConfigServer() {
     // Use an alternative client region, because we call refreshParameters both from the internal
     // refresher process and from getClusterParameter.
+    // Allow this client to be killable. If interrupted, the exception will be caught and handled in
+    // refreshParameters.
     auto altClient = getGlobalServiceContext()->makeClient("clusterParameterRefreshTransaction");
-    // TODO(SERVER-74660): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*altClient.get());
-        altClient.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
+
     AlternativeClientRegion clientRegion(altClient);
     auto opCtx = cc().makeOperationContext();
     auto as = AuthorizationSession::get(cc());
@@ -247,8 +244,15 @@ Status ClusterServerParameterRefresher::refreshParameters(OperationContext* opCt
     // No active job; make a new promise and run the job ourselves.
     _refreshPromise = std::make_unique<SharedPromise<void>>();
     lk.unlock();
-    // Run _refreshParameters unlocked to allow new futures to be gotten from our promise.
-    Status status = _refreshParameters(opCtx);
+    Status status = [&]() {
+        try {
+            // Run _refreshParameters unlocked to allow new futures to be gotten from our promise.
+            return _refreshParameters(opCtx);
+        } catch (const ExceptionFor<ErrorCodes::InterruptedAtShutdown>& ex) {
+            return ex.toStatus();
+        }
+    }();
+
     lk.lock();
     // Complete the promise and detach it from the object, allowing a new job to be created the
     // next time refreshParameters is run. Note that the futures of this promise hold references to
@@ -269,7 +273,7 @@ Status ClusterServerParameterRefresher::_refreshParameters(OperationContext* opC
         return Status::OK();
     }
 
-    invariant(isMongos());
+    invariant(serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
     multiversion::FeatureCompatibilityVersion fcv;
     TenantIdMap<stdx::unordered_map<std::string, BSONObj>> clusterParameterDocs;
 

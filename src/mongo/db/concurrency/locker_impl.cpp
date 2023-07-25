@@ -1131,6 +1131,10 @@ void LockerImpl::getFlowControlTicket(OperationContext* opCtx, LockMode lockMode
     }
 }
 
+std::vector<LogDegugInfo> LockerImpl::getLockInfoFromResourceHolders(ResourceId resId) {
+    return getGlobalLockManager()->getLockInfoFromResourceHolders(resId);
+}
+
 LockResult LockerImpl::lockRSTLBegin(OperationContext* opCtx, LockMode mode) {
     bool testOnly = false;
 

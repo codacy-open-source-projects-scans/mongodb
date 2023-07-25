@@ -84,12 +84,15 @@ struct OptionsBase {
 struct Options : OptionsBase<Options> {};
 struct OptionsWithSecondaryCollections : OptionsBase<OptionsWithSecondaryCollections> {
     OptionsWithSecondaryCollections secondaryNssOrUUIDs(
-        std::vector<NamespaceStringOrUUID> secondaryNssOrUUIDs) {
-        _secondaryNssOrUUIDs = std::move(secondaryNssOrUUIDs);
+        std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsBegin,
+        std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsEnd) {
+        _secondaryNssOrUUIDsBegin = secondaryNssOrUUIDsBegin;
+        _secondaryNssOrUUIDsEnd = secondaryNssOrUUIDsEnd;
         return std::move(*this);
     }
 
-    std::vector<NamespaceStringOrUUID> _secondaryNssOrUUIDs;
+    std::vector<NamespaceStringOrUUID>::const_iterator _secondaryNssOrUUIDsBegin;
+    std::vector<NamespaceStringOrUUID>::const_iterator _secondaryNssOrUUIDsEnd;
 };
 }  // namespace auto_get_collection
 
@@ -245,7 +248,7 @@ public:
     AutoGetCollection(OperationContext* opCtx,
                       const NamespaceStringOrUUID& nsOrUUID,
                       LockMode modeColl,
-                      Options options = {});
+                      const Options& options = {});
 
     /**
      * Special constructor when this class is instantiated from AutoGetCollectionForRead. Used to
@@ -256,7 +259,7 @@ public:
     AutoGetCollection(OperationContext* opCtx,
                       const NamespaceStringOrUUID& nsOrUUID,
                       LockMode modeColl,
-                      Options options,
+                      const Options& options,
                       ForReadTag read);
 
     AutoGetCollection(AutoGetCollection&&) = default;
@@ -326,7 +329,7 @@ protected:
     AutoGetCollection(OperationContext* opCtx,
                       const NamespaceStringOrUUID& nsOrUUID,
                       LockMode modeColl,
-                      Options options,
+                      const Options& options,
                       bool verifyWriteEligible);
     // Ordering matters, the _collLocks should destruct before the _autoGetDb releases the
     // rstl/global/database locks.

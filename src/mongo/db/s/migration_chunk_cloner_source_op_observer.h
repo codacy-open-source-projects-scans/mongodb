@@ -107,17 +107,16 @@ public:
                   const OplogDeleteEntryArgs& args,
                   OpStateAccumulator* opAccumulator = nullptr) final;
 
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       const TransactionOperations& transactionOperations,
-                                       OpStateAccumulator* opAccumulator = nullptr) final;
-
-    void onTransactionPrepare(
+    void onUnpreparedTransactionCommit(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
-        size_t numberOfPrePostImagesToWrite,
-        Date_t wallClockTime) final;
+        OpStateAccumulator* opAccumulator = nullptr) final;
+
+    void postTransactionPrepare(OperationContext* opCtx,
+                                const std::vector<OplogSlot>& reservedSlots,
+                                const TransactionOperations& transactionOperations) final;
 
     void onTransactionPrepareNonPrimary(OperationContext* opCtx,
                                         const LogicalSessionId& lsid,

@@ -323,6 +323,11 @@ void expireIdleBuckets(BucketCatalog& catalog,
 std::pair<OID, Date_t> generateBucketOID(const Date_t& time, const TimeseriesOptions& options);
 
 /**
+ * Resets the counter used for bucket OID generation. Should be called after a collision.
+ */
+void resetBucketOIDCounter();
+
+/**
  * Allocates a new bucket and adds it to the catalog.
  */
 Bucket& allocateBucket(BucketCatalog& catalog,
@@ -367,6 +372,20 @@ ExecutionStatsController getOrInitializeExecutionStats(BucketCatalog& catalog,
  */
 std::shared_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
                                                   const NamespaceString& ns);
+
+/**
+ * Retrieves the execution stats from the side bucket catalog.
+ * Assumes the side bucket catalog has the stats of one collection.
+ */
+std::pair<NamespaceString, std::shared_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
+    BucketCatalog& sideBucketCatalog);
+
+/**
+ * Merges the execution stats of a collection into the bucket catalog.
+ */
+void mergeExecutionStatsToBucketCatalog(BucketCatalog& catalog,
+                                        std::shared_ptr<ExecutionStats> collStats,
+                                        const NamespaceString& viewNs);
 
 /**
  * Generates a status with code TimeseriesBucketCleared and an appropriate error message.

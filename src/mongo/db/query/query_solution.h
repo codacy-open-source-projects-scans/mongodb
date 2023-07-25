@@ -932,7 +932,7 @@ struct ReturnKeyNode : public QuerySolutionNode {
  */
 struct ProjectionNode : public QuerySolutionNodeWithSortSet {
     ProjectionNode(std::unique_ptr<QuerySolutionNode> child,
-                   const MatchExpression& fullExpression,
+                   const MatchExpression* fullExpression,
                    projection_ast::Projection proj)
         : QuerySolutionNodeWithSortSet(std::move(child)),
           fullExpression(fullExpression),
@@ -977,9 +977,9 @@ public:
      */
     virtual StringData projectionImplementationTypeToString() const = 0;
 
-    // The full query tree.  Needed when we have positional operators.
-    // Owned in the CanonicalQuery, not here.
-    const MatchExpression& fullExpression;
+    // The full query tree. Needed when we have positional operators. Owned in the CanonicalQuery,
+    // not here, so here this is a native pointer, not a std_unique, to avoid having to clone it.
+    const MatchExpression* fullExpression;
 
     projection_ast::Projection proj;
 };
@@ -1006,7 +1006,7 @@ struct ProjectionNodeDefault final : ProjectionNode {
  */
 struct ProjectionNodeCovered final : ProjectionNode {
     ProjectionNodeCovered(std::unique_ptr<QuerySolutionNode> child,
-                          const MatchExpression& fullExpression,
+                          const MatchExpression* fullExpression,
                           projection_ast::Projection proj,
                           BSONObj coveredKeyObj)
         : ProjectionNode(std::move(child), fullExpression, std::move(proj)),
@@ -1660,7 +1660,6 @@ struct EqLookupNode : public QuerySolutionNode {
 };
 
 struct SentinelNode : public QuerySolutionNode {
-
     SentinelNode() {}
 
     virtual StageType getType() const {
@@ -1685,5 +1684,41 @@ struct SentinelNode : public QuerySolutionNode {
     }
 
     std::unique_ptr<QuerySolutionNode> clone() const final;
+};
+
+struct SearchNode : public QuerySolutionNode {
+    explicit SearchNode(bool isSearchMeta) : isSearchMeta(isSearchMeta) {
+        // TODO SERVER-78565: Support $search in SBE plan cache
+        eligibleForPlanCache = false;
+    }
+
+    StageType getType() const override {
+        return STAGE_SEARCH;
+    }
+
+    void appendToString(str::stream* ss, int indent) const override;
+
+    bool fetched() const {
+        return true;
+    }
+
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        return FieldAvailability::kFullyProvided;
+    }
+
+    bool sortedByDiskLoc() const override {
+        return false;
+    }
+
+    const ProvidedSortSet& providedSorts() const final {
+        return kEmptySet;
+    }
+
+    std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    /**
+     * True for $searchMeta, False for $search query.
+     */
+    bool isSearchMeta;
 };
 }  // namespace mongo

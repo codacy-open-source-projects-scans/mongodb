@@ -370,7 +370,8 @@ void renameCollectionMetadataInTransaction(OperationContext* opCtx,
                                            const std::shared_ptr<executor::TaskExecutor>& executor,
                                            const OperationSessionInfo& osi) {
 
-    std::string logMsg = str::stream() << fromNss.ns() << " to " << toNss.ns();
+    std::string logMsg = str::stream()
+        << toStringForLogging(fromNss) << " to " << toStringForLogging(toNss);
     if (optFromCollType) {
         // Case sharded FROM collection
         auto fromUUID = optFromCollType->getUuid();
@@ -570,7 +571,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     uassert(ErrorCodes::InvalidOptions,
                             "Cannot provide an expected collection UUID when renaming between "
                             "databases",
-                            fromNss.db() == toNss.db() ||
+                            fromNss.db_forSharding() == toNss.db_forSharding() ||
                                 (!_doc.getExpectedSourceUUID() && !_doc.getExpectedTargetUUID()));
 
                     {
@@ -612,9 +613,9 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                 str::stream() << "Source and destination collections must be on "
                                                  "the same database because "
                                               << fromNss.toStringForErrorMsg() << " is sharded.",
-                                fromNss.db() == toNss.db());
+                                fromNss.db_forSharding() == toNss.db_forSharding());
                         _doc.setOptShardedCollInfo(optSourceCollType);
-                    } else if (fromNss.db() != toNss.db()) {
+                    } else if (fromNss.db_forSharding() != toNss.db_forSharding()) {
                         sharding_ddl_util::checkDbPrimariesOnTheSameShard(opCtx, fromNss, toNss);
                     }
 
@@ -667,11 +668,13 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                         opCtx, fromNss, toNss, _doc.getDropTarget(), executor);
 
                     {
-                        AutoGetCollection coll{opCtx,
-                                               toNss,
-                                               MODE_IS,
-                                               AutoGetCollection::Options{}.expectedUUID(
-                                                   _doc.getExpectedTargetUUID())};
+                        AutoGetCollection coll{
+                            opCtx,
+                            toNss,
+                            MODE_IS,
+                            AutoGetCollection::Options{}
+                                .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
+                                .expectedUUID(_doc.getExpectedTargetUUID())};
                         uassert(ErrorCodes::IllegalOperation,
                                 "Cannot rename to an existing encrypted collection",
                                 !coll || !coll->getCollectionOptions().encryptedFieldConfig ||

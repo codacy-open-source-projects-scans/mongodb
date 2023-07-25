@@ -614,7 +614,8 @@ void DocumentSourceGraphLookUp::serializeToArray(std::vector<Value>& array,
     auto fromValue = (pExpCtx->ns.db() == _from.db())
         ? Value(opts.serializeIdentifier(_from.coll()))
         : Value(Document{
-              {"db", opts.serializeIdentifier(_from.dbName().serializeWithoutTenantPrefix())},
+              {"db",
+               opts.serializeIdentifier(_from.dbName().serializeWithoutTenantPrefix_UNSAFE())},
               {"coll", opts.serializeIdentifier(_from.coll())}});
 
     // Serialize default options.
@@ -847,7 +848,7 @@ intrusive_ptr<DocumentSource> DocumentSourceGraphLookUp::createFromBson(
         }
     }
 
-    const bool isMissingRequiredField = from.ns().empty() || as.empty() || !startWith ||
+    const bool isMissingRequiredField = from.isEmpty() || as.empty() || !startWith ||
         connectFromField.empty() || connectToField.empty();
 
     uassert(40105,

@@ -160,8 +160,13 @@ public:
         return StringData{_data.data() + offset, _data.size() - offset};
     }
 
+    size_t size() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return _data.size() - offset;
+    }
+
     bool isEmpty() const {
-        return _data.size() == kDataOffset;
+        return size() == 0;
     }
     bool isAdminDB() const {
         return db() == DatabaseName::kAdmin.db();
@@ -177,10 +182,10 @@ public:
     }
 
     /**
-     * Serialize the db name to stirng, always ignoring the tenantId.
-     * This function should only be used when no available serialize context.
+     * Returns a db name string without tenant id.  Only to be used when a tenant id cannot be
+     * tolerated in the serialized output, and should otherwise be avoided whenever possible.
      */
-    std::string serializeWithoutTenantPrefix() const {
+    std::string serializeWithoutTenantPrefix_UNSAFE() const {
         return db().toString();
     }
 
@@ -228,14 +233,6 @@ public:
         return StringData{_data.data() + kDataOffset, _data.size() - kDataOffset}
             .equalCaseInsensitive(
                 StringData{other._data.data() + kDataOffset, other._data.size() - kDataOffset});
-    }
-
-    friend std::ostream& operator<<(std::ostream& stream, const DatabaseName& tdb) {
-        return stream << tdb.toString();
-    }
-
-    friend StringBuilder& operator<<(StringBuilder& builder, const DatabaseName& tdb) {
-        return builder << tdb.toString();
     }
 
     int compare(const DatabaseName& other) const {
@@ -353,6 +350,10 @@ private:
     // Same in-memory layout as NamespaceString, see documentation in its header
     std::string _data{'\0'};
 };
+
+inline std::string stringifyForAssert(const DatabaseName& dbName) {
+    return toStringForLogging(dbName);
+}
 
 // The `constexpr` definitions for `DatabaseName::ConstantProxy` static data members are below. See
 // `constexpr` definitions for the `NamespaceString::ConstantProxy` static data members of NSS in

@@ -887,11 +887,11 @@ Status runAggregate(OperationContext* opCtx,
     InterruptibleLockGuard interruptibleLockAcquisition(opCtx->lockState());
 
     auto initContext = [&](auto_get_collection::ViewMode m) -> void {
-        ctx.emplace(
-            opCtx,
-            nss,
-            AutoGetCollection::Options{}.viewMode(m).secondaryNssOrUUIDs(secondaryExecNssList),
-            AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
+        ctx.emplace(opCtx,
+                    nss,
+                    AutoGetCollection::Options{}.viewMode(m).secondaryNssOrUUIDs(
+                        secondaryExecNssList.cbegin(), secondaryExecNssList.cend()),
+                    AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
         collections = MultipleCollectionAccessor(opCtx,
                                                  &ctx->getCollection(),
                                                  ctx->getNss(),
@@ -1143,7 +1143,7 @@ Status runAggregate(OperationContext* opCtx,
                     expCtx,
                     pipelineInvolvedNamespaces,
                     nss,
-                    ctx ? boost::make_optional(ctx->getCollectionType()) : boost::none);
+                    ctx ? ctx->getCollectionType() : query_shape::CollectionType::unknown);
             });
         }
 

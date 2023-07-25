@@ -99,6 +99,7 @@
 #include "mongo/db/repl/shard_merge_recipient_service.h"
 #include "mongo/db/repl/tenant_migration_donor_service.h"
 #include "mongo/db/repl/tenant_migration_recipient_service.h"
+#include "mongo/db/s/config/configsvr_coordinator_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
@@ -126,7 +127,6 @@
 #include "mongo/rpc/unique_message.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_collection_gen.h"
-#include "mongo/s/catalog/type_config_version.h"
 #include "mongo/s/catalog/type_index_catalog_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
@@ -198,7 +198,7 @@ void abortAllReshardCollection(OperationContext* opCtx) {
 
     std::vector<std::string> nsWithReshardColl;
     store.forEach(opCtx, {}, [&](const ReshardingCoordinatorDocument& doc) {
-        nsWithReshardColl.push_back(doc.getSourceNss().ns().toString());
+        nsWithReshardColl.push_back(NamespaceStringUtil::serialize(doc.getSourceNss()));
         return true;
     });
 
@@ -211,28 +211,6 @@ void abortAllReshardCollection(OperationContext* opCtx) {
             "reshardCollection was not properly cleaned up after attempted abort for these ns: "
             "[{}]. This is sign that the resharding operation was interrupted but not "
             "aborted."_format(nsListStr));
-    }
-}
-
-// TODO SERVER-68551: Remove once 7.0 becomes last-lts
-void dropDistLockCollections(OperationContext* opCtx) {
-    LOGV2(6589100, "Dropping deprecated distributed locks collections");
-    static const std::vector<NamespaceString> collectionsToDrop{
-        NamespaceString::kLockpingsNamespace, NamespaceString::kDistLocksNamepsace};
-
-    for (const auto& nss : collectionsToDrop) {
-        DropReply dropReply;
-        const auto dropStatus =
-            dropCollection(opCtx,
-                           nss,
-                           &dropReply,
-                           DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops);
-        if (dropStatus != ErrorCodes::NamespaceNotFound) {
-            uassertStatusOKWithContext(
-                dropStatus,
-                str::stream() << "Failed to drop deprecated distributed locks collection "
-                              << nss.toStringForErrorMsg());
-        }
     }
 }
 
@@ -439,6 +417,16 @@ public:
                 ScopedPostFCVDocumentUpdateActions postUpdateAction =
                     _prepareTransitionalState(opCtx, actualVersion, requestedVersion);
 
+                // If this is a config server, then there must be no active
+                // SetClusterParameterCoordinator instances active when downgrading.
+                if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+                    uassert(ErrorCodes::CannotDowngrade,
+                            "Cannot downgrade while cluster server parameters are being set",
+                            ConfigsvrCoordinatorService::getService(opCtx)
+                                ->areAllCoordinatorsOfTypeFinished(
+                                    opCtx, ConfigsvrCoordinatorTypeEnum::kSetClusterParameter));
+                }
+
                 // We pass boost::none as the setIsCleaningServerMetadata argument in order to
                 // indicate that we don't want to override the existing isCleaningServerMetadata FCV
                 // doc field. This is to protect against the case where a previous FCV downgrade
@@ -611,18 +599,6 @@ private:
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
         }
 
-        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
-        if (isDowngrading &&
-            feature_flags::gDropCollectionHoldingCriticalSection
-                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
-            ShardingDDLCoordinatorService::getService(opCtx)
-                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx,
-                                                           DDLCoordinatorTypeEnum::kDropCollection);
-            ShardingDDLCoordinatorService::getService(opCtx)
-                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx,
-                                                           DDLCoordinatorTypeEnum::kDropDatabase);
-        }
-
         if (isUpgrading) {
             _createShardingIndexCatalogIndexes(
                 opCtx, requestedVersion, NamespaceString::kShardIndexCatalogNamespace);
@@ -686,8 +662,6 @@ private:
     void _upgradeServerMetadata(OperationContext* opCtx,
                                 const multiversion::FeatureCompatibilityVersion requestedVersion) {
         if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            const auto actualVersion = serverGlobalParams.featureCompatibility.getVersion();
-            _cleanupConfigVersionOnUpgrade(opCtx, requestedVersion, actualVersion);
             _dropConfigMigrationsCollection(opCtx);
         }
 
@@ -696,8 +670,6 @@ private:
             // TODO SERVER-78330 remove this.
             deleteShardingStateRecoveryDoc(opCtx);
         }
-
-        _removeRecordPreImagesCollectionOption(opCtx);
     }
 
     void _maybeMigrateAuditConfig(OperationContext* opCtx,
@@ -807,79 +779,6 @@ private:
         }
     }
 
-    // TODO SERVER-68889 remove once 7.0 becomes last LTS
-    void _cleanupConfigVersionOnUpgrade(
-        OperationContext* opCtx,
-        const multiversion::FeatureCompatibilityVersion requestedVersion,
-        const multiversion::FeatureCompatibilityVersion actualVersion) {
-        if (feature_flags::gStopUsingConfigVersion.isEnabledOnTargetFCVButDisabledOnOriginalFCV(
-                requestedVersion, actualVersion)) {
-            LOGV2(6888800, "Removing deprecated fields from config.version collection");
-            static const std::vector<StringData> deprecatedFields{
-                "excluding"_sd,
-                "upgradeId"_sd,
-                "upgradeState"_sd,
-                StringData{VersionType::currentVersion.name()},
-                StringData{VersionType::minCompatibleVersion.name()},
-            };
-
-            const auto updateObj = [&] {
-                BSONObjBuilder updateBuilder;
-                BSONObjBuilder unsetBuilder(updateBuilder.subobjStart("$unset"));
-                for (const auto deprecatedField : deprecatedFields) {
-                    unsetBuilder.append(deprecatedField.toString(), true);
-                }
-                unsetBuilder.doneFast();
-                return updateBuilder.obj();
-            }();
-
-            DBDirectClient client(opCtx);
-            write_ops::UpdateCommandRequest update(VersionType::ConfigNS);
-            update.setUpdates({[&]() {
-                write_ops::UpdateOpEntry entry;
-                entry.setQ({});
-                entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(updateObj));
-                entry.setMulti(true);
-                entry.setUpsert(false);
-                return entry;
-            }()});
-            client.update(update);
-        }
-    }
-
-    // TODO SERVER-68889 remove once 7.0 becomes last LTS
-    void _updateConfigVersionOnDowngrade(
-        OperationContext* opCtx,
-        const multiversion::FeatureCompatibilityVersion requestedVersion,
-        const multiversion::FeatureCompatibilityVersion originalVersion) {
-        if (feature_flags::gStopUsingConfigVersion.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
-                requestedVersion, originalVersion)) {
-            LOGV2(6888801, "Restoring removed fields in config.version collection");
-            const auto updateObj = [&] {
-                BSONObjBuilder updateBuilder;
-                BSONObjBuilder unsetBuilder(updateBuilder.subobjStart("$set"));
-                unsetBuilder.append(VersionType::minCompatibleVersion.name(),
-                                    VersionType::MIN_COMPATIBLE_CONFIG_VERSION);
-                unsetBuilder.append(VersionType::currentVersion.name(),
-                                    VersionType::CURRENT_CONFIG_VERSION);
-                unsetBuilder.doneFast();
-                return updateBuilder.obj();
-            }();
-
-            DBDirectClient client(opCtx);
-            write_ops::UpdateCommandRequest update(VersionType::ConfigNS);
-            update.setUpdates({[&]() {
-                write_ops::UpdateOpEntry entry;
-                entry.setQ({});
-                entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(updateObj));
-                entry.setMulti(true);
-                entry.setUpsert(false);
-                return entry;
-            }()});
-            client.update(update);
-        }
-    }
-
     void _createShardingIndexCatalogIndexes(
         OperationContext* opCtx,
         const multiversion::FeatureCompatibilityVersion requestedVersion,
@@ -893,33 +792,6 @@ private:
             if (indexCatalogNss == NamespaceString::kShardIndexCatalogNamespace) {
                 uassertStatusOK(sharding_util::createShardCollectionCatalogIndexes(opCtx));
             }
-        }
-    }
-
-    // Removes collection option "recordPreImages" from all collection definitions.
-    // TODO SERVER-74036: Remove once FCV 7.0 becomes last-LTS.
-    void _removeRecordPreImagesCollectionOption(OperationContext* opCtx) {
-        for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-            Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
-            catalog::forEachCollectionFromDb(
-                opCtx,
-                dbName,
-                MODE_X,
-                [&](const Collection* collection) {
-                    // To remove collection option "recordPreImages" from persistent storage, issue
-                    // the "collMod" command with none of the parameters set.
-                    BSONObjBuilder responseBuilder;
-                    uassertStatusOK(processCollModCommand(
-                        opCtx, collection->ns(), CollMod{collection->ns()}, &responseBuilder));
-                    LOGV2(7383300,
-                          "Removed 'recordPreImages' collection option",
-                          "ns"_attr = collection->ns(),
-                          "collModResponse"_attr = responseBuilder.obj());
-                    return true;
-                },
-                [&](const Collection* collection) {
-                    return collection->getCollectionOptions().recordPreImagesOptionUsed;
-                });
         }
     }
 
@@ -1001,9 +873,6 @@ private:
             // on a consistent version from start to finish. This will ensure that it will be able
             // to apply the oplog entries correctly.
             abortAllReshardCollection(opCtx);
-
-            // TODO SERVER-68551: Remove once 7.0 becomes last-lts
-            dropDistLockCollections(opCtx);
 
             _createShardingIndexCatalogIndexes(
                 opCtx, requestedVersion, NamespaceString::kConfigsvrIndexCatalogNamespace);
@@ -1204,7 +1073,6 @@ private:
             // be able to apply the oplog entries correctly.
             abortAllReshardCollection(opCtx);
             _createReshardingCoordinatorUniqueIndex(opCtx, requestedVersion, originalVersion);
-            _updateConfigVersionOnDowngrade(opCtx, requestedVersion, originalVersion);
         }
 
         if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
@@ -1573,18 +1441,6 @@ private:
     // back to the user/client. Therefore, these tasks **must** be idempotent/retryable.
     void _finalizeUpgrade(OperationContext* opCtx,
                           const multiversion::FeatureCompatibilityVersion requestedVersion) {
-        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
-            feature_flags::gDropCollectionHoldingCriticalSection.isEnabledOnVersion(
-                requestedVersion)) {
-            ShardingDDLCoordinatorService::getService(opCtx)
-                ->waitForCoordinatorsOfGivenTypeToComplete(
-                    opCtx, DDLCoordinatorTypeEnum::kDropCollectionPre70Compatible);
-            ShardingDDLCoordinatorService::getService(opCtx)
-                ->waitForCoordinatorsOfGivenTypeToComplete(
-                    opCtx, DDLCoordinatorTypeEnum::kDropDatabasePre70Compatible);
-        }
-
         _maybeRemoveOldAuditConfig(opCtx, requestedVersion);
     }
 

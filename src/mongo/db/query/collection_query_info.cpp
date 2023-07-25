@@ -161,11 +161,7 @@ void CollectionQueryInfo::computeUpdateIndexData(const IndexCatalogEntry* entry,
             }
 
             // Handle regular index fields of Compound Wildcard Index.
-            // (Ignore FCV check): This is intentional because we want clusters which have wildcard
-            // indexes
-            // still be able to use the feature even if the FCV is downgraded.
-            if (isWildcard &&
-                feature_flags::gFeatureFlagCompoundWildcardIndexes.isEnabledAndIgnoreFCVUnsafe()) {
+            if (isWildcard) {
                 BSONObj key = descriptor->keyPattern();
                 BSONObjIterator j(key);
                 while (j.more()) {
@@ -283,6 +279,13 @@ void CollectionQueryInfo::updatePlanCacheIndexEntries(OperationContext* opCtx,
 }
 
 void CollectionQueryInfo::init(OperationContext* opCtx, const CollectionPtr& coll) {
+    // Skip registering the index in a --repair, as the server will terminate after
+    // the repair operation completes.
+    if (storageGlobalParams.repair) {
+        LOGV2_DEBUG(7610901, 1, "In a repair, skipping registering indexes");
+        return;
+    }
+
     auto ii =
         coll->getIndexCatalog()->getIndexIterator(opCtx, IndexCatalog::InclusionPolicy::kReady);
     while (ii->more()) {

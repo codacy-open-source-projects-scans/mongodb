@@ -231,7 +231,7 @@ TEST(ExpressionTypeTest, RedactsTypesCorrectly) {
     SerializationOptions opts;
     opts.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$type":"?array<?number>"})",
+        R"({"$type":[2]})",
         type.getSerializedRightHandSide(opts));
 }
 
@@ -279,6 +279,14 @@ TEST(ExpressionBinDataSubTypeTest, MatchesBinDataColumnType) {
     BSONObj match = BSON("a" << BSONBinData(nullptr, 0, BinDataType::Column));
     BSONObj notMatch = BSON("a" << BSONBinData(nullptr, 0, BinDataType::newUUID));
     InternalSchemaBinDataSubTypeExpression type(""_sd, BinDataType::Column);
+    ASSERT_TRUE(type.matchesSingleElement(match["a"]));
+    ASSERT_FALSE(type.matchesSingleElement(notMatch["a"]));
+}
+
+TEST(ExpressionBinDataSubTypeTest, MatchesBinDataSensitiveType) {
+    BSONObj match = BSON("a" << BSONBinData(nullptr, 0, BinDataType::Sensitive));
+    BSONObj notMatch = BSON("a" << BSONBinData(nullptr, 0, BinDataType::newUUID));
+    InternalSchemaBinDataSubTypeExpression type(""_sd, BinDataType::Sensitive);
     ASSERT_TRUE(type.matchesSingleElement(match["a"]));
     ASSERT_FALSE(type.matchesSingleElement(notMatch["a"]));
 }

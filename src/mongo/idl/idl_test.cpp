@@ -1928,7 +1928,8 @@ TEST(IDLArrayTests, TestArraysOfComplexTypes) {
 
     std::vector<std::int64_t> field1{1, 2, 3};
     ASSERT_TRUE(field1 == testStruct.getField1());
-    std::vector<NamespaceString> field2{{"a", "b"}, {"c", "d"}};
+    std::vector<NamespaceString> field2{NamespaceString::createNamespaceString_forTest("a", "b"),
+                                        NamespaceString::createNamespaceString_forTest("c", "d")};
     ASSERT_TRUE(field2 == testStruct.getField2());
 
     ASSERT_EQUALS(testStruct.getField6().size(), 2u);
@@ -5165,5 +5166,19 @@ TEST(IDLDangerousIgnoreChecks, ValidateDuplicateChecking) {
                       AssertionException);
     }
 }
+
+TEST(IDLTrie, TestPrefixes) {
+    ASSERT_FALSE(TestTrieArgs::hasField("foo"));
+    ASSERT_FALSE(TestTrieArgs::hasField("s"));
+    ASSERT_FALSE(TestTrieArgs::hasField("sw"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swi"));
+    ASSERT_TRUE(TestTrieArgs::hasField("swim"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swims"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swimer"));
+    ASSERT_TRUE(TestTrieArgs::hasField("swimmer"));
+    ASSERT_FALSE(TestTrieArgs::hasField("swimmers"));
+    ASSERT_TRUE(TestTrieArgs::hasField("swimmed"));
+}
+
 }  // namespace
 }  // namespace mongo

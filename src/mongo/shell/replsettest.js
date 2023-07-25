@@ -1720,6 +1720,20 @@ var ReplSetTest = function(opts) {
               (new Date() - awaitTsStart) + "ms for " + this.nodes.length + " nodes in set '" +
               this.name + "'");
 
+        // Waits for the services which write on step-up to finish rebuilding to avoid background
+        // writes after initiation is done. PrimaryOnlyServices wait for the stepup optime to be
+        // majority committed before rebuilding services, so we skip waiting for PrimaryOnlyServices
+        // if we do not wait for replication.
+        if (!doNotWaitForReplication && !doNotWaitForPrimaryOnlyServices) {
+            primary = self.getPrimary();
+            // TODO(SERVER-57924): cleanup asCluster() to avoid checking here.
+            if (self._notX509Auth(primary) || primary.isTLS()) {
+                asCluster(primary, function() {
+                    self.waitForStepUpWrites(primary);
+                });
+            }
+        }
+
         // Make sure all nodes are up to date. Bypass this if the heartbeat interval wasn't turned
         // down or the test specifies that we should not wait for replication. This is only an
         // optimization so it's OK if we bypass it in some suites.
@@ -1727,32 +1741,6 @@ var ReplSetTest = function(opts) {
             asCluster(self.nodes, function() {
                 self.awaitNodesAgreeOnAppliedOpTime();
             });
-        }
-
-        // Waits for the primary only services to finish rebuilding to avoid background writes
-        // after initiation is done. PrimaryOnlyServices wait for the stepup optime to be majority
-        // committed before rebuilding services, so we skip waiting for PrimaryOnlyServices if
-        // we do not wait for replication.
-        if (!doNotWaitForReplication && !doNotWaitForPrimaryOnlyServices) {
-            primary = self.getPrimary();
-            // TODO(SERVER-57924): cleanup asCluster() to avoid checking here.
-            if (self._notX509Auth(primary) || primary.isTLS()) {
-                asCluster(self.nodes, function() {
-                    self.waitForPrimaryOnlyServices(primary);
-                });
-            }
-        }
-
-        // Wait for the query analysis writer to finish setting up to avoid background writes
-        // after initiation is done.
-        if (!doNotWaitForReplication) {
-            primary = self.getPrimary();
-            // TODO(SERVER-57924): cleanup asCluster() to avoid checking here.
-            if (self._notX509Auth(primary) || primary.isTLS()) {
-                asCluster(self.nodes, function() {
-                    self.waitForQueryAnalysisWriterSetup(primary);
-                });
-            }
         }
 
         // Turn off the failpoints now that initial sync and initial setup is complete.
@@ -1779,25 +1767,28 @@ var ReplSetTest = function(opts) {
         let startTime = new Date();  // Measure the execution time of this function.
         this.initiateWithAnyNodeAsPrimary(cfg, initCmd, {doNotWaitForPrimaryOnlyServices: true});
 
-        // stepUp() calls awaitReplication() which requires all nodes to be authorized to run
-        // replSetGetStatus.
-        asCluster(this.nodes, function() {
-            const newPrimary = self.nodes[0];
-            self.stepUp(newPrimary);
-            if (!doNotWaitForPrimaryOnlyServices) {
-                self.waitForPrimaryOnlyServices(newPrimary);
-            }
-        });
-
-        // Wait for the query analysis writer to finish setting up to avoid background writes
-        // after initiation is done.
-        asCluster(this.nodes, function() {
-            const newPrimary = self.nodes[0];
-            self.stepUp(newPrimary);
-            if (!doNotWaitForPrimaryOnlyServices) {
-                self.waitForQueryAnalysisWriterSetup(newPrimary);
-            }
-        });
+        // Most of the time node 0 will already be primary so we can skip the step-up.
+        let primary = self.getPrimary();
+        if (self.getNodeId(self.nodes[0]) == self.getNodeId(primary)) {
+            print("ReplSetTest initiateWithNodeZeroAsPrimary skipping step-up because node 0 is " +
+                  "already primary");
+            asCluster(primary, function() {
+                if (!doNotWaitForPrimaryOnlyServices) {
+                    self.waitForStepUpWrites(primary);
+                }
+            });
+        } else {
+            // stepUp() calls awaitReplication() which requires all nodes to be authorized to run
+            // replSetGetStatus.
+            asCluster(this.nodes, function() {
+                const newPrimary = self.nodes[0];
+                self.stepUp(newPrimary,
+                            {doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices});
+                if (!doNotWaitForPrimaryOnlyServices) {
+                    self.waitForStepUpWrites(newPrimary);
+                }
+            });
+        }
 
         print("ReplSetTest initiateWithNodeZeroAsPrimary took " + (new Date() - startTime) +
               "ms for " + this.nodes.length + " nodes.");
@@ -1835,11 +1826,15 @@ var ReplSetTest = function(opts) {
      */
     this.stepUp = function(node, {
         awaitReplicationBeforeStepUp: awaitReplicationBeforeStepUp = true,
-        awaitWritablePrimary: awaitWritablePrimary = true
+        awaitWritablePrimary: awaitWritablePrimary = true,
+        doNotWaitForPrimaryOnlyServices = false,
     } = {}) {
         jsTest.log("ReplSetTest stepUp: Stepping up " + node.host);
 
         if (awaitReplicationBeforeStepUp) {
+            if (!doNotWaitForPrimaryOnlyServices) {
+                this.waitForStepUpWrites();
+            }
             this.awaitReplication();
         }
 
@@ -1865,18 +1860,35 @@ var ReplSetTest = function(opts) {
             const timeout = 60 * 1000;
             this.awaitNodesAgreeOnPrimary(timeout, this.nodes, node);
 
-            // getPrimary() guarantees that there will be only one writable primary for a replica
-            // set.
-            if (!awaitWritablePrimary || this.getPrimary() === node) {
+            if (!awaitWritablePrimary) {
                 return true;
             }
 
-            jsTest.log(node.host + ' is not primary after stepUp command');
+            // getPrimary() guarantees that there will be only one writable primary for a replica
+            // set.
+            const newPrimary = this.getPrimary();
+            if (newPrimary.host === node.host) {
+                return true;
+            }
+
+            jsTest.log(node.host + ' is not primary after stepUp command, ' + newPrimary.host +
+                       ' is the primary');
             return false;
         }, "Timed out while waiting for stepUp to succeed on node in port: " + node.port);
 
         jsTest.log("ReplSetTest stepUp: Finished stepping up " + node.host);
         return node;
+    };
+
+    /**
+     * Wait for writes which may happen when nodes are stepped up.  This currently includes
+     * primary-only service writes and writes from the query analysis writer, the latter being
+     * a replica-set-aware service for which there is no generic way to wait.
+     */
+    this.waitForStepUpWrites = function(primary) {
+        primary = primary || self.getPrimary();
+        this.waitForPrimaryOnlyServices(primary);
+        this.waitForQueryAnalysisWriterSetup(primary);
     };
 
     /**
@@ -2661,11 +2673,8 @@ var ReplSetTest = function(opts) {
             // to time out since it may take a while to process each batch and a test may have
             // changed "cursorTimeoutMillis" to a short time period.
             this._cursorExhausted = false;
-            this.cursor = coll.find(query)
-                              .sort({$natural: -1})
-                              .noCursorTimeout()
-                              .readConcern("local")
-                              .limit(-1);
+            this.cursor =
+                coll.find(query).sort({$natural: -1}).noCursorTimeout().readConcern("local");
         };
 
         this.getFirstDoc = function() {
@@ -2809,6 +2818,39 @@ var ReplSetTest = function(opts) {
         return readers;
     }
 
+    function dumpPreImagesCollection(msgPrefix, node, nsUUID, timestamp, limit) {
+        const beforeCursor =
+            node.getDB("config")["system.preimages"]
+                .find({"_id.nsUUID": nsUUID, "_id.ts": {"$lt": timestamp}})
+                .sort({$natural: -1})
+                .noCursorTimeout()
+                .readConcern("local")
+                .limit(limit / 2);  // We print up to half of the limit in the before part so that
+                                    // the timestamp is centered.
+        const beforeEntries = beforeCursor.toArray().reverse();
+
+        let log = `${msgPrefix} -- Dumping a window of ${
+            limit} entries for preimages of collection ${nsUUID} from host ${
+            node.host} centered around timestamp ${timestamp.toStringIncomparable()}`;
+
+        beforeEntries.forEach(entry => {
+            log += '\n' + tojsononeline(entry);
+        });
+
+        const remainingWindow = limit - beforeEntries.length;
+        const cursor = node.getDB("config")["system.preimages"]
+                           .find({"_id.nsUUID": nsUUID, "_id.ts": {"$gte": timestamp}})
+                           .sort({$natural: 1})
+                           .noCursorTimeout()
+                           .readConcern("local")
+                           .limit(remainingWindow);
+        cursor.forEach(entry => {
+            log += '\n' + tojsononeline(entry);
+        });
+
+        jsTestLog(log);
+    }
+
     /**
      * Check preimages on all nodes, by reading reading from the last time. Since the preimage may
      * or may not be maintained independently, each node may not contain the same number of entries
@@ -2816,6 +2858,8 @@ var ReplSetTest = function(opts) {
      */
     function checkPreImageCollection(rst, secondaries, msgPrefix = 'checkPreImageCollection') {
         secondaries = secondaries || rst._secondaries;
+
+        const originalPreferences = [];
 
         print(`${msgPrefix} -- starting preimage checks.`);
         print(`${msgPrefix} -- waiting for secondaries to be ready.`);
@@ -2839,7 +2883,13 @@ var ReplSetTest = function(opts) {
                 }
 
                 const preImageColl = node.getDB("config")["system.preimages"];
-                // Reset connection preferences in case the test has modified them.
+                // Reset connection preferences in case the test has modified them. We'll restore
+                // them back to what they were originally in the end.
+                originalPreferences[i] = {
+                    secondaryOk: preImageColl.getMongo().getSecondaryOk(),
+                    readPref: preImageColl.getMongo().getReadPref()
+                };
+
                 preImageColl.getMongo().setSecondaryOk(true);
                 preImageColl.getMongo().setReadPref(rst._primary === node ? "primary"
                                                                           : "secondary");
@@ -2856,14 +2906,39 @@ var ReplSetTest = function(opts) {
 
                 while (true) {
                     let preImageEntryToCompare = undefined;
+                    let originNode = undefined;
                     for (const reader of readers) {
                         if (reader.hasNext()) {
                             const preImageEntry = reader.next();
                             if (preImageEntryToCompare === undefined) {
                                 preImageEntryToCompare = preImageEntry;
+                                originNode = reader.mongo;
                             } else {
-                                assert(bsonBinaryEqual(preImageEntryToCompare, preImageEntry),
-                                       `Detected preimage entries that have different content`);
+                                if (!bsonBinaryEqual(preImageEntryToCompare, preImageEntry)) {
+                                    // TODO SERVER-55756: Investigate if we can remove this since
+                                    // we'll have the data files present in case this fails with
+                                    // PeriodicKillSecondaries.
+                                    print(
+                                        `${msgPrefix} -- preimage inconsistency detected.` +
+                                        "\n" +
+                                        `${originNode.host} -> ${
+                                            tojsononeline(preImageEntryToCompare)}` +
+                                        "\n" +
+                                        `${reader.mongo.host} -> ${tojsononeline(preImageEntry)}`);
+                                    print("Printing previous entries:");
+                                    dumpPreImagesCollection(msgPrefix,
+                                                            originNode,
+                                                            nsUUID,
+                                                            preImageEntryToCompare._id.ts,
+                                                            100);
+                                    dumpPreImagesCollection(
+                                        msgPrefix, reader.mongo, nsUUID, preImageEntry._id.ts, 100);
+                                    const log = `${msgPrefix} -- non-matching preimage entries:\n` +
+                                        `${originNode.host} -> ${
+                                                    tojsononeline(preImageEntryToCompare)}\n` +
+                                        `${reader.mongo.host} -> ${tojsononeline(preImageEntry)}`;
+                                    assert(false, log);
+                                }
                             }
                         }
                     }
@@ -2874,6 +2949,14 @@ var ReplSetTest = function(opts) {
             }
         }
         print(`${msgPrefix} -- preimages check complete.`);
+
+        // Restore original read preferences used by the connection.
+        for (const idx in originalPreferences) {
+            const node = rst.nodes[idx];
+            const conn = node.getDB("config").getMongo();
+            conn.setSecondaryOk(originalPreferences[idx].secondaryOk);
+            conn.setReadPref(originalPreferences[idx].readPref);
+        }
     }
 
     this.checkPreImageCollection = function(msgPrefix) {

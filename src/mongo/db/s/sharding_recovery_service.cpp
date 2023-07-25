@@ -101,7 +101,7 @@ namespace sharding_recovery_util {
 
 bool inRecoveryMode(OperationContext* opCtx) {
     const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (!replCoord->isReplEnabled()) {
+    if (!replCoord->getSettings().isReplSet()) {
         return false;
     }
 
@@ -651,7 +651,8 @@ void ShardingRecoveryService::recoverIndexesCatalog(OperationContext* opCtx) {
 
     while (cursor->more()) {
         auto doc = cursor->nextSafe();
-        auto nss = NamespaceString(doc[CollectionType::kNssFieldName].String());
+        const auto nss = NamespaceStringUtil::deserialize(
+            boost::none, doc[CollectionType::kNssFieldName].String());
         auto indexVersion = doc[CollectionType::kIndexVersionFieldName].timestamp();
         for (const auto& idx : doc[kShardingIndexCatalogEntriesFieldName].Array()) {
             auto indexEntry = IndexCatalogType::parse(

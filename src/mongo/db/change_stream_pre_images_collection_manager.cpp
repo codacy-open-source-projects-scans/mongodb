@@ -100,6 +100,7 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(failPreimagesCollectionCreation);
+MONGO_FAIL_POINT_DEFINE(truncateOnlyOnSecondaries);
 
 const auto getPreImagesCollectionManager =
     ServiceContext::declareDecoration<ChangeStreamPreImagesCollectionManager>();
@@ -272,6 +273,7 @@ void ChangeStreamPreImagesCollectionManager::performExpiredChangeStreamPreImages
     ServiceContext::UniqueOperationContext opCtx;
     try {
         opCtx = client->makeOperationContext();
+
         Date_t currentTimeForTimeBasedExpiration =
             change_stream_pre_image_util::getCurrentTimeForPreImageRemoval(opCtx.get());
         size_t numberOfRemovals = 0;
@@ -393,8 +395,9 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
     const auto currentEarliestOplogEntryTs =
         repl::StorageInterface::get(opCtx->getServiceContext())->getEarliestOplogTimestamp(opCtx);
 
-    const auto preImageExpirationTime = change_stream_pre_image_util::getPreImageExpirationTime(
-        opCtx, currentTimeForTimeBasedExpiration);
+    const auto preImageExpirationTime =
+        change_stream_pre_image_util::getPreImageOpTimeExpirationDate(
+            opCtx, boost::none /** tenantId **/, currentTimeForTimeBasedExpiration);
 
     // Configure the filter for the case when expiration parameter is set.
     if (preImageExpirationTime) {
@@ -426,6 +429,16 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
     // users from running out of disk space.
     ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
                                                         AdmissionContext::Priority::kImmediate);
+
+    // Truncate marker initialisation and truncates don't need to block on oplog application
+    // provided the following holds:
+    //      (1) Initial truncate markers are approximations. If initialization is necessary, it is
+    //      okay that a few entries are missed while reading the pre-images collection during
+    //      initialization.
+    //      (2) Truncates will only occur on ranges with no "holes" - this should be true regardless
+    //      of whether the node is a primary or secondary.
+    ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(opCtx->lockState());
+
     // Acquire intent-exclusive lock on the change collection.
     const auto preImageColl =
         acquireCollection(opCtx,
@@ -471,7 +484,10 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithTrunca
         MODE_IX);
 
 
-    if (!preImagesColl.exists()) {
+    if (!preImagesColl.exists() ||
+        (MONGO_unlikely(truncateOnlyOnSecondaries.shouldFail()) &&
+         repl::ReplicationCoordinator::get(opCtx)->getMemberState() ==
+             repl::MemberState::RS_PRIMARY)) {
         return 0;
     }
 

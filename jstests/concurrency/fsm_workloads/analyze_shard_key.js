@@ -548,7 +548,8 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
                 `population does not match the mock query patterns: ${tojsononeline(sampleSize)}`);
             // The sample population should always match the mock query patterns unless there are
             // retries.
-            assert(TestData.runningWithShardStepdowns || TestData.runningWithBalancer);
+            assert(TestData.runningWithShardStepdowns || TestData.runningWithBalancer ||
+                   TestData.runInsideTransaction);
         }
         return isAcceptable;
     };
@@ -576,7 +577,8 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
                 `population does not match the mock query patterns: ${tojsononeline(sampleSize)}`);
             // The sample population should always match the mock query patterns unless there are
             // retries.
-            assert(TestData.runningWithShardStepdowns || TestData.runningWithBalancer);
+            assert(TestData.runningWithShardStepdowns || TestData.runningWithBalancer ||
+                   TestData.runInsideTransaction);
         }
         return isAcceptable;
     };
@@ -969,9 +971,10 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         const rand = Math.random();
         if (rand < 0.25) {
             cmdObj.sampleRate = Math.random() * 0.5 + 0.5;
-        } else if (rand < 0.25) {
-            cmdObj.sampleSize =
-                NumberLong(Math.floor(Math.random() * 1.5 * this.numInitialDocuments));
+        } else if (rand < 0.5) {
+            cmdObj.sampleSize = NumberLong(
+                AnalyzeShardKeyUtil.getRandInteger(Math.floor(0.5 * this.numInitialDocuments),
+                                                   Math.floor(1.5 * this.numInitialDocuments)));
         }
         const isSampling =
             cmdObj.hasOwnProperty("sampleRate") || cmdObj.hasOwnProperty("sampleSize");
@@ -1099,7 +1102,7 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         } catch (e) {
             if (!this.isAcceptableUpdateError(res) &&
                 !(res.hasOwnProperty("writeErrors") &&
-                  isAcceptableUpdateError(res.writeErrors[0]))) {
+                  this.isAcceptableUpdateError(res.writeErrors[0]))) {
                 throw e;
             }
         }

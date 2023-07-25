@@ -66,7 +66,6 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/analyze_shard_key_util.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -87,11 +86,12 @@ public:
                     str::stream() << kStageName
                                   << " must take a nested object but found: " << specElem,
                     specElem.type() == BSONType::Object);
-            uassert(
-                ErrorCodes::IllegalOperation,
-                str::stream() << kStageName << " is not supported on a standalone mongod",
-                isMongos() ||
-                    repl::ReplicationCoordinator::get(getGlobalServiceContext())->isReplEnabled());
+            uassert(ErrorCodes::IllegalOperation,
+                    str::stream() << kStageName << " is not supported on a standalone mongod",
+                    serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+                        repl::ReplicationCoordinator::get(getGlobalServiceContext())
+                            ->getSettings()
+                            .isReplSet());
             uassert(ErrorCodes::IllegalOperation,
                     str::stream() << kStageName << " is not supported on a multitenant replica set",
                     !gMultitenancySupport);

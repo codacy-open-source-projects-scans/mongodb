@@ -96,19 +96,19 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
         case DDLCoordinatorTypeEnum::kMovePrimary:
             return std::make_shared<MovePrimaryCoordinator>(service, std::move(initialState));
             break;
-        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
         case DDLCoordinatorTypeEnum::kDropDatabase:
-        case DDLCoordinatorTypeEnum::kDropDatabasePre70Compatible:
             return std::make_shared<DropDatabaseCoordinator>(service, std::move(initialState));
             break;
-        // TODO SERVER-73627: Remove once 7.0 becomes last LTS.
         case DDLCoordinatorTypeEnum::kDropCollection:
-        case DDLCoordinatorTypeEnum::kDropCollectionPre70Compatible:
             return std::make_shared<DropCollectionCoordinator>(service, std::move(initialState));
             break;
         case DDLCoordinatorTypeEnum::kRenameCollection:
             return std::make_shared<RenameCollectionCoordinator>(service, std::move(initialState));
+            break;
         case DDLCoordinatorTypeEnum::kCreateCollection:
+            return std::make_shared<CreateCollectionCoordinator>(service, std::move(initialState));
+            break;
+        case DDLCoordinatorTypeEnum::kCreateCollectionPre71Compatible:
             return std::make_shared<CreateCollectionCoordinator>(service, std::move(initialState));
             break;
         case DDLCoordinatorTypeEnum::kRefineCollectionShardKey:

@@ -162,7 +162,7 @@ std::string DocumentSourceChangeStream::getNsRegexForChangeStream(
     switch (type) {
         case ChangeStreamType::kSingleCollection:
             // Match the target namespace exactly.
-            return "^" + regexEscapeNsForChangeStream(nss.ns()) + "$";
+            return "^" + regexEscapeNsForChangeStream(NamespaceStringUtil::serialize(nss)) + "$";
         case ChangeStreamType::kSingleDatabase:
             // Match all namespaces that start with db name, followed by ".", then NOT followed by
             // '$' or 'system.' unless 'showSystemEvents' is set.
@@ -219,7 +219,9 @@ std::string DocumentSourceChangeStream::getCmdNsRegexForChangeStream(
         case ChangeStreamType::kSingleCollection:
         case ChangeStreamType::kSingleDatabase:
             // Match the target database command namespace exactly.
-            return "^" + regexEscapeNsForChangeStream(nss.getCommandNS().ns()) + "$";
+            return "^" +
+                regexEscapeNsForChangeStream(NamespaceStringUtil::serialize(nss.getCommandNS())) +
+                "$";
         case ChangeStreamType::kAllChangesForCluster:
             // Match all command namespaces on any database.
             return kRegexAllDBs + "\\." + kRegexCmdColl;
@@ -353,12 +355,9 @@ void DocumentSourceChangeStream::assertIsLegalSpecification(
     const intrusive_ptr<ExpressionContext>& expCtx, const DocumentSourceChangeStreamSpec& spec) {
     // We can only run on a replica set, or through mongoS. Confirm that this is the case.
     auto replCoord = repl::ReplicationCoordinator::get(expCtx->opCtx);
-    uassert(
-        40573,
-        "The $changeStream stage is only supported on replica sets",
-        expCtx->inMongos ||
-            (replCoord &&
-             replCoord->getReplicationMode() == repl::ReplicationCoordinator::Mode::modeReplSet));
+    uassert(40573,
+            "The $changeStream stage is only supported on replica sets",
+            expCtx->inMongos || (replCoord && replCoord->getSettings().isReplSet()));
 
     // If 'allChangesForCluster' is true, the stream must be opened on the 'admin' database with
     // {aggregate: 1}.
@@ -411,12 +410,15 @@ void DocumentSourceChangeStream::assertIsLegalSpecification(
             !(spec.getResumeAfter() && resumeToken->fromInvalidate));
 
     // If we are resuming a single-collection stream, the resume token should always contain a
-    // UUID unless the token is a high water mark.
+    // UUID unless the token is from endOfTransaction event or a high water mark.
     uassert(ErrorCodes::InvalidResumeToken,
             "Attempted to resume a single-collection stream, but the resume token does not "
             "include a UUID",
             !resumeToken || resumeToken->uuid || !expCtx->isSingleNamespaceAggregation() ||
-                ResumeToken::isHighWaterMarkToken(*resumeToken));
+                ResumeToken::isHighWaterMarkToken(*resumeToken) ||
+                Value::compare(resumeToken->eventIdentifier["operationType"],
+                               Value("endOfTransaction"_sd),
+                               nullptr) == 0);
 }
 
 }  // namespace mongo

@@ -45,6 +45,10 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 
+#include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_single_document_transformation.h"
+#include "mongo/db/pipeline/semantic_analysis.h"
+
 namespace mongo {
 
 constexpr StringData DocumentSourceGroup::kStageName;
@@ -65,9 +69,9 @@ boost::intrusive_ptr<DocumentSourceGroup> DocumentSourceGroup::create(
     boost::optional<size_t> maxMemoryUsageBytes) {
     boost::intrusive_ptr<DocumentSourceGroup> groupStage =
         new DocumentSourceGroup(expCtx, maxMemoryUsageBytes);
-    groupStage->setIdExpression(groupByExpression);
+    groupStage->_groupProcessor.setIdExpression(groupByExpression);
     for (auto&& statement : accumulationStatements) {
-        groupStage->addAccumulator(statement);
+        groupStage->_groupProcessor.addAccumulationStatement(statement);
     }
 
     return groupStage;
@@ -80,6 +84,88 @@ DocumentSourceGroup::DocumentSourceGroup(const boost::intrusive_ptr<ExpressionCo
 boost::intrusive_ptr<DocumentSource> DocumentSourceGroup::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     return createFromBsonWithMaxMemoryUsage(std::move(elem), expCtx, boost::none);
+}
+
+Pipeline::SourceContainer::iterator DocumentSourceGroup::doOptimizeAt(
+    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+    invariant(*itr == this);
+
+    if (pushDotRenamedMatch(itr, container)) {
+        return itr;
+    }
+
+    return std::next(itr);
+}
+
+bool DocumentSourceGroup::pushDotRenamedMatch(Pipeline::SourceContainer::iterator itr,
+                                              Pipeline::SourceContainer* container) {
+    if (std::next(itr) == container->end() || std::next(std::next(itr)) == container->end()) {
+        return false;
+    }
+
+    // Keep separate iterators for each stage (projection, match).
+    auto prospectiveProjectionItr = std::next(itr);
+    auto prospectiveProjection =
+        dynamic_cast<DocumentSourceSingleDocumentTransformation*>(prospectiveProjectionItr->get());
+
+    auto prospectiveMatchItr = std::next(std::next(itr));
+    auto prospectiveMatch = dynamic_cast<DocumentSourceMatch*>(prospectiveMatchItr->get());
+
+    if (!prospectiveProjection || !prospectiveMatch) {
+        return false;
+    }
+
+    stdx::unordered_set<std::string> groupingFields;
+    StringMap<std::string> relevantRenames;
+
+    auto itsGroup = dynamic_cast<DocumentSourceGroup*>(itr->get());
+
+    auto idFields = itsGroup->getIdFields();
+    for (auto& idFieldsItr : idFields) {
+        groupingFields.insert(idFieldsItr.first);
+    }
+
+    GetModPathsReturn paths = prospectiveProjection->getModifiedPaths();
+
+    for (const auto& thisComplexRename : paths.complexRenames) {
+
+        // Check if the dotted renaming is done on a grouping field.
+        // This ensures that the top level is flat i.e., no arrays.
+        if (groupingFields.find(thisComplexRename.second) != groupingFields.end()) {
+            relevantRenames.insert(std::pair<std::string, std::string>(thisComplexRename.first,
+                                                                       thisComplexRename.second));
+        }
+    }
+
+    // Perform all changes on a copy of the match source.
+    boost::intrusive_ptr<DocumentSource> currentMatchCopyDocument =
+        prospectiveMatch->clone(prospectiveMatch->getContext());
+
+    auto currentMatchCopyDocumentMatch =
+        dynamic_cast<DocumentSourceMatch*>(currentMatchCopyDocument.get());
+
+    paths.renames = std::move(relevantRenames);
+
+    // Translate predicate statements based on the projection renames.
+    auto matchSplitForProject = currentMatchCopyDocumentMatch->splitMatchByModifiedFields(
+        currentMatchCopyDocumentMatch, paths);
+
+    if (matchSplitForProject.first) {
+        // Perform the swap of the projection and the match stages.
+        container->erase(prospectiveMatchItr);
+        container->insert(prospectiveProjectionItr, std::move(matchSplitForProject.first));
+
+        if (matchSplitForProject.second) {
+            // If there is a portion of the match stage predicate that is conflicting with the
+            // projection, re-insert it below the projection stage.
+            container->insert(std::next(prospectiveProjectionItr),
+                              std::move(matchSplitForProject.second));
+        }
+
+        return true;
+    }
+
+    return false;
 }
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceGroup::createFromBsonWithMaxMemoryUsage(
@@ -101,11 +187,12 @@ DocumentSource::GetNextResult DocumentSourceGroup::doGetNext() {
         invariant(initializationResult.isEOF());
     }
 
-    auto result = getNextReadyGroup();
-    if (result.isEOF()) {
+    auto result = _groupProcessor.getNext();
+    if (!result) {
         dispose();
+        return GetNextResult::makeEOF();
     }
-    return result;
+    return GetNextResult(std::move(*result));
 }
 
 DocumentSource::GetNextResult DocumentSourceGroup::performBlockingGroup() {
@@ -117,18 +204,14 @@ DocumentSource::GetNextResult DocumentSourceGroup::performBlockingGroup() {
 // performBlockingGroup() and prevent stack overflows.
 MONGO_COMPILER_NOINLINE DocumentSource::GetNextResult DocumentSourceGroup::performBlockingGroupSelf(
     GetNextResult input) {
-    setExecutionStarted();
+    _groupProcessor.setExecutionStarted();
     // Barring any pausing, this loop exhausts 'pSource' and populates '_groups'.
     for (; input.isAdvanced(); input = pSource->getNext()) {
-        if (shouldSpillWithAttemptToSaveMemory()) {
-            spill();
-        }
-
         // We release the result document here so that it does not outlive the end of this loop
         // iteration. Not releasing could lead to an array copy when this group follows an unwind.
         auto rootDocument = input.releaseDocument();
-        Value id = computeId(rootDocument);
-        processDocument(id, rootDocument);
+        Value id = _groupProcessor.computeId(rootDocument);
+        _groupProcessor.add(id, rootDocument);
     }
 
     switch (input.getStatus()) {
@@ -139,7 +222,7 @@ MONGO_COMPILER_NOINLINE DocumentSource::GetNextResult DocumentSourceGroup::perfo
             return input;  // Propagate pause.
         }
         case DocumentSource::GetNextResult::ReturnStatus::kEOF: {
-            readyGroups();
+            _groupProcessor.readyGroups();
             // This must happen last so that, unless control gets here, we will re-enter
             // initialization after getting a GetNextResult::ResultState::kPauseExecution.
             _groupsReady = true;

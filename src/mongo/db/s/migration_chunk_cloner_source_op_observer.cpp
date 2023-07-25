@@ -112,7 +112,9 @@ void MigrationChunkClonerSourceOpObserver::assertNoMovePrimaryInProgress(
 
 void MigrationChunkClonerSourceOpObserver::onUnpreparedTransactionCommit(
     OperationContext* opCtx,
+    const std::vector<OplogSlot>& reservedSlots,
     const TransactionOperations& transactionOperations,
+    const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
     OpStateAccumulator* const opAccumulator) {
     // Return early if we are secondary or in some replication state in which we are not
     // appending entries to the oplog.
@@ -336,13 +338,10 @@ void MigrationChunkClonerSourceOpObserver::onDelete(OperationContext* opCtx,
     }
 }
 
-void MigrationChunkClonerSourceOpObserver::onTransactionPrepare(
+void MigrationChunkClonerSourceOpObserver::postTransactionPrepare(
     OperationContext* opCtx,
     const std::vector<OplogSlot>& reservedSlots,
-    const TransactionOperations& transactionOperations,
-    const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
-    size_t numberOfPrePostImagesToWrite,
-    Date_t wallClockTime) {
+    const TransactionOperations& transactionOperations) {
     // Return early if we are secondary or in some replication state in which we are not
     // appending entries to the oplog.
     if (!opCtx->writesAreReplicated()) {

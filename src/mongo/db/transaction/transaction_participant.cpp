@@ -649,12 +649,6 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
     // this thread to terminate.
     auto client = getGlobalServiceContext()->makeClient("OldestActiveTxnTimestamp");
 
-    // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*client.get());
-        client.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
-
     AlternativeClientRegion acr(client);
 
     try {
@@ -1792,12 +1786,26 @@ TransactionParticipant::Participant::prepareTransaction(
     opCtx->getWriteUnitOfWork()->prepare();
     p().needToWriteAbortEntry = true;
 
-    opObserver->onTransactionPrepare(opCtx,
-                                     reservedSlots,
-                                     *completedTransactionOperations,
-                                     applyOpsOplogSlotAndOperationAssignment,
-                                     p().transactionOperations.getNumberOfPrePostImagesToWrite(),
-                                     wallClockTime);
+    // Don't write oplog entry on secondaries.
+    if (opCtx->writesAreReplicated()) {
+        // We write the oplog entry in a side transaction so that we do not commit the now-prepared
+        // transaction. See SERVER-34824.
+        TransactionParticipant::SideTransactionBlock sideTxn(opCtx);
+
+        writeConflictRetry(opCtx, "onTransactionPrepare", NamespaceString::kRsOplogNamespace, [&] {
+            WriteUnitOfWork wuow(opCtx);
+            opObserver->onTransactionPrepare(
+                opCtx,
+                reservedSlots,
+                *completedTransactionOperations,
+                applyOpsOplogSlotAndOperationAssignment,
+                p().transactionOperations.getNumberOfPrePostImagesToWrite(),
+                wallClockTime);
+            wuow.commit();
+        });
+    }
+
+    opObserver->postTransactionPrepare(opCtx, reservedSlots, *completedTransactionOperations);
 
     abortGuard.dismiss();
 
@@ -1896,7 +1904,24 @@ void TransactionParticipant::Participant::commitUnpreparedTransaction(OperationC
     auto opObserver = opCtx->getServiceContext()->getOpObserver();
     invariant(opObserver);
 
-    opObserver->onUnpreparedTransactionCommit(opCtx, *txnOps);
+    // Reserve all the optimes in advance, so we only need to get the optime mutex once.  We
+    // reserve enough entries for all statements in the transaction.
+    std::vector<OplogSlot> reservedSlots;
+    if (!txnOps->isEmpty()) {
+        reservedSlots = LocalOplogInfo::get(opCtx)->getNextOpTimes(
+            opCtx, txnOps->numOperations() + txnOps->getNumberOfPrePostImagesToWrite());
+    }
+
+    // Serialize transaction statements to BSON and determine their assignment to "applyOps"
+    // entries.
+    const auto applyOpsOplogSlotAndOperationAssignment =
+        txnOps->getApplyOpsInfo(reservedSlots,
+                                getMaxNumberOfTransactionOperationsInSingleOplogEntry(),
+                                getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes(),
+                                /*prepare=*/false);
+
+    opObserver->onUnpreparedTransactionCommit(
+        opCtx, reservedSlots, *txnOps, applyOpsOplogSlotAndOperationAssignment);
 
     // Read-only transactions with all read concerns must wait for any data they read to be majority
     // committed. For local read concern this is to match majority read concern. For both local and
@@ -2106,12 +2131,6 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
 
         auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
-
-        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*splitClientOwned.get());
-            splitClientOwned.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
 
         AlternativeClientRegion acr(splitClientOwned);
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;
@@ -2334,12 +2353,6 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
 
         auto splitClientOwned = userOpCtx->getServiceContext()->makeClient("tempSplitClient");
         auto splitOpCtx = splitClientOwned->makeOperationContext();
-
-        // TODO(SERVER-74656): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*splitClientOwned.get());
-            splitClientOwned.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
 
         AlternativeClientRegion acr(splitClientOwned);
         std::unique_ptr<MongoDSessionCatalog::Session> checkedOutSession;

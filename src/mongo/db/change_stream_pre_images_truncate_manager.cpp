@@ -438,7 +438,7 @@ PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTena
     LOGV2_INFO(7658604,
                "Decided on initial creation method for pre-images truncate markers initialization",
                "creationMethod"_attr = CollectionTruncateMarkers::toString(creationMethod),
-               "datatSize"_attr = dataSize,
+               "dataSize"_attr = dataSize,
                "numRecords"_attr = numRecords,
                "ns"_attr = preImageCollection.nss());
 
@@ -469,24 +469,6 @@ PreImagesTruncateManager::TenantTruncateMarkers getInitialTruncateMarkersForTena
     }
 }
 
-void truncateRange(OperationContext* opCtx,
-                   const CollectionPtr& preImagesColl,
-                   const RecordId& minRecordId,
-                   const RecordId& maxRecordId,
-                   int64_t bytesDeleted,
-                   int64_t docsDeleted) {
-    // The session might be in use from marker initialisation so we must
-    // reset it here in order to allow an untimestamped write.
-    opCtx->recoveryUnit()->abandonSnapshot();
-    opCtx->recoveryUnit()->allowOneUntimestampedWrite();
-
-    WriteUnitOfWork wuow(opCtx);
-    auto rs = preImagesColl->getRecordStore();
-    auto status = rs->rangeTruncate(opCtx, minRecordId, maxRecordId, -bytesDeleted, -docsDeleted);
-    invariantStatusOK(status);
-    wuow.commit();
-}
-
 // Performs a ranged truncate over each expired marker in 'truncateMarkersForNss'. Updates the
 // "Output" parameters to communicate the respective docs deleted, bytes deleted, and and maximum
 // wall time of documents deleted to the caller.
@@ -496,20 +478,29 @@ void truncateExpiredMarkersForNsUUID(
     const CollectionPtr& preImagesColl,
     const UUID& nsUUID,
     const RecordId& minRecordIdForNs,
+    const Timestamp& maxTSEligibleForTruncate,
     int64_t& totalDocsDeletedOutput,
     int64_t& totalBytesDeletedOutput,
     Date_t& maxWallTimeForNsTruncateOutput) {
     while (auto marker = truncateMarkersForNsUUID->peekOldestMarkerIfNeeded(opCtx)) {
+        if (change_stream_pre_image_util::getPreImageTimestamp(marker->lastRecord) >
+            maxTSEligibleForTruncate) {
+            // The truncate marker contains pre-images part of a data range not yet consistent
+            // (i.e. there could be oplog holes or partially applied ranges of the oplog in the
+            // range).
+            return;
+        }
+
         writeConflictRetry(opCtx, "truncate pre-images collection", preImagesColl->ns(), [&] {
             auto bytesDeleted = marker->bytes;
             auto docsDeleted = marker->records;
 
-            truncateRange(opCtx,
-                          preImagesColl,
-                          minRecordIdForNs,
-                          marker->lastRecord,
-                          bytesDeleted,
-                          docsDeleted);
+            change_stream_pre_image_util::truncateRange(opCtx,
+                                                        preImagesColl,
+                                                        minRecordIdForNs,
+                                                        marker->lastRecord,
+                                                        bytesDeleted,
+                                                        docsDeleted);
 
             if (marker->wallTime > maxWallTimeForNsTruncateOutput) {
                 maxWallTimeForNsTruncateOutput = marker->wallTime;
@@ -521,6 +512,28 @@ void truncateExpiredMarkersForNsUUID(
             totalBytesDeletedOutput += bytesDeleted;
         });
     }
+}
+
+// Truncate ranges must be consistent data - no record within a truncate range should be written
+// after the truncate. Otherwise, the data viewed by an open change stream could be corrupted,
+// only seeing part of the range post truncate. The node can either be a secondary or primary at
+// this point. Restrictions must be in place to ensure consistent ranges in both scenarios.
+//      - Primaries can't truncate past the 'allDurable' Timestamp. 'allDurable'
+//      guarantees out-of-order writes on the primary don't leave oplog holes.
+//
+//      - Secondaries can't truncate past the 'lastApplied' timestamp. Within an oplog batch,
+//      entries are applied out of order, thus truncate markers may be created before the entire
+//      batch is finished.
+//      The 'allDurable' Timestamp is not sufficient given it is computed from within WT, which
+//      won't always know there are entries with opTime < 'allDurable' which have yet to enter
+//      the storage engine during secondary oplog application.
+//
+// Returns the maximum 'ts' a pre-image is allowed to have in order to be safely truncated.
+Timestamp getMaxTSEligibleForTruncate(OperationContext* opCtx) {
+    Timestamp allDurable =
+        Timestamp(opCtx->getServiceContext()->getStorageEngine()->getAllDurableTimestamp());
+    auto lastAppliedOpTime = repl::ReplicationCoordinator::get(opCtx)->getMyLastAppliedOpTime();
+    return std::min(lastAppliedOpTime.getTimestamp(), allDurable);
 }
 }  // namespace
 
@@ -546,6 +559,12 @@ PreImagesTruncateManager::TruncateStats PreImagesTruncateManager::truncateExpire
     }
 
     auto snapShottedTruncateMarkers = tenantTruncateMarkers->getUnderlyingSnapshot();
+
+    // All pre-images with 'ts' <= 'maxTSEligibleForTruncate' are candidates for truncation.
+    // However, pre-images with 'ts' > 'maxTSEligibleForTruncate' are unsafe to truncate, as there
+    // may be oplog holes or inconsistent data prior to it.
+    // Compute the value once, as it requires making an additional call into the storage engine.
+    Timestamp maxTSEligibleForTruncate = getMaxTSEligibleForTruncate(opCtx);
     for (auto& [nsUUID, truncateMarkersForNsUUID] : *snapShottedTruncateMarkers) {
         RecordId minRecordId =
             change_stream_pre_image_util::getAbsoluteMinPreImageRecordIdBoundForNs(nsUUID)
@@ -559,6 +578,7 @@ PreImagesTruncateManager::TruncateStats PreImagesTruncateManager::truncateExpire
                                         preImagesColl,
                                         nsUUID,
                                         minRecordId,
+                                        maxTSEligibleForTruncate,
                                         docsDeletedForNs,
                                         bytesDeletedForNs,
                                         maxWallTimeForNsTruncate);
@@ -571,6 +591,7 @@ PreImagesTruncateManager::TruncateStats PreImagesTruncateManager::truncateExpire
                                         preImagesColl,
                                         nsUUID,
                                         minRecordId,
+                                        maxTSEligibleForTruncate,
                                         docsDeletedForNs,
                                         bytesDeletedForNs,
                                         maxWallTimeForNsTruncate);
@@ -592,7 +613,8 @@ PreImagesTruncateManager::TruncateStats PreImagesTruncateManager::truncateExpire
                     .recordId();
 
             writeConflictRetry(opCtx, "final truncate", preImagesColl->ns(), [&] {
-                truncateRange(opCtx, preImagesColl, minRecordId, maxRecordId, 0, 0);
+                change_stream_pre_image_util::truncateRange(
+                    opCtx, preImagesColl, minRecordId, maxRecordId, 0, 0);
             });
 
             tenantTruncateMarkers->erase(nsUUID);

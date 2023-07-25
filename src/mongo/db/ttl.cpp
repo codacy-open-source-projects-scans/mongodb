@@ -65,8 +65,10 @@
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/concurrency/locker.h"
+#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/batched_delete_stage.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/delete_stage.h"
@@ -91,6 +93,7 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shard_role.h"
@@ -449,9 +452,9 @@ void TTLMonitor::run() {
         }
 
         try {
-            _doTTLPass();
-        } catch (const WriteConflictException&) {
-            LOGV2_DEBUG(22531, 1, "got WriteConflictException");
+            const auto opCtxPtr = cc().makeOperationContext();
+            writeConflictRetry(
+                opCtxPtr.get(), "TTL pass", NamespaceString(), [&] { _doTTLPass(opCtxPtr.get()); });
         } catch (const DBException& ex) {
             LOGV2_WARNING(22537,
                           "TTLMonitor was interrupted, waiting before doing another pass",
@@ -472,9 +475,7 @@ void TTLMonitor::shutdown() {
     LOGV2(3684101, "Finished shutting down TTL collection monitor thread");
 }
 
-void TTLMonitor::_doTTLPass() {
-    const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
-    OperationContext* opCtx = opCtxPtr.get();
+void TTLMonitor::_doTTLPass(OperationContext* opCtx) {
 
     hangTTLMonitorBetweenPasses.pauseWhileSet(opCtx);
 
@@ -500,8 +501,7 @@ void TTLMonitor::_doTTLPass() {
 bool TTLMonitor::_doTTLSubPass(
     OperationContext* opCtx, stdx::unordered_map<UUID, long long, UUID::Hash>& collSubpassHistory) {
     // If part of replSet but not in a readable state (e.g. during initial sync), skip.
-    if (repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-            repl::ReplicationCoordinator::modeReplSet &&
+    if (repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
         !repl::ReplicationCoordinator::get(opCtx)->getMemberState().readable())
         return false;
 
@@ -609,10 +609,12 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
         if (!coll.exists() || coll.uuid() != uuid)
             return false;
 
-        // Allow TTL deletion on non-capped collections, and on capped clustered collections.
         const auto& collectionPtr = coll.getCollectionPtr();
-        invariant(!collectionPtr->isCapped() ||
-                  (collectionPtr->isCapped() && collectionPtr->isClustered()));
+        if (!feature_flags::gFeatureFlagTTLIndexesOnCappedCollections.isEnabled(
+                serverGlobalParams.featureCompatibility) &&
+            collectionPtr->isCapped() && !collectionPtr->isClustered()) {
+            return false;
+        }
 
         if (MONGO_unlikely(hangTTLMonitorWithLock.shouldFail())) {
             LOGV2(22534,

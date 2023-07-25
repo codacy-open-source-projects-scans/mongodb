@@ -101,6 +101,7 @@
 #include "mongo/db/transaction_resources.h"
 #include "mongo/db/txn_retry_counter_too_old_info.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -167,22 +168,31 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
 
 class OpObserverMock : public OpObserverNoop {
 public:
-    void onTransactionPrepare(
+    /**
+     * TransactionPartipant calls onTransactionPrepare() within a side transaction. The boundaries
+     * of this side transaction may be defined within OpObserverImpl or TransactionParticipant. To
+     * verify the transaction lifecycle outside any side transaction boundaries, we override
+     * postTransactionPrepare() instead of onTransactionPrepare().
+     *
+     * Note that OpObserverImpl is not registered with the OpObserverRegistry in TxtParticipantTest
+     * setup. Only a small handful of tests explicitly register OpObserverImpl and these tests do
+     * no override the callback `postTransactionPrepareFn`.
+     */
+    void postTransactionPrepare(OperationContext* opCtx,
+                                const std::vector<OplogSlot>& reservedSlots,
+                                const TransactionOperations& transactionOperations) override;
+
+    bool postTransactionPrepareThrowsException = false;
+    bool transactionPrepared = false;
+    std::function<void()> postTransactionPrepareFn = []() {
+    };
+
+    void onUnpreparedTransactionCommit(
         OperationContext* opCtx,
         const std::vector<OplogSlot>& reservedSlots,
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
-        size_t numberOfPrePostImagesToWrite,
-        Date_t wallClockTime) override;
-
-    bool onTransactionPrepareThrowsException = false;
-    bool transactionPrepared = false;
-    std::function<void()> onTransactionPrepareFn = []() {
-    };
-
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       const TransactionOperations& transactionOperations,
-                                       OpStateAccumulator* opAccumulator = nullptr) override;
+        OpStateAccumulator* opAccumulator = nullptr) override;
     bool onUnpreparedTransactionCommitThrowsException = false;
     bool unpreparedTransactionCommitted = false;
     std::function<void(const std::vector<repl::ReplOperation>&)> onUnpreparedTransactionCommitFn =
@@ -218,39 +228,34 @@ public:
     const repl::OpTime dropOpTime = {Timestamp(Seconds(100), 1U), 1LL};
 };
 
-void OpObserverMock::onTransactionPrepare(
-    OperationContext* opCtx,
-    const std::vector<OplogSlot>& reservedSlots,
-    const TransactionOperations& transactionOperations,
-    const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
-    size_t numberOfPrePostImagesToWrite,
-    Date_t wallClockTime) {
+void OpObserverMock::postTransactionPrepare(OperationContext* opCtx,
+                                            const std::vector<OplogSlot>& reservedSlots,
+                                            const TransactionOperations& transactionOperations) {
     ASSERT_TRUE(opCtx->lockState()->inAWriteUnitOfWork());
-    OpObserverNoop::onTransactionPrepare(opCtx,
-                                         reservedSlots,
-                                         transactionOperations,
-                                         applyOpsOperationAssignment,
-                                         numberOfPrePostImagesToWrite,
-                                         wallClockTime);
 
     uassert(ErrorCodes::OperationFailed,
-            "onTransactionPrepare() failed",
-            !onTransactionPrepareThrowsException);
+            "postTransactionPrepare() failed",
+            !postTransactionPrepareThrowsException);
     transactionPrepared = true;
-    onTransactionPrepareFn();
+    postTransactionPrepareFn();
 }
 
 void OpObserverMock::onUnpreparedTransactionCommit(
     OperationContext* opCtx,
+    const std::vector<OplogSlot>& reservedSlots,
     const TransactionOperations& transactionOperations,
+    const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
     OpStateAccumulator* opAccumulator) {
     ASSERT(opCtx->lockState()->inAWriteUnitOfWork());
-
-    OpObserverNoop::onUnpreparedTransactionCommit(opCtx, transactionOperations);
 
     uassert(ErrorCodes::OperationFailed,
             "onUnpreparedTransactionCommit() failed",
             !onUnpreparedTransactionCommitThrowsException);
+
+    ASSERT_EQUALS(transactionOperations.numOperations() +
+                      transactionOperations.getNumberOfPrePostImagesToWrite(),
+                  reservedSlots.size());
+    ASSERT_FALSE(applyOpsOperationAssignment.prepare);
 
     unpreparedTransactionCommitted = true;
     const auto& statements = transactionOperations.getOperationsForOpObserver();
@@ -1077,7 +1082,7 @@ TEST_F(TxnParticipantTest, ThrowDuringOnTransactionPrepareAbortsTransaction) {
 
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
 
-    _opObserver->onTransactionPrepareThrowsException = true;
+    _opObserver->postTransactionPrepareThrowsException = true;
 
     ASSERT_THROWS_CODE(txnParticipant.prepareTransaction(opCtx(), {}),
                        AssertionException,
@@ -1489,8 +1494,8 @@ TEST_F(TxnParticipantTest, CannotStartNewTransactionWhilePreparedTransactionInPr
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
     auto ruPrepareTimestamp = Timestamp();
-    auto originalFn = _opObserver->onTransactionPrepareFn;
-    _opObserver->onTransactionPrepareFn = [&]() {
+    auto originalFn = _opObserver->postTransactionPrepareFn;
+    _opObserver->postTransactionPrepareFn = [&]() {
         originalFn();
 
         ruPrepareTimestamp = opCtx()->recoveryUnit()->getPrepareTimestamp();
@@ -1690,6 +1695,8 @@ TEST_F(TxnParticipantTest, CorrectlyStashAPIParameters) {
 }
 
 TEST_F(TxnParticipantTest, PrepareReturnsAListOfAffectedNamespaces) {
+    RAIIServerParameterControllerForTest controller("featureFlagEndOfTransactionChangeEvent", true);
+
     const std::vector<NamespaceString> kNamespaces = {
         NamespaceString::createNamespaceString_forTest("TestDB1", "TestColl1"),
         NamespaceString::createNamespaceString_forTest("TestDB1", "TestColl2"),
@@ -2202,7 +2209,7 @@ TEST_F(TransactionsMetricsTest, NoPreparedMetricsChangesAfterExceptionInPrepare)
 
     txnParticipant.unstashTransactionResources(opCtx(), "prepareTransaction");
 
-    _opObserver->onTransactionPrepareThrowsException = true;
+    _opObserver->postTransactionPrepareThrowsException = true;
 
     ASSERT_THROWS_CODE(txnParticipant.prepareTransaction(opCtx(), {}),
                        AssertionException,
@@ -4247,7 +4254,7 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterExceptionInPrepare) {
 
     tickSource->advance(Microseconds(11 * 1000));
 
-    _opObserver->onTransactionPrepareThrowsException = true;
+    _opObserver->postTransactionPrepareThrowsException = true;
 
     startCapturingLogMessages();
     ASSERT_THROWS_CODE(txnParticipant.prepareTransaction(opCtx(), {}),

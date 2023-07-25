@@ -380,6 +380,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/db/repl/replica_set_messages',
         '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/s/common_s',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
         'global_settings',
         'server_base',
@@ -454,6 +455,7 @@ env.Library(
         'change_stream_options',
         'change_stream_serverless_helpers',
         'repl/repl_coordinator_interface',
+        'repl/repl_settings',
         'server_base',
         'service_context',
     ],
@@ -469,6 +471,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter',
         'change_stream_serverless_helpers',
+        'repl/repl_settings',
         'server_base',
     ],
 )
@@ -559,6 +562,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/pipeline/change_stream_preimage',
         'change_stream_options_manager',
         'change_stream_serverless_helpers',
+        'concurrency/exception_util',
         'query_exec',
         'record_id_helpers',
         'server_base',
@@ -747,6 +751,7 @@ env.Library(
         'commands',
         'commands/server_status_core',
         'repl/repl_coordinator_interface',
+        'repl/repl_settings',
         'repl/replica_set_messages',
         'repl/topology_version_observer',
         'server_base',
@@ -847,6 +852,8 @@ env.Library(
         'server_base',
         'stats/resource_consumption_metrics',
         'stats/timer_stats',
+        # TODO (SERVER-66896): Remove this dependency.
+        'storage/storage_engine_feature_flags',
         'timeseries/timeseries_options',
     ],
 )
@@ -1053,6 +1060,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         'repl/repl_coordinator_interface',
+        'repl/repl_settings',
     ],
 )
 
@@ -1334,6 +1342,7 @@ env.Library(
         'concurrency/lock_manager',
         'repl/repl_coordinator_interface',
         'repl/repl_server_parameters',
+        'repl/repl_settings',
         'shared_request_handling',
         'storage/storage_control',
     ],
@@ -1626,6 +1635,7 @@ execEnv.Library(
         '$BUILD_DIR/mongo/db/sorter/sorter_stats',
         '$BUILD_DIR/mongo/db/stats/resource_consumption_metrics',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
+        '$BUILD_DIR/mongo/db/timeseries/bucket_catalog/bucket_catalog',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_write_util',
         'not_primary_error_tracker',
@@ -1768,7 +1778,10 @@ env.Library(
         'catalog/database_holder',
         'catalog/document_validation',
         'catalog/index_key_validate',
+        'catalog/local_oplog_info',
         'catalog/multi_index_block',
+        'change_stream_pre_image_util',
+        'change_stream_serverless_helpers',
         'commands/mongod_fcv',
         'concurrency/exception_util',
         'dbdirectclient',
@@ -2126,6 +2139,17 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='feature_compatibility_version_metrics',
+    source=[
+        'feature_compatibility_version_metrics.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status_core',
+        'server_base',
+    ],
+)
+
 # This library is the base class for tests which require the presence of ServiceContext. However it
 # does not perform any default initialisation of the relevant services, such as lockers and
 # transaction resources, so any test which directly references it must perform its own
@@ -2178,12 +2202,13 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/util/net/network',
-        'repl/repl_coordinator_interface',
-        'repl/replica_set_messages',
         'server_options_servers',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/util/processinfo',
+        'repl/repl_coordinator_interface',
+        'repl/repl_settings',
+        'repl/replica_set_messages',
     ],
 )
 
@@ -2347,6 +2372,7 @@ env.Library(
         'dbdirectclient',
         'dbhelpers',
         'exec/working_set',
+        'feature_compatibility_version_metrics',
         'free_mon/free_mon_mongod',
         'ftdc/ftdc_mongod',
         'fts/ftsmongod',
@@ -2468,6 +2494,7 @@ env.Library(
         'mirror_maestro',
         'mongod_initializers',
         'mongod_options',
+        'op_observer/change_stream_pre_images_op_observer',
         'op_observer/fallback_op_observer',
         'op_observer/fcv_op_observer',
         'op_observer/op_observer',
@@ -2814,5 +2841,16 @@ env.Benchmark(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Benchmark(
+    target='operation_cpu_timer_bm',
+    source=[
+        'operation_cpu_timer_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        'service_context',
     ],
 )

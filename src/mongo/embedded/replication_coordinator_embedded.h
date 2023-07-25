@@ -103,10 +103,8 @@ public:
 
     const repl::ReplSettings& getSettings() const override;
 
-    Mode getReplicationMode() const override;
     bool getMaintenanceMode() override;
 
-    bool isReplEnabled() const override;
     bool isWritablePrimaryForReportingPurposes() override;
     bool isInPrimaryOrSecondaryState(OperationContext* opCtx) const override;
     bool isInPrimaryOrSecondaryState_UNSAFE() const override;
@@ -228,6 +226,8 @@ public:
     Milliseconds getConfigElectionTimeoutPeriod() const override;
 
     std::vector<repl::MemberConfig> getConfigVotingMembers() const override;
+
+    size_t getNumConfigVotingMembers() const override;
 
     std::int64_t getConfigTerm() const override;
 

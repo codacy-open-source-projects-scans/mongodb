@@ -115,17 +115,6 @@ const ReplSettings& ReplicationCoordinatorMock::getSettings() const {
     return _settings;
 }
 
-bool ReplicationCoordinatorMock::isReplEnabled() const {
-    return _settings.usingReplSets();
-}
-
-ReplicationCoordinator::Mode ReplicationCoordinatorMock::getReplicationMode() const {
-    if (_settings.usingReplSets()) {
-        return modeReplSet;
-    }
-    return modeNone;
-}
-
 MemberState ReplicationCoordinatorMock::getMemberState() const {
     stdx::lock_guard<Mutex> lk(_mutex);
 
@@ -421,6 +410,11 @@ Milliseconds ReplicationCoordinatorMock::getConfigElectionTimeoutPeriod() const 
 std::vector<MemberConfig> ReplicationCoordinatorMock::getConfigVotingMembers() const {
     stdx::lock_guard<Mutex> lock(_mutex);
     return _getConfigReturnValue.votingMembers();
+}
+
+size_t ReplicationCoordinatorMock::getNumConfigVotingMembers() const {
+    stdx::lock_guard<Mutex> lock(_mutex);
+    return _getConfigReturnValue.votingMembers().size();
 }
 
 std::int64_t ReplicationCoordinatorMock::getConfigTerm() const {

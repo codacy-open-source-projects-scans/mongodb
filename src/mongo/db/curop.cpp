@@ -66,6 +66,7 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/redaction.h"
@@ -301,7 +302,7 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
 
         tassert(7663403,
                 str::stream() << "SerializationContext on the expCtx should not be empty, with ns: "
-                              << expCtx->ns.ns(),
+                              << expCtx->ns.toStringForErrorMsg(),
                 expCtx->serializationCtxt != SerializationContext::stateDefault());
 
         // reportState is used to generate a command reply
@@ -380,11 +381,14 @@ void CurOp::setGenericOpRequestDetails(NamespaceString nss,
 
 void CurOp::setEndOfOpMetrics(long long nreturned) {
     _debug.additiveMetrics.nreturned = nreturned;
-    // executionTime is set with the final executionTime in completeAndLogOperation, but for
-    // query stats collection we want it set before incrementing cursor metrics using OpDebug's
-    // AdditiveMetrics. The value set here will be overwritten later in
-    // completeAndLogOperation.
-    _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
+    // A non-null queryStats store key indicates the current query is being tracked for queryStats
+    // and therefore the executionTime needs to be recorded as part of that effort. executionTime is
+    // set with the final executionTime in completeAndLogOperation, but for query stats collection
+    // we want it set before incrementing cursor metrics using OpDebug's AdditiveMetrics. The value
+    // set here will be overwritten later in completeAndLogOperation.
+    if (_debug.queryStatsStoreKeyHash) {
+        _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
+    }
 }
 
 void CurOp::setMessage_inlock(StringData message) {
@@ -562,6 +566,11 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
                 // Retrieving storage stats should not be blocked by oplog application.
                 ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
                     opCtx->lockState());
+                // Slow query logs are critical for observability and should not wait for ticket
+                // acquisition. Slow queries can happen for various reasons; however, if queries are
+                // slower due to ticket exhaustion, queueing in order to log can compound the issue.
+                ScopedAdmissionPriorityForLock skipAdmissionControl(
+                    opCtx->lockState(), AdmissionContext::Priority::kImmediate);
                 Lock::GlobalLock lk(opCtx,
                                     MODE_IS,
                                     Date_t::now() + Milliseconds(500),
@@ -596,7 +605,6 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
         _debug.report(
             opCtx, (lockerInfo ? &lockerInfo->stats : nullptr), operationMetricsPtr, &attr);
 
-        // TODO SERVER-67020 Ensure the ns in attr has the tenantId as the db prefix
         LOGV2_OPTIONS(51803, {component}, "Slow query", attr);
 
         _checkForFailpointsAfterCommandLogged();
@@ -863,9 +871,15 @@ void CurOp::reportState(BSONObjBuilder* builder,
         builder->append("dataThroughputAverage", *_debug.dataThroughputAverage);
     }
 
-    auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
-    if (admissionPriority < AdmissionContext::Priority::kNormal) {
-        builder->append("admissionPriority", toString(admissionPriority));
+    // (Ignore FCV check): This feature flag is used to initialize ticketing during storage engine
+    // initialization and FCV checking is ignored there, so here we also need to ignore FCV to keep
+    // consistent behavior.
+    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
+            .isEnabledAndIgnoreFCVUnsafe()) {
+        auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
+        if (admissionPriority < AdmissionContext::Priority::kNormal) {
+            builder->append("admissionPriority", toString(admissionPriority));
+        }
     }
 
     if (auto start = _waitForWriteConcernStart.load(); start > 0) {
@@ -928,7 +942,7 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("type", networkOpToString(networkOp));
     }
 
-    pAttrs->addDeepCopy("ns", curop.getNS());
+    pAttrs->addDeepCopy("ns", toStringForLogging(curop.getNSS()));
 
     if (client) {
         if (auto clientMetadata = ClientMetadata::get(client)) {
@@ -1084,9 +1098,15 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("reslen", responseLength);
     }
 
-    auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
-    if (admissionPriority < AdmissionContext::Priority::kNormal) {
-        pAttrs->add("admissionPriority", admissionPriority);
+    // (Ignore FCV check): This feature flag is used to initialize ticketing during storage engine
+    // initialization and FCV checking is ignored there, so here we also need to ignore FCV to keep
+    // consistent behavior.
+    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
+            .isEnabledAndIgnoreFCVUnsafe()) {
+        auto admissionPriority = opCtx->lockState()->getAdmissionPriority();
+        if (admissionPriority < AdmissionContext::Priority::kNormal) {
+            pAttrs->add("admissionPriority", admissionPriority);
+        }
     }
 
     if (lockStats) {
@@ -1193,8 +1213,7 @@ void OpDebug::append(OperationContext* opCtx,
 
     b.append("op", logicalOpToString(logicalOp));
 
-    NamespaceString nss = NamespaceString(curop.getNS());
-    b.append("ns", nss.ns());
+    b.append("ns", curop.getNS());
 
     appendAsObjOrString(
         "command", appendCommentField(opCtx, curop.opDescription()), appendMaxElementSize, &b);
@@ -1434,9 +1453,7 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     addIfNeeded("op", [](auto field, auto args, auto& b) {
         b.append(field, logicalOpToString(args.op.logicalOp));
     });
-    addIfNeeded("ns", [](auto field, auto args, auto& b) {
-        b.append(field, NamespaceString(args.curop.getNS()).ns());
-    });
+    addIfNeeded("ns", [](auto field, auto args, auto& b) { b.append(field, args.curop.getNS()); });
 
     addIfNeeded("command", [](auto field, auto args, auto& b) {
         appendAsObjOrString(field,
@@ -1789,7 +1806,7 @@ static void appendResolvedViewsInfoImpl(
         const std::vector<BSONObj>& pipeline = kv.second.second;
 
         BSONObjBuilder aView;
-        aView.append("viewNamespace", viewNss.ns());
+        aView.append("viewNamespace", NamespaceStringUtil::serialize(viewNss));
 
         BSONArrayBuilder dependenciesArr(aView.subarrayStart("dependencyChain"));
         for (const auto& nss : dependencies) {

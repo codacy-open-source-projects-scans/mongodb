@@ -42,8 +42,9 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/sbe/abt/abt_lower.h"
-#include "mongo/db/exec/sbe/abt/named_slots_mock.h"
+#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
+#include "mongo/db/query/cqf_get_executor.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/optimizer/containers.h"
@@ -94,8 +95,11 @@ protected:
         stream << "-- OUTPUT:" << std::endl;
         auto env = VariableEnvironment::build(n);
         SlotVarMap map;
-        MockEmptyNamedSlotsProvider namedSlots;
-        auto expr = SBEExpressionLowering{env, map, namedSlots}.optimize(n);
+        sbe::RuntimeEnvironment runtimeEnv;
+        Metadata metadata;
+        NodeProps np;
+        auto expr =
+            optimizer::SBEExpressionLowering{env, map, runtimeEnv, &metadata, &np}.optimize(n);
         stream << expr->toString() << std::endl;
     }
 
@@ -120,8 +124,12 @@ protected:
     void runNodeVariation(GoldenTestContext& gctx,
                           const std::string& name,
                           const ABT& n,
+                          sbe::RuntimeEnvironment* runtimeEnv,
+                          sbe::value::SlotIdGenerator* ids,
                           boost::optional<opt::unordered_map<std::string, IndexDefinition>>
-                              collIndexDefs = boost::none) {
+                              collIndexDefs = boost::none,
+                          opt::unordered_map<std::string, ScanDefinition> scanDefs =
+                              opt::unordered_map<std::string, ScanDefinition>()) {
         auto& stream = gctx.outStream();
         if (stream.tellp()) {
             stream << std::endl;
@@ -132,10 +140,7 @@ protected:
         stream << "-- OUTPUT:" << std::endl;
         auto env = VariableEnvironment::build(n);
         SlotVarMap map;
-        MockEmptyNamedSlotsProvider namedSlots;
         boost::optional<sbe::value::SlotId> ridSlot;
-        sbe::value::SlotIdGenerator ids;
-        opt::unordered_map<std::string, ScanDefinition> scanDefs;
 
         scanDefs.insert({"collName",
                          collIndexDefs.has_value() ? buildScanDefinition(collIndexDefs.value())
@@ -144,7 +149,7 @@ protected:
 
         Metadata md(scanDefs);
         auto planStage =
-            SBENodeLowering{env, namedSlots, ids, md, _nodeMap, ScanOrder::Forward}.optimize(
+            SBENodeLowering{env, *runtimeEnv, *ids, md, _nodeMap, ScanOrder::Forward}.optimize(
                 n, map, ridSlot);
         sbe::DebugPrinter printer;
         stream << stripUUIDs(printer.print(*planStage)) << std::endl;
@@ -156,15 +161,27 @@ protected:
         lastNodeGenerated = 0;
     }
 
+    void runNodeVariation(GoldenTestContext& gctx,
+                          const std::string& name,
+                          const ABT& n,
+                          boost::optional<opt::unordered_map<std::string, IndexDefinition>>
+                              collIndexDefs = boost::none,
+                          opt::unordered_map<std::string, ScanDefinition> scanDefs =
+                              opt::unordered_map<std::string, ScanDefinition>()) {
+        sbe::RuntimeEnvironment runtimeEnv;
+        sbe::value::SlotIdGenerator ids;
+        runNodeVariation(gctx, name, n, &runtimeEnv, &ids, collIndexDefs, scanDefs);
+    }
+
     ScanDefinition buildScanDefinition(
-        opt::unordered_map<std::string, IndexDefinition> indexDefs = {}) {
+        opt::unordered_map<std::string, IndexDefinition> indexDefs = {},
+        DistributionAndPaths dnp = DistributionAndPaths(DistributionType::Centralized)) {
         ScanDefOptions opts;
         opts.insert({"type", "mongod"});
         opts.insert({"database", "test"});
         opts.insert({"uuid", UUID::gen().toString()});
 
         MultikeynessTrie trie;
-        DistributionAndPaths dnp(DistributionType::Centralized);
         bool exists = true;
         CEType ce{false};
         return ScanDefinition(opts, indexDefs, trie, dnp, exists, ce, ShardingMetadata{});
@@ -272,6 +289,126 @@ private:
     int32_t lastNodeGenerated = 0;
 };
 
+TEST_F(ABTPlanGeneration, LowerShardFiltering) {
+    GoldenTestContext ctx(&goldenTestConfig);
+    ctx.printTestHeader(GoldenTestContext::HeaderFormat::Text);
+
+    const std::string shardKeyName = "SHARDKEYNAME";
+    {
+        // In shard filtering-related tests, mock the global and unconditional creation of a shard
+        // filtering slot in the runtime environment.
+        sbe::RuntimeEnvironment runtimeEnv;
+        sbe::value::SlotIdGenerator ids = sbe::value::SlotIdGenerator{};
+        runtimeEnv.registerSlot(
+            kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &ids);
+        // Create node properties which allow the lowering to access information about the Shard
+        // Key.
+        NodeProps filterNodeProps{getNextNodeID() /*_planNodeId*/,
+                                  {} /*_groupId*/,
+                                  {} /*_logicalProps*/,
+                                  {} /*_physicalProps*/,
+                                  boost::none /*_ridProjName*/,
+                                  CostType::fromDouble(0) /*_cost*/,
+                                  CostType::fromDouble(0) /*_localCost*/,
+                                  {false} /*_adjustedCE*/};
+        // The IndexingAvailability logical property will provide information about where to look in
+        // the scanDefs for the Shard Key info.
+        properties::setPropertyOverwrite(
+            filterNodeProps._logicalProps,
+            properties::IndexingAvailability(10,
+                                             ProjectionName("testProjectionName"),
+                                             shardKeyName,
+                                             false,
+                                             false,
+                                             opt::unordered_set<std::string>()));
+
+        // Create the DistributionAndPaths pointing to the shard key fields.
+        // The path to each component of the shard key is stored/provided as an ABT.
+        auto makePathABT = [&](FieldNameType pathName) {
+            return make<PathGet>(pathName, make<PathIdentity>());
+        };
+        std::vector<ABT> shardKeyPaths{makePathABT("a"), makePathABT("b"), makePathABT("c")};
+        DistributionAndPaths dnp(DistributionType::RangePartitioning, shardKeyPaths);
+        ScanDefinition shardKeyScanDef =
+            buildScanDefinition(opt::unordered_map<std::string, IndexDefinition>(), dnp);
+        opt::unordered_map<std::string, ScanDefinition> scanDefs{
+            std::make_pair(shardKeyName, shardKeyScanDef)};
+
+        // Create the ABT to be lowered, starting with the shardFilter FunctionCall.
+        auto functionCallNode = make<FunctionCall>(
+            "shardFilter",
+            makeSeq(make<Variable>("proj0"), make<Variable>("proj1"), make<Variable>("proj2")));
+
+        auto filterNode =
+            _node(make<FilterNode>(
+                      std::move(functionCallNode),
+                      _node(make<PhysicalScanNode>(
+                          FieldProjectionMap{{},
+                                             {ProjectionName{"scan0"}},
+                                             {{FieldNameType{"a"}, ProjectionName{"proj0"}},
+                                              {FieldNameType{"b"}, ProjectionName{"proj1"}},
+                                              {FieldNameType{"c"}, ProjectionName{"proj2"}}}},
+                          "collName",
+                          false))),
+                  filterNodeProps);
+        runNodeVariation(ctx,
+                         "Shard Filtering with Top Level Fields",
+                         std::move(filterNode),
+                         &runtimeEnv,
+                         &ids,
+                         boost::none,
+                         scanDefs);
+    }
+
+    {
+        sbe::RuntimeEnvironment runtimeEnv;
+        sbe::value::SlotIdGenerator ids = sbe::value::SlotIdGenerator{};
+        runtimeEnv.registerSlot(
+            kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &ids);
+        NodeProps filterNodeProps{getNextNodeID() /*_planNodeId*/,
+                                  {} /*_groupId*/,
+                                  {} /*_logicalProps*/,
+                                  {} /*_physicalProps*/,
+                                  boost::none /*_ridProjName*/,
+                                  CostType::fromDouble(0) /*_cost*/,
+                                  CostType::fromDouble(0) /*_localCost*/,
+                                  {false} /*_adjustedCE*/};
+        properties::setPropertyOverwrite(
+            filterNodeProps._logicalProps,
+            properties::IndexingAvailability(10,
+                                             ProjectionName("testProjectionName"),
+                                             shardKeyName,
+                                             false,
+                                             false,
+                                             opt::unordered_set<std::string>()));
+
+        // "a.b" is the shard Key in this variation of the test.
+        auto pathABT = make<PathGet>("a", make<PathGet>("b", make<PathIdentity>()));
+        std::vector<ABT> shardKeyPaths{pathABT};
+        DistributionAndPaths dnp(DistributionType::RangePartitioning, shardKeyPaths);
+        ScanDefinition shardKeyScanDef =
+            buildScanDefinition(opt::unordered_map<std::string, IndexDefinition>(), dnp);
+        opt::unordered_map<std::string, ScanDefinition> scanDefs{
+            std::make_pair(shardKeyName, shardKeyScanDef)};
+
+        auto evalPathABT =
+            make<EvalPath>(std::move(pathABT), make<Variable>(ProjectionName("scan0")));
+        auto evalNode = _node(make<EvaluationNode>(
+            ProjectionName("proj0"), _path(std::move(evalPathABT)), _node(scanForTest())));
+
+        // Create the ABT to be lowered, starting with the shardFilter FunctionCall.
+        auto functionCallNode = make<FunctionCall>("shardFilter", makeSeq(make<Variable>("proj0")));
+        auto filterNode = _node(make<FilterNode>(std::move(functionCallNode), std::move(evalNode)),
+                                filterNodeProps);
+        runNodeVariation(ctx,
+                         "Shard Filtering with Dotted Field Path",
+                         std::move(filterNode),
+                         &runtimeEnv,
+                         &ids,
+                         boost::none,
+                         scanDefs);
+    }
+}
 
 TEST_F(ABTPlanGeneration, LowerConstantExpression) {
     GoldenTestContext ctx(&goldenTestConfig);
@@ -418,8 +555,7 @@ TEST_F(ABTPlanGeneration, LowerExchangeNode) {
 
         runNodeVariation(
             ctx,
-            str::stream() << "Lower exchange node of type "
-                          << DistributionTypeEnum::toString[static_cast<int>(exchangeType)],
+            str::stream() << "Lower exchange node of type " << toStringData(exchangeType),
             _node(make<ExchangeNode>(distReq, std::move(evalNode2)), exchangeNodeProp));
     }
 }
@@ -455,8 +591,7 @@ TEST_F(ABTPlanGeneration, LowerGroupByNode) {
     for (const auto& groupType : groupTypes) {
         runNodeVariation(
             ctx,
-            str::stream() << "GroupByNode one output with type "
-                          << GroupNodeTypeEnum::toString[static_cast<int>(groupType)],
+            str::stream() << "GroupByNode one output with type " << toStringData(groupType),
             _node(make<GroupByNode>(
                 ProjectionNameVector{"key1", "key2"},
                 ProjectionNameVector{"outFunc1"},
@@ -466,8 +601,7 @@ TEST_F(ABTPlanGeneration, LowerGroupByNode) {
 
         runNodeVariation(
             ctx,
-            str::stream() << "GroupByNode multiple outputs with type "
-                          << GroupNodeTypeEnum::toString[static_cast<int>(groupType)],
+            str::stream() << "GroupByNode multiple outputs with type " << toStringData(groupType),
             _node(make<GroupByNode>(
                 ProjectionNameVector{"key1", "key2"},
                 ProjectionNameVector{"outFunc1", "outFunc2"},
@@ -625,7 +759,7 @@ TEST_F(ABTPlanGeneration, LowerMergeJoinNode) {
             "scan1");
         runNodeVariation(ctx,
                          str::stream() << "Lower merge join with one projection (collation="
-                                       << CollationOpEnum::toString[static_cast<int>(op)] << ")",
+                                       << toStringData(op) << ")",
                          _node(make<MergeJoinNode>(ProjectionNameVector{ProjectionName{"proj0"}},
                                                    ProjectionNameVector{ProjectionName{"proj1"}},
                                                    std::vector<CollationOp>{op},
@@ -650,8 +784,7 @@ TEST_F(ABTPlanGeneration, LowerMergeJoinNode) {
             runNodeVariation(
                 ctx,
                 str::stream() << "Lower merge join with two projections (collation="
-                              << CollationOpEnum::toString[static_cast<int>(op1)] << ", "
-                              << CollationOpEnum::toString[static_cast<int>(op2)] << ")",
+                              << toStringData(op1) << ", " << toStringData(op2) << ")",
                 _node(make<MergeJoinNode>(
                     ProjectionNameVector{ProjectionName{"proj0"}, ProjectionName{"proj2"}},
                     ProjectionNameVector{ProjectionName{"proj1"}, ProjectionName{"proj3"}},
@@ -675,7 +808,7 @@ TEST_F(ABTPlanGeneration, LowerMergeJoinNode) {
             {ProjectionName{"proj3"}});
         runNodeVariation(ctx,
                          str::stream() << "Lower merge join with required projection (collation="
-                                       << CollationOpEnum::toString[static_cast<int>(op1)] << ")",
+                                       << toStringData(op1) << ")",
                          _node(make<FilterNode>(makeEquals("proj3", Constant::str("NYC")),
                                                 _node(make<MergeJoinNode>(
                                                     ProjectionNameVector{ProjectionName{"proj0"}},
@@ -716,8 +849,8 @@ TEST_F(ABTPlanGeneration, LowerNestedLoopJoinNode) {
 
         runNodeVariation(
             ctx,
-            str::stream() << "Nested loop join with equality predicate ("
-                          << JoinTypeEnum::toString[static_cast<int>(joinType)] << " join)",
+            str::stream() << "Nested loop join with equality predicate (" << toStringData(joinType)
+                          << " join)",
             _node(make<FilterNode>(makeEquals("proj2", Constant::int32(10024)), std::move(nlj))));
     }
 }
@@ -827,15 +960,13 @@ TEST_F(ABTPlanGeneration, LowerSortedMergeNode) {
         runVariations(properties::CollationRequirement(
                           ProjectionCollationSpec({{ProjectionName{"proj0"}, op}})),
                       op,
-                      str::stream()
-                          << "sorted on `a` " << CollationOpEnum::toString[static_cast<int>(op)]);
+                      str::stream() << "sorted on `a` " << toStringData(op));
         for (auto& op2 : ops) {
             runVariations(properties::CollationRequirement(ProjectionCollationSpec(
                               {{ProjectionName{"proj0"}, op}, {ProjectionName{"proj1"}, op2}})),
                           op,
-                          str::stream()
-                              << "sorted on `a` " << CollationOpEnum::toString[static_cast<int>(op)]
-                              << " and `b` " << CollationOpEnum::toString[static_cast<int>(op2)]);
+                          str::stream() << "sorted on `a` " << toStringData(op) << " and `b` "
+                                        << toStringData(op2));
         }
     }
 }
@@ -859,11 +990,8 @@ TEST_F(ABTPlanGeneration, LowerSpoolNodes) {
                 _node(make<SpoolConsumerNode>(spoolConsumeType, 1, ProjectionNameVector{"proj0"}));
             runNodeVariation(
                 ctx,
-                str::stream() << "Spool in union with "
-                              << SpoolProducerTypeEnum::toString[static_cast<int>(spoolProdType)]
-                              << " producer and "
-                              << SpoolConsumerTypeEnum::toString[static_cast<int>(spoolConsumeType)]
-                              << " consumer",
+                str::stream() << "Spool in union with " << toStringData(spoolProdType)
+                              << " producer and " << toStringData(spoolConsumeType) << " consumer",
                 _node(make<UnionNode>(ProjectionNameVector{"proj0"},
                                       makeSeq(std::move(leftTree), std::move(rightTree)))));
         }

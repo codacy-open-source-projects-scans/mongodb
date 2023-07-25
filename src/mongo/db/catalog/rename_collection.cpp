@@ -854,8 +854,7 @@ void validateNamespacesForRenameCollection(OperationContext* opCtx,
             str::stream() << "Invalid target namespace: " << target.toStringForErrorMsg(),
             target.isValid());
 
-    if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-         repl::ReplicationCoordinator::modeNone)) {
+    if (repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
         uassert(ErrorCodes::IllegalOperation,
                 "can't rename live oplog while replicating",
                 !source.isOplog());
@@ -907,8 +906,10 @@ void validateNamespacesForRenameCollection(OperationContext* opCtx,
                         ActionType::setUserWriteBlockMode));
 
         uassert(ErrorCodes::IllegalOperation,
-                str::stream() << "Cannot rename time-series buckets collection {" << source.ns()
-                              << "} to a non-time-series buckets namespace {" << target.ns() << "}",
+                str::stream() << "Cannot rename time-series buckets collection {"
+                              << source.toStringForErrorMsg()
+                              << "} to a non-time-series buckets namespace {"
+                              << target.toStringForErrorMsg() << "}",
                 target.isTimeseriesBucketsCollection());
     }
 }
@@ -1015,8 +1016,7 @@ Status renameCollectionForApplyOps(OperationContext* opCtx,
                       str::stream() << "error with target namespace: " << targetStatus.reason());
     }
 
-    if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-         repl::ReplicationCoordinator::modeNone) &&
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
         targetNss.isOplog()) {
         return Status(ErrorCodes::IllegalOperation,
                       str::stream() << "Cannot rename collection to the oplog");

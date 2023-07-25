@@ -814,12 +814,13 @@ tasks:
         vars:
           test_control: "cursor_manager"
 
-  - name: mixed_workloads
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "mixed_workloads"
+  # unscheduling according to SERVER-78888
+  # - name: mixed_workloads
+  #   priority: 5
+  #   commands:
+  #     - func: f_run_dsi_workload
+  #       vars:
+  #         test_control: "mixed_workloads"
 
   - name: mixed_workloads_genny_stepdowns
     priority: 5
@@ -1651,8 +1652,7 @@ buildvariants:
 
   - name: linux-intel-standalone-classic-query-engine
     display_name: Linux Intel Standalone (Classic Query Engine)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: &cron_query_perf_schedule "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1690,8 +1690,7 @@ buildvariants:
 
   - name: linux-intel-standalone-sbe
     display_name: Linux Intel Standalone (SBE)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1710,8 +1709,7 @@ buildvariants:
 
   - name: linux-intel-1-node-replSet-classic-query-engine
     display_name: Linux Intel 1-Node ReplSet (Classic Query Engine)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: &linux-1-node-repl-cron  "0 0 * * 4" # 00:00 on Thursday
+    cron: &linux-1-node-repl-cron "0 0 * * 4"  # 00:00 on Thursday
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1735,8 +1733,7 @@ buildvariants:
 
   - name: linux-intel-1-node-replSet-sbe
     display_name: Linux Intel 1-Node ReplSet (SBE)
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -1755,7 +1752,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-lite-all-feature-flags.2022-11
     display_name: Linux 1-Node ReplSet (graviton lite, all FF) 2022-11
-    cron: "0 0 * * 4"  # 00:00 on Thursday
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2008,7 +2005,6 @@ buildvariants:
       - name: crud_workloads_w1
       - name: genny_canaries
       - name: cursor_manager
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: non_sharded_workloads
@@ -2072,8 +2068,7 @@ buildvariants:
 
   - name: linux-standalone-classic-query-engine.2022-11
     display_name: Linux Standalone (Classic Query Engine) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2093,8 +2088,7 @@ buildvariants:
 
   - name: linux-standalone-sbe.2022-11
     display_name: Linux Standalone (SBE) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2134,7 +2128,7 @@ buildvariants:
 
   - name: linux-intel-standalone-sampling-bonsai
     display_name: Linux Intel Standalone (Bonsai with Sampling CE)
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2173,7 +2167,7 @@ buildvariants:
 
   - name: linux-intel-standalone-heuristic-bonsai
     display_name: Linux Intel Standalone (Bonsai with Heuristic CE)
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2270,7 +2264,6 @@ buildvariants:
 
   - name: linux-1-node-replSet-classic-query-engine.2022-11
     display_name: Linux 1-Node ReplSet (Classic Query Engine) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
     cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
@@ -2291,8 +2284,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-sbe.2022-11
     display_name: Linux 1-Node ReplSet (SBE) 2022-11
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2363,7 +2355,7 @@ buildvariants:
 
   - name: linux-1-node-replSet-all-feature-flags.2022-11
     display_name: Linux 1-Node ReplSet (all feature flags) 2022-11
-    cron: "0 0 * * 4"  # 00:00 on Thursday
+    cron: *linux-1-node-repl-cron
     modules: *modules
     expansions:
       mongodb_setup_release: 2022-11
@@ -2410,7 +2402,6 @@ buildvariants:
       - name: ycsb_60GB
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
@@ -2526,7 +2517,6 @@ buildvariants:
       - name: ycsb_60GB
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
-      - name: mixed_workloads
       - name: tpcc
       - name: linkbench
       - name: linkbench2
@@ -2730,7 +2720,6 @@ buildvariants:
       - name: industry_benchmarks_w1
       - name: crud_workloads_majority
       - name: crud_workloads_w1
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
@@ -2768,7 +2757,6 @@ buildvariants:
       - name: industry_benchmarks
       - name: crud_workloads_majority
       - name: crud_workloads_w1
-      - name: mixed_workloads
 
   - name: linux-3-shard-heuristic-bonsai.2022-11
     display_name: Linux 3-Shard Cluster 2022-11 (Bonsai with Heuristic CE)
@@ -2844,7 +2832,6 @@ buildvariants:
       - name: change_streams_listen_throughput
       - name: industry_benchmarks
       - name: linkbench
-      - name: mixed_workloads
       - name: mongos_workloads
       - name: mongos_large_catalog_workloads
       - name: move_chunk_large_chunk_map_workloads
@@ -2877,7 +2864,6 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
-      - name: mixed_workloads
       - name: mongos_workloads
       - name: move_chunk_workloads
       - name: move_chunk_waiting_workloads
@@ -2985,7 +2971,6 @@ buildvariants:
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads_majority
       - name: crud_workloads_w1
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: refine_shard_key_transaction_stress
@@ -3041,7 +3026,6 @@ buildvariants:
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: crud_workloads_majority
-      - name: mixed_workloads
       - name: smoke_test
       - name: linkbench
       - name: linkbench2
@@ -3074,7 +3058,6 @@ buildvariants:
       - name: industry_benchmarks_w1
       - name: crud_workloads_majority
       - name: crud_workloads_w1
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: refine_shard_key_transaction_stress
@@ -3132,7 +3115,6 @@ buildvariants:
       - name: industry_benchmarks_w1
       - name: crud_workloads_majority
       - name: crud_workloads_w1
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: refine_shard_key_transaction_stress
@@ -3190,7 +3172,6 @@ buildvariants:
       - name: industry_benchmarks_w1
       - name: crud_workloads_majority
       - name: crud_workloads_w1
-      - name: mixed_workloads
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: refine_shard_key_transaction_stress
@@ -3245,7 +3226,6 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: crud_workloads_majority
       - name: industry_benchmarks
-      - name: mixed_workloads
 
   - name: linux-3-node-replSet-maintenance-events.2022-11
     display_name: Linux 3-Node ReplSet (Maintenance Events) 2022-11
@@ -3448,7 +3428,6 @@ buildvariants:
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
       - name: crud_workloads_w1
-      - name: mixed_workloads
       - name: tpcc
       - name: linkbench
       - name: linkbench2
@@ -3478,7 +3457,6 @@ buildvariants:
       - name: industry_benchmarks
       - name: linkbench2
       - name: misc_workloads
-      - name: mixed_workloads
       - name: snapshot_reads
       - name: tpcc
       - name: ycsb_60GB
@@ -3671,8 +3649,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-classic-query-engine-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory (Classic Query Engine).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-classic-query-engine.2023-02
@@ -3683,8 +3660,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-sbe-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory (SBE).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-sbe.2023-02
@@ -3695,13 +3671,16 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-sampling-bonsai-arm.2023-01
     display_name: MicroBenchmarks Arm Standalone inMemory (Bonsai with Sampling CE).2023-01
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-sampling-bonsai.2023-02
-    # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
-    # Add tasks to the anchor that this variant references
-    # If diverging from that list, add the entire list of desired tasks here
+        # Try to use the Bonsai optimizer with sampling CE mode, or fall back to the classic planner.
+    tasks: &microbenchmarks-bonsai-tasks
+      - name: agg-query-comparison_read_commands
+      - name: aggregation_read_commands
+      - name: query_read_commands
+      - name: query_read_commands_large_dataset
 
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-heuristic-bonsai-arm.2023-01
@@ -3710,9 +3689,8 @@ buildvariants:
     expansions:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-heuristic-bonsai.2023-02
-    # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
-    # Add tasks to the anchor that this variant references
-    # If diverging from that list, add the entire list of desired tasks here
+        # Try to use the Bonsai optimizer with heuristic CE mode, or fall back to the classic planner.
+    tasks: *microbenchmarks-bonsai-tasks
 
   - <<: *linux-microbenchmarks-repl-arm
     name: linux-microbenchmarks-repl-all-feature-flags-arm.2023-01
@@ -3772,8 +3750,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-intel
     name: linux-microbenchmarks-standalone-classic-query-engine.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory (Classic Query Engine).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-classic-query-engine.2023-02
@@ -3784,8 +3761,7 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-intel
     name: linux-microbenchmarks-standalone-sbe.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory (SBE).2023-01
-    # Will make it less frequent when the current SBE perf improvement is finished (SERVER-69799).
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-sbe.2023-02
@@ -3796,24 +3772,22 @@ buildvariants:
   - <<: *linux-microbenchmarks-standalone-intel
     name: linux-microbenchmarks-standalone-sampling-bonsai.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory (Bonsai with Sampling CE).2023-01
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-sampling-bonsai.2023-02
-    # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
-    # Add tasks to the anchor that this variant references
-    # If diverging from that list, add the entire list of desired tasks here
+      # Try to use the Bonsai optimizer with sampling CE mode, or fall back to the classic planner.
+    tasks: *microbenchmarks-bonsai-tasks
 
   - <<: *linux-microbenchmarks-standalone-intel
     name: linux-microbenchmarks-standalone-heuristic-bonsai.2023-01
     display_name: MicroBenchmarks Intel Standalone inMemory (Bonsai with Heuristic CE).2023-01
-    cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+    cron: *cron_query_perf_schedule
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-heuristic-bonsai.2023-02
-    # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
-    # Add tasks to the anchor that this variant references
-    # If diverging from that list, add the entire list of desired tasks here
+      # Try to use the Bonsai optimizer with heuristic CE mode, or fall back to the classic planner.
+    tasks: *microbenchmarks-bonsai-tasks
 
   - <<: *linux-microbenchmarks-repl-intel
     name: linux-microbenchmarks-repl-all-feature-flags.2023-01

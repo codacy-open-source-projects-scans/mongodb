@@ -249,12 +249,11 @@ void validateMaxTimeMS(const boost::optional<std::int64_t>& commandMaxTimeMS,
  * Apply the read concern from the cursor to this operation.
  */
 void applyCursorReadConcern(OperationContext* opCtx, repl::ReadConcernArgs rcArgs) {
-    const auto replicationMode = repl::ReplicationCoordinator::get(opCtx)->getReplicationMode();
+    const auto isReplSet = repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
 
     // Select the appropriate read source. If we are in a transaction with read concern majority,
     // this will already be set to kNoTimestamp, so don't set it again.
-    if (replicationMode == repl::ReplicationCoordinator::modeReplSet &&
-        rcArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern &&
+    if (isReplSet && rcArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern &&
         !opCtx->inMultiDocumentTransaction()) {
         switch (rcArgs.getMajorityReadMechanism()) {
             case repl::ReadConcernArgs::MajorityReadMechanism::kMajoritySnapshot: {
@@ -273,8 +272,7 @@ void applyCursorReadConcern(OperationContext* opCtx, repl::ReadConcernArgs rcArg
         }
     }
 
-    if (replicationMode == repl::ReplicationCoordinator::modeReplSet &&
-        rcArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern &&
+    if (isReplSet && rcArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern &&
         !opCtx->inMultiDocumentTransaction()) {
         auto atClusterTime = rcArgs.getArgsAtClusterTime();
         invariant(atClusterTime && *atClusterTime != LogicalTime::kUninitialized);
@@ -584,10 +582,12 @@ public:
                 // Note that some pipelines which were optimized away may require locking multiple
                 // namespaces. As such, we pass any secondary namespaces required by the pinned
                 // cursor's executor when constructing 'readLock'.
+                const auto& secondaryNamespaces =
+                    cursorPin->getExecutor()->getSecondaryNamespaces();
                 readLock.emplace(opCtx,
                                  cursorPin->getExecutor()->nss(),
                                  AutoGetCollection::Options{}.secondaryNssOrUUIDs(
-                                     cursorPin->getExecutor()->getSecondaryNamespaces()));
+                                     secondaryNamespaces.cbegin(), secondaryNamespaces.cend()));
 
                 statsTracker.emplace(
                     opCtx,
@@ -689,9 +689,7 @@ public:
                     // Use the commit point of the last batch for exhaust cursors.
                     lastKnownCommittedOpTime = cursorPin->getLastKnownCommittedOpTime();
                 }
-                if (lastKnownCommittedOpTime) {
-                    clientsLastKnownCommittedOpTime(opCtx) = lastKnownCommittedOpTime.value();
-                }
+                clientsLastKnownCommittedOpTime(opCtx) = lastKnownCommittedOpTime;
 
                 awaitDataState(opCtx).shouldWaitForInserts = true;
             }
@@ -741,10 +739,19 @@ public:
 
                 cursorPin->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
 
-                if (opCtx->isExhaust() && !clientsLastKnownCommittedOpTime(opCtx).isNull()) {
-                    // Set the commit point of the latest batch.
+                if (opCtx->isExhaust() && clientsLastKnownCommittedOpTime(opCtx)) {
+                    // Update the cursor's lastKnownCommittedOpTime to the current
+                    // lastCommittedOpTime. The lastCommittedOpTime now may be staler than the
+                    // actual lastCommittedOpTime returned in the metadata of this latest batch (see
+                    // appendReplyMetadata).  As a result, we may sometimes return more empty
+                    // batches than we need to. But it is fine to be conservative in this.
                     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-                    cursorPin->setLastKnownCommittedOpTime(replCoord->getLastCommittedOpTime());
+                    auto myLastCommittedOpTime = replCoord->getLastCommittedOpTime();
+                    auto clientsLastKnownCommittedOpTime = cursorPin->getLastKnownCommittedOpTime();
+                    if (!clientsLastKnownCommittedOpTime.has_value() ||
+                        clientsLastKnownCommittedOpTime.value() < myLastCommittedOpTime) {
+                        cursorPin->setLastKnownCommittedOpTime(myLastCommittedOpTime);
+                    }
                 }
             } else {
                 curOp->debug().cursorExhausted = true;

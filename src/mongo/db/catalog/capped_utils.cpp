@@ -110,8 +110,7 @@ Status emptyCapped(OperationContext* opCtx, const NamespaceString& collectionNam
                                     << collectionName.toStringForErrorMsg());
     }
 
-    if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-         repl::ReplicationCoordinator::modeNone) &&
+    if ((repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) &&
         collectionName.isOplog()) {
         return Status(ErrorCodes::OplogOperationUnsupported,
                       str::stream() << "Cannot truncate a live oplog while replicating: "
@@ -273,7 +272,7 @@ void cloneCollectionAsCapped(OperationContext* opCtx,
 
             // Go to the next document
             retries = 0;
-        } catch (const WriteConflictException& e) {
+        } catch (const StorageUnavailableException& e) {
             CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
             retries++;  // logAndBackoff expects this to be 1 on first call.
             logWriteConflictAndBackoff(

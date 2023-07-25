@@ -94,7 +94,6 @@
 #include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/s/query/async_results_merger_params_gen.h"
 #include "mongo/s/query/cluster_query_result.h"
@@ -333,7 +332,7 @@ public:
         Response typedRun(OperationContext* opCtx) {
             uassert(ErrorCodes::IllegalOperation,
                     "_clusterQueryWithoutShardKey can only be run on Mongos",
-                    isMongos());
+                    serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
 
             LOGV2(6962300,
                   "Running read phase for a write without a shard key.",
@@ -350,7 +349,7 @@ public:
 
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
-            const auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().db(), writeCmdObj);
+            const auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
             auto parsedInfoFromRequest = parseWriteCommand(opCtx, opMsgRequest.body);
 
             auto allShardsContainingChunksForNs =
@@ -485,7 +484,7 @@ public:
             const auto writeCmdObj = [&] {
                 const auto explainCmdObj = request().getWriteCmd();
                 const auto opMsgRequestExplainCmd =
-                    OpMsgRequest::fromDBAndBody(ns().db(), explainCmdObj);
+                    OpMsgRequest::fromDBAndBody(ns().dbName(), explainCmdObj);
                 auto explainRequest = ExplainCommandRequest::parse(
                     IDLParserContext("_clusterQueryWithoutShardKeyExplain"),
                     opMsgRequestExplainCmd.body);
@@ -499,7 +498,8 @@ public:
 
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
-            const auto opMsgRequestWriteCmd = OpMsgRequest::fromDBAndBody(ns().db(), writeCmdObj);
+            const auto opMsgRequestWriteCmd =
+                OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
             auto parsedInfoFromRequest = parseWriteCommand(opCtx, opMsgRequestWriteCmd.body);
 
             auto allShardsContainingChunksForNs =

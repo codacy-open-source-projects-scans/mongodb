@@ -81,3 +81,24 @@ feature_flags:
         cpp_varname: feature_flags::gFeatureFlagUseUnreplicatedTruncatesForDeletions
         default: false
         shouldBeFCVGated: false
+    featureFlagTTLIndexesOnCappedCollections:
+        description: "Enables support for capped collections having a TTL index."
+        cpp_varname: feature_flags::gFeatureFlagTTLIndexesOnCappedCollections
+        default: true
+        version: 7.1
+        shouldBeFCVGated: true
+    featureFlagEndOfTransactionChangeEvent:
+        description: "Feature flag to enable endOfTransaction oplog entry and change stream event"
+        cpp_varname: feature_flags::gFeatureFlagEndOfTransactionChangeEvent
+        default: false
+        shouldBeFCVGated: true
+    featureFlagAllMongodsAreSharded:
+        description: "Feature flag to enable and autobootstrap sharding for all mongods"
+        cpp_varname: gFeatureFlagAllMongodsAreSharded
+        default: false
+        shouldBeFCVGated: true
+    featureFlagShardKeyIndexOptionalHashedSharding:
+        description: "Feature flag to make a supporting shard key index for hashed sharding optional"
+        cpp_varname: gFeatureFlagShardKeyIndexOptionalHashedSharding
+        default: false
+        shouldBeFCVGated: true

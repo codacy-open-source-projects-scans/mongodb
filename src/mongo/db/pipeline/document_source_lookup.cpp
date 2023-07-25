@@ -1058,7 +1058,8 @@ void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
     auto fromValue = (pExpCtx->ns.db() == _fromNs.db())
         ? Value(opts.serializeIdentifier(_fromNs.coll()))
         : Value(Document{
-              {"db", opts.serializeIdentifier(_fromNs.dbName().serializeWithoutTenantPrefix())},
+              {"db",
+               opts.serializeIdentifier(_fromNs.dbName().serializeWithoutTenantPrefix_UNSAFE())},
               {"coll", opts.serializeIdentifier(_fromNs.coll())}});
 
     MutableDocument output(Document{
@@ -1325,7 +1326,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
         }
     }
 
-    if (fromNs.ns().empty()) {
+    if (fromNs.isEmpty()) {
         validateLookupCollectionlessPipeline(pipeline);
         fromNs = NamespaceString::makeCollectionlessAggregateNSS(pExpCtx->ns.dbName());
     }

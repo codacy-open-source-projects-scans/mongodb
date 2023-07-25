@@ -141,6 +141,7 @@ public:
     DbCheckStartAndStopLogger(OperationContext* opCtx) : _opCtx(opCtx) {
         try {
             const auto healthLogEntry = dbCheckHealthLogEntry(boost::none /*nss*/,
+                                                              boost::none /*collectionUUID*/,
                                                               SeverityEnum::Info,
                                                               "",
                                                               OplogEntriesEnum::Start,
@@ -167,6 +168,7 @@ public:
             _logOp(_opCtx, nss, boost::none /*uuid*/, oplogEntry.toBSON());
 
             const auto healthLogEntry = dbCheckHealthLogEntry(boost::none /*nss*/,
+                                                              boost::none /*collectionUUID*/,
                                                               SeverityEnum::Info,
                                                               "",
                                                               OplogEntriesEnum::Stop,
@@ -225,9 +227,13 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
                     "dataConsistencyAndMissingIndexKeysCheck, the secondaryIndex parameter cannot "
                     "be set.",
                     !invocation.getSecondaryIndex());
+            uassert(ErrorCodes::InvalidOptions,
+                    "When validateMode is set to dataConsistency or "
+                    "dataConsistencyAndMissingIndexKeysCheck, the skipLookupForExtraKeys parameter "
+                    "cannot be set.",
+                    !invocation.getSkipLookupForExtraKeys());
         }
     }
-
     NamespaceString nss(
         NamespaceStringUtil::parseNamespaceFromRequest(dbName, invocation.getColl()));
     AutoGetCollectionForRead agc(opCtx, nss);
@@ -383,7 +389,7 @@ protected:
                 _doCollection(opCtx, coll);
             } catch (const DBException& e) {
                 auto logEntry = dbCheckErrorHealthLogEntry(
-                    coll.nss, "dbCheck failed", OplogEntriesEnum::Batch, e.toStatus());
+                    coll.nss, coll.uuid, "dbCheck failed", OplogEntriesEnum::Batch, e.toStatus());
                 HealthLogInterface::get(Client::getCurrent()->getServiceContext())->log(*logEntry);
                 return;
             }
@@ -415,6 +421,7 @@ private:
             } else {
                 const auto entry = dbCheckWarningHealthLogEntry(
                     info.nss,
+                    info.uuid,
                     "abandoning dbCheck batch because collection no longer exists",
                     OplogEntriesEnum::Batch,
                     Status(ErrorCodes::NamespaceNotFound, "collection not found"));
@@ -462,6 +469,7 @@ private:
                     retryable = true;
                     entry = dbCheckWarningHealthLogEntry(
                         info.nss,
+                        info.uuid,
                         "retrying dbCheck batch after timeout due to lock unavailability",
                         OplogEntriesEnum::Batch,
                         result.getStatus());
@@ -469,29 +477,34 @@ private:
                     retryable = true;
                     entry = dbCheckWarningHealthLogEntry(
                         info.nss,
+                        info.uuid,
                         "retrying dbCheck batch after conflict with pending catalog operation",
                         OplogEntriesEnum::Batch,
                         result.getStatus());
                 } else if (code == ErrorCodes::NamespaceNotFound) {
                     entry = dbCheckWarningHealthLogEntry(
                         info.nss,
+                        info.uuid,
                         "abandoning dbCheck batch because collection no longer exists",
                         OplogEntriesEnum::Batch,
                         result.getStatus());
                 } else if (code == ErrorCodes::IndexNotFound) {
                     entry = dbCheckWarningHealthLogEntry(
                         info.nss,
+                        info.uuid,
                         "skipping dbCheck on collection because it is missing an _id index",
                         OplogEntriesEnum::Batch,
                         result.getStatus());
                 } else if (ErrorCodes::isA<ErrorCategory::NotPrimaryError>(code)) {
                     entry = dbCheckWarningHealthLogEntry(
                         info.nss,
+                        info.uuid,
                         "stopping dbCheck because node is no longer primary",
                         OplogEntriesEnum::Batch,
                         result.getStatus());
                 } else {
                     entry = dbCheckErrorHealthLogEntry(info.nss,
+                                                       info.uuid,
                                                        "dbCheck batch failed",
                                                        OplogEntriesEnum::Batch,
                                                        result.getStatus());
@@ -507,6 +520,7 @@ private:
 
             _batchesProcessed++;
             auto entry = dbCheckBatchEntry(info.nss,
+                                           info.uuid,
                                            stats.nDocs,
                                            stats.nBytes,
                                            stats.md5,
@@ -526,6 +540,7 @@ private:
             auto status = waitForWriteConcern(opCtx, stats.time, info.writeConcern, &unused);
             if (!status.isOK()) {
                 auto entry = dbCheckWarningHealthLogEntry(info.nss,
+                                                          info.uuid,
                                                           "dbCheck failed waiting for writeConcern",
                                                           OplogEntriesEnum::Batch,
                                                           status);
@@ -550,8 +565,8 @@ private:
             reachedEnd = reachedLast || tooManyDocs || tooManyBytes;
 
             if (docsInCurrentInterval > info.maxRate && info.maxRate > 0) {
-                // If an extremely low max rate has been set (substantially smaller than the batch
-                // size) we might want to sleep for multiple seconds between batches.
+                // If an extremely low max rate has been set (substantially smaller than the
+                // batch size) we might want to sleep for multiple seconds between batches.
                 int64_t timesExceeded = docsInCurrentInterval / info.maxRate;
 
                 stdx::this_thread::sleep_for(timesExceeded * 1s - (Clock::now() - lastStart));
@@ -585,15 +600,15 @@ private:
                                      const BSONKey& first,
                                      int64_t batchDocs,
                                      int64_t batchBytes) {
-        // Each batch will read at the latest no-overlap point, which is the all_durable timestamp
-        // on primaries. We assume that the history window on secondaries is always longer than the
-        // time it takes between starting and replicating a batch on the primary. Otherwise, the
-        // readTimestamp will not be available on a secondary by the time it processes the oplog
-        // entry.
+        // Each batch will read at the latest no-overlap point, which is the all_durable
+        // timestamp on primaries. We assume that the history window on secondaries is always
+        // longer than the time it takes between starting and replicating a batch on the
+        // primary. Otherwise, the readTimestamp will not be available on a secondary by the
+        // time it processes the oplog entry.
         opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoOverlap);
 
-        // dbCheck writes to the oplog, so we need to take an IX lock. We don't need to write to the
-        // collection, however, so we only take an intent lock on it.
+        // dbCheck writes to the oplog, so we need to take an IX lock. We don't need to write to
+        // the collection, however, so we only take an intent lock on it.
         Lock::GlobalLock glob(opCtx, MODE_IX);
 
         // The CollectionCatalog to use for lock-free reads with point-in-time catalog lookups.
@@ -719,7 +734,8 @@ public:
                "              maxCountPerSecond: <max rate in docs/sec>\n"
                "              maxDocsPerBatch: <max number of docs/batch>\n"
                "              maxBytesPerBatch: <try to keep a batch within max bytes/batch>\n"
-               "              maxBatchTimeMillis: <max time processing a batch in milliseconds>\n"
+               "              maxBatchTimeMillis: <max time processing a batch in "
+               "milliseconds>\n"
                "to check a collection.\n"
                "Invoke with {dbCheck: 1} to check all collections in the database.";
     }

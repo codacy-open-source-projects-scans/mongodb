@@ -46,13 +46,10 @@ enums:
         values:
             kMovePrimary: "movePrimary"
             kDropDatabase: "dropDatabase_V2"
-            # TODO SERVER-73627: Remove once 7.0 becomes last LTS.
-            kDropDatabasePre70Compatible: "dropDatabase"
             kDropCollection: "dropCollection_V2"
-            # TODO SERVER-73627: Remove once 7.0 becomes last LTS.
-            kDropCollectionPre70Compatible: "dropCollection"
             kRenameCollection: "renameCollection_V2"
-            kCreateCollection: "createCollection_V3"
+            kCreateCollection: "createCollection_V4"
+            kCreateCollectionPre71Compatible: "createCollection_V3"
             kRefineCollectionShardKey: "refineCollectionShardKey"
             kSetAllowMigrations: "setAllowMigrations"
             kCollMod: "collMod_V3"

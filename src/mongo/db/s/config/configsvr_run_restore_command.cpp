@@ -153,8 +153,9 @@ std::set<std::string> getDatabasesToRestore(OperationContext* opCtx) {
             continue;
         }
 
-        NamespaceString nss(doc.getStringField("ns"));
-        databasesToRestore.emplace(nss.db());
+        NamespaceString nss =
+            NamespaceStringUtil::deserialize(boost::none, doc.getStringField("ns"));
+        databasesToRestore.emplace(nss.db_forSharding());
     }
 
     return databasesToRestore;
@@ -216,7 +217,7 @@ public:
              BSONObjBuilder& result) override {
         uassert(ErrorCodes::CommandFailed,
                 "This command can only be used in standalone mode",
-                !repl::ReplicationCoordinator::get(opCtx)->getSettings().usingReplSets());
+                !repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
 
         uassert(ErrorCodes::CommandFailed,
                 "This command can only be run during a restore procedure",
@@ -283,10 +284,11 @@ public:
                         // Handles the "_id.namespace" case for collection
                         // "config.system.sharding_ddl_coordinators".
                         const auto obj = doc.getField(nssFieldName->substr(0, dotPosition)).Obj();
-                        docNss = NamespaceString(
-                            obj.getStringField(nssFieldName->substr(dotPosition + 1)));
+                        docNss = NamespaceStringUtil::deserialize(
+                            boost::none, obj.getStringField(nssFieldName->substr(dotPosition + 1)));
                     } else {
-                        docNss = NamespaceString(doc.getStringField(*nssFieldName));
+                        docNss = NamespaceStringUtil::deserialize(
+                            boost::none, doc.getStringField(*nssFieldName));
                     }
                 }
 
@@ -324,7 +326,8 @@ public:
                             logAttrs(coll->ns().dbName()),
                             "uuid"_attr = coll->uuid(),
                             "_id"_attr = doc.getField("_id"));
-                NamespaceStringOrUUID nssOrUUID(coll->ns().db().toString(), coll->uuid());
+                NamespaceStringOrUUID nssOrUUID(coll->ns().db_forSharding().toString(),
+                                                coll->uuid());
                 uassertStatusOK(repl::StorageInterface::get(opCtx)->deleteById(
                     opCtx, nssOrUUID, doc.getField("_id")));
             }
@@ -356,14 +359,16 @@ public:
                 while (cursor->more()) {
                     auto doc = cursor->next();
 
-                    const NamespaceString dbNss = NamespaceString(doc.getStringField("_id"));
+                    const NamespaceString dbNss =
+                        NamespaceStringUtil::deserialize(boost::none, doc.getStringField("_id"));
                     if (!dbNss.coll().empty()) {
                         // We want to handle database only namespaces.
                         continue;
                     }
 
                     bool shouldRestore =
-                        databasesRestored.find(dbNss.db().toString()) != databasesRestored.end();
+                        databasesRestored.find(dbNss.db_forSharding().toString()) !=
+                        databasesRestored.end();
 
                     LOGV2_DEBUG(6261305,
                                 1,
@@ -385,7 +390,8 @@ public:
                                 logAttrs(coll->ns().dbName()),
                                 "uuid"_attr = coll->uuid(),
                                 "_id"_attr = doc.getField("_id"));
-                    NamespaceStringOrUUID nssOrUUID(coll->ns().db().toString(), coll->uuid());
+                    NamespaceStringOrUUID nssOrUUID(coll->ns().db_forSharding().toString(),
+                                                    coll->uuid());
                     uassertStatusOK(repl::StorageInterface::get(opCtx)->deleteById(
                         opCtx, nssOrUUID, doc.getField("_id")));
                 }

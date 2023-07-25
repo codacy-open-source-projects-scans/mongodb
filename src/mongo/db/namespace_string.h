@@ -274,7 +274,7 @@ public:
      * These functions construct a NamespaceString without checking for presence of TenantId. These
      * must only be used by auth systems which are not yet tenant aware.
      *
-     * TODO SERVER-74896 Remove this function. Any remaining call sites must be changed to use a
+     * TODO SERVER-74896 Remove these functions. Any remaining call sites must be changed to use a
      * function on NamespaceStringUtil.
      */
     static NamespaceString createNamespaceStringForAuth(const boost::optional<TenantId>& tenantId,
@@ -286,6 +286,11 @@ public:
     static NamespaceString createNamespaceStringForAuth(const boost::optional<TenantId>& tenantId,
                                                         StringData ns) {
         return NamespaceString(tenantId, ns);
+    }
+
+    static NamespaceString createNamespaceStringForAuth(const DatabaseName& dbName,
+                                                        StringData coll) {
+        return NamespaceString(dbName, coll);
     }
 
     /**
@@ -415,6 +420,13 @@ public:
     }
 
     /**
+     * This function must only be used in sharding code (src/mongo/s and src/mongo/db/s).
+     */
+    StringData db_forSharding() const {
+        return db();
+    }
+
+    /**
      * This function must only be used in unit tests.
      */
     StringData db_forTest() const {
@@ -438,11 +450,6 @@ public:
         return StringData{_data.data() + offset, _data.size() - offset};
     }
 
-    StringData ns() const {
-        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
-        return StringData{_data.data() + offset, _data.size() - offset};
-    }
-
     StringData ns_forTest() const {
         return ns();
     }
@@ -457,8 +464,13 @@ public:
     }
 
     /**
-     * Returns a namespace string without tenant id.  Only to be used when a tenant id cannot be
-     * tolerated in the serialized output, and should otherwise be avoided whenever possible.
+     * Returns a namespace string without tenant id.
+     * Please use the NamespaceStringUtil::serialize class instead to apply the proper serialization
+     * behavior.
+     * Only to be used when a tenant id cannot be tolerated in the serialized output, and should
+     * otherwise be avoided whenever possible.
+     *
+     * MUST only be used for very specific cases.
      */
     std::string serializeWithoutTenantPrefix_UNSAFE() const {
         return toString();
@@ -500,8 +512,12 @@ public:
         return _data.size() - offset;
     }
 
+    size_t dbSize() const {
+        return _dbNameOffsetEnd();
+    }
+
     bool isEmpty() const {
-        return _data.size() == kDataOffset;
+        return size() == 0;
     }
 
     //
@@ -839,6 +855,7 @@ public:
 
 private:
     friend NamespaceStringUtil;
+    friend class NamespaceStringTest;
 
     /**
      * In order to construct NamespaceString objects, use NamespaceStringUtil. The functions
@@ -892,6 +909,15 @@ private:
         }
 
         return ns().toString();
+    }
+
+    /**
+     * Please refer to NamespaceStringUtil::serialize method or use ns_forTest to satisfy any unit
+     * test needing access to ns().
+     */
+    StringData ns() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return StringData{_data.data() + offset, _data.size() - offset};
     }
 
     static constexpr size_t kDataOffset = sizeof(uint8_t);
@@ -1011,15 +1037,6 @@ public:
     const UUID& uuid() const {
         invariant(stdx::holds_alternative<UUIDWithDbName>(_nssOrUUID));
         return get<1>(get<UUIDWithDbName>(_nssOrUUID));
-    }
-
-    /**
-     * Returns database name as a string.
-     *
-     * TODO SERVER-66887 remove this function for better clarity once call sites have been changed
-     */
-    std::string dbname() const {
-        return dbName().db().toString();
     }
 
     /**

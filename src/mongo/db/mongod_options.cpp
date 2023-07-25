@@ -68,6 +68,7 @@
 #include "mongo/db/mongod_options_storage_gen.h"
 #include "mongo/db/repl/repl_set_config_params_gen.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_options_base.h"
 #include "mongo/db/server_options_nongeneral_gen.h"
@@ -79,6 +80,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_proxy.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/str.h"
@@ -163,6 +165,9 @@ StatusWith<repl::ReplSettings> populateReplSettings(const moe::Environment& para
         // "replSetName" is previously removed if "replSet" and "replSetName" are both found to be
         // set by the user. Therefore, we only need to check for it if "replSet" in not found.
         replSettings.setReplSetString(params["replication.replSetName"].as<std::string>().c_str());
+    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+        replSettings.setShouldAutoInitiate();
+        replSettings.setReplSetString(repl::ReplSettings::kDefaultSetName);
     }
 
     if (params.count("replication.oplogSizeMB")) {
@@ -238,6 +243,25 @@ Status validateMongodOptions(const moe::Environment& params) {
     }
 #endif
 
+    bool setConfigRole = params.count("configsvr");
+    bool setShardRole = params.count("shardsvr");
+    if (params.count("sharding.clusterRole")) {
+        auto clusterRole = params["sharding.clusterRole"].as<std::string>();
+        setConfigRole = setConfigRole || clusterRole == "configsvr";
+        setShardRole = setShardRole || clusterRole == "shardsvr";
+    }
+
+    bool setRouterRole = params.count("router");
+    if (params.count("sharding.routerEnabled")) {
+        setRouterRole = setRouterRole || params["sharding.routerEnabled"].as<bool>();
+    }
+
+    // TODO (SERVER-79008): Make `--configdb` mandatory when the embedded router is enabled.
+    if (setRouterRole && !setConfigRole && !setShardRole) {
+        return Status(ErrorCodes::BadValue,
+                      "The embedded router requires the node to act as a shard or config server");
+    }
+
     if (params.count("storage.queryableBackupMode")) {
         // Command line options that are disallowed when --queryableBackupMode is specified.
         for (const auto& disallowedOption :
@@ -249,13 +273,7 @@ Status validateMongodOptions(const moe::Environment& params) {
             }
         }
 
-        bool isClusterRoleShard = params.count("shardsvr");
-        if (params.count("sharding.clusterRole")) {
-            auto clusterRole = params["sharding.clusterRole"].as<std::string>();
-            isClusterRoleShard = isClusterRoleShard || (clusterRole == "shardsvr");
-        }
-
-        if (isClusterRoleShard && !params.count("sharding._overrideShardIdentity")) {
+        if (setShardRole && !params.count("sharding._overrideShardIdentity")) {
             return Status(
                 ErrorCodes::BadValue,
                 "shardsvr cluster role with queryableBackupMode requires _overrideShardIdentity");
@@ -266,7 +284,6 @@ Status validateMongodOptions(const moe::Environment& params) {
 }
 
 Status canonicalizeMongodOptions(moe::Environment* params) {
-
     Status ret = canonicalizeServerOptions(params);
     if (!ret.isOK()) {
         return ret;
@@ -318,6 +335,20 @@ Status canonicalizeMongodOptions(moe::Environment* params) {
             return ret;
         }
         ret = params->remove("shardsvr");
+        if (!ret.isOK()) {
+            return ret;
+        }
+    }
+
+    // If the "--router" option is passed from the command line, override "sharding.routerEnabled"
+    // (config file option) as it will be used later.
+    if (params->count("router")) {
+        Status ret =
+            params->set("sharding.routerEnabled", moe::Value((*params)["router"].as<bool>()));
+        if (!ret.isOK()) {
+            return ret;
+        }
+        ret = params->remove("router");
         if (!ret.isOK()) {
             return ret;
         }
@@ -539,7 +570,7 @@ Status storeMongodOptions(const moe::Environment& params) {
         return replSettingsWithStatus.getStatus();
     const repl::ReplSettings& replSettings(replSettingsWithStatus.getValue());
 
-    if (replSettings.usingReplSets()) {
+    if (replSettings.isReplSet()) {
         if ((params.count("security.authorization") &&
              params["security.authorization"].as<std::string>() == "enabled") &&
             !serverGlobalParams.startupClusterAuthMode.x509Only() &&
@@ -622,7 +653,7 @@ Status storeMongodOptions(const moe::Environment& params) {
         // Force to set up the node as a replica set, unless we're a shard and we're using queryable
         // backup mode.
         if ((clusterRoleParam == "configsvr" || !params.count("storage.queryableBackupMode")) &&
-            !replSettings.usingReplSets()) {
+            !replSettings.isReplSet()) {
             return Status(ErrorCodes::BadValue,
                           str::stream() << "Cannot start a " << clusterRoleParam
                                         << " as a standalone server. Please use the option "
@@ -641,6 +672,11 @@ Status storeMongodOptions(const moe::Environment& params) {
             }
         } else if (clusterRoleParam == "shardsvr") {
             serverGlobalParams.clusterRole = ClusterRole::ShardServer;
+        }
+
+        if (feature_flags::gCohostedRouter.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+            params.count("sharding.routerEnabled") && params["sharding.routerEnabled"].as<bool>()) {
+            serverGlobalParams.clusterRole += ClusterRole::RouterServer;
         }
     }
 

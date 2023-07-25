@@ -162,8 +162,7 @@ public:
                           "with --configsvr");
             }
 
-            if ((repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-                 repl::ReplicationCoordinator::modeNone) &&
+            if ((repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) &&
                 (dbName == DatabaseName::kLocal)) {
                 uasserted(ErrorCodes::IllegalOperation,
                           str::stream() << "Cannot drop '" << dbName.toStringForErrorMsg()
@@ -223,7 +222,7 @@ public:
             if (request().getNamespace().isOplog()) {
                 uassert(5255000,
                         "can't drop live oplog while replicating",
-                        !repl::ReplicationCoordinator::get(opCtx)->isReplEnabled());
+                        !repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
                 auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
                 invariant(storageEngine);
                 // We use the method supportsRecoveryTimestamp() to detect whether we are using
@@ -675,7 +674,7 @@ public:
 
             // We need to copy the serialization context from the request to the reply object
             Reply reply(SerializationContext::stateCommandReply(cmd.getSerializationContext()));
-            reply.setDB(dbname.db());
+            reply.setDB(DatabaseNameUtil::serialize(dbname, reply.getSerializationContext()));
 
             if (!db) {
                 // This preserves old behavior where we used to create an empty database even when

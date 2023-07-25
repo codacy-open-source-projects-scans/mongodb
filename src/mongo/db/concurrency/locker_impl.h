@@ -236,6 +236,8 @@ public:
 
     FlowControlTicketholder::CurOp getFlowControlStats() const override;
 
+    std::vector<LogDegugInfo> getLockInfoFromResourceHolders(ResourceId resId);
+
     //
     // Below functions are for testing only.
     //

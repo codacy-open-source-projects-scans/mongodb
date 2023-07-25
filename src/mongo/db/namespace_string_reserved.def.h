@@ -207,12 +207,6 @@ NSS_CONSTANT(kShardCollectionCatalogNamespace, DatabaseName::kConfig, "shard.col
 // Namespace used for storing NamespacePlacementType docs on the CSRS.
 NSS_CONSTANT(kConfigsvrPlacementHistoryNamespace, DatabaseName::kConfig, "placementHistory"_sd)
 
-// TODO SERVER-68551: remove once 7.0 becomes last-lts
-NSS_CONSTANT(kLockpingsNamespace, DatabaseName::kConfig, "lockpings"_sd)
-
-// TODO SERVER-68551: remove once 7.0 becomes last-lts
-NSS_CONSTANT(kDistLocksNamepsace, DatabaseName::kConfig, "locks"_sd)
-
 // Namespace used to store the state document of 'SetChangeStreamStateCoordinator'.
 NSS_CONSTANT(kSetChangeStreamStateCoordinatorNamespace,
              DatabaseName::kConfig,
@@ -279,3 +273,21 @@ NSS_CONSTANT(kConfigMongosNamespace, DatabaseName::kConfig, "mongos"_sd)
 NSS_CONSTANT(kDefaultOplogTruncateAfterPointNamespace,
              DatabaseName::kLocal,
              "replset.oplogTruncateAfterPoint"_sd)
+
+// Namespace used for local system rollback id.
+NSS_CONSTANT(kDefaultRollbackIdNamespace, DatabaseName::kLocal, "system.rollback.id"_sd)
+
+// Namespace used for the local oplog dollar main namespace.
+NSS_CONSTANT(kLocalOplogDollarMain, DatabaseName::kLocal, "oplog.$main"_sd)
+
+// Namespace used for local replset initial sync id.
+NSS_CONSTANT(kDefaultInitialSyncIdNamespace, DatabaseName::kLocal, "replset.initialSyncId"_sd)
+
+// Namespace used for local temporary oplog buffer.
+NSS_CONSTANT(kDefaultOplogCollectionNamespace, DatabaseName::kLocal, "temp_oplog_buffer"_sd)
+
+// Namespace used for local minimum valid namespace.
+NSS_CONSTANT(kDefaultMinValidNamespace, DatabaseName::kLocal, "replset.minvalid"_sd)
+
+// Namespace used by the test command to pin the oldest timestamp.
+NSS_CONSTANT(kDurableHistoryTestNamespace, DatabaseName::kMdbTesting, "pinned_timestamp"_sd)

@@ -332,6 +332,8 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
 
                 triggerCleanup(opCtx, status);
             }
+
+            return status;
         });
 }
 
@@ -534,7 +536,7 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(
         std::vector<NamespaceString> colls;
         for (const auto& bsonElem : cloneResponse.getValue().response["clonedColls"].Obj()) {
             if (bsonElem.type() == String) {
-                colls.push_back(NamespaceString(bsonElem.String()));
+                colls.push_back(NamespaceStringUtil::deserialize(boost::none, bsonElem.String()));
             }
         }
 

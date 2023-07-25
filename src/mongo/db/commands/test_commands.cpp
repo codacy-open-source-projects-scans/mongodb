@@ -84,7 +84,6 @@
 namespace mongo {
 namespace {
 
-const NamespaceString kDurableHistoryTestNss("mdb_testing.pinned_timestamp");
 const std::string kTestingDurableHistoryPinName = "_testing";
 
 using repl::UnreplicatedWritesBlock;
@@ -185,7 +184,8 @@ public:
         const NamespaceString fullNs = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
         if (!fullNs.isValid()) {
             uasserted(ErrorCodes::InvalidNamespace,
-                      str::stream() << "collection name " << fullNs.ns() << " is not valid");
+                      str::stream()
+                          << "collection name " << fullNs.toStringForErrorMsg() << " is not valid");
         }
 
         int n = cmdObj.getIntField("n");
@@ -199,7 +199,8 @@ public:
         AutoGetCollection collection(opCtx, fullNs, MODE_X);
         if (!collection) {
             uasserted(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "collection " << fullNs.ns() << " does not exist");
+                      str::stream()
+                          << "collection " << fullNs.toStringForErrorMsg() << " does not exist");
         }
 
         if (!collection->isCapped()) {
@@ -306,25 +307,30 @@ public:
         const Timestamp requestedPinTs = cmdObj.firstElement().timestamp();
         const bool round = cmdObj["round"].booleanSafe();
 
-        AutoGetDb autoDb(opCtx, kDurableHistoryTestNss.dbName(), MODE_IX);
-        Lock::CollectionLock collLock(opCtx, kDurableHistoryTestNss, MODE_IX);
+        AutoGetDb autoDb(opCtx, NamespaceString::kDurableHistoryTestNamespace.dbName(), MODE_IX);
+        Lock::CollectionLock collLock(
+            opCtx, NamespaceString::kDurableHistoryTestNamespace, MODE_IX);
         if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
                 opCtx,
-                kDurableHistoryTestNss)) {  // someone else may have beat us to it.
-            uassertStatusOK(userAllowedCreateNS(opCtx, kDurableHistoryTestNss));
+                NamespaceString::kDurableHistoryTestNamespace)) {  // someone else may have beat us
+                                                                   // to it.
+            uassertStatusOK(
+                userAllowedCreateNS(opCtx, NamespaceString::kDurableHistoryTestNamespace));
             WriteUnitOfWork wuow(opCtx);
             CollectionOptions defaultCollectionOptions;
             auto db = autoDb.ensureDbExists(opCtx);
-            uassertStatusOK(
-                db->userCreateNS(opCtx, kDurableHistoryTestNss, defaultCollectionOptions));
+            uassertStatusOK(db->userCreateNS(
+                opCtx, NamespaceString::kDurableHistoryTestNamespace, defaultCollectionOptions));
             wuow.commit();
         }
 
-        const auto collection =
-            acquireCollection(opCtx,
-                              CollectionAcquisitionRequest::fromOpCtx(
-                                  opCtx, kDurableHistoryTestNss, AcquisitionPrerequisites::kWrite),
-                              MODE_IX);
+        const auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx,
+                static_cast<const NamespaceString&>(NamespaceString::kDurableHistoryTestNamespace),
+                AcquisitionPrerequisites::kWrite),
+            MODE_IX);
         WriteUnitOfWork wuow(opCtx);
 
         // Note, this write will replicate to secondaries, but a secondary will not in-turn pin
@@ -354,7 +360,7 @@ std::string TestingDurableHistoryPin::getName() {
 }
 
 boost::optional<Timestamp> TestingDurableHistoryPin::calculatePin(OperationContext* opCtx) {
-    AutoGetCollectionForRead autoColl(opCtx, kDurableHistoryTestNss);
+    AutoGetCollectionForRead autoColl(opCtx, NamespaceString::kDurableHistoryTestNamespace);
     if (!autoColl) {
         return boost::none;
     }

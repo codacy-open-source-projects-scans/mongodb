@@ -91,11 +91,13 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/shard_id.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/framework.h"
@@ -455,10 +457,6 @@ public:
         }
     }
 };
-
-bool getCSRewriteFeatureFlagValue() {
-    return feature_flags::gFeatureFlagChangeStreamsRewrite.isEnabledAndIgnoreFCVUnsafe();
-}
 
 TEST_F(ChangeStreamStageTest, ShouldRejectNonObjectArg) {
     auto expCtx = getExpCtx();
@@ -2420,9 +2418,10 @@ TEST_F(ChangeStreamStageTest, TransformApplyOps) {
 }
 
 TEST_F(ChangeStreamStageTest, TransformApplyOpsWithCreateOperation) {
+    // Enable the endOfTransaction feature flag so this test produces an EOT change event.
+    RAIIServerParameterControllerForTest controller("featureFlagEndOfTransactionChangeEvent", true);
     // Doesn't use the checkTransformation() pattern that other tests use since we expect multiple
     // documents to be returned from one applyOps.
-
     Document idIndexDef = Document{{"v", 2}, {"key", D{{"_id", 1}}}};
     Document applyOpsDoc{
         {"applyOps",
@@ -2447,8 +2446,10 @@ TEST_F(ChangeStreamStageTest, TransformApplyOpsWithCreateOperation) {
     LogicalSessionFromClient lsid = testLsid();
     vector<Document> results = getApplyOpsResults(applyOpsDoc, lsid, kShowExpandedEventsSpec);
 
+    size_t expectedSize = 3;
+
     // The create operation should be skipped.
-    ASSERT_EQ(results.size(), 2u);
+    ASSERT_EQ(results.size(), expectedSize);
 
     // Check that the first document is correct.
     auto nextDoc = results[0];
@@ -2458,6 +2459,7 @@ TEST_F(ChangeStreamStageTest, TransformApplyOpsWithCreateOperation) {
     ASSERT_VALUE_EQ(nextDoc[DSChangeStream::kOperationDescriptionField],
                     Value(Document{{"idIndex", idIndexDef}}));
     ASSERT_EQ(nextDoc["lsid"].getDocument().toBson().woCompare(lsid.toBSON()), 0);
+    ASSERT_EQ(ResumeToken::parse(nextDoc["_id"].getDocument()).getData().txnOpIndex, 0);
 
     // Check the second document.
     nextDoc = results[1];
@@ -2467,8 +2469,20 @@ TEST_F(ChangeStreamStageTest, TransformApplyOpsWithCreateOperation) {
     ASSERT_EQ(nextDoc[DSChangeStream::kFullDocumentField]["_id"].getInt(), 123);
     ASSERT_EQ(nextDoc[DSChangeStream::kFullDocumentField]["x"].getString(), "hallo");
     ASSERT_EQ(nextDoc["lsid"].getDocument().toBson().woCompare(lsid.toBSON()), 0);
+    ASSERT_EQ(ResumeToken::parse(nextDoc["_id"].getDocument()).getData().txnOpIndex, 1);
 
-    // The third document is skipped.
+    // The third document in applyOps is skipped, so the third document of the result is
+    // endOfTransaction.
+    nextDoc = results[2];
+    ASSERT_EQ(nextDoc[DSChangeStream::kOperationTypeField].getString(),
+              DSChangeStream::kEndOfTransactionOpType);
+    ASSERT_EQ(nextDoc["txnNumber"].getLong(), 0LL);
+    ASSERT_EQ(nextDoc["lsid"].getDocument().toBson().woCompare(lsid.toBSON()), 0);
+    auto operationDescription = nextDoc[DSChangeStream::kOperationDescriptionField];
+    ASSERT_EQ(operationDescription["txnNumber"].getLong(), 0LL);
+    ASSERT_EQ(operationDescription["lsid"].getDocument().toBson().woCompare(lsid.toBSON()), 0);
+    // Third document (with txnOpIndex == 2) is skipped, so EOT should have txnOpIndex == 3.
+    ASSERT_EQ(ResumeToken::parse(nextDoc["_id"].getDocument()).getData().txnOpIndex, 3);
 }
 
 TEST_F(ChangeStreamStageTest, ClusterTimeMatchesOplogEntry) {
@@ -2684,7 +2698,7 @@ TEST_F(ChangeStreamStageTest, DSCSUnwindTransactionStageSerialization) {
 
     auto filter = BSON("ns" << BSON("$regex"
                                     << "^db\\.coll$"));
-    DocumentSourceChangeStreamUnwindTransactionSpec spec(filter);
+    DocumentSourceChangeStreamUnwindTransactionSpec spec{std::move(filter)};
     auto stageSpecAsBSON = BSON("" << spec.toBSON());
 
     validateDocumentSourceStageSerialization<DocumentSourceChangeStreamUnwindTransaction>(

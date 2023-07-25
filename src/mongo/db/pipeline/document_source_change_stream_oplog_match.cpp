@@ -167,10 +167,6 @@ Pipeline::SourceContainer::iterator DocumentSourceChangeStreamOplogMatch::doOpti
     tassert(5687203, "Iterator mismatch during optimization", *itr == this);
 
     auto nextChangeStreamStageItr = std::next(itr);
-    // (Ignore FCV check): This feature flag doesn't have upgrade/downgrade concern.
-    if (!feature_flags::gFeatureFlagChangeStreamsRewrite.isEnabledAndIgnoreFCVUnsafe()) {
-        return nextChangeStreamStageItr;
-    }
 
     // It is not safe to combine any parts of a user $match with this stage when the $user match has
     // a non-simple collation, because this stage's MatchExpression always executes wtih the simple
@@ -239,7 +235,7 @@ Value DocumentSourceChangeStreamOplogMatch::serialize(SerializationOptions opts)
             sub.append(DocumentSourceChangeStreamOplogMatchSpec::kFilterFieldName,
                        getMatchExpression()->serialize(opts));
         } else {
-            DocumentSourceChangeStreamOplogMatchSpec(_predicate).serialize(&sub);
+            DocumentSourceChangeStreamOplogMatchSpec(getPredicate()).serialize(&sub);
         }
         sub.done();
     }

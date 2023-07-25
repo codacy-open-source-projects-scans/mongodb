@@ -104,13 +104,20 @@ public:
                     "Can't rename a collection to itself",
                     fromNss != toNss);
 
-            if (fromNss.isTimeseriesBucketsCollection() &&
-                !AuthorizationSession::get(opCtx->getClient())
-                     ->isAuthorizedForActionsOnResource(
-                         ResourcePattern::forClusterResource(fromNss.tenantId()),
-                         ActionType::setUserWriteBlockMode)) {
-                uasserted(ErrorCodes::IllegalOperation,
-                          "Renaming a timeseries collection is not allowed");
+            if (fromNss.isTimeseriesBucketsCollection()) {
+                uassert(ErrorCodes::IllegalOperation,
+                        "Renaming system.buckets collections is not allowed",
+                        AuthorizationSession::get(opCtx->getClient())
+                            ->isAuthorizedForActionsOnResource(
+                                ResourcePattern::forClusterResource(fromNss.tenantId()),
+                                ActionType::setUserWriteBlockMode));
+
+                uassert(ErrorCodes::IllegalOperation,
+                        str::stream() << "Cannot rename time-series buckets collection {"
+                                      << fromNss.toStringForErrorMsg()
+                                      << "} to a non-time-series buckets namespace {"
+                                      << toNss.toStringForErrorMsg() << "}",
+                        toNss.isTimeseriesBucketsCollection());
             }
 
             RenameCollectionRequest renameCollReq(request().getTo());
@@ -136,7 +143,8 @@ public:
                         ActionType::setUserWriteBlockMode));
 
             auto catalogCache = Grid::get(opCtx)->catalogCache();
-            auto swDbInfo = Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.db());
+            auto swDbInfo =
+                Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, fromNss.db_forSharding());
             if (swDbInfo == ErrorCodes::NamespaceNotFound) {
                 uassert(CollectionUUIDMismatchInfo(fromNss.dbName(),
                                                    *request().getCollectionUUID(),
@@ -153,7 +161,7 @@ public:
             auto cmdResponse = uassertStatusOK(shard->runCommandWithFixedRetryAttempts(
                 opCtx,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                fromNss.db().toString(),
+                fromNss.db_forSharding().toString(),
                 CommandHelpers::appendMajorityWriteConcern(
                     appendDbVersionIfPresent(renameCollRequest.toBSON({}), dbInfo->getVersion())),
                 Shard::RetryPolicy::kNoRetry));

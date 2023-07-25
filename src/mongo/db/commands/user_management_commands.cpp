@@ -777,21 +777,19 @@ public:
                    StringData forCommand,
                    const boost::optional<TenantId>& tenant)
         :  // Don't transactionalize on standalone.
-          _isReplSet{repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-                     repl::ReplicationCoordinator::modeReplSet},
+          _isReplSet{repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()},
           // Subclient used by transaction operations.
           _client{opCtx->getServiceContext()->makeClient(forCommand.toString())},
           _dbName{DatabaseNameUtil::deserialize(tenant, kAdminDB)},
           _sessionInfo{LogicalSessionFromClient(UUID::gen())} {
+        // Note: We allow the client to be killable. We only make an operation context on this
+        // client during runCommand, and that operation context is short-lived. If we get
+        // interrupted during that operation context's life, we will fail the transaction.
+
         _sessionInfo.setTxnNumber(0);
         _sessionInfo.setStartTransaction(true);
         _sessionInfo.setAutocommit(false);
 
-        // TODO(SERVER-74660): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*_client.get());
-            _client.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
 
         auto as = AuthorizationSession::get(_client.get());
         if (as) {
@@ -854,7 +852,7 @@ public:
 
 private:
     static bool validNamespace(const NamespaceString& nss) {
-        return (nss.dbName().db() == kAdminDB);
+        return (nss.isAdminDB());
     }
 
     StatusWith<std::uint32_t> doCrudOp(BSONObj op) try {
@@ -1340,10 +1338,11 @@ DropAllUsersFromDatabaseReply CmdUMCTyped<DropAllUsersFromDatabaseCommand>::Invo
 
     audit::logDropAllUsersFromDatabase(client, dbname);
 
-    auto swNumRemoved = removePrivilegeDocuments(
-        opCtx,
-        BSON(AuthorizationManager::USER_DB_FIELD_NAME << dbname.serializeWithoutTenantPrefix()),
-        dbname.tenantId());
+    auto swNumRemoved =
+        removePrivilegeDocuments(opCtx,
+                                 BSON(AuthorizationManager::USER_DB_FIELD_NAME
+                                      << dbname.serializeWithoutTenantPrefix_UNSAFE()),
+                                 dbname.tenantId());
 
     // Must invalidate even on bad status - what if the write succeeded but the GLE failed?
     authzManager->invalidateUsersFromDB(opCtx, dbname);
@@ -1508,8 +1507,9 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
         if (arg.isAllForAllDBs()) {
             // Leave the pipeline unconstrained, we want to return every user.
         } else if (arg.isAllOnCurrentDB()) {
-            pipeline.push_back(BSON("$match" << BSON(AuthorizationManager::USER_DB_FIELD_NAME
-                                                     << dbname.serializeWithoutTenantPrefix())));
+            pipeline.push_back(
+                BSON("$match" << BSON(AuthorizationManager::USER_DB_FIELD_NAME
+                                      << dbname.serializeWithoutTenantPrefix_UNSAFE())));
         } else {
             invariant(arg.isExact());
             BSONArrayBuilder usersMatchArray;
@@ -2069,8 +2069,8 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
 
     DropAllRolesFromDatabaseReply reply;
     const auto dropRoleOps = [&](UMCTransaction& txn) -> Status {
-        auto roleMatch =
-            BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << dbname.serializeWithoutTenantPrefix());
+        auto roleMatch = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME
+                              << dbname.serializeWithoutTenantPrefix_UNSAFE());
         auto rolesMatch = BSON("roles" << roleMatch);
 
         // Remove these roles from all users
@@ -2085,7 +2085,7 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
 
         // Remove these roles from all other roles
         swCount = txn.update(rolesNSS(dbname.tenantId()),
-                             BSON("roles.db" << dbname.serializeWithoutTenantPrefix()),
+                             BSON("roles.db" << dbname.serializeWithoutTenantPrefix_UNSAFE()),
                              BSON("$pull" << rolesMatch));
         if (!swCount.isOK()) {
             return useDefaultCode(swCount.getStatus(), ErrorCodes::RoleModificationFailed)
@@ -2139,8 +2139,7 @@ DropAllRolesFromDatabaseReply CmdUMCTyped<DropAllRolesFromDatabaseCommand>::Invo
  *   (BooleanFalse) Do not show information about privileges
  *   (BooleanTrue) Attach all privileges inherited from roles to role descriptions
  *   "asUserFragment" Render results as a partial user document as-if a user existed which possessed
- *                    these roles. This format may change over time with changes to the auth
- *                    schema.
+ *                    these roles. This format may change over time with changes to the auth schema.
  */
 CmdUMCTyped<RolesInfoCommand, UMCInfoParams> cmdRolesInfo;
 template <>

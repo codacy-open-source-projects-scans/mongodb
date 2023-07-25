@@ -1075,13 +1075,18 @@ def check_param_or_type_validator(ctxt: IDLCompatibilityContext, old_field: synt
 
     if new_field.validator:
         if old_field.validator:
-            allow_name: str = cmd_name + "-param-" + old_field.name
-            if new_field.validator != old_field.validator and allow_name not in ignore_validator_check_list:
+            old_field_name: str = cmd_name + "-param-" + old_field.name
+            if new_field.validator != old_field.validator and old_field_name not in ignore_validator_check_list:
                 ctxt.add_command_or_param_type_validators_not_equal_error(
                     cmd_name, new_field.name, new_idl_file_path, type_name, is_command_parameter)
         else:
-            ctxt.add_command_or_param_type_contains_validator_error(
-                cmd_name, new_field.name, new_idl_file_path, type_name, is_command_parameter)
+            new_field_name: str = cmd_name + "-param-" + new_field.name
+            # In SERVER-77382 we fixed the error handling of creating time-series collections by
+            # adding a new validator to two 'stable' fields, but it didn't break any stable API
+            # guarantees.
+            if new_field_name not in ["create-param-timeField", "create-param-metaField"]:
+                ctxt.add_command_or_param_type_contains_validator_error(
+                    cmd_name, new_field.name, new_idl_file_path, type_name, is_command_parameter)
 
 
 def get_all_struct_fields(struct: syntax.Struct, idl_file: syntax.IDLParsedSpec,
@@ -1139,9 +1144,6 @@ def check_command_params_or_type_struct_fields(
     # We allow collMod isTimeseriesNamespace parameter to be removed because it's implicitly
     # added from mongos and not documented in the API.
     allow_list += ["collMod-param-isTimeseriesNamespace"]
-    # We allow collMod "recordPreImages" parameter to be removed because it was incorrectly marked as stable
-    # in 5.0.x versions.
-    allow_list += ["collMod-param-recordPreImages"]
 
     for old_field in old_struct_fields or []:
         new_field_exists = False

@@ -449,7 +449,7 @@ bool isIndexBuildResumable(OperationContext* opCtx,
     // This check may be redundant with the 'applicationMode' check and the replication requirement
     // for two phase index builds.
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeNone) {
+    if (!replCoord->getSettings().isReplSet()) {
         return false;
     }
 
@@ -2326,7 +2326,7 @@ IndexBuildsCoordinator::_filterSpecsAndRegisterBuild(OperationContext* opCtx,
     {
         // Disallow index builds on drop-pending namespaces (system.drop.*) if we are primary.
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-        if (replCoord->getSettings().usingReplSets() &&
+        if (replCoord->getSettings().isReplSet() &&
             replCoord->canAcceptWritesFor(opCtx, nssOrUuid)) {
             uassert(ErrorCodes::NamespaceNotFound,
                     str::stream() << "drop-pending collection: " << nss.toStringForErrorMsg(),
@@ -2435,7 +2435,7 @@ IndexBuildsCoordinator::PostSetupAction IndexBuildsCoordinator::_setUpIndexBuild
         // Two-phase index builds write a different oplog entry than the default behavior which
         // writes a no-op just to generate an optime.
         onInitFn = [&](std::vector<BSONObj>& specs) {
-            if (!(replCoord->getSettings().usingReplSets() &&
+            if (!(replCoord->getSettings().isReplSet() &&
                   replCoord->canAcceptWritesFor(opCtx, nss))) {
                 // Not primary.
                 return Status::OK();
@@ -3594,14 +3594,37 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
         auto specsToBuild = indexCatalog->removeExistingIndexes(
             opCtx, collection, indexSpecs, /*removeIndexBuildsToo=*/true);
         if (indexSpecs.size() != specsToBuild.size()) {
-            LOGV2_WARNING(7176900,
-                          "Secondary node already has a subset of indexes built and will not "
-                          "participate in voting towards the commit quorum. Use the "
-                          "'setIndexCommitQuorum' command to adjust the commit quorum accordingly",
-                          logAttrs(nss),
-                          logAttrs(collection->uuid()),
-                          "requestedSpecs"_attr = indexSpecs,
-                          "specsToBuild"_attr = specsToBuild);
+            if (specsToBuild.size() == 0) {
+                LOGV2_WARNING(
+                    7731100,
+                    "Secondary node already has all indexes built, which can happen as a result of "
+                    "a previous, incomplete rolling index build. The node will not proceed with "
+                    "the index build, and consequently will not participate in voting towards the "
+                    "commit quorum. Use the 'setIndexCommitQuorum' command to adjust the commit "
+                    "quorum accordingly. Caveat: to ensure the index build completes, this node "
+                    "should not become primary for the duration of the build; step it down if it "
+                    "happens",
+                    logAttrs(nss),
+                    logAttrs(collection->uuid()),
+                    "requestedSpecs"_attr = indexSpecs,
+                    "specsToBuild"_attr = specsToBuild);
+            } else {
+                LOGV2_WARNING(
+                    7731101,
+                    "Secondary node already has a subset of indexes built, which can happen as a "
+                    "result of a previous, incomplete rolling index build. The node will not "
+                    "proceed with the index build, and consequently will not participate in voting "
+                    "towards the commit quorum. Use the 'setIndexCommitQuorum' command to adjust "
+                    "the commit quorum accordingly. Caveat: to ensure the index build completes, "
+                    "this node should not become primary for the duration of the build; step it "
+                    "down if it happens. Additionally, this node will be missing a subset of the "
+                    "indices present in the rest of the replica set. To remediate this, manually "
+                    "build the missing indexes on this node as a standalone.",
+                    logAttrs(nss),
+                    logAttrs(collection->uuid()),
+                    "requestedSpecs"_attr = indexSpecs,
+                    "specsToBuild"_attr = specsToBuild);
+            }
         }
         return indexSpecs;
     }

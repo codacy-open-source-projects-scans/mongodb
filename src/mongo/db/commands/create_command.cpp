@@ -83,6 +83,8 @@
 namespace mongo {
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(preImagesEnabledOnAllCollectionsByDefault);
+
 constexpr auto kCreateCommandHelp =
     "explicitly creates a collection or view\n"
     "{\n"
@@ -124,13 +126,13 @@ void checkCollectionOptions(OperationContext* opCtx,
                             const Status& originalStatus,
                             const NamespaceString& ns,
                             const CollectionOptions& options) {
-    auto collOrView = AutoGetCollectionForReadLockFree(
-        opCtx,
-        ns,
-        AutoGetCollection::Options{}.viewMode(auto_get_collection::ViewMode::kViewsPermitted));
+    AutoGetDb autoDb(opCtx, ns.dbName(), MODE_IS);
+    Lock::CollectionLock collLock(opCtx, ns, MODE_IS);
+
     auto collatorFactory = CollatorFactoryInterface::get(opCtx->getServiceContext());
 
-    auto& coll = collOrView.getCollection();
+    const auto catalog = CollectionCatalog::get(opCtx);
+    const auto coll = catalog->lookupCollectionByNamespace(opCtx, ns);
     if (coll) {
         auto actualOptions = coll->getCollectionOptions();
         uassert(ErrorCodes::NamespaceExists,
@@ -140,7 +142,8 @@ void checkCollectionOptions(OperationContext* opCtx,
                 options.matchesStorageOptions(actualOptions, collatorFactory));
         return;
     }
-    auto view = collOrView.getView();
+
+    const auto view = catalog->lookupView(opCtx, ns);
     if (!view) {
         // If the collection/view disappeared in between attempting to create it
         // and retrieving the options, just propagate the original error.
@@ -308,8 +311,7 @@ public:
 
                 uassert(6346402,
                         "Encrypted collections are not supported on standalone",
-                        repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() ==
-                            repl::ReplicationCoordinator::Mode::modeReplSet);
+                        repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet());
 
                 FLEUtil::checkEFCForECC(cmd.getEncryptedFields().get());
             }
@@ -434,6 +436,14 @@ public:
 
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
                 unsafeCreateCollection(opCtx);
+
+            preImagesEnabledOnAllCollectionsByDefault.execute([&](const auto&) {
+                if (!cmd.getViewOn() &&
+                    validateChangeStreamPreAndPostImagesOptionIsPermitted(cmd.getNamespace())
+                        .isOK()) {
+                    cmd.setChangeStreamPreAndPostImages(ChangeStreamPreAndPostImagesOptions{true});
+                }
+            });
 
             const auto createStatus = createCollection(opCtx, cmd);
             // NamespaceExists will cause multi-document transactions to implicitly abort, so

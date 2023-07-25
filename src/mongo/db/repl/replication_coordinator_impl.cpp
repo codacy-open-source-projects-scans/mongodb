@@ -318,13 +318,6 @@ void ReplicationCoordinatorImpl::WaiterList::setErrorAll_inlock(Status status) {
 }
 
 namespace {
-ReplicationCoordinator::Mode getReplicationModeFromSettings(const ReplSettings& settings) {
-    if (settings.usingReplSets()) {
-        return ReplicationCoordinator::modeReplSet;
-    }
-    return ReplicationCoordinator::modeNone;
-}
-
 InitialSyncerInterface::Options createInitialSyncerOptions(
     ReplicationCoordinator* replCoord, ReplicationCoordinatorExternalState* externalState) {
     InitialSyncerInterface::Options options;
@@ -370,7 +363,6 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
     int64_t prngSeed)
     : _service(service),
       _settings(settings),
-      _replMode(getReplicationModeFromSettings(settings)),
       _topCoord(std::move(topCoord)),
       _replExecutor(std::move(executor)),
       _externalState(std::move(externalState)),
@@ -379,7 +371,7 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
       _rsConfigState(kConfigPreStart),
       _selfIndex(-1),
       _sleptLastElection(false),
-      _readWriteAbility(std::make_unique<ReadWriteAbility>(!settings.usingReplSets())),
+      _readWriteAbility(std::make_unique<ReadWriteAbility>(!settings.isReplSet())),
       _replicationProcess(replicationProcess),
       _storage(storage),
       _handleLivenessTimeoutCallback(_replExecutor.get(),
@@ -399,7 +391,7 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
 
     invariant(_service);
 
-    if (!isReplEnabled()) {
+    if (!_settings.isReplSet()) {
         return;
     }
 
@@ -950,7 +942,7 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx) 
 
 void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
                                          StorageEngine::LastShutdownState lastShutdownState) {
-    if (!isReplEnabled()) {
+    if (!_settings.isReplSet()) {
         if (ReplSettings::shouldRecoverFromOplogAsStandalone()) {
             uassert(ErrorCodes::InvalidOptions,
                     str::stream() << "Cannot set parameter 'recoverToOplogTimestamp' "
@@ -987,7 +979,7 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
         return;
     }
 
-    invariant(_settings.usingReplSets());
+    invariant(_settings.isReplSet());
     invariant(!ReplSettings::shouldRecoverFromOplogAsStandalone());
 
     // Initialize the cached pointer to the oplog collection.
@@ -1016,9 +1008,19 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
         if (doneLoadingConfig) {
             // If we're not done loading the config, then the config state will be set by
             // _finishLoadLocalConfig.
-            stdx::lock_guard<Latch> lk(_mutex);
-            invariant(!_rsConfig.isInitialized());
-            _setConfigState_inlock(kConfigUninitialized);
+            {
+                stdx::lock_guard<Latch> lk(_mutex);
+                invariant(!_rsConfig.isInitialized());
+                _setConfigState_inlock(kConfigUninitialized);
+            }
+            if (_settings.shouldAutoInitiate()) {
+                BSONObjBuilder bob;
+                bob.append("replSetInitiate", BSONObj());
+                auto initiateCmd = OpMsgRequest::fromDBAndBody("", bob.obj());
+                auto status = getStatusFromCommandResult(
+                    CommandHelpers::runCommandDirectly(opCtx, initiateCmd));
+                uassertStatusOK(status);
+            }
         }
     } catch (DBException& e) {
         auto status = e.toStatus();
@@ -1088,7 +1090,7 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
     // * wake up all existing threads blocking in awaitReplication
     // * Shut down and join the execution resources it owns.
 
-    if (!_settings.usingReplSets()) {
+    if (!_settings.isReplSet()) {
         return;
     }
 
@@ -1156,10 +1158,6 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
 
 const ReplSettings& ReplicationCoordinatorImpl::getSettings() const {
     return _settings;
-}
-
-ReplicationCoordinator::Mode ReplicationCoordinatorImpl::getReplicationMode() const {
-    return _replMode;
 }
 
 MemberState ReplicationCoordinatorImpl::getMemberState() const {
@@ -1524,7 +1522,7 @@ void ReplicationCoordinatorImpl::_resetMyLastOpTimes(WithLock lk) {
 void ReplicationCoordinatorImpl::_reportUpstream_inlock(stdx::unique_lock<Latch> lock) {
     invariant(lock.owns_lock());
 
-    if (getReplicationMode() != modeReplSet) {
+    if (!_settings.isReplSet()) {
         return;
     }
 
@@ -1698,7 +1696,7 @@ Status ReplicationCoordinatorImpl::waitUntilOpTimeForRead(OperationContext* opCt
 Status ReplicationCoordinatorImpl::waitUntilOpTimeForReadUntil(OperationContext* opCtx,
                                                                const ReadConcernArgs& readConcern,
                                                                boost::optional<Date_t> deadline) {
-    if (getReplicationMode() != repl::ReplicationCoordinator::modeReplSet) {
+    if (!_settings.isReplSet()) {
         // 'afterOpTime', 'afterClusterTime', and 'atClusterTime' are only supported for replica
         // sets.
         return {ErrorCodes::NotAReplicaSet,
@@ -1916,7 +1914,7 @@ Status ReplicationCoordinatorImpl::setLastDurableOptime_forTest(long long cfgVer
                                                                 const OpTime& opTime,
                                                                 Date_t wallTime) {
     stdx::lock_guard<Latch> lock(_mutex);
-    invariant(getReplicationMode() == modeReplSet);
+    invariant(_settings.isReplSet());
 
     if (wallTime == Date_t()) {
         wallTime = Date_t() + Seconds(opTime.getSecs());
@@ -1934,7 +1932,7 @@ Status ReplicationCoordinatorImpl::setLastAppliedOptime_forTest(long long cfgVer
                                                                 const OpTime& opTime,
                                                                 Date_t wallTime) {
     stdx::lock_guard<Latch> lock(_mutex);
-    invariant(getReplicationMode() == modeReplSet);
+    invariant(_settings.isReplSet());
 
     if (wallTime == Date_t()) {
         wallTime = Date_t() + Seconds(opTime.getSecs());
@@ -2115,7 +2113,6 @@ ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorImpl::awaitRepli
     invariant(OperationContextSession::get(opCtx) == nullptr);
 
     Timer timer;
-    WriteConcernOptions fixedWriteConcern = populateUnsetWriteConcernOptionsSyncMode(writeConcern);
 
     // We should never wait for replication if we are holding any locks, because this can
     // potentially block for long time while doing network activity.
@@ -2143,6 +2140,9 @@ ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorImpl::awaitRepli
 
     auto future = [&] {
         stdx::lock_guard lock(_mutex);
+        WriteConcernOptions fixedWriteConcern =
+            _populateUnsetWriteConcernOptionsSyncMode(lock, writeConcern);
+
         return _startWaitingForReplication(lock, opTime, fixedWriteConcern);
     }();
     auto status = futureGetNoThrowWithDeadline(opCtx, future, wTimeoutDate, timeoutError);
@@ -2172,14 +2172,16 @@ ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorImpl::awaitRepli
 
 SharedSemiFuture<void> ReplicationCoordinatorImpl::awaitReplicationAsyncNoWTimeout(
     const OpTime& opTime, const WriteConcernOptions& writeConcern) {
-    WriteConcernOptions fixedWriteConcern = populateUnsetWriteConcernOptionsSyncMode(writeConcern);
+    stdx::lock_guard lg(_mutex);
+
+    WriteConcernOptions fixedWriteConcern =
+        _populateUnsetWriteConcernOptionsSyncMode(lg, writeConcern);
 
     // The returned future won't account for wTimeout or wDeadline, so reject any write concerns
     // with either option to avoid misuse.
     invariant(fixedWriteConcern.wDeadline == Date_t::max());
     invariant(fixedWriteConcern.wTimeout == WriteConcernOptions::kNoTimeout);
 
-    stdx::lock_guard lg(_mutex);
     return _startWaitingForReplication(lg, opTime, fixedWriteConcern);
 }
 
@@ -2204,8 +2206,9 @@ BSONObj ReplicationCoordinatorImpl::_getReplicationProgress(WithLock wl) const {
 SharedSemiFuture<void> ReplicationCoordinatorImpl::_startWaitingForReplication(
     WithLock wl, const OpTime& opTime, const WriteConcernOptions& writeConcern) {
 
-    const Mode replMode = getReplicationMode();
-    if (replMode == modeNone) {
+    const auto isReplSet = _settings.isReplSet();
+
+    if (!isReplSet) {
         // no replication check needed (validated above)
         return Future<void>::makeReady();
     }
@@ -2219,7 +2222,7 @@ SharedSemiFuture<void> ReplicationCoordinatorImpl::_startWaitingForReplication(
     }
 
     auto checkForStepDown = [&]() -> Status {
-        if (replMode == modeReplSet && !_memberState.primary()) {
+        if (isReplSet && !_memberState.primary()) {
             return {ErrorCodes::PrimarySteppedDown,
                     "Primary stepped down while waiting for replication"};
         }
@@ -2351,7 +2354,7 @@ std::shared_ptr<HelloResponse> ReplicationCoordinatorImpl::_makeHelloResponse(
     // horizonString must be passed in if we are a valid member of the config.
     invariant(horizonString);
     auto response = std::make_shared<HelloResponse>();
-    invariant(isReplEnabled());
+    invariant(_settings.isReplSet());
     _topCoord->fillHelloForReplSet(response, *horizonString);
 
     OpTime lastOpTime = _getMyLastAppliedOpTime_inlock();
@@ -2368,7 +2371,7 @@ std::shared_ptr<HelloResponse> ReplicationCoordinatorImpl::_makeHelloResponse(
         response->setIsSecondary(true);
     }
 
-    if (_waitingForRSTLAtStepDown) {
+    if (_stepDownPending) {
         response->setIsWritablePrimary(false);
     }
 
@@ -2669,6 +2672,12 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
     // The state transition should never be rollback within this class.
     invariant(_stateTransition != ReplicationCoordinator::OpsKillingStateTransitionEnum::kRollback);
 
+    if (_stateTransition == ReplicationCoordinator::OpsKillingStateTransitionEnum::kStepDown)
+        _replCord->autoGetRstlEnterStepDown();
+    ScopeGuard callReplCoordExit([&] {
+        if (_stateTransition == ReplicationCoordinator::OpsKillingStateTransitionEnum::kStepDown)
+            _replCord->autoGetRstlExitStepDown();
+    });
     int rstlTimeout = fassertOnLockTimeoutForStepUpDown.load();
     Date_t start{Date_t::now()};
     if (rstlTimeout > 0 && deadline - start > Seconds(rstlTimeout)) {
@@ -2697,7 +2706,13 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
                     "calling abort() to allow cluster to progress",
                     "lockRep"_attr = lockRep.obj());
     });
+    callReplCoordExit.dismiss();
 };
+
+ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::~AutoGetRstlForStepUpStepDown() {
+    if (_stateTransition == ReplicationCoordinator::OpsKillingStateTransitionEnum::kStepDown)
+        _replCord->autoGetRstlExitStepDown();
+}
 
 void ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::_startKillOpThread() {
     invariant(!_killOpThread);
@@ -2802,6 +2817,24 @@ const OperationContext* ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown
     return _opCtx;
 }
 
+void ReplicationCoordinatorImpl::autoGetRstlEnterStepDown() {
+    stdx::lock_guard lk(_mutex);
+    // This makes us tell the 'hello' command we can't accept writes (though in fact we can,
+    // it is not valid to disable writes until we actually acquire the RSTL).
+    if (_stepDownPending++ == 0)
+        _fulfillTopologyChangePromise(lk);
+}
+
+void ReplicationCoordinatorImpl::autoGetRstlExitStepDown() {
+    stdx::lock_guard lk(_mutex);
+    // Once we release the RSTL, we announce either that we can accept writes or that we're now
+    // a real secondary.
+    invariant(_stepDownPending > 0);
+    if (--_stepDownPending == 0)
+        _fulfillTopologyChangePromise(lk);
+}
+
+
 void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
                                           const bool force,
                                           const Milliseconds& waitTime,
@@ -2816,19 +2849,6 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
     uassert(ErrorCodes::NotWritablePrimary,
             "not primary so can't step down",
             getMemberState().primary());
-
-    // This makes us tell the 'hello' command we can't accept writes (though in fact we can,
-    // it is not valid to disable writes until we actually acquire the RSTL).
-    {
-        stdx::lock_guard lk(_mutex);
-        _waitingForRSTLAtStepDown++;
-        _fulfillTopologyChangePromise(lk);
-    }
-    ScopeGuard clearStepDownFlag([&] {
-        stdx::lock_guard lk(_mutex);
-        _waitingForRSTLAtStepDown--;
-        _fulfillTopologyChangePromise(lk);
-    });
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &stepdownHangBeforeRSTLEnqueue, opCtx, "stepdownHangBeforeRSTLEnqueue");
@@ -2857,14 +2877,7 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
     // attempt fails later we can release the RSTL and go to sleep to allow secondaries to
     // catch up without allowing new writes in.
     _updateWriteAbilityFromTopologyCoordinator(lk, opCtx);
-    auto action = _updateMemberStateFromTopologyCoordinator(lk);
-    invariant(action == PostMemberStateUpdateAction::kActionNone);
     invariant(!_readWriteAbility->canAcceptNonLocalWrites(lk));
-
-    // We truly cannot accept writes now, and we've updated the topology version to say so, so
-    // no need for this flag any more, nor to increment the topology version again.
-    _waitingForRSTLAtStepDown--;
-    clearStepDownFlag.dismiss();
 
     auto updateMemberState = [&] {
         invariant(lk.owns_lock());
@@ -3056,12 +3069,11 @@ void ReplicationCoordinatorImpl::_handleTimePassing(
 }
 
 bool ReplicationCoordinatorImpl::isWritablePrimaryForReportingPurposes() {
-    if (!_settings.usingReplSets()) {
+    if (!_settings.isReplSet()) {
         return true;
     }
 
     stdx::lock_guard<Latch> lock(_mutex);
-    invariant(getReplicationMode() == modeReplSet);
     return _getMemberState_inlock().primary();
 }
 
@@ -3109,7 +3121,7 @@ bool isSystemDotProfile(OperationContext* opCtx, const NamespaceStringOrUUID& ns
 
 bool ReplicationCoordinatorImpl::canAcceptWritesFor(OperationContext* opCtx,
                                                     const NamespaceStringOrUUID& nsOrUUID) {
-    if (!isReplEnabled() || nsOrUUID.dbName().isLocalDB()) {
+    if (!_settings.isReplSet() || nsOrUUID.dbName().isLocalDB()) {
         // Writes on stand-alone nodes or "local" database are always permitted.
         return true;
     }
@@ -3178,7 +3190,7 @@ Status ReplicationCoordinatorImpl::checkCanServeReadsFor_UNSAFE(OperationContext
 
     // Oplog reads are not allowed during STARTUP state, but we make an exception for internal
     // reads. Internal reads are required for cleaning up unfinished apply batches.
-    if (!isPrimaryOrSecondary && getReplicationMode() == modeReplSet && ns.isOplog()) {
+    if (!isPrimaryOrSecondary && _settings.isReplSet() && ns.isOplog()) {
         stdx::lock_guard<Latch> lock(_mutex);
         if ((_memberState.startup() && client->isFromUserConnection()) || _memberState.startup2() ||
             _memberState.rollback()) {
@@ -3191,7 +3203,7 @@ Status ReplicationCoordinatorImpl::checkCanServeReadsFor_UNSAFE(OperationContext
     // Non-oplog local reads from the user are not allowed during initial sync when the initial
     // sync method disallows it.  "isFromUserConnection" means DBDirectClient reads are not blocked;
     // "isInternalClient" means reads from other cluster members are not blocked.
-    if (!isPrimaryOrSecondary && getReplicationMode() == modeReplSet && ns.isLocalDB() &&
+    if (!isPrimaryOrSecondary && _settings.isReplSet() && ns.isLocalDB() &&
         client->isFromUserConnection()) {
         stdx::lock_guard<Latch> lock(_mutex);
         auto isInternalClient = !client->session() ||
@@ -3250,8 +3262,7 @@ bool ReplicationCoordinatorImpl::shouldRelaxIndexConstraints(OperationContext* o
 }
 
 OID ReplicationCoordinatorImpl::getElectionId() {
-    stdx::lock_guard<Latch> lock(_mutex);
-    return _electionId;
+    return OID::fromTerm(_electionIdTerm.load());
 }
 
 int ReplicationCoordinatorImpl::getMyId() const {
@@ -3380,6 +3391,11 @@ Milliseconds ReplicationCoordinatorImpl::getConfigElectionTimeoutPeriod() const 
 std::vector<MemberConfig> ReplicationCoordinatorImpl::getConfigVotingMembers() const {
     stdx::lock_guard<Latch> lock(_mutex);
     return _rsConfig.votingMembers();
+}
+
+size_t ReplicationCoordinatorImpl::getNumConfigVotingMembers() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _rsConfig.votingMembers().size();
 }
 
 std::int64_t ReplicationCoordinatorImpl::getConfigTerm() const {
@@ -3511,7 +3527,7 @@ bool ReplicationCoordinatorImpl::getMaintenanceMode() {
 }
 
 Status ReplicationCoordinatorImpl::setMaintenanceMode(OperationContext* opCtx, bool activate) {
-    if (getReplicationMode() != modeReplSet) {
+    if (!_settings.isReplSet()) {
         return Status(ErrorCodes::NoReplicationEnabled,
                       "can only set maintenance mode on replica set members");
     }
@@ -3743,9 +3759,8 @@ Status ReplicationCoordinatorImpl::_doReplSetReconfig(OperationContext* opCtx,
             return Status(ErrorCodes::NotYetInitialized,
                           "Node not yet initialized; use the replSetInitiate command");
         case kConfigReplicationDisabled:
-            invariant(
-                false);       // should be unreachable due to !_settings.usingReplSets() check above
-            [[fallthrough]];  // Placate clang.
+            invariant(false);  // should be unreachable due to !_settings.isReplSet() check above
+            [[fallthrough]];   // Placate clang.
         case kConfigInitiating:
         case kConfigReconfiguring:
         case kConfigHBReconfiguring:
@@ -4124,7 +4139,9 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
             // liveness timeout. And, no new election can happen as we have already set our
             // ReplicationCoordinatorImpl::_rsConfigState state to "kConfigReconfiguring" which
             // prevents new elections from happening. So, its safe to release the RSTL lock.
+            lk.unlock();
             arsd.reset();
+            lk.lock();
         }
     }
 
@@ -4354,7 +4371,7 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
     LOGV2(21356, "replSetInitiate admin command received from client");
 
     stdx::unique_lock<Latch> lk(_mutex);
-    if (!isReplEnabled()) {
+    if (!_settings.isReplSet()) {
         return Status(ErrorCodes::NoReplicationEnabled, "server is not running with --replSet");
     }
     while (_rsConfigState == kConfigPreStart || _rsConfigState == kConfigStartingUp) {
@@ -4645,11 +4662,11 @@ ReplicationCoordinatorImpl::PostMemberStateUpdateAction
 ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator(WithLock lk) {
     // We want to respond to any waiting hellos even if our current and target state are the
     // same as it is possible writes have been disabled during a stepDown but the primary has yet
-    // to transition to SECONDARY state.  We do not do so when _waitingForRSTLAtStepDown is true
+    // to transition to SECONDARY state.  We do not do so when _stepDownPending is true
     // because in that case we have already said we cannot accept writes in the hello response
     // and explictly incremented the toplogy version.
     ON_BLOCK_EXIT([&] {
-        if (_rsConfig.isInitialized() && !_waitingForRSTLAtStepDown) {
+        if (_rsConfig.isInitialized() && !_stepDownPending) {
             _fulfillTopologyChangePromise(lk);
         }
     });
@@ -4784,9 +4801,17 @@ void ReplicationCoordinatorImpl::_performPostMemberStateUpdateAction(
 
 void ReplicationCoordinatorImpl::_postWonElectionUpdateMemberState(WithLock lk) {
     invariant(_topCoord->getTerm() != OpTime::kUninitializedTerm);
-    _electionId = OID::fromTerm(_topCoord->getTerm());
+
+    // Get the term from the topology coordinator, which we then use to generate the election ID.
+    // We intentionally wait until the end of this function
+    int64_t electionIdTerm = _topCoord->getTerm();
+    OID electionId = OID::fromTerm(electionIdTerm);
+
+    ON_BLOCK_EXIT([&] { _electionIdTerm.store(electionIdTerm); });
+
     auto ts = VectorClockMutable::get(getServiceContext())->tickClusterTime(1).asTimestamp();
-    _topCoord->processWinElection(_electionId, ts);
+    _topCoord->processWinElection(electionId, ts);
+
     const PostMemberStateUpdateAction nextAction = _updateMemberStateFromTopologyCoordinator(lk);
 
     invariant(nextAction == kActionFollowerModeStateChange,
@@ -5015,7 +5040,7 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig(WithLock lk,
                                                 const ReplSetConfig& newConfig,
                                                 int myIndex) {
     invariant(newConfig.getProtocolVersion() == 1);
-    invariant(_settings.usingReplSets());
+    invariant(_settings.isReplSet());
     _cancelHeartbeats_inlock();
     _setConfigState_inlock(kConfigSteady);
 
@@ -5269,12 +5294,11 @@ Status ReplicationCoordinatorImpl::checkIfWriteConcernCanBeSatisfied(
 
 Status ReplicationCoordinatorImpl::_checkIfWriteConcernCanBeSatisfied_inlock(
     const WriteConcernOptions& writeConcern) const {
-    if (getReplicationMode() == modeNone) {
+    if (!_settings.isReplSet()) {
         return Status(ErrorCodes::NoReplicationEnabled,
                       "No replication enabled when checking if write concern can be satisfied");
     }
 
-    invariant(getReplicationMode() == modeReplSet);
     return _rsConfig.checkIfWriteConcernCanBeSatisfied(writeConcern);
 }
 
@@ -5286,12 +5310,10 @@ Status ReplicationCoordinatorImpl::checkIfCommitQuorumCanBeSatisfied(
 
 Status ReplicationCoordinatorImpl::_checkIfCommitQuorumCanBeSatisfied(
     WithLock, const CommitQuorumOptions& commitQuorum) const {
-    if (getReplicationMode() == modeNone) {
+    if (!_settings.isReplSet()) {
         return Status(ErrorCodes::NoReplicationEnabled,
                       "No replication enabled when checking if commit quorum can be satisfied");
     }
-
-    invariant(getReplicationMode() == modeReplSet);
 
     // We need to ensure that the 'commitQuorum' can be satisfied by all the members of this
     // replica set.
@@ -5307,7 +5329,7 @@ WriteConcernOptions ReplicationCoordinatorImpl::getGetLastErrorDefault() {
 }
 
 Status ReplicationCoordinatorImpl::checkReplEnabledForCommand(BSONObjBuilder* result) {
-    if (!_settings.usingReplSets()) {
+    if (!_settings.isReplSet()) {
         if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             result->append("info", "configsvr");  // for shell prompt
         }
@@ -5320,10 +5342,6 @@ Status ReplicationCoordinatorImpl::checkReplEnabledForCommand(BSONObjBuilder* re
     }
 
     return Status::OK();
-}
-
-bool ReplicationCoordinatorImpl::isReplEnabled() const {
-    return getReplicationMode() != modeNone;
 }
 
 ReadPreference ReplicationCoordinatorImpl::_getSyncSourceReadPreference(WithLock) const {
@@ -6050,7 +6068,7 @@ EventHandle ReplicationCoordinatorImpl::updateTerm_forTest(
 
 Status ReplicationCoordinatorImpl::updateTerm(OperationContext* opCtx, long long term) {
     // Term is only valid if we are replicating.
-    if (getReplicationMode() != modeReplSet) {
+    if (!_settings.isReplSet()) {
         return {ErrorCodes::BadValue, "cannot supply 'term' without active replication"};
     }
 

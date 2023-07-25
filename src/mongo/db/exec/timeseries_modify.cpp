@@ -61,6 +61,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/shard_id.h"
 #include "mongo/db/storage/snapshot.h"
+#include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
@@ -133,6 +134,28 @@ TimeseriesModifyStage::TimeseriesModifyStage(ExpressionContext* expCtx,
     _isUserInitiatedUpdate = _params.isUpdate && opCtx()->writesAreReplicated() &&
         !(_params.isFromOplogApplication ||
           _params.updateDriver->type() == UpdateDriver::UpdateType::kDelta || _params.fromMigrate);
+
+    if (_params.isUpdate) {
+        _sideBucketCatalog = std::make_unique<timeseries::bucket_catalog::BucketCatalog>(1);
+    }
+}
+
+TimeseriesModifyStage::~TimeseriesModifyStage() {
+    if (_sideBucketCatalog && !_insertedBucketIds.empty()) {
+        auto [viewNs, collStats] =
+            timeseries::bucket_catalog::internal::getSideBucketCatalogCollectionStats(
+                *_sideBucketCatalog);
+        // Finishes tracking the newly inserted buckets in the main bucket catalog as direct
+        // writes when the whole update operation is done.
+        auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx());
+        for (const auto bucketId : _insertedBucketIds) {
+            timeseries::bucket_catalog::directWriteFinish(
+                bucketCatalog.bucketStateRegistry, viewNs, bucketId);
+        }
+        // Merges the execution stats of the side bucket catalog to the main one.
+        timeseries::bucket_catalog::internal::mergeExecutionStatsToBucketCatalog(
+            bucketCatalog, collStats, viewNs);
+    }
 }
 
 bool TimeseriesModifyStage::isEOF() {
@@ -515,8 +538,10 @@ std::pair<bool, PlanStage::StageState> TimeseriesModifyStage::_writeToTimeseries
                                                              recordId,
                                                              unchangedMeasurements,
                                                              modifiedMeasurements,
+                                                             *_sideBucketCatalog,
                                                              bucketFromMigrate,
-                                                             _params.stmtId);
+                                                             _params.stmtId,
+                                                             &_insertedBucketIds);
                 } else {
                     timeseries::performAtomicWritesForDelete(opCtx(),
                                                              collectionPtr(),

@@ -126,10 +126,6 @@ public:
 
     virtual const ReplSettings& getSettings() const;
 
-    virtual bool isReplEnabled() const;
-
-    virtual Mode getReplicationMode() const;
-
     virtual MemberState getMemberState() const;
 
     virtual bool canAcceptNonLocalWrites() const;
@@ -250,6 +246,8 @@ public:
     virtual Milliseconds getConfigElectionTimeoutPeriod() const override;
 
     virtual std::vector<MemberConfig> getConfigVotingMembers() const override;
+
+    virtual size_t getNumConfigVotingMembers() const override;
 
     virtual std::int64_t getConfigTerm() const override;
 

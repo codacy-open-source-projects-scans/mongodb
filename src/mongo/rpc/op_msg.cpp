@@ -273,8 +273,14 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
     throw;
 }
 
+OpMsgRequest OpMsgRequest::fromDBAndBody(const DatabaseName& db,
+                                         BSONObj body,
+                                         const BSONObj& extraFields) {
+    return OpMsgRequestBuilder::create(db, std::move(body), extraFields);
+}
+
 OpMsgRequest OpMsgRequest::fromDBAndBody(StringData db, BSONObj body, const BSONObj& extraFields) {
-    return OpMsgRequestBuilder::create(
+    return fromDBAndBody(
         DatabaseNameUtil::deserialize(boost::none, db), std::move(body), extraFields);
 }
 
@@ -284,6 +290,24 @@ boost::optional<TenantId> parseDollarTenant(const BSONObj body) {
     } else {
         return boost::none;
     }
+}
+
+DatabaseName OpMsgRequest::getDbName() const {
+    if (!gMultitenancySupport) {
+        return DatabaseNameUtil::deserialize(boost::none, getDatabase());
+    }
+
+    SerializationContext sc = SerializationContext::stateCommandRequest();
+    auto tenantId = getValidatedTenantId();
+    if (!tenantId) {
+        tenantId = parseDollarTenant(body);
+    }
+    sc.setTenantIdSource(tenantId ? true : false);
+
+    if (auto const expectPrefix = body.getField("expectPrefix")) {
+        sc.setPrefixState(expectPrefix.boolean());
+    }
+    return DatabaseNameUtil::deserialize(tenantId, getDatabase(), sc);
 }
 
 bool appendDollarTenant(BSONObjBuilder& builder,
@@ -312,7 +336,7 @@ void appendDollarDbAndTenant(BSONObjBuilder& builder,
                              boost::optional<TenantId> existingDollarTenant = boost::none) {
     if (!dbName.tenantId() ||
         appendDollarTenant(builder, dbName.tenantId().value(), existingDollarTenant)) {
-        builder.append("$db", dbName.serializeWithoutTenantPrefix());
+        builder.append("$db", dbName.serializeWithoutTenantPrefix_UNSAFE());
     } else {
         builder.append("$db", DatabaseNameUtil::serialize(dbName));
     }

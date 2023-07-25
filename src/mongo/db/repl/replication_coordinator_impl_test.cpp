@@ -277,7 +277,7 @@ TEST_F(ReplCoordTest, NodeInitiateInServerlessMode) {
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result));
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
     auto config = getReplCoord()->getConfig();
     ASSERT_EQUALS("mySet", config.getReplSetName());
 }
@@ -326,7 +326,7 @@ TEST_F(ReplCoordTest,
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
     ASSERT_TRUE(getExternalState()->threadsStarted());
 
     // Show that initiate fails after it has already succeeded.
@@ -342,7 +342,7 @@ TEST_F(ReplCoordTest,
                                                &result2));
 
     // Still in repl set mode, even after failed reinitiate.
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 }
 
 TEST_F(ReplCoordTest,
@@ -392,7 +392,7 @@ TEST_F(ReplCoordTest,
                                                     << BSON_ARRAY(BSON("_id" << 0 << "host"
                                                                              << "node1:12345"))),
                                                &result1));
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 }
 
 TEST_F(ReplCoordTest,
@@ -500,7 +500,7 @@ TEST_F(ReplCoordTest, InitiateSucceedsWhenQuorumCheckPasses) {
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
     prsiThread.join();
     ASSERT_OK(status);
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 
     ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
 }
@@ -534,7 +534,8 @@ TEST_F(ReplCoordTest, NodeReturnsInvalidReplicaSetConfigWhenInitiatingWithAnEmpt
     BSONObjBuilder result1;
     auto status = getReplCoord()->processReplSetInitiate(opCtx.get(), BSONObj(), &result1);
     ASSERT_EQUALS(ErrorCodes::InvalidReplicaSetConfig, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "'ReplSetConfig._id' is missing but a required field");
+    ASSERT_STRING_CONTAINS(status.reason(),
+                           "'ReplSetConfig.version' is missing but a required field");
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
 }
 
@@ -1271,7 +1272,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigMajorit
     getNet()->exitNetwork();
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
     prsiThread.join();
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 
     ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
 
@@ -1331,7 +1332,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigNoMajor
     getNet()->exitNetwork();
     ASSERT_EQUALS(startDate + Milliseconds(10), getNet()->now());
     prsiThread.join();
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
 
     ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
 
@@ -1664,7 +1665,7 @@ private:
 
 TEST_F(ReplCoordTest, NodeReturnsBadValueWhenUpdateTermIsRunAgainstANonReplNode) {
     init(ReplSettings());
-    ASSERT_TRUE(ReplicationCoordinator::modeNone == getReplCoord()->getReplicationMode());
+    ASSERT_FALSE(getReplCoord()->getSettings().isReplSet());
     auto opCtx = makeOperationContext();
 
     ASSERT_EQUALS(ErrorCodes::BadValue, getReplCoord()->updateTerm(opCtx.get(), 0).code());
@@ -3029,12 +3030,12 @@ TEST_F(ReplCoordTest, GetReplicationModeNone) {
 }
 
 TEST_F(ReplCoordTest,
-       NodeReturnsModeReplSetInResponseToGetReplicationModeWhenRunningWithTheReplSetFlag) {
-    // modeReplSet if the set name was supplied.
+       NodeReturnsTrueInResponseToGetSettingsIsReplSetWhenRunningWithTheReplSetFlag) {
+    // isReplSet() returns true if the set name was supplied.
     ReplSettings settings;
     settings.setReplSetString("mySet/node1:12345");
     init(settings);
-    ASSERT_EQUALS(ReplicationCoordinator::modeReplSet, getReplCoord()->getReplicationMode());
+    ASSERT(getReplCoord()->getSettings().isReplSet());
     ASSERT_EQUALS(MemberState::RS_STARTUP, getReplCoord()->getMemberState().s);
     assertStartSuccess(BSON("_id"
                             << "mySet"
@@ -4912,9 +4913,22 @@ TEST_F(ReplCoordTest, AwaitHelloResponseReturnsOnElectionTimeout) {
     // awaitHelloResponse blocks and waits on a future when the request TopologyVersion equals
     // the current TopologyVersion of the server.
     stdx::thread getHelloThread([&] {
-        const auto response =
+        // We expect two topology changes, one when we attempt to obtain the RSTL (when we report
+        // ourselves as a non-writable primary), and one when we succeed in stepping down.
+        auto response =
             awaitHelloWithNewOpCtx(getReplCoord(), currentTopologyVersion, {}, deadline);
         auto topologyVersion = response->getTopologyVersion();
+        ASSERT_EQUALS(topologyVersion->getCounter(), expectedCounter);
+        ASSERT_EQUALS(topologyVersion->getProcessId(), expectedProcessId);
+
+        ASSERT_FALSE(response->isWritablePrimary());
+        ASSERT_FALSE(response->isSecondary());
+        ASSERT_TRUE(response->hasPrimary());
+
+        currentTopologyVersion = *topologyVersion;
+        expectedCounter = currentTopologyVersion.getCounter() + 1;
+        response = awaitHelloWithNewOpCtx(getReplCoord(), currentTopologyVersion, {}, deadline);
+        topologyVersion = response->getTopologyVersion();
         ASSERT_EQUALS(topologyVersion->getCounter(), expectedCounter);
         ASSERT_EQUALS(topologyVersion->getProcessId(), expectedProcessId);
 

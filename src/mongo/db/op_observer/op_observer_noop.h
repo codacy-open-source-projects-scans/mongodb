@@ -217,9 +217,12 @@ public:
 
     void onTransactionStart(OperationContext* opCtx) override {}
 
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       const TransactionOperations& transactionOperations,
-                                       OpStateAccumulator* opAccumulator = nullptr) override {}
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        const TransactionOperations& transactionOperations,
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        OpStateAccumulator* opAccumulator = nullptr) override {}
 
     void onBatchedWriteStart(OperationContext* opCtx) override {}
 
@@ -246,6 +249,10 @@ public:
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) override {}
+
+    void postTransactionPrepare(OperationContext* opCtx,
+                                const std::vector<OplogSlot>& reservedSlots,
+                                const TransactionOperations& transactionOperations) override {}
 
     void onTransactionPrepareNonPrimary(OperationContext* opCtx,
                                         const LogicalSessionId& lsid,

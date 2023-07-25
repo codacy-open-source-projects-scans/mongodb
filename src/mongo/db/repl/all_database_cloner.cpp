@@ -153,9 +153,8 @@ BaseCloner::AfterStageBehavior AllDatabaseCloner::connectStage() {
 }
 
 BaseCloner::AfterStageBehavior AllDatabaseCloner::getInitialSyncIdStage() {
-    auto initialSyncId = getClient()->findOne(
-        NamespaceString{ReplicationConsistencyMarkersImpl::kDefaultInitialSyncIdNamespace},
-        BSONObj{});
+    auto initialSyncId =
+        getClient()->findOne(NamespaceString::kDefaultInitialSyncIdNamespace, BSONObj{});
     uassert(ErrorCodes::InitialSyncFailure,
             "Cannot retrieve sync source initial sync ID",
             !initialSyncId.isEmpty());
@@ -209,7 +208,7 @@ BaseCloner::AfterStageBehavior AllDatabaseCloner::listDatabasesStage() {
             _databases.emplace_back(dbName);
 
             // Put admin dbs in the front of the vector.
-            if (dbName.db() == "admin") {
+            if (dbName.isAdminDB()) {
                 if (_databases.size() > 1) {
                     std::iter_swap(_databases.begin() + idxToInsertNextAdmin, _databases.end() - 1);
                 }
@@ -312,7 +311,7 @@ void AllDatabaseCloner::postStage() {
             setSyncFailedStatus(dbStatus);
             return;
         }
-        if (!foundUser && StringData(dbName.db()).equalCaseInsensitive("admin")) {
+        if (!foundUser && dbName.isAdminDB()) {
             LOGV2_DEBUG(21058, 1, "Finished the 'admin' db, now validating it");
             // Do special checks for the admin database because of auth. collections.
             {

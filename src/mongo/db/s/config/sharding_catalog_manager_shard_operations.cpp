@@ -1187,7 +1187,7 @@ StatusWith<long long> ShardingCatalogManager::_runCountCommandOnConfig(Operation
     auto resultStatus =
         _localConfigShard->runCommandWithFixedRetryAttempts(opCtx,
                                                             kConfigReadSelector,
-                                                            nss.db().toString(),
+                                                            nss.db_forSharding().toString(),
                                                             countBuilder.done(),
                                                             Shard::kDefaultConfigCommandTimeout,
                                                             Shard::RetryPolicy::kIdempotent);
@@ -1610,9 +1610,10 @@ void ShardingCatalogManager::_addShardInTransaction(
                                dbNames.end(),
                                std::back_inserter(placementEntries),
                                [&](const std::string dbName) {
-                                   return NamespacePlacementType(NamespaceString(dbName),
-                                                                 newShard.getTopologyTime(),
-                                                                 {ShardId(newShard.getName())})
+                                   return NamespacePlacementType(
+                                              NamespaceStringUtil::deserialize(boost::none, dbName),
+                                              newShard.getTopologyTime(),
+                                              {ShardId(newShard.getName())})
                                        .toBSON();
                                });
                 write_ops::InsertCommandRequest insertPlacementEntries(

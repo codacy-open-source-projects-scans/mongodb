@@ -46,6 +46,9 @@ variables:
     - name: Wiredtiger-perf-log-jobs
       execution_tasks:
       - ".log-perf"
+    - name: Wiredtiger-perf-chunk-cache-jobs
+      execution_tasks:
+      - ".chunk-cache-perf"
     - name: Wiredtiger-perf-long-jobs
       execution_tasks:
       - ".long-perf"
@@ -75,6 +78,7 @@ buildvariants:
     - name: ".checkpoint-perf"
     - name: ".evict-perf"
     - name: ".log-perf"
+    - name: ".chunk-cache-perf"
     - name: ".long-perf"
     - name: ".oplog-perf"
     - name: many-dhandle-stress
@@ -98,6 +102,7 @@ buildvariants:
     - name: ".checkpoint-perf"
     - name: ".evict-perf"
     - name: ".log-perf"
+    - name: ".chunk-cache-perf"
     - name: ".long-perf"
     - name: ".oplog-perf"
     - name: many-dhandle-stress
@@ -121,6 +126,7 @@ buildvariants:
   run_on:
   - ubuntu2004-test
   expansions:
+    database: WTCodeStatisticsDB
     configure_env_vars: PATH=/opt/mongodbtoolchain/v4/bin:$PATH
     compile_env_vars: PATH=/opt/mongodbtoolchain/v4/bin:$PATH
     test_env_vars:
@@ -129,6 +135,9 @@ buildvariants:
       WT_BUILDDIR=$WT_TOPDIR/cmake_build
       LD_LIBRARY_PATH=$WT_BUILDDIR
       LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so
+    python_binary: '/opt/mongodbtoolchain/v4/bin/python3'
+    pip3_binary: '/opt/mongodbtoolchain/v4/bin/pip3'
+    virtualenv_binary: '/opt/mongodbtoolchain/v4/bin/virtualenv'
     make_command: ninja
     cmake_generator: Ninja
     CMAKE_TOOLCHAIN_FILE: -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/mongodbtoolchain_stable_gcc.cmake

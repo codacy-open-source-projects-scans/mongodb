@@ -225,9 +225,12 @@ public:
                        const NamespaceString& collectionName,
                        const UUID& uuid) final;
     void onTransactionStart(OperationContext* opCtx) final;
-    void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                       const TransactionOperations& transactionOperations,
-                                       OpStateAccumulator* opAccumulator = nullptr) final;
+    void onUnpreparedTransactionCommit(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        const TransactionOperations& transactionOperations,
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        OpStateAccumulator* opAccumulator = nullptr) final;
     void onBatchedWriteStart(OperationContext* opCtx) final;
     void onBatchedWriteCommit(OperationContext* opCtx) final;
     void onBatchedWriteAbort(OperationContext* opCtx) final;
@@ -241,7 +244,7 @@ public:
         OperationContext* opCtx,
         const TransactionOperations& transactionOperations,
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
-        Date_t wallClockTime) final;
+        Date_t wallClockTime) final {}
 
     void onTransactionPrepare(
         OperationContext* opCtx,
@@ -250,6 +253,10 @@ public:
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) final;
+
+    void postTransactionPrepare(OperationContext* opCtx,
+                                const std::vector<OplogSlot>& reservedSlots,
+                                const TransactionOperations& transactionOperations) final {}
 
     void onTransactionPrepareNonPrimary(OperationContext* opCtx,
                                         const LogicalSessionId& lsid,

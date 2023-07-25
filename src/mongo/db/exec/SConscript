@@ -78,15 +78,14 @@ sortExecutorEnv.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/query/sort_pattern',
+        '$BUILD_DIR/mongo/db/sorter/sorter_stats',
         '$BUILD_DIR/mongo/db/storage/encryption_hooks',
         '$BUILD_DIR/mongo/db/storage/storage_options',
-        '$BUILD_DIR/mongo/s/is_mongos',
         '$BUILD_DIR/third_party/shim_snappy',
         'working_set',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/sorter/sorter_idl',
-        '$BUILD_DIR/mongo/db/sorter/sorter_stats',
     ],
 )
 

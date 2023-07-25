@@ -486,12 +486,21 @@ public:
      * transaction, before the RecoveryUnit onCommit() is called.  It must not be called when no
      * transaction is active.
      *
+     * 'reservedSlots' is a list of oplog slots reserved for the oplog entries in a transaction.
+     *
      * The 'transactionOperations' contains the list of CRUD operations (formerly 'statements') to
      * be applied in this transaction.
+     *
+     * The 'applyOpsOperationAssignment' contains a representation of "applyOps" entries and oplog
+     * slots to be used for writing pre- and post- image oplog entries for a transaction.
      */
-    virtual void onUnpreparedTransactionCommit(OperationContext* opCtx,
-                                               const TransactionOperations& transactionOperations,
-                                               OpStateAccumulator* opAccumulator = nullptr) = 0;
+    virtual void onUnpreparedTransactionCommit(
+        OperationContext* opCtx,
+        const std::vector<OplogSlot>& reservedSlots,
+        const TransactionOperations& transactionOperations,
+        const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
+        OpStateAccumulator* opAccumulator = nullptr) = 0;
+
     /**
      * The onPreparedTransactionCommit method is called on the commit of a prepared transaction,
      * after the RecoveryUnit onCommit() is called.  It must not be called when no transaction is
@@ -577,6 +586,20 @@ public:
         const ApplyOpsOplogSlotAndOperationAssignment& applyOpsOperationAssignment,
         size_t numberOfPrePostImagesToWrite,
         Date_t wallClockTime) = 0;
+
+    /**
+     * The postTransactionPrepare method is called after an atomic transaction is prepared. It must
+     * be called when a transaction is active.
+     *
+     * 'reservedSlots' is a list of oplog slots reserved for the oplog entries in a transaction. The
+     * last reserved slot represents the prepareOpTime used for the prepare oplog entry.
+     *
+     * The 'transactionOperations' contains the list of CRUD operations to be applied in
+     * this transaction.
+     */
+    virtual void postTransactionPrepare(OperationContext* opCtx,
+                                        const std::vector<OplogSlot>& reservedSlots,
+                                        const TransactionOperations& transactionOperations) = 0;
 
     /**
      * This method is called when a transaction transitions into prepare while it is not primary,

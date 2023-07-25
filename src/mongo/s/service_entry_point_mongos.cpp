@@ -49,6 +49,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/curop_metrics.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/namespace_string.h"
@@ -118,7 +119,7 @@ struct HandleRequest : public std::enable_shared_from_this<HandleRequest> {
     static NamespaceString getNamespaceString(const DbMessage& dbmsg) {
         if (!dbmsg.messageShouldHaveNs())
             return {};
-        return NamespaceString(dbmsg.getns());
+        return NamespaceStringUtil::deserialize(boost::none, dbmsg.getns());
     }
 
     const std::shared_ptr<RequestExecutionContext> rec;
@@ -197,6 +198,8 @@ void HandleRequest::onSuccess(const DbResponse& dbResponse) {
             .filter,
         dbResponse.response.size(),
         slowMsOverride);
+
+    recordCurOpMetrics(opCtx);
 
     // Update the source of stats shown in the db.serverStatus().opLatencies section.
     Top::get(opCtx->getServiceContext())

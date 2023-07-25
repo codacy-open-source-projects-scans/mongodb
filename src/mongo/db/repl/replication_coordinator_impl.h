@@ -171,8 +171,6 @@ public:
 
     virtual const ReplSettings& getSettings() const override;
 
-    virtual Mode getReplicationMode() const override;
-
     virtual MemberState getMemberState() const override;
 
     virtual std::vector<MemberData> getMemberData() const override;
@@ -294,6 +292,8 @@ public:
 
     virtual std::vector<MemberConfig> getConfigVotingMembers() const override;
 
+    virtual size_t getNumConfigVotingMembers() const override;
+
     virtual std::int64_t getConfigTerm() const override;
 
     virtual std::int64_t getConfigVersion() const override;
@@ -366,8 +366,6 @@ public:
     virtual WriteConcernOptions getGetLastErrorDefault() override;
 
     virtual Status checkReplEnabledForCommand(BSONObjBuilder* result) override;
-
-    virtual bool isReplEnabled() const override;
 
     virtual HostAndPort chooseNewSyncSource(const OpTime& lastOpTimeFetched) override;
 
@@ -483,6 +481,15 @@ public:
     virtual void recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) final;
 
     virtual SplitPrepareSessionManager* getSplitPrepareSessionManager() override;
+
+    // ==================== Private API ===================
+    // Called by AutoGetRstlForStepUpStepDown before taking RSTL when making stepdown transitions
+    void autoGetRstlEnterStepDown();
+
+    // Called by AutoGetRstlForStepUpStepDown before releasing RSTL when making stepdown
+    // transitions.  Also called in case of failure to acquire RSTL.  There will be one call to this
+    // method for each call to autoGetRSTLEnterStepDown.
+    void autoGetRstlExitStepDown();
 
     // ================== Test support API ===================
 
@@ -715,6 +722,8 @@ private:
             OperationContext* opCtx,
             ReplicationCoordinator::OpsKillingStateTransitionEnum stateTransition,
             Date_t deadline = Date_t::max());
+
+        ~AutoGetRstlForStepUpStepDown();
 
         // Disallows copying.
         AutoGetRstlForStepUpStepDown(const AutoGetRstlForStepUpStepDown&) = delete;
@@ -1746,9 +1755,6 @@ private:
     // Parsed command line arguments related to replication.
     const ReplSettings _settings;  // (R)
 
-    // Mode of replication specified by _settings.
-    const Mode _replMode;  // (R)
-
     // Pointer to the TopologyCoordinator owned by this ReplicationCoordinator.
     std::unique_ptr<TopologyCoordinator> _topCoord;  // (M)
 
@@ -1781,8 +1787,8 @@ private:
     // Set to true when we are in the process of shutting down replication.
     bool _inShutdown;  // (M)
 
-    // Election ID of the last election that resulted in this node becoming primary.
-    OID _electionId;  // (M)
+    // The term of the last election that resulted in this node becoming primary.
+    AtomicWord<int64_t> _electionIdTerm;  // (S)
 
     // Used to signal threads waiting for changes to _memberState.
     stdx::condition_variable _memberStateChange;  // (M)
@@ -1890,10 +1896,10 @@ private:
 
     AtomicWord<bool> _startedSteadyStateReplication{false};
 
-    // If we're waiting to get the RSTL at stepdown and therefore should claim we don't allow
+    // If we're in stepdown code and therefore should claim we don't allow
     // writes.  This is a counter rather than a flag because there are scenarios where multiple
     // stepdowns are attempted at once.
-    short _waitingForRSTLAtStepDown = 0;
+    short _stepDownPending = 0;
 
     // If we're in terminal shutdown.  If true, we'll refuse to vote in elections.
     bool _inTerminalShutdown = false;  // (M)

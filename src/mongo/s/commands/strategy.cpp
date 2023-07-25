@@ -104,7 +104,6 @@
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/is_mongos.h"
 #include "mongo/s/load_balancer_support.h"
 #include "mongo/s/mongos_topology_coordinator.h"
 #include "mongo/s/query_analysis_sampler.h"
@@ -599,8 +598,9 @@ void ParseAndRunCommand::_parseCommand() {
     // the command does not define a fully-qualified namespace, set CurOp to the generic command
     // namespace db.$cmd.
     _ns.emplace(NamespaceStringUtil::serialize(_invocation->ns()));
-    auto nss =
-        (request.getDatabase() == *_ns ? NamespaceString(*_ns, "$cmd") : NamespaceString(*_ns));
+    const auto nss = (request.getDatabase() == *_ns
+                          ? NamespaceString::makeCommandNamespace(_invocation->ns().dbName())
+                          : _invocation->ns());
 
     // Fill out all currentOp details.
     CurOp::get(opCtx)->setGenericOpRequestDetails(nss, command, request.body, _opType);
@@ -608,7 +608,9 @@ void ParseAndRunCommand::_parseCommand() {
     _osi = initializeOperationSessionInfo(
         opCtx, request, command->requiresAuth(), command->attachLogicalSessionsToOpCtx(), true);
 
-    auto allowTransactionsOnConfigDatabase = !isMongos() || client->isFromSystemConnection();
+    auto allowTransactionsOnConfigDatabase =
+        !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+        client->isFromSystemConnection();
     validateSessionOptions(_osi, command->getName(), nss, allowTransactionsOnConfigDatabase);
 
     _wc.emplace(uassertStatusOK(WriteConcernOptions::extractWCFromCommand(request.body)));

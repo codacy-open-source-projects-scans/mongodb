@@ -380,7 +380,7 @@ std::vector<BSONObj> ValidationBehaviorsRefineShardKey::loadIndexes(
     auto indexesRes = _indexShard->runExhaustiveCursorCommand(
         _opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        nss.db().toString(),
+        nss.db_forSharding().toString(),
         appendShardVersion(BSON("listIndexes" << nss.coll()),
                            _cri.getShardVersion(_indexShard->getId())),
         Milliseconds(-1));
@@ -492,14 +492,14 @@ void ValidationBehaviorsReshardingBulkIndex::verifyUsefulNonMultiKeyIndex(
     auto cri = catalogCache->getShardedCollectionRoutingInfo(_opCtx, nss);
     auto shard = uassertStatusOK(Grid::get(_opCtx)->shardRegistry()->getShard(
         _opCtx, cri.cm.getMinKeyShardIdWithSimpleCollation()));
-    auto checkShardingIndexRes = uassertStatusOK(
-        shard->runCommand(_opCtx,
-                          ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                          "admin",
-                          appendShardVersion(BSON(kCheckShardingIndexCmdName
-                                                  << nss.ns() << kKeyPatternField << proposedKey),
-                                             cri.getShardVersion(shard->getId())),
-                          Shard::RetryPolicy::kIdempotent));
+    auto checkShardingIndexRes = uassertStatusOK(shard->runCommand(
+        _opCtx,
+        ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+        "admin",
+        appendShardVersion(BSON(kCheckShardingIndexCmdName << NamespaceStringUtil::serialize(nss)
+                                                           << kKeyPatternField << proposedKey),
+                           cri.getShardVersion(shard->getId())),
+        Shard::RetryPolicy::kIdempotent));
     if (checkShardingIndexRes.commandStatus == ErrorCodes::UnknownError) {
         // CheckShardingIndex returns UnknownError if a compatible shard key index cannot be found,
         // but we return InvalidOptions to correspond with the shardCollection behavior.

@@ -150,16 +150,18 @@ RecipientShardEntry makeRecipientShard(ShardId shardId,
 }
 
 NamespaceString constructTemporaryReshardingNss(StringData db, const UUID& sourceUuid) {
-    return NamespaceString(db,
-                           fmt::format("{}{}",
-                                       NamespaceString::kTemporaryReshardingCollectionPrefix,
-                                       sourceUuid.toString()));
+    return NamespaceStringUtil::parseNamespaceFromRequest(
+        boost::none,
+        db,
+        fmt::format(
+            "{}{}", NamespaceString::kTemporaryReshardingCollectionPrefix, sourceUuid.toString()));
 }
 
 std::set<ShardId> getRecipientShards(OperationContext* opCtx,
                                      const NamespaceString& sourceNss,
                                      const UUID& reshardingUUID) {
-    const auto& tempNss = constructTemporaryReshardingNss(sourceNss.db(), reshardingUUID);
+    const auto& tempNss =
+        constructTemporaryReshardingNss(sourceNss.db_forSharding(), reshardingUUID);
     auto* catalogCache = Grid::get(opCtx)->catalogCache();
     auto [cm, _] = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, tempNss));
 

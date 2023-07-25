@@ -66,6 +66,7 @@
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/s/shard_key_index_util.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -122,7 +123,7 @@ Status checkReplState(OperationContext* opCtx,
     }
 
     // Disallow index drops on drop-pending namespaces (system.drop.*) if we are primary.
-    auto isPrimary = replCoord->getSettings().usingReplSets() && canAcceptWrites;
+    auto isPrimary = replCoord->getSettings().isReplSet() && canAcceptWrites;
     const auto& nss = collection->ns();
     if (isPrimary && nss.isDropPendingNamespace()) {
         return Status(ErrorCodes::NamespaceNotFound,
@@ -344,12 +345,18 @@ void dropReadyIndexes(OperationContext* opCtx,
                     if (desc->isIdIndex()) {
                         return false;
                     }
-
+                    // For any index that is compatible with the shard key, if
+                    // gFeatureFlagShardKeyIndexOptionalHashedSharding is enabled and
+                    // the shard key is hashed, allow users to drop the hashed index.
+                    const auto& shardKey = collDescription.getShardKeyPattern();
                     if (isCompatibleWithShardKey(opCtx,
                                                  CollectionPtr(collection),
                                                  desc->getEntry(),
-                                                 collDescription.getKeyPattern(),
-                                                 false /* requiresSingleKey */)) {
+                                                 shardKey.toBSON(),
+                                                 false /* requiresSingleKey */) &&
+                        !(gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
+                              serverGlobalParams.featureCompatibility) &&
+                          shardKey.isHashedPattern())) {
                         return false;
                     }
 
@@ -384,7 +391,7 @@ void dropReadyIndexes(OperationContext* opCtx,
             uassert(
                 ErrorCodes::CannotDropShardKeyIndex,
                 "Cannot drop the only compatible index for this collection's shard key",
-                !isLastNonHiddenShardKeyIndex(
+                !isLastNonHiddenRangedShardKeyIndex(
                     opCtx, CollectionPtr(collection), indexName, collDescription.getKeyPattern()));
         }
 
@@ -559,10 +566,10 @@ DropIndexesReply dropIndexes(OperationContext* opCtx,
                 if (collDesc.isSharded()) {
                     uassert(ErrorCodes::CannotDropShardKeyIndex,
                             "Cannot drop the only compatible index for this collection's shard key",
-                            !isLastNonHiddenShardKeyIndex(opCtx,
-                                                          collection->getCollection(),
-                                                          indexName,
-                                                          collDesc.getKeyPattern()));
+                            !isLastNonHiddenRangedShardKeyIndex(opCtx,
+                                                                collection->getCollection(),
+                                                                indexName,
+                                                                collDesc.getKeyPattern()));
                 }
 
                 auto writableEntry = indexCatalog->getWritableEntryByName(
@@ -612,7 +619,7 @@ Status dropIndexesForApplyOps(OperationContext* opCtx,
                               const NamespaceString& nss,
                               const BSONObj& cmdObj) try {
     BSONObjBuilder bob(cmdObj);
-    bob.append("$db", nss.dbName().serializeWithoutTenantPrefix());
+    bob.append("$db", nss.dbName().serializeWithoutTenantPrefix_UNSAFE());
     auto cmdObjWithDb = bob.obj();
     auto parsed = DropIndexes::parse(
         IDLParserContext{"dropIndexes", false /* apiStrict */, nss.tenantId()}, cmdObjWithDb);

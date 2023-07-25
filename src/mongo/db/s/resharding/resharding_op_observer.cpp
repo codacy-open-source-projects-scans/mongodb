@@ -84,7 +84,7 @@ std::shared_ptr<ReshardingCoordinatorObserver> getReshardingCoordinatorObserver(
     OperationContext* opCtx, const BSONObj& reshardingId) {
     auto registry = repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext());
     auto service = registry->lookupServiceByName(ReshardingCoordinatorService::kServiceName);
-    auto instance = ReshardingCoordinator::lookup(opCtx, service, reshardingId);
+    auto [instance, _] = ReshardingCoordinator::lookup(opCtx, service, reshardingId);
 
     iassert(5400001, "ReshardingCoordinatorService instance does not exist", instance.has_value());
 
@@ -172,7 +172,7 @@ void _doPin(OperationContext* opCtx) {
     StatusWith<Timestamp> res = storageEngine->pinOldestTimestamp(
         opCtx, ReshardingHistoryHook::kName.toString(), pin.value(), false);
     if (!res.isOK()) {
-        if (replCoord->getReplicationMode() != repl::ReplicationCoordinator::Mode::modeReplSet) {
+        if (!replCoord->getSettings().isReplSet()) {
             // The pin has failed, but we're in standalone mode. Ignore the error.
             return;
         }
@@ -230,7 +230,7 @@ void ReshardingOpObserver::onInserts(OperationContext* opCtx,
     }
 
     // This is a no-op if either replication is not enabled or this node is a secondary
-    if (!repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() ||
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
         !opCtx->writesAreReplicated()) {
         return;
     }
@@ -250,7 +250,7 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx,
     }
 
     // This is a no-op if either replication is not enabled or this node is a secondary
-    if (!repl::ReplicationCoordinator::get(opCtx)->isReplEnabled() ||
+    if (!repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() ||
         !opCtx->writesAreReplicated()) {
         return;
     }
