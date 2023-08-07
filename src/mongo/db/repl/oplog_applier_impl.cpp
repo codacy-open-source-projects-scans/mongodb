@@ -393,11 +393,6 @@ void _setOplogApplicationWorkerOpCtxStates(OperationContext* opCtx) {
     // Do not enforce constraints.
     opCtx->setEnforceConstraints(false);
 
-    // Since we swap the locker in stash / unstash transaction resources,
-    // ShouldNotConflictWithSecondaryBatchApplicationBlock will touch the locker that has been
-    // destroyed by unstash in its destructor. Thus we set the flag explicitly.
-    opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
-
     // When querying indexes, we return the record matching the key if it exists, or an adjacent
     // document. This means that it is possible for us to hit a prepare conflict if we query for an
     // incomplete key and an adjacent key is prepared.
@@ -689,8 +684,6 @@ void scheduleWritesToOplogAndChangeCollection(OperationContext* opCtx,
                                                     AdmissionContext::Priority::kImmediate);
 
             UnreplicatedWritesBlock uwb(opCtx.get());
-            ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
-                opCtx->lockState());
 
             std::vector<InsertStatement> docs;
             docs.reserve(end - begin);
@@ -750,10 +743,6 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
                 "replication batch size is {size}",
                 "Replication batch size",
                 "size"_attr = ops.size());
-
-    // Stop all readers until we're done. This also prevents doc-locking engines from deleting old
-    // entries from the oplog until we finish writing.
-    Lock::ParallelBatchWriterMode pbwm(opCtx);
 
     invariant(_replCoord);
     if (_replCoord->getApplierState() == ReplicationCoordinator::ApplierState::Stopped) {

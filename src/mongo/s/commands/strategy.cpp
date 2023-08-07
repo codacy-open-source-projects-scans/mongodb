@@ -611,7 +611,8 @@ void ParseAndRunCommand::_parseCommand() {
     auto allowTransactionsOnConfigDatabase =
         !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
         client->isFromSystemConnection();
-    validateSessionOptions(_osi, command->getName(), nss, allowTransactionsOnConfigDatabase);
+    // TODO (SERVER-79644): Make this call also use allNamespaces() when applicable.
+    validateSessionOptions(_osi, command->getName(), {nss}, allowTransactionsOnConfigDatabase);
 
     _wc.emplace(uassertStatusOK(WriteConcernOptions::extractWCFromCommand(request.body)));
 
@@ -924,6 +925,10 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
         if (analyze_shard_key::supportsSamplingQueries(opCtx)) {
             analyze_shard_key::QueryAnalysisSampler::get(opCtx).gotCommand(command->getName());
         }
+    }
+
+    if (command->shouldAffectQueryCounter()) {
+        globalOpCounters.gotQuery();
     }
 
     return Status::OK();

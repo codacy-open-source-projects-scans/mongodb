@@ -427,6 +427,12 @@ public:
      */
     virtual void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const = 0;
 
+    /**
+     * Returns true if the time-series collection was created with 'bucketRoundingSeconds' and
+     * 'bucketMaxSpanSeconds', and none of the time-series options have been changed. The value may
+     * only transition from true to false.
+     */
+    virtual bool areTimeseriesBucketsFixed() const = 0;
     /*
      * Returns true if this collection is clustered. That is, its RecordIds store the value of the
      * cluster key. If the collection is clustered on _id, there is no separate _id index.
@@ -783,7 +789,8 @@ public:
     void setShardKeyPattern(const BSONObj& shardKeyPattern);
     const ShardKeyPattern& getShardKeyPattern() const;
 
-    bool isSharded() const {
+    // TODO SERVER-79296 remove sharding info from CollectionPtr
+    bool isSharded_DEPRECATED() const {
         return static_cast<bool>(_shardKeyPattern);
     }
 

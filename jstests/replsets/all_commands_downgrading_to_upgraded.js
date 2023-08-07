@@ -11,10 +11,9 @@
  */
 
 // This will verify the completeness of our map and run all tests.
-load("jstests/libs/all_commands_test.js");
-load("jstests/libs/fixture_helpers.js");  // For isSharded and isReplSet
+import {AllCommandsTest} from "jstests/libs/all_commands_test.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load('jstests/replsets/rslib.js');
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const name = jsTestName();
 const dbName = "alltestsdb";
@@ -87,9 +86,6 @@ const allCommands = {
     _mergeAuthzCollections: {skip: isAnInternalCommand},
     _migrateClone: {skip: isAnInternalCommand},
     _mongotConnPoolStats: {skip: isAnInternalCommand},
-    _movePrimaryRecipientAbortMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientForgetMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientSyncData: {skip: isAnInternalCommand},
     _recvChunkAbort: {skip: isAnInternalCommand},
     _recvChunkCommit: {skip: isAnInternalCommand},
     _recvChunkReleaseCritSec: {skip: isAnInternalCommand},
@@ -231,13 +227,11 @@ const allCommands = {
         },
     },
     analyzeShardKey: {
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
             assert.commandWorked(
                 conn.getDB('admin').runCommand({shardCollection: fullNs, key: {_id: 1}}));
-            for (let i = 0; i < 10; i++) {
+            for (let i = 0; i < 1000; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
             }
         },
@@ -298,8 +292,6 @@ const allCommands = {
         isAdminCommand: true,
     },
     bulkWrite: {
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
         // TODO SERVER-67711: Remove check when this feature flag is removed.
         checkFeatureFlag: "BulkWriteCommand",
         isAdminCommand: true,
@@ -324,8 +316,6 @@ const allCommands = {
     checkMetadataConsistency: {
         isAdminCommand: true,
         isShardedOnly: true,
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
         // TODO SERVER-70396: Remove check when this feature flag is removed.
         checkFeatureFlag: "CheckMetadataConsistency",
         command: {checkMetadataConsistency: 1},
@@ -497,8 +487,6 @@ const allCommands = {
         isAdminCommand: true,
     },
     configureQueryAnalyzer: {
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
@@ -571,6 +559,7 @@ const allCommands = {
         // feature).
         skip: "requires mongot mock setup",
     },
+    createUnsplittableCollection: {skip: isAnInternalCommand},
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         teardown: function(conn) {
@@ -1224,6 +1213,7 @@ const allCommands = {
         skip: isDeprecated,
     },
     removeShard: {
+        // We cannot test removeShard because we need to be able to run addShard during set up.
         // This will be tested in FCV upgrade/downgrade passthroughs in the sharding
         // directory.
         skip: "cannot add shard while in downgrading FCV state",
@@ -1314,32 +1304,7 @@ const allCommands = {
         isShardedOnly: true,
         isAdminCommand: true,
     },
-    reshardCollection: {
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
-        isShardedOnly: true,
-        isAdminCommand: true,
-        setUp: function(conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
-            const testColl = conn.getCollection(fullNs);
-            assert.commandWorked(
-                conn.getDB('admin').runCommand({shardCollection: fullNs, key: {_id: 1}}));
-
-            // Build an index on the collection to support the resharding operation.
-            assert.commandWorked(testColl.createIndex({a: 1}));
-
-            // Insert some documents that will be resharded.
-            assert.commandWorked(testColl.insert({_id: 0, a: 0}));
-            assert.commandWorked(testColl.insert({_id: 1, a: 1}));
-        },
-        command: {
-            reshardCollection: fullNs,
-            key: {a: 1},
-        },
-        teardown: function(conn) {
-            assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
-        },
-    },
+    reshardCollection: {skip: cannotRunWhileDowngrading},
     revokePrivilegesFromRole: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
@@ -1441,8 +1406,6 @@ const allCommands = {
         skip: "requires cloudFreeMonitoringEndpointURL setup",
     },
     setProfilingFilterGlobally: {
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
         command: {setProfilingFilterGlobally: 1, filter: {nreturned: 0}},
         expectFailure: true,
         expectedErrorCode:
@@ -1562,18 +1525,14 @@ const allCommands = {
         doesNotRunOnMongos: true,
     },
     transitionFromDedicatedConfigServer: {
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
-        command: {transitionFromDedicatedConfigServer: 1},
-        isShardedOnly: true,
-        isAdminCommand: true,
+        // This command uses addShard logic internally, so is not able to run with a transitionary
+        // FCV.
+        skip: cannotRunWhileDowngrading
     },
     transitionToDedicatedConfigServer: {
-        // TODO SERVER-74867: Remove the skip once 7.0 is lastLTS.
-        skip: commandIsDisabledOnLastLTS,
-        command: {transitionToDedicatedConfigServer: 1},
-        isShardedOnly: true,
-        isAdminCommand: true,
+        // In order to properly run this command, we'd need to add a shard or transition from a
+        // dedicated config server, which is not allowed in a transitionary FCV.
+        skip: cannotRunWhileDowngrading
     },
     update: {
         setUp: function(conn) {
@@ -1693,7 +1652,7 @@ let assertCommandOrWriteFailed = function(res, code, msg) {
 
 let runAllCommands = function(command, test, conn, fixture) {
     let cmdDb = conn.getDB(dbName);
-    const isShardedCluster = isMongos(cmdDb);
+    const isShardedCluster = FixtureHelpers.isMongos(cmdDb);
     const isReplSet = FixtureHelpers.isReplSet(cmdDb);
 
     // Skip command if it does not run on this type of cluster.
@@ -1783,12 +1742,13 @@ let runAllCommands = function(command, test, conn, fixture) {
 };
 
 let runTest = function(conn, adminDB, fixture) {
-    assert.commandFailed(conn.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+    assert.commandFailed(
+        conn.adminCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
     jsTestLog("Running all commands in the downgradingToLastLTS FCV");
     // First check that the map contains all available commands.
     let commandsList = AllCommandsTest.checkCommandCoverage(conn, allCommands);
-    if (isMongos(adminDB)) {
+    if (FixtureHelpers.isMongos(adminDB)) {
         let shardCommandsList =
             AllCommandsTest.checkCommandCoverage(fixture.shard0.rs.getPrimary(), allCommands);
         commandsList = new Set(commandsList.concat(shardCommandsList));
@@ -1809,11 +1769,12 @@ let runTest = function(conn, adminDB, fixture) {
         runAllCommands(command, test, conn, fixture);
     }
 
-    assert.commandWorked(conn.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        conn.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
     jsTestLog("Running all commands after upgrading back to the latest FCV");
     commandsList = AllCommandsTest.checkCommandCoverage(conn, allCommands);
-    if (isMongos(adminDB)) {
+    if (FixtureHelpers.isMongos(adminDB)) {
         let shardCommandsList =
             AllCommandsTest.checkCommandCoverage(fixture.shard0.rs.getPrimary(), allCommands);
         commandsList = new Set(commandsList.concat(shardCommandsList));

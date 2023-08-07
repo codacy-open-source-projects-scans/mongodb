@@ -77,6 +77,7 @@
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/db/s/sharding_logging.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/scoped_task_executor.h"
@@ -512,23 +513,6 @@ void Balancer::_consumeActionStreamLoop() {
         _outstandingStreamingOps.store(0);
     });
 
-    // Lambda function for applying action response
-    auto applyActionResponseTo = [this](const BalancerStreamAction& action,
-                                        const BalancerStreamActionResponse& response,
-                                        ActionsStreamPolicy* policy) {
-        invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
-        ThreadClient tc("BalancerSecondaryThread::applyActionResponse", getGlobalServiceContext());
-
-        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*tc.get());
-            tc.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
-
-        auto opCtx = tc->makeOperationContext();
-        policy->applyActionResult(opCtx.get(), action, response);
-    };
-
     // Lambda function to sleep for throttling
     auto applyThrottling =
         [lastActionTime = Date_t::fromMillisSinceEpoch(0)](const Milliseconds throttle) mutable {
@@ -636,11 +620,9 @@ void Balancer::_consumeActionStreamLoop() {
                                                  mergeAction.chunkRange,
                                                  mergeAction.collectionPlacementVersion)
                             .thenRunOn(*executor)
-                            .onCompletion([this,
-                                           stream,
-                                           &applyActionResponseTo,
-                                           action = std::move(mergeAction)](const Status& status) {
-                                applyActionResponseTo(action, status, stream);
+                            .onCompletion([this, stream, action = std::move(mergeAction)](
+                                              const Status& status) {
+                                _applyStreamingActionResponseToPolicy(action, status, stream);
                             });
                 },
                 [&, stream = sourcedStream](DataSizeInfo&& dataSizeAction) {
@@ -655,12 +637,9 @@ void Balancer::_consumeActionStreamLoop() {
                                               dataSizeAction.estimatedValue,
                                               dataSizeAction.maxSize)
                             .thenRunOn(*executor)
-                            .onCompletion([this,
-                                           stream,
-                                           &applyActionResponseTo,
-                                           action = std::move(dataSizeAction)](
+                            .onCompletion([this, stream, action = std::move(dataSizeAction)](
                                               const StatusWith<DataSizeResponse>& swDataSize) {
-                                applyActionResponseTo(action, swDataSize, stream);
+                                _applyStreamingActionResponseToPolicy(action, swDataSize, stream);
                             });
                 },
                 [&, stream = sourcedStream](MergeAllChunksOnShardInfo&& mergeAllChunksAction) {
@@ -674,12 +653,10 @@ void Balancer::_consumeActionStreamLoop() {
                                 opCtx.get(), mergeAllChunksAction.nss, mergeAllChunksAction.shardId)
                             .thenRunOn(*executor)
                             .onCompletion(
-                                [this,
-                                 stream,
-                                 &applyActionResponseTo,
-                                 action = mergeAllChunksAction](
+                                [this, stream, action = mergeAllChunksAction](
                                     const StatusWith<NumMergedChunks>& swNumMergedChunks) {
-                                    applyActionResponseTo(action, swNumMergedChunks, stream);
+                                    _applyStreamingActionResponseToPolicy(
+                                        action, swNumMergedChunks, stream);
                                 });
                 },
                 [](MigrateInfo&& _) {
@@ -944,6 +921,22 @@ void Balancer::_mainThread() {
     LOGV2(21867, "CSRS balancer is now stopped");
 }
 
+void Balancer::_applyStreamingActionResponseToPolicy(const BalancerStreamAction& action,
+                                                     const BalancerStreamActionResponse& response,
+                                                     ActionsStreamPolicy* policy) {
+    invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
+    ThreadClient tc("BalancerSecondaryThread::applyActionResponse", getGlobalServiceContext());
+
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+    {
+        stdx::lock_guard<Client> lk(*tc.get());
+        tc.get()->setSystemOperationUnkillableByStepdown(lk);
+    }
+
+    auto opCtx = tc->makeOperationContext();
+    policy->applyActionResult(opCtx.get(), action, response);
+};
+
 bool Balancer::_terminationRequested() {
     stdx::lock_guard<Latch> scopedLock(_mutex);
     return (_threadSetState != ThreadSetState::Running);
@@ -1175,6 +1168,28 @@ int Balancer::_moveChunks(OperationContext* opCtx,
             ShardingCatalogManager::get(opCtx)->splitOrMarkJumbo(
                 opCtx, collection.getNss(), migrateInfo.minKey, migrateInfo.getMaxChunkSizeBytes());
             continue;
+        }
+
+        if (status == ErrorCodes::IndexNotFound &&
+            gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
+                serverGlobalParams.featureCompatibility)) {
+
+            const auto [cm, _] = uassertStatusOK(
+                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(
+                    opCtx, migrateInfo.nss));
+
+            if (cm.getShardKeyPattern().isHashedPattern()) {
+                LOGV2(78252,
+                      "Turning off balancing for hashed collection because migration failed due to "
+                      "missing shardkey index",
+                      "migrateInfo"_attr = redact(migrateInfo.toString()),
+                      "error"_attr = redact(status),
+                      "collection"_attr = migrateInfo.nss);
+
+                // Schedule writing to config.collections to turn off the balancer.
+                _commandScheduler->disableBalancerForCollection(opCtx, migrateInfo.nss);
+                continue;
+            }
         }
 
         LOGV2(21872,

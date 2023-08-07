@@ -41,6 +41,7 @@
 
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/collection_type.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
@@ -300,6 +301,23 @@ public:
         return std::get<ViewAcquisition>(_collectionOrViewAcquisition);
     }
 
+    query_shape::CollectionType getCollectionType() const {
+        if (isView()) {
+            if (getView().getViewDefinition().timeseries())
+                return query_shape::CollectionType::timeseries;
+            return query_shape::CollectionType::view;
+        }
+        const auto& collection = getCollection();
+        if (!collection.exists()) {
+            return query_shape::CollectionType::nonExistent;
+        }
+        return query_shape::CollectionType::collection;
+    }
+
+    bool collectionExists() const {
+        return isCollection() && getCollection().exists();
+    }
+
 private:
     friend class CollectionAcquisition;
 
@@ -403,6 +421,7 @@ private:
  */
 struct YieldedTransactionResources {
     YieldedTransactionResources(YieldedTransactionResources&&) = default;
+    YieldedTransactionResources& operator=(YieldedTransactionResources&&) = default;
 
     YieldedTransactionResources(
         std::unique_ptr<shard_role_details::TransactionResources> yieldedResources,
@@ -435,6 +454,92 @@ YieldedTransactionResources yieldTransactionResourcesFromOperationContext(Operat
 
 void restoreTransactionResourcesToOperationContext(
     OperationContext* opCtx, YieldedTransactionResources yieldedResourcesHolder);
+
+/**
+ * An opaque class meant for containing TransactionResources that are stashed for subsequent
+ * getMores.
+ *
+ * Usage of this class must be done via the RAII type HandleTransactionResourcesFromCursor. It will
+ * take care of restoring the TransactionResources onto the operation and stash them back once it
+ * goes out of scope.
+ */
+class StashedTransactionResources {
+public:
+    StashedTransactionResources() = default;
+
+    StashedTransactionResources(
+        std::unique_ptr<shard_role_details::TransactionResources> yieldedResources,
+        shard_role_details::TransactionResources::State originalState)
+        : _yieldedResources(std::move(yieldedResources)), _originalState(originalState) {}
+
+    StashedTransactionResources(const StashedTransactionResources&) = delete;
+    StashedTransactionResources(StashedTransactionResources&&) = default;
+
+    StashedTransactionResources& operator=(const StashedTransactionResources&) = delete;
+    StashedTransactionResources& operator=(StashedTransactionResources&&) = default;
+
+    ~StashedTransactionResources() {
+        invariant(!_yieldedResources,
+                  "Resources must be disposed or passed on to an opCtx before destroying the "
+                  "StashedTransactionResources");
+    }
+
+    /**
+     * Releases the yielded TransactionResources without transitioning them back to an opCtx. This
+     * releases all locks and acquisitions held.
+     */
+    void dispose();
+
+private:
+    friend class HandleTransactionResourcesFromCursor;
+
+    std::unique_ptr<shard_role_details::TransactionResources> _yieldedResources;
+    shard_role_details::TransactionResources::State _originalState;
+};
+
+class StashTransactionResourcesForDBDirect {
+public:
+    StashTransactionResourcesForDBDirect(OperationContext* opCtx);
+    ~StashTransactionResourcesForDBDirect();
+
+private:
+    OperationContext* _opCtx;
+    std::unique_ptr<shard_role_details::TransactionResources> _originalTransactionResources;
+};
+
+class ClientCursor;
+
+/**
+ * This method puts the TransactionResources associated with the current OpCtx into the stashed
+ * state and then detaches them from the OpCtx, moving their ownership to the given cursor.
+ */
+void stashTransactionResourcesFromOperationContext(OperationContext* opCtx, ClientCursor* cursor);
+
+/**
+ * An RAII class that handles restoration of the TransactionResources onto the OperationContext from
+ * a ClientCursor.
+ *
+ * This class automatically handles stashing and unstashing the resources onto the ClientCursor as
+ * long as the TransactionResources aren't in the FAILED state. If the operation has failed and the
+ * resources have to be released the user must dismissRestoredResources() in order to release them
+ * and not stash them into the ClientCursor.
+ */
+class HandleTransactionResourcesFromCursor {
+public:
+    HandleTransactionResourcesFromCursor(OperationContext* opCtx, ClientCursor* cursor);
+    ~HandleTransactionResourcesFromCursor();
+
+    /**
+     * Marks the current TransactionResources as FAILED and releases all resources. After calling
+     * this method the transactions won't be stashed back into the ClientCursor.
+     */
+    void dismissRestoredResources();
+
+private:
+    OperationContext* _opCtx;
+    ClientCursor* _cursor;
+    std::unique_ptr<shard_role_details::TransactionResources> _originalTransactionResources;
+};
 
 namespace shard_role_details {
 class SnapshotAttempt {

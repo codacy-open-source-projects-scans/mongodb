@@ -28,12 +28,13 @@
  *   uses_transactions,
  * ]
  */
-(function() {
-"use strict";
-
-load('jstests/libs/profiler.js');
-load('jstests/sharding/libs/last_lts_mongod_commands.js');
-load('jstests/sharding/libs/last_lts_mongos_commands.js');
+import {profilerHasSingleMatchingEntryOrThrow} from "jstests/libs/profiler.js";
+import {
+    commandsRemovedFromMongodSinceLastLTS
+} from "jstests/sharding/libs/last_lts_mongod_commands.js";
+import {
+    commandsRemovedFromMongosSinceLastLTS
+} from "jstests/sharding/libs/last_lts_mongos_commands.js";
 
 // TODO SERVER-50144 Remove this and allow orphan checking.
 // This test calls removeShard which can leave docs in config.rangeDeletions in state "pending",
@@ -138,9 +139,6 @@ let testCases = {
     _mergeAuthzCollections: {skip: "internal command"},
     _migrateClone: {skip: "internal command"},
     _mongotConnPoolStats: {skip: "internal command"},
-    _movePrimaryRecipientSyncData: {skip: "internal command"},
-    _movePrimaryRecipientAbortMigration: {skip: "internal command"},
-    _movePrimaryRecipientForgetMigration: {skip: "internal command"},
     _recvChunkAbort: {skip: "internal command"},
     _recvChunkCommit: {skip: "internal command"},
     _recvChunkReleaseCritSec: {skip: "internal command"},
@@ -392,6 +390,7 @@ let testCases = {
     },
     createSearchIndex: {skip: "present in v6.3 but renamed to createSearchIndexes in v7.0"},
     createSearchIndexes: {skip: "does not accept read or write concern"},
+    createUnsplittableCollection: {skip: "does not accept read or write concern"},
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         checkReadConcern: false,
@@ -1120,4 +1119,3 @@ rst.stopSet();
 let st = new ShardingTest({mongos: 1, shards: {rs0: {nodes: 1}}});
 runTests(st.s0, st.rs0.getPrimary(), st.configRS.getPrimary(), true);
 st.stop();
-})();

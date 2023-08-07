@@ -353,6 +353,10 @@ Status storeServerOptions(const moe::Environment& params) {
         }
     }
 
+    if (params.count("net.internalPort")) {
+        serverGlobalParams.internalPort = params["net.internalPort"].as<int>();
+    }
+
     if (params.count("security.transitionToAuth")) {
         serverGlobalParams.transitionToAuth = params["security.transitionToAuth"].as<bool>();
     }
@@ -477,6 +481,15 @@ Status storeServerOptions(const moe::Environment& params) {
             return ret;
         }
     }
+
+#ifdef MONGO_CONFIG_GRPC
+    if (params.count("net.grpc.port")) {
+        serverGlobalParams.grpcPort = params["net.grpc.port"].as<int>();
+    }
+    if (params.count("net.grpc.serverMaxThreads")) {
+        serverGlobalParams.grpcServerMaxThreads = params["net.grpc.serverMaxThreads"].as<int>();
+    }
+#endif
 
     return Status::OK();
 }

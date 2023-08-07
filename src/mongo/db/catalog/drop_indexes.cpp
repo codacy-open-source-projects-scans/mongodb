@@ -70,6 +70,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -347,16 +348,22 @@ void dropReadyIndexes(OperationContext* opCtx,
                     }
                     // For any index that is compatible with the shard key, if
                     // gFeatureFlagShardKeyIndexOptionalHashedSharding is enabled and
-                    // the shard key is hashed, allow users to drop the hashed index.
+                    // the shard key is hashed, allow users to drop the hashed index. Note
+                    // skipDroppingHashedShardKeyIndex is used in some tests to prevent dropIndexes
+                    // from dropping the hashed shard key index so we can continue to test chunk
+                    // migration with hashed sharding. Otherwise, dropIndexes with '*' would drop
+                    // the index and prevent chunk migration from running.
                     const auto& shardKey = collDescription.getShardKeyPattern();
+                    const bool skipDropIndex = skipDroppingHashedShardKeyIndex ||
+                        !(gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
+                              serverGlobalParams.featureCompatibility) &&
+                          shardKey.isHashedPattern());
                     if (isCompatibleWithShardKey(opCtx,
                                                  CollectionPtr(collection),
                                                  desc->getEntry(),
                                                  shardKey.toBSON(),
                                                  false /* requiresSingleKey */) &&
-                        !(gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
-                              serverGlobalParams.featureCompatibility) &&
-                          shardKey.isHashedPattern())) {
+                        skipDropIndex) {
                         return false;
                     }
 
@@ -417,7 +424,9 @@ void assertNoMovePrimaryInProgress(OperationContext* opCtx, const NamespaceStrin
         auto collDesc = scopedCss->getCollectionDescription(opCtx);
         collDesc.throwIfReshardingInProgress(nss);
 
-        if (!collDesc.isSharded()) {
+        // Only collections that are not registered in the sharding catalog are affected by
+        // movePrimary
+        if (!collDesc.hasRoutingTable()) {
             if (scopedDss->isMovePrimaryInProgress()) {
                 LOGV2(4976500, "assertNoMovePrimaryInProgress", logAttrs(nss));
 

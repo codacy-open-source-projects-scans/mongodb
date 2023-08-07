@@ -546,7 +546,7 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
         CurOp::get(opCtx)->debug().placementVersionRefreshMillis += Milliseconds(t.millis());
     });
 
-    if (nss.isNamespaceAlwaysUnsharded()) {
+    if (nss.isNamespaceAlwaysUntracked()) {
         return;
     }
 
@@ -563,9 +563,7 @@ void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
 
         {
             // The refresh threads do not perform any data reads themselves, therefore they don't
-            // need to synchronise with secondary oplog application or go through admission control.
-            ShouldNotConflictWithSecondaryBatchApplicationBlock skipParallelBatchWriterMutex(
-                opCtx->lockState());
+            // need to go through admission control.
             ScopedAdmissionPriorityForLock skipAdmissionControl(
                 opCtx->lockState(), AdmissionContext::Priority::kImmediate);
 
@@ -661,7 +659,7 @@ CollectionMetadata forceGetCurrentMetadata(OperationContext* opCtx, const Namesp
             Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithPlacementRefresh(opCtx,
                                                                                            nss));
 
-        if (!cm.isSharded()) {
+        if (!cm.hasRoutingTable()) {
             return CollectionMetadata();
         }
 
@@ -691,7 +689,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
     const auto [cm, _] = uassertStatusOK(
         Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
 
-    if (!cm.isSharded()) {
+    if (!cm.hasRoutingTable()) {
         // DBLock and CollectionLock are used here to avoid throwing further recursive stale
         // config errors, as well as a possible InvalidViewDefinition error if an invalid view
         // is in the 'system.views' collection.
@@ -716,7 +714,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
             CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
         if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
             const auto& metadata = *optMetadata;
-            if (metadata.isSharded() &&
+            if (metadata.hasRoutingTable() &&
                 (cm.getVersion().isOlderOrEqualThan(metadata.getCollPlacementVersion()))) {
                 LOGV2_DEBUG(22063,
                             1,
@@ -741,7 +739,7 @@ ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss);
     if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
         const auto& metadata = *optMetadata;
-        if (metadata.isSharded() &&
+        if (metadata.hasRoutingTable() &&
             (cm.getVersion().isOlderOrEqualThan(metadata.getCollPlacementVersion()))) {
             LOGV2_DEBUG(22064,
                         1,

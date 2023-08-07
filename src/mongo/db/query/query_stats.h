@@ -69,7 +69,6 @@ using BSONNumeric = long long;
 }  // namespace
 
 namespace query_stats {
-
 /**
  * An aggregated metric stores a compressed view of data. It balances the loss of information
  * with the reduction in required storage.
@@ -119,10 +118,6 @@ public:
         // (QueryStatsEntry)
         queryStatsStoreSizeEstimateBytesMetric.increment(kKeySize + size());
     }
-
-    QueryStatsEntry(QueryStatsEntry& entry) = delete;
-
-    QueryStatsEntry(QueryStatsEntry&& entry) = delete;
 
     ~QueryStatsEntry() {
         // Decrement by size of query stats store key (hash returns size_t) and value
@@ -194,7 +189,7 @@ public:
     /**
      * The KeyGenerator that can generate the query stats key for this request.
      */
-    std::unique_ptr<KeyGenerator> keyGenerator;
+    const std::shared_ptr<const KeyGenerator> keyGenerator;
 };
 struct TelemetryPartitioner {
     // The partitioning function for use with the 'Partitioned' utility.
@@ -217,6 +212,8 @@ using QueryStatsStore = PartitionedCache<std::size_t,
  * Acquire a reference to the global queryStats store.
  */
 QueryStatsStore& getQueryStatsStore(OperationContext* opCtx);
+
+bool isQueryStatsFeatureEnabled(bool requiresFullQueryStatsFeatureFlag);
 
 /**
  * Registers a request for query stats collection. The function may decide not to collect anything,
@@ -250,10 +247,15 @@ QueryStatsStore& getQueryStatsStore(OperationContext* opCtx);
  *   deferred construction callback to ensure that this feature does not impact performance if
  *   collecting stats is not needed due to the feature being disabled or the request being rate
  *   limited.
+ * - Since we currently have 2 feature flags (one for full query stats, and one for
+ *   find-command-only query stats), we use the requiresFullQueryStatsFeatureFlag parameter to
+ * denote which requests should only be registered when the full feature flag is enabled. TODO
+ * SERVER-79494 Remove requiresFullQueryStatsFeatureFlag parameter.
  */
 void registerRequest(OperationContext* opCtx,
                      const NamespaceString& collection,
-                     std::function<std::unique_ptr<KeyGenerator>(void)> makeKeyGenerator);
+                     std::function<std::unique_ptr<KeyGenerator>(void)> makeKeyGenerator,
+                     bool requiresFullQueryStatsFeatureFlag = true);
 
 /**
  * Writes query stats to the query stats store for the operation identified by `queryStatsKeyHash`.

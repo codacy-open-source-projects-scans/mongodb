@@ -64,7 +64,7 @@ Status validateCollectionStatsNamespaces(const std::vector<std::string> value,
                                          const boost::optional<TenantId>& tenantId) {
     try {
         for (const auto& nsStr : value) {
-            NamespaceString ns(nsStr);
+            const auto ns = NamespaceStringUtil::deserialize(tenantId, nsStr);
 
             if (!ns.isValid()) {
                 return Status(ErrorCodes::BadValue,
@@ -92,11 +92,13 @@ public:
         for (const auto& nsStr : namespaces) {
 
             try {
-                NamespaceString ns(nsStr);
+                // TODO SERVER-74464 tenantId needs to be passed.
+                const auto ns =
+                    NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(nsStr);
                 auto result = CommandHelpers::runCommandDirectly(
                     opCtx,
                     OpMsgRequest::fromDBAndBody(
-                        ns.db(),
+                        ns.db_deprecated(),
                         BSON("aggregate" << ns.coll() << "cursor" << BSONObj{} << "pipeline"
                                          << BSON_ARRAY(BSON("$collStats" << BSON(
                                                                 "storageStats" << BSON(

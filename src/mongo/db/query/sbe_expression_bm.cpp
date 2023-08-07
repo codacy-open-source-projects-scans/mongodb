@@ -112,7 +112,11 @@ public:
         LOGV2_DEBUG(6979800,
                     1,
                     "running sbe expression benchmark on expression",
-                    "expression"_attr = expression->serialize(/*explain = */ true).toString());
+                    "expression"_attr = expression
+                                            ->serialize(SerializationOptions{
+                                                .verbosity = boost::make_optional(
+                                                    ExplainOptions::Verbosity::kQueryPlanner)})
+                                            .toString());
 
         // This stage makes it possible to execute the benchmark in cases when
         // stage_builder::generateExpression adds more stages.
@@ -142,7 +146,7 @@ public:
                     "sbe expression benchmark PlanStage",
                     "stage"_attr = debugPrint(stage.get()));
 
-        auto expr = evalExpr.extractExpr(state.slotVarMap, *_env);
+        auto expr = evalExpr.extractExpr(state);
         LOGV2_DEBUG(6979802,
                     1,
                     "sbe expression benchmark EExpression",
@@ -183,7 +187,7 @@ private:
         }
     }
 
-    stage_builder::PlanStageEnvironment _env;
+    stage_builder::Environment _env;
     std::unique_ptr<stage_builder::PlanStageStaticData> _planStageData;
     Variables _variables;
     sbe::value::SlotIdGenerator _slotIdGenerator;

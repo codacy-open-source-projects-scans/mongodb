@@ -229,8 +229,10 @@ CollectionRoutingInfoTargeter makeCollectionRoutingInfoTargeter(
                                std::move(routingTableHistory))),
                            boost::none);
 
-    return CollectionRoutingInfoTargeter(CollectionRoutingInfo{
-        std::move(cm), boost::optional<ShardingIndexesCatalogCache>(boost::none)});
+    return CollectionRoutingInfoTargeter(
+        nss,
+        CollectionRoutingInfo{std::move(cm),
+                              boost::optional<ShardingIndexesCatalogCache>(boost::none)});
 }
 
 /**
@@ -356,7 +358,7 @@ DocumentSourceAnalyzeShardKeyReadWriteDistribution::createFromBson(
 }
 
 Value DocumentSourceAnalyzeShardKeyReadWriteDistribution::serialize(
-    SerializationOptions opts) const {
+    const SerializationOptions& opts) const {
     return Value(Document{{getSourceName(), _spec.toBSON(opts)}});
 }
 

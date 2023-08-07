@@ -229,7 +229,7 @@ void CommandHelpers::auditLogAuthEvent(OperationContext* opCtx,
                 _nss = _invocation->ns();
                 _name = _invocation->definition()->getName();
             } else {
-                _nss = NamespaceString(request.getDatabase());
+                _nss = NamespaceString(request.getDbName());
                 _name = request.getCommandName().toString();
             }
         }
@@ -290,10 +290,9 @@ std::string CommandHelpers::parseNsFullyQualified(const BSONObj& cmdObj) {
             str::stream() << "collection name has invalid type " << typeName(first.type()),
             first.canonicalType() == canonicalizeBSONType(mongo::String));
     const auto ns = first.valueStringData();
-    const NamespaceString nss(ns);
     uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Invalid namespace specified '" << nss.toStringForErrorMsg() << "'",
-            nss.isValid());
+            str::stream() << "Invalid namespace specified '" << ns << "'",
+            NamespaceString::isValid(ns));
     return ns.toString();
 }
 
@@ -562,7 +561,7 @@ void CommandHelpers::uassertCommandRunWithMajority(StringData commandName,
             writeConcern.isMajority());
 }
 
-void CommandHelpers::canUseTransactions(const NamespaceString& nss,
+void CommandHelpers::canUseTransactions(const std::vector<NamespaceString>& namespaces,
                                         StringData cmdName,
                                         bool allowTransactionsOnConfigDatabase) {
 
@@ -581,27 +580,29 @@ void CommandHelpers::canUseTransactions(const NamespaceString& nss,
             str::stream() << "Cannot run '" << cmdName << "' in a multi-document transaction.",
             command->allowedInTransactions());
 
-    const auto dbName = nss.dbName();
+    for (auto& nss : namespaces) {
+        const auto dbName = nss.dbName();
 
-    uassert(ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Cannot run command against the '" << dbName.toStringForErrorMsg()
-                          << "' database in a transaction.",
-            !dbName.isLocalDB());
-
-    uassert(ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Cannot run command against the '" << nss.toStringForErrorMsg()
-                          << "' collection in a transaction.",
-            !nss.isSystemDotProfile());
-
-    if (allowTransactionsOnConfigDatabase) {
         uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                "Cannot run command against the config.transactions namespace in a transaction"
-                "on a sharded cluster.",
-                nss != NamespaceString::kSessionTransactionsTableNamespace);
-    } else {
+                str::stream() << "Cannot run command against the '" << dbName.toStringForErrorMsg()
+                              << "' database in a transaction.",
+                !dbName.isLocalDB());
+
         uassert(ErrorCodes::OperationNotSupportedInTransaction,
-                "Cannot run command against the config database in a transaction.",
-                !dbName.isConfigDB());
+                str::stream() << "Cannot run command against the '" << nss.toStringForErrorMsg()
+                              << "' collection in a transaction.",
+                !(nss.isSystemDotProfile() || nss.isSystemDotViews()));
+
+        if (allowTransactionsOnConfigDatabase) {
+            uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                    "Cannot run command against the config.transactions namespace in a transaction"
+                    "on a sharded cluster.",
+                    nss != NamespaceString::kSessionTransactionsTableNamespace);
+        } else {
+            uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                    "Cannot run command against the config database in a transaction.",
+                    !dbName.isConfigDB());
+        }
     }
 }
 

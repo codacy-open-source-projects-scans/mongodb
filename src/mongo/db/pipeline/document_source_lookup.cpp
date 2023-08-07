@@ -1051,11 +1051,11 @@ void DocumentSourceLookUp::appendSpecificExecStats(MutableDocument& doc) const {
 }
 
 void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array,
-                                            SerializationOptions opts) const {
+                                            const SerializationOptions& opts) const {
     // Support alternative $lookup from config.cache.chunks* namespaces.
     //
     // Do not include the tenantId in serialized 'from' namespace.
-    auto fromValue = (pExpCtx->ns.db() == _fromNs.db())
+    auto fromValue = (pExpCtx->ns.db_deprecated() == _fromNs.db_deprecated())
         ? Value(opts.serializeIdentifier(_fromNs.coll()))
         : Value(Document{
               {"db",

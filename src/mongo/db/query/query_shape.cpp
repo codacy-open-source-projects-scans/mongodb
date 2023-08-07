@@ -228,7 +228,7 @@ void appendNamespaceShape(BSONObjBuilder& bob,
     if (nss.tenantId()) {
         bob.append("tenantId", opts.serializeIdentifier(nss.tenantId().value().toString()));
     }
-    bob.append("db", opts.serializeIdentifier(nss.db()));
+    bob.append("db", opts.serializeIdentifier(nss.db_deprecated()));
     bob.append("coll", opts.serializeIdentifier(nss.coll()));
 }
 
@@ -241,17 +241,14 @@ BSONObj extractQueryShape(const BSONObj& cmd,
             IDLParserContext("findCommandRequest", false /* apiStrict */, tenantId), cmd));
         auto parsedFindCommand =
             uassertStatusOK(parsed_find_command::parse(expCtx, std::move(findCommandRequest)));
-        return extractQueryShape(*parsedFindCommand, SerializationOptions(), expCtx);
+        return extractQueryShape(*parsedFindCommand, opts, expCtx);
     } else if (cmd.firstElementFieldName() == AggregateCommandRequest::kCommandName) {
         auto aggregateCommandRequest = AggregateCommandRequest::parse(
             IDLParserContext("aggregateCommandRequest", false /* apiStrict */, tenantId), cmd);
         auto pipeline = Pipeline::parse(aggregateCommandRequest.getPipeline(), expCtx);
         auto ns = aggregateCommandRequest.getNamespace();
-        return extractQueryShape(std::move(aggregateCommandRequest),
-                                 std::move(*pipeline),
-                                 SerializationOptions(),
-                                 expCtx,
-                                 ns);
+        return extractQueryShape(
+            std::move(aggregateCommandRequest), std::move(*pipeline), opts, expCtx, ns);
     } else {
         uasserted(7746402, str::stream() << "QueryShape can not be computed for command: " << cmd);
     }
@@ -389,13 +386,14 @@ NamespaceStringOrUUID parseNamespaceShape(BSONElement cmdNsElt) {
         tassert(7632903,
                 "Exactly one of 'uuid' and 'coll' can be defined.",
                 !cmdNs.getUuid().has_value());
-        return NamespaceString(cmdNs.getDb(), cmdNs.getColl().value());
+        return NamespaceStringUtil::parseNamespaceFromRequest(
+            tenantId, cmdNs.getDb(), cmdNs.getColl().value());
     } else {
         tassert(7632904,
                 "Exactly one of 'uuid' and 'coll' can be defined.",
                 !cmdNs.getColl().has_value());
         UUID uuid = uassertStatusOK(UUID::parse(cmdNs.getUuid().value().toString()));
-        return NamespaceStringOrUUID(cmdNs.getDb().toString(), uuid, tenantId);
+        return NamespaceStringOrUUID(DatabaseNameUtil::deserialize(tenantId, cmdNs.getDb()), uuid);
     }
 }
 

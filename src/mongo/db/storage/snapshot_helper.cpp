@@ -73,18 +73,8 @@ bool canReadAtLastApplied(OperationContext* opCtx) {
 }
 
 bool shouldReadAtLastApplied(OperationContext* opCtx,
-                             const NamespaceString& nss,
+                             boost::optional<const NamespaceString&> nss,
                              std::string* reason) {
-    // If this is true, then the operation opted-in to the PBWM lock, implying that it cannot change
-    // its ReadSource. It's important to note that it is possible for this to be false, but still be
-    // holding the PBWM lock, explained below.
-    if (opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
-        if (reason) {
-            *reason = "conflicts with batch application";
-        }
-        return false;
-    }
-
     // If we are already holding the PBWM lock, do not change ReadSource. Snapshots acquired by an
     // operation after a yield/restore must see all writes in the pre-yield snapshot. Once a
     // snapshot is reading without a timestamp, we choose to continue acquiring snapshots without a
@@ -102,7 +92,7 @@ bool shouldReadAtLastApplied(OperationContext* opCtx,
     // Non-replicated collections do not need to read at lastApplied, as those collections are not
     // written by the replication system. However, the oplog is special, as it *is* written by the
     // replication system.
-    if (!nss.isReplicated() && !nss.isOplog()) {
+    if (nss && !nss->isReplicated() && !nss->isOplog()) {
         if (reason) {
             *reason = "unreplicated collection";
         }
@@ -154,7 +144,8 @@ bool shouldReadAtLastApplied(OperationContext* opCtx,
 
 namespace SnapshotHelper {
 
-bool changeReadSourceIfNeeded(OperationContext* opCtx, const NamespaceString& nss) {
+bool changeReadSourceIfNeeded(OperationContext* opCtx,
+                              boost::optional<const NamespaceString&> nss) {
     std::string reason;
     // Write to the reason string if debug logging is enabled. This avoids writing this string every
     // time we check if we should read at last applied. This string itself is only used in logging
@@ -243,21 +234,21 @@ bool changeReadSourceIfNeeded(OperationContext* opCtx, const NamespaceString& ns
         LOGV2_DEBUG(4452901,
                     2,
                     "Changed ReadSource to kLastApplied",
-                    logAttrs(nss),
+                    "namespace"_attr = nss,
                     "ts"_attr = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx));
     } else if (originalReadSource == RecoveryUnit::ReadSource::kLastApplied &&
                currentReadSource == RecoveryUnit::ReadSource::kLastApplied) {
         LOGV2_DEBUG(6730500,
                     2,
                     "ReadSource kLastApplied updated timestamp",
-                    logAttrs(nss),
+                    "namespace"_attr = nss,
                     "ts"_attr = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx));
     } else if (originalReadSource == RecoveryUnit::ReadSource::kLastApplied &&
                currentReadSource == RecoveryUnit::ReadSource::kNoTimestamp) {
         LOGV2_DEBUG(4452902,
                     2,
                     "Changed ReadSource to kNoTimestamp",
-                    logAttrs(nss),
+                    "namespace"_attr = nss,
                     "reason"_attr = reason);
     }
 

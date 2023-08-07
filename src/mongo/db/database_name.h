@@ -124,18 +124,6 @@ public:
     DatabaseName() = default;
 
     /**
-     * This function constructs a DatabaseName without checking for presence of TenantId. It
-     * must only be used by auth systems which are not yet tenant aware.
-     *
-     * TODO SERVER-76294 Remove this function. Any remaining call sites must be changed to use a
-     * function on DatabaseNameUtil.
-     */
-    static DatabaseName createDatabaseNameForAuth(const boost::optional<TenantId>& tenantId,
-                                                  StringData dbString) {
-        return DatabaseName(tenantId, dbString);
-    }
-
-    /**
      * This function constructs a DatabaseName without checking for presence of TenantId.
      *
      * MUST only be used for tests.
@@ -151,13 +139,6 @@ public:
         }
 
         return TenantId{OID::from(&_data[kDataOffset])};
-    }
-    /**
-     * This function is deprecated. TODO SERVER-77537 Make db() private.
-     */
-    StringData db() const {
-        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
-        return StringData{_data.data() + offset, _data.size() - offset};
     }
 
     size_t size() const {
@@ -285,6 +266,7 @@ private:
     friend class NamespaceString;
     friend class NamespaceStringOrUUID;
     friend class DatabaseNameUtil;
+    friend class NamespaceStringUtil;
 
     /**
      * Constructs a DatabaseName from the given tenantId and database name.
@@ -320,6 +302,11 @@ private:
         if (!dbString.empty()) {
             std::memcpy(_data.data() + dbStartIndex, dbString.rawData(), dbString.size());
         }
+    }
+
+    StringData db() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return StringData{_data.data() + offset, _data.size() - offset};
     }
 
     std::string toString() const {

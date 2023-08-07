@@ -94,10 +94,6 @@ enum struct SbeCompatibility {
     fullyCompatible,
 };
 
-inline bool operator<(SbeCompatibility a, SbeCompatibility b) {
-    return static_cast<int>(a) < static_cast<int>(b);
-}
-
 class ExpressionContext : public RefCountable {
 public:
     struct ResolvedNamespace {
@@ -224,8 +220,8 @@ public:
     /**
      * Returns true if this is a collectionless aggregation on the specified database.
      */
-    bool isDBAggregation(const DatabaseName& dbName) const {
-        return ns.dbName() == dbName && ns.isCollectionlessAggregateNS();
+    bool isDBAggregation(StringData dbName) const {
+        return ns.db_deprecated() == dbName && ns.isCollectionlessAggregateNS();
     }
 
     /**
@@ -417,7 +413,8 @@ public:
             invariant(scopeVar.isObject());
             scopeObj = scopeVar.getDocument().toBson();
         }
-        return JsExecution::get(opCtx, scopeObj, ns.db(), loadStoredProcedures, jsHeapLimitMB);
+        return JsExecution::get(
+            opCtx, scopeObj, ns.db_deprecated(), loadStoredProcedures, jsHeapLimitMB);
     }
 
     /**

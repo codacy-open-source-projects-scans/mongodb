@@ -62,6 +62,7 @@
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/exec/shard_filterer_impl.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_names.h"
@@ -350,7 +351,7 @@ namespace {
  * TODO SERVER-79041: Change how and when the shardFilterer slot is allocated.
  */
 void setupShardFiltering(OperationContext* opCtx,
-                         const CollectionPtr& collection,
+                         const MultipleCollectionAccessor& collections,
                          mongo::sbe::RuntimeEnvironment& runtimeEnv,
                          sbe::value::SlotIdGenerator& slotIdGenerator) {
     // Allocate a global slot for shard filtering and register it in 'runtimeEnv'.
@@ -359,10 +360,19 @@ void setupShardFiltering(OperationContext* opCtx,
 
     // TODO SERVER-79007: Merge this method of creating a ShardFilterer with that in
     // sbe_stage_builders.cpp.
-    if (collection.isSharded()) {
+    bool isSharded = collections.isAcquisition()
+        ? collections.getMainAcquisition().getShardingDescription().isSharded()
+        : collections.getMainCollection().isSharded_DEPRECATED();
+    if (isSharded) {
         auto shardFilterer = [&]() -> std::unique_ptr<ShardFilterer> {
-            ShardFiltererFactoryImpl shardFiltererFactory(collection);
-            return shardFiltererFactory.makeShardFilterer(opCtx);
+            if (collections.isAcquisition()) {
+                return std::make_unique<ShardFiltererImpl>(
+                    *collections.getMainAcquisition().getShardingFilter());
+            } else {
+                const auto& collection = collections.getMainCollection();
+                ShardFiltererFactoryImpl shardFiltererFactory(collection);
+                return shardFiltererFactory.makeShardFilterer(opCtx);
+            }
         }();
         runtimeEnv.resetSlot(shardFiltererSlot,
                              sbe::value::TypeTags::shardFilterer,
@@ -371,24 +381,48 @@ void setupShardFiltering(OperationContext* opCtx,
     }
 }
 
-static ExecParams createExecutor(OptPhaseManager phaseManager,
-                                 PlanAndProps planAndProps,
-                                 OperationContext* opCtx,
-                                 boost::intrusive_ptr<ExpressionContext> expCtx,
-                                 const NamespaceString& nss,
-                                 const CollectionPtr& collection,
-                                 const bool requireRID,
-                                 const ScanOrder scanOrder,
-                                 const bool needsExplain) {
+static ExecParams createExecutor(
+    OptPhaseManager phaseManager,
+    PlanAndProps planAndProps,
+    OperationContext* opCtx,
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    const NamespaceString& nss,
+    const MultipleCollectionAccessor& collections,
+    const bool requireRID,
+    const ScanOrder scanOrder,
+    const bool needsExplain,
+    PlanYieldPolicy::YieldPolicy yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO) {
     auto env = VariableEnvironment::build(planAndProps._node);
     SlotVarMap slotMap;
     auto runtimeEnvironment = std::make_unique<sbe::RuntimeEnvironment>();  // TODO use factory
     sbe::value::SlotIdGenerator ids;
     boost::optional<sbe::value::SlotId> ridSlot;
+
+    stdx::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable =
+        PlanYieldPolicy::YieldThroughAcquisitions{};
+
+    if (!collections.isAcquisition()) {
+        yieldable = &(collections.getMainCollection());
+    }
+
+    auto sbeYieldPolicy =
+        std::make_unique<PlanYieldPolicySBE>(opCtx,
+                                             yieldPolicy,
+                                             opCtx->getServiceContext()->getFastClockSource(),
+                                             internalQueryExecYieldIterations.load(),
+                                             Milliseconds{internalQueryExecYieldPeriodMS.load()},
+                                             yieldable,
+                                             std::make_unique<YieldPolicyCallbacksImpl>(nss));
+
     // Construct the ShardFilterer and bind it to the correct slot.
-    setupShardFiltering(opCtx, collection, *runtimeEnvironment, ids);
-    SBENodeLowering g{
-        env, *runtimeEnvironment, ids, phaseManager.getMetadata(), planAndProps._map, scanOrder};
+    setupShardFiltering(opCtx, collections, *runtimeEnvironment, ids);
+    SBENodeLowering g{env,
+                      *runtimeEnvironment,
+                      ids,
+                      phaseManager.getMetadata(),
+                      planAndProps._map,
+                      scanOrder,
+                      sbeYieldPolicy.get()};
     auto sbePlan = g.optimize(planAndProps._node, slotMap, ridSlot);
     tassert(6624262, "Unexpected rid slot", !requireRID || ridSlot);
 
@@ -400,31 +434,19 @@ static ExecParams createExecutor(OptPhaseManager phaseManager,
         OPTIMIZER_DEBUG_LOG(6264802, 5, "Lowered SBE plan", "plan"_attr = p.print(*sbePlan.get()));
     }
 
-    stage_builder::PlanStageSlots outputs;
-    outputs.set(stage_builder::PlanStageSlots::kResult, slotMap.begin()->second);
+    auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
+    staticData->resultSlot = slotMap.begin()->second;
     if (requireRID) {
-        outputs.set(stage_builder::PlanStageSlots::kRecordId, *ridSlot);
+        staticData->recordIdSlot = ridSlot;
     }
 
-    auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
-    staticData->outputs = std::move(outputs);
-
-    stage_builder::PlanStageData data(
-        stage_builder::PlanStageEnvironment(std::move(runtimeEnvironment)), std::move(staticData));
+    stage_builder::PlanStageData data(stage_builder::Environment(std::move(runtimeEnvironment)),
+                                      std::move(staticData));
 
     sbePlan->attachToOperationContext(opCtx);
     if (needsExplain || expCtx->mayDbProfile) {
         sbePlan->markShouldCollectTimingInfo();
     }
-
-    auto yieldPolicy =
-        std::make_unique<PlanYieldPolicySBE>(opCtx,
-                                             PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                             opCtx->getServiceContext()->getFastClockSource(),
-                                             internalQueryExecYieldIterations.load(),
-                                             Milliseconds{internalQueryExecYieldPeriodMS.load()},
-                                             nullptr,
-                                             std::make_unique<YieldPolicyCallbacksImpl>(nss));
 
     std::unique_ptr<ABTPrinter> abtPrinter;
     if (needsExplain) {
@@ -462,7 +484,7 @@ static ExecParams createExecutor(OptPhaseManager phaseManager,
             std::move(abtPrinter),
             QueryPlannerParams::Options::DEFAULT,
             nss,
-            std::move(yieldPolicy),
+            std::move(sbeYieldPolicy),
             false /*isFromPlanCache*/,
             true /* generatedByBonsai */};
 }
@@ -520,7 +542,7 @@ static void populateAdditionalScanDefs(
         }
         scanDefs.emplace(scanDefName,
                          createScanDef({{"type", "mongod"},
-                                        {"database", involvedNss.db().toString()},
+                                        {"database", involvedNss.db_deprecated().toString()},
                                         {"uuid", uuidStr},
                                         {ScanNode::kDefaultCollectionNameSpec, collNameStr}},
                                        std::move(indexDefs),
@@ -639,19 +661,36 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
     }
 
     const size_t numberOfPartitions = internalQueryDefaultDOP.load();
+
+    const bool isSharded = collection.isSharded_DEPRECATED();
+    ABTVector shardKey;
+    if (isSharded) {
+        for (auto&& e : collection.getShardKeyPattern().getKeyPattern().toBSON()) {
+            shardKey.push_back(translateShardKeyField(e.fieldName()));
+        }
+    }
+
+    DistributionType type{DistributionType::UnknownPartitioning};
+    if (isSharded) {
+        // TODO SERVER-78503: Handle hashed distribution
+        type = DistributionType::RangePartitioning;
+    } else if (numberOfPartitions == 1) {
+        type = DistributionType::Centralized;
+    }
+
     // For now handle only local parallelism (no over-the-network exchanges).
-    DistributionAndPaths distribution{(numberOfPartitions == 1)
-                                          ? DistributionType::Centralized
-                                          : DistributionType::UnknownPartitioning};
+    DistributionAndPaths distribution{type, shardKey};
 
     opt::unordered_map<std::string, ScanDefinition> scanDefs;
     boost::optional<CEType> numRecords;
     if (collectionExists) {
         numRecords = static_cast<double>(collection->numRecords(opCtx));
     }
+    ShardingMetadata shardingMetadata{.mayContainOrphans = isSharded};
+
     scanDefs.emplace(scanDefName,
                      createScanDef({{"type", "mongod"},
-                                    {"database", nss.db().toString()},
+                                    {"database", nss.db_deprecated().toString()},
                                     {"uuid", uuidStr},
                                     {ScanNode::kDefaultCollectionNameSpec, nss.coll().toString()}},
                                    std::move(indexDefs),
@@ -659,7 +698,8 @@ Metadata populateMetadata(boost::intrusive_ptr<ExpressionContext> expCtx,
                                    constFold,
                                    std::move(distribution),
                                    collectionExists,
-                                   numRecords));
+                                   numRecords,
+                                   std::move(shardingMetadata)));
 
     // Add a scan definition for all involved collections. Note that the base namespace has already
     // been accounted for above and isn't included here.
@@ -693,9 +733,11 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
     switch (mode) {
         case CEMode::kSampling: {
             Metadata metadataForSampling = metadata;
-            // Do not use indexes for sampling.
             for (auto& entry : metadataForSampling._scanDefs) {
+                // Do not use indexes for sampling.
                 entry.second.getIndexDefs().clear();
+                // Do not perform shard filtering for sampling.
+                entry.second.shardingMetadata().mayContainOrphans = false;
             }
 
             // TODO: consider a limited rewrite set.
@@ -767,7 +809,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     OperationContext* opCtx,
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const NamespaceString& nss,
-    const CollectionPtr& collection,
+    const MultipleCollectionAccessor& collections,
     QueryHints queryHints,
     const boost::optional<BSONObj>& indexHint,
     const Pipeline* pipeline,
@@ -785,6 +827,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     if (pipeline) {
         involvedCollections = pipeline->getInvolvedCollections();
     }
+
+    const auto& collection = collections.getMainCollection();
 
     validateCommandOptions(canonicalQuery, collection, indexHint, involvedCollections);
 
@@ -905,15 +949,16 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                           opCtx,
                           expCtx,
                           nss,
-                          collection,
+                          collections,
                           requireRID,
                           scanOrder,
                           needsExplain);
 }
 
-boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(const CollectionPtr& collection,
-                                                               QueryHints queryHints,
-                                                               const CanonicalQuery* query) {
+boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
+    const MultipleCollectionAccessor& collections,
+    QueryHints queryHints,
+    const CanonicalQuery* query) {
     boost::optional<BSONObj> indexHint;
     if (!query->getFindCommandRequest().getHint().isEmpty()) {
         indexHint = query->getFindCommandRequest().getHint();
@@ -926,7 +971,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(const CollectionP
     return getSBEExecutorViaCascadesOptimizer(opCtx,
                                               expCtx,
                                               nss,
-                                              collection,
+                                              collections,
                                               std::move(queryHints),
                                               indexHint,
                                               nullptr /* pipeline */,

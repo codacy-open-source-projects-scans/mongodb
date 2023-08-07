@@ -1207,7 +1207,7 @@ public:
         auto endDateExpression = _context->popABTExpr();
         auto startDateExpression = _context->popABTExpr();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
         auto timeZoneDBVar = makeVariable(timeZoneDBName);
 
@@ -1346,7 +1346,7 @@ public:
         auto dateStringExpression = _context->popABTExpr();
         auto dateStringName = makeLocalVariableName(_context->state.frameId(), 0);
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
 
         // Set parameters for an invocation of built-in "dateFromString" function.
@@ -1740,7 +1740,7 @@ public:
         // for datetime computation. This global object is registered as an unowned value in the
         // runtime environment so we pass the corresponding slot to the datePartsWeekYear and
         // dateParts functions as a variable.
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
         auto computeDate = makeABTFunction(eIsoWeekYear ? "datePartsWeekYear" : "dateParts",
                                            makeVariable(timeZoneDBName),
@@ -1822,7 +1822,7 @@ public:
         }
         auto date = _context->popABTExpr();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
         auto timeZoneDBVar = makeVariable(timeZoneDBName);
 
@@ -1887,7 +1887,7 @@ public:
             ? _context->popABTExpr()
             : optimizer::Constant::str(kIsoFormatStringZ);  // assumes UTC until disproven
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
         auto timeZoneDBVar = makeVariable(timeZoneDBName);
         auto [timezoneDBTag, timezoneDBVal] =
@@ -2011,7 +2011,7 @@ public:
         auto unitExpression = _context->popABTExpr();
         auto dateExpression = _context->popABTExpr();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto timeZoneDBName = _context->registerVariable(timeZoneDBSlot);
         auto timeZoneDBVar = makeVariable(timeZoneDBName);
         auto [timezoneDBTag, timezoneDBVal] =
@@ -2274,15 +2274,11 @@ public:
                 pushABT(optimizer::Constant::nothing());
                 return;
             } else {
-                auto it = Variables::kIdToBuiltinVarName.find(expr->getVariableId());
-                tassert(5611300,
-                        "Encountered unexpected system variable ID",
-                        it != Variables::kIdToBuiltinVarName.end());
-
-                auto slot = _context->state.env->getSlotIfExists(it->second);
+                auto builtinVarId = expr->getVariableId();
+                auto slot = _context->state.getBuiltinVarSlot(builtinVarId);
                 uassert(5611301,
                         str::stream()
-                            << "Builtin variable '$$" << it->second << "' is not available",
+                            << "Builtin variable '$$" << builtinVarId << "' is not available",
                         slot.has_value());
 
                 inputExpr = *slot;
@@ -2655,7 +2651,58 @@ public:
         visitMultiBranchLogicExpression(expr, optimizer::Operations::Or);
     }
     void visit(const ExpressionPow* expr) final {
-        unsupportedExpression("$pow");
+        _context->ensureArity(2);
+        auto rhs = _context->popABTExpr();
+        auto lhs = _context->popABTExpr();
+
+        auto lhsName = makeLocalVariableName(_context->state.frameId(), 0);
+        auto rhsName = makeLocalVariableName(_context->state.frameId(), 0);
+
+        auto checkIsNotNumber =
+            optimizer::make<optimizer::BinaryOp>(optimizer::Operations::Or,
+                                                 generateABTNonNumericCheck(lhsName),
+                                                 generateABTNonNumericCheck(rhsName));
+
+        auto checkBaseIsZero = optimizer::make<optimizer::BinaryOp>(
+            optimizer::Operations::Eq, makeVariable(lhsName), optimizer::Constant::int32(0));
+
+        auto checkIsZeroAndNegative = optimizer::make<optimizer::BinaryOp>(
+            optimizer::Operations::And, checkBaseIsZero, generateABTNegativeCheck(rhsName));
+
+        auto checkIsNullOrMissing =
+            optimizer::make<optimizer::BinaryOp>(optimizer::Operations::Or,
+                                                 generateABTNullOrMissing(lhsName),
+                                                 generateABTNullOrMissing(rhsName));
+
+        // Create an expression to invoke built-in "pow" function
+        auto powFunctionCall = makeABTFunction("pow", makeVariable(lhsName), makeVariable(rhsName));
+        // Local bind to hold the result of the built-in "pow" function
+        auto powResName = makeLocalVariableName(_context->state.frameId(), 0);
+        auto powResVariable = makeVariable(powResName);
+
+        // Return the result or check for issues if result is empty (Nothing)
+        auto checkPowRes = optimizer::make<optimizer::BinaryOp>(
+            optimizer::Operations::FillEmpty,
+            powResVariable,
+            buildABTMultiBranchConditional(
+                ABTCaseValuePair{std::move(checkIsNullOrMissing), optimizer::Constant::null()},
+                ABTCaseValuePair{
+                    std::move(checkIsNotNumber),
+                    makeABTFail(ErrorCodes::Error{5154200}, "$pow only supports numeric types")},
+                ABTCaseValuePair{std::move(checkIsZeroAndNegative),
+                                 makeABTFail(ErrorCodes::Error{5154201},
+                                             "$pow cannot raise 0 to a negative exponent")},
+                optimizer::Constant::nothing()));
+
+
+        pushABT(optimizer::make<optimizer::Let>(
+            std::move(lhsName),
+            std::move(lhs),
+            optimizer::make<optimizer::Let>(
+                std::move(rhsName),
+                std::move(rhs),
+                optimizer::make<optimizer::Let>(
+                    std::move(powResName), std::move(powFunctionCall), checkPowRes))));
     }
     void visit(const ExpressionRange* expr) final {
         auto startName = makeLocalVariableName(_context->state.frameIdGenerator->generate(), 0);
@@ -2895,7 +2942,7 @@ public:
         auto [specTag, specVal] = makeValue(expr->getSortPattern());
         auto specConstant = makeABTConstant(specTag, specVal);
 
-        auto collatorSlot = _context->state.env->getSlotIfExists("collator"_sd);
+        auto collatorSlot = _context->state.getCollatorSlot();
         auto collatorVar = collatorSlot.map(
             [&](auto slotId) { return _context->registerVariable(*collatorSlot); });
 
@@ -3513,7 +3560,7 @@ private:
         auto dateName = makeLocalVariableName(_context->state.frameId(), 0);
         auto dateVar = makeVariable(dateName);
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
 
         // Set parameters for an invocation of the built-in function.
         optimizer::ABTVector arguments;
@@ -3901,7 +3948,7 @@ private:
         optimizer::ABTVector checkNulls;
         optimizer::ABTVector checkNotArrays;
 
-        auto collatorSlot = _context->state.env->getSlotIfExists("collator"_sd);
+        auto collatorSlot = _context->state.getCollatorSlot();
 
         args.reserve(arity);
         argNames.reserve(arity);
@@ -4210,7 +4257,7 @@ private:
             }
         }();
 
-        auto timeZoneDBSlot = _context->state.env->getSlot("timeZoneDB"_sd);
+        auto timeZoneDBSlot = *_context->state.getTimeZoneDBSlot();
         auto timeZoneDBVar = makeVariable(_context->registerVariable(timeZoneDBSlot));
 
         optimizer::ABTVector checkNullArg;

@@ -229,42 +229,12 @@ bool haveAcquiredConsistentCatalogAndSnapshot(
     }
 }
 
-void assertReadConcernSupported(const CollectionPtr& coll,
-                                const repl::ReadConcernArgs& readConcernArgs,
-                                const RecoveryUnit::ReadSource& readSource) {
-    const auto readConcernLevel = readConcernArgs.getLevel();
-    // Ban snapshot reads on capped collections.
-    uassert(ErrorCodes::SnapshotUnavailable,
-            "Reading from capped collections with readConcern snapshot is not supported",
-            !coll->isCapped() || readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
-
-    // Disallow snapshot reads and causal consistent majority reads on config.transactions
-    // outside of transactions to avoid running the collection at a point-in-time in the middle
-    // of a secondary batch. Such reads are unsafe because config.transactions updates are
-    // coalesced on secondaries. Majority reads without an afterClusterTime is allowed because
-    // they are allowed to return arbitrarily stale data. We allow kNoTimestamp and kLastApplied
-    // reads because they must be from internal readers given the snapshot/majority readConcern
-    // (e.g. for session checkout).
-
-    if (coll->ns() == NamespaceString::kSessionTransactionsTableNamespace &&
-        readSource != RecoveryUnit::ReadSource::kNoTimestamp &&
-        readSource != RecoveryUnit::ReadSource::kLastApplied &&
-        ((readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern &&
-          !readConcernArgs.allowTransactionTableSnapshot()) ||
-         (readConcernLevel == repl::ReadConcernLevel::kMajorityReadConcern &&
-          readConcernArgs.getArgsAfterClusterTime()))) {
-        uasserted(5557800,
-                  "Snapshot reads and causal consistent majority reads on config.transactions "
-                  "are not supported");
-    }
-}
-
-void checkInvariantsForReadOptions(const NamespaceString& nss,
+void checkInvariantsForReadOptions(boost::optional<const NamespaceString&> nss,
                                    const boost::optional<LogicalTime>& afterClusterTime,
                                    const RecoveryUnit::ReadSource& readSource,
                                    const boost::optional<Timestamp>& readTimestamp,
-                                   bool callerWasConflicting,
-                                   bool shouldReadAtLastApplied) {
+                                   bool shouldReadAtLastApplied,
+                                   bool isEnforcingConstraints) {
     if (readTimestamp && afterClusterTime) {
         // Readers that use afterClusterTime have already waited at a higher level for the
         // all_durable time to advance to a specified optime, and they assume the read timestamp
@@ -292,15 +262,17 @@ void checkInvariantsForReadOptions(const NamespaceString& nss,
     // If the caller entered this function expecting to conflict with batch application
     // (i.e. no ShouldNotConflict block in scope), but they are reading without a timestamp and
     // not holding the PBWM lock, then there is a possibility that this reader may
-    // unintentionally see inconsistent data during a batch. Certain namespaces are applied
-    // serially in oplog application, and therefore can be safely read without taking the PBWM
-    // lock or reading at a timestamp.
-    if (readSource == RecoveryUnit::ReadSource::kNoTimestamp && callerWasConflicting &&
-        !nss.mustBeAppliedInOwnOplogBatch() && shouldReadAtLastApplied) {
+    // unintentionally see inconsistent data during a batch. However there are a couple exceptions
+    // to this:
+    // * If we are not enforcing contraints, then we are ourselves within batch application or some
+    //   similar state where this is expected
+    // * Certain namespaces are applied serially in oplog application, and therefore can be safely
+    //   read without taking the PBWM or reading at a timestamp
+    if (readSource == RecoveryUnit::ReadSource::kNoTimestamp && isEnforcingConstraints && nss &&
+        !nss->mustBeAppliedInOwnOplogBatch() && shouldReadAtLastApplied) {
         LOGV2_FATAL(4728700,
-                    "Reading from replicated collection on a secondary without read timestamp "
-                    "or PBWM lock",
-                    "collection"_attr = nss);
+                    "Reading from replicated collection on a secondary without read timestamp",
+                    logAttrs(*nss));
     }
 }
 
@@ -355,17 +327,7 @@ AutoStatsTracker::~AutoStatsTracker() {
 AutoGetCollectionForRead::AutoGetCollectionForRead(OperationContext* opCtx,
                                                    const NamespaceStringOrUUID& nsOrUUID,
                                                    const AutoGetCollection::Options& options)
-    : _callerWasConflicting(opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()),
-      _shouldNotConflictWithSecondaryBatchApplicationBlock(
-          [&]() -> boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock> {
-              if (opCtx->getServiceContext()->getStorageEngine()->supportsReadConcernSnapshot()) {
-                  return boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock>(
-                      opCtx->lockState());
-              }
-
-              return boost::none;
-          }()),
-      _autoDb(AutoGetDb::createForAutoGetCollection(
+    : _autoDb(AutoGetDb::createForAutoGetCollection(
           opCtx, nsOrUUID, getLockModeForQuery(opCtx, nsOrUUID), options)) {
 
     const auto modeColl = getLockModeForQuery(opCtx, nsOrUUID);
@@ -474,8 +436,8 @@ AutoGetCollectionForRead::AutoGetCollectionForRead(OperationContext* opCtx,
                                       readConcernArgs.getArgsAfterClusterTime(),
                                       readSource,
                                       readTimestamp,
-                                      _callerWasConflicting,
-                                      shouldReadAtLastApplied);
+                                      shouldReadAtLastApplied,
+                                      opCtx->isEnforcingConstraints());
 
         checkCollectionUUIDMismatch(opCtx, *catalog, _resolvedNss, _coll, options._expectedUUID);
 
@@ -553,10 +515,6 @@ const NamespaceString& AutoGetCollectionForRead::getNss() const {
 
 namespace {
 
-void openSnapshot(OperationContext* opCtx) {
-    opCtx->recoveryUnit()->preallocateSnapshot();
-}
-
 /**
  * Used as a return value for the following function.
  */
@@ -609,7 +567,7 @@ ConsistentCatalogAndSnapshot getConsistentCatalogAndSnapshot(
     std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsBegin,
     std::vector<NamespaceStringOrUUID>::const_iterator secondaryNssOrUUIDsEnd,
     const repl::ReadConcernArgs& readConcernArgs,
-    bool callerExpectedToConflictWithSecondaryBatchApplication) {
+    bool allowReadSourceChange) {
     // Loop until we get a consistent catalog and snapshot or throw an exception.
     while (true) {
         // The read source used can change depending on replication state, so we must fetch the repl
@@ -628,22 +586,28 @@ ConsistentCatalogAndSnapshot getConsistentCatalogAndSnapshot(
         // used to determine if the read source needs to be changed and we only do this if the
         // original read source is kNoTimestamp or kLastApplied. If it's neither of the two we can
         // safely continue.
-        NamespaceString nss;
-        try {
-            nss = catalogBeforeSnapshot->resolveNamespaceStringOrUUID(opCtx, nsOrUUID);
-        } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-            invariant(nsOrUUID.isUUID());
+        NamespaceString nssStorage;
+        boost::optional<const NamespaceString&> nss = nssStorage;
 
-            const auto readSource = opCtx->recoveryUnit()->getTimestampReadSource();
-            if (readSource == RecoveryUnit::ReadSource::kNoTimestamp ||
-                readSource == RecoveryUnit::ReadSource::kLastApplied) {
-                throw;
-            }
+        try {
+            nssStorage = catalogBeforeSnapshot->resolveNamespaceStringOrUUID(opCtx, nsOrUUID);
+        } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+            // The UUID cannot be resolved to a namespace in the latest catalog, but we allow the
+            // call to continue which eventually calls
+            // CollectionCatalog::establishConsistentCollection() which will read from the durable
+            // catalog to create a new collection instance if it exists in the snapshot. This allows
+            // query yields, which use UUID, to restore where the collection is committed to the
+            // storage engine but not yet committed into the local catalog.
+            invariant(nsOrUUID.isUUID());
+            nss = boost::none;
         }
 
         // This may modify the read source on the recovery unit for opCtx if the current read source
         // is either kNoTimestamp or kLastApplied.
-        const bool shouldReadAtLastApplied = SnapshotHelper::changeReadSourceIfNeeded(opCtx, nss);
+        bool shouldReadAtLastApplied = false;
+        if (allowReadSourceChange) {
+            shouldReadAtLastApplied = SnapshotHelper::changeReadSourceIfNeeded(opCtx, nss);
+        }
 
         const auto resolvedSecondaryNamespaces = resolveSecondaryNamespacesOrUUIDs(
             opCtx, catalogBeforeSnapshot.get(), secondaryNssOrUUIDsBegin, secondaryNssOrUUIDsEnd);
@@ -657,7 +621,7 @@ ConsistentCatalogAndSnapshot getConsistentCatalogAndSnapshot(
         // catalog.
         establishCappedSnapshotIfNeeded(opCtx, catalogBeforeSnapshot, nsOrUUID);
 
-        openSnapshot(opCtx);
+        opCtx->recoveryUnit()->preallocateSnapshot();
 
         const auto readSource = opCtx->recoveryUnit()->getTimestampReadSource();
         const auto readTimestamp = opCtx->recoveryUnit()->getPointInTimeReadTimestamp(opCtx);
@@ -666,8 +630,8 @@ ConsistentCatalogAndSnapshot getConsistentCatalogAndSnapshot(
                                       readConcernArgs.getArgsAfterClusterTime(),
                                       readSource,
                                       readTimestamp,
-                                      callerExpectedToConflictWithSecondaryBatchApplication,
-                                      shouldReadAtLastApplied);
+                                      shouldReadAtLastApplied,
+                                      opCtx->isEnforcingConstraints());
 
         const auto catalogAfterSnapshot = CollectionCatalog::get(opCtx);
 
@@ -802,36 +766,37 @@ inline CatalogStateForNamespace acquireCatalogStateForNamespace(
     OperationContext* opCtx,
     const NamespaceStringOrUUID& nsOrUUID,
     const repl::ReadConcernArgs& readConcernArgs,
-    bool callerExpectedToConflictWithSecondaryBatchApplication,
     const AutoGetCollection::Options& options) {
 
-    auto [catalog, isAnySecondaryNssShardedOrAView, readSource, readTimestamp] =
-        getConsistentCatalogAndSnapshot(opCtx,
-                                        nsOrUUID,
-                                        options._secondaryNssOrUUIDsBegin,
-                                        options._secondaryNssOrUUIDsEnd,
-                                        readConcernArgs,
-                                        callerExpectedToConflictWithSecondaryBatchApplication);
+    bool needsRetry = false;
+    while (true) {
+        auto [catalog, isAnySecondaryNssShardedOrAView, readSource, readTimestamp] =
+            getConsistentCatalogAndSnapshot(opCtx,
+                                            nsOrUUID,
+                                            options._secondaryNssOrUUIDsBegin,
+                                            options._secondaryNssOrUUIDsEnd,
+                                            readConcernArgs,
+                                            /*allowReadSourceChange=*/!needsRetry);
 
-    auto [resolvedNss, collection, view] =
-        getCollectionForLockFreeRead(opCtx, catalog, readTimestamp, nsOrUUID, options);
+        auto [resolvedNss, collection, view] =
+            getCollectionForLockFreeRead(opCtx, catalog, readTimestamp, nsOrUUID, options);
 
-    return CatalogStateForNamespace{std::move(catalog),
-                                    isAnySecondaryNssShardedOrAView,
-                                    std::move(resolvedNss),
-                                    collection,
-                                    std::move(view)};
-}
+        // If we setup using UUID and the resolved namespace is pointing to an unreplicated
+        // namespace (or the oplog), then we should retry the setup after resetting the read source
+        // here using the resolved namespace. This only needs to be done once.
+        if (nsOrUUID.isUUID() && !collection->ns().isReplicated() && !needsRetry) {
+            opCtx->recoveryUnit()->abandonSnapshot();
+            [[maybe_unused]] bool shouldReadAtLastApplied =
+                SnapshotHelper::changeReadSourceIfNeeded(opCtx, collection->ns());
+            needsRetry = true;
+            continue;
+        }
 
-boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock>
-makeShouldNotConflictWithSecondaryBatchApplicationBlock(OperationContext* opCtx,
-                                                        bool isLockFreeReadSubOperation) {
-    if (!isLockFreeReadSubOperation &&
-        opCtx->getServiceContext()->getStorageEngine()->supportsReadConcernSnapshot()) {
-        return boost::optional<ShouldNotConflictWithSecondaryBatchApplicationBlock>(
-            opCtx->lockState());
-    } else {
-        return boost::none;
+        return CatalogStateForNamespace{std::move(catalog),
+                                        isAnySecondaryNssShardedOrAView,
+                                        std::move(resolvedNss),
+                                        collection,
+                                        std::move(view)};
     }
 }
 
@@ -841,11 +806,10 @@ const Collection* AutoGetCollectionForReadLockFree::_restoreFromYield(OperationC
                                                                       UUID uuid) {
     auto nsOrUUID = NamespaceStringOrUUID(_resolvedDbName, uuid);
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-    bool callerExpectedToConflict = _callerExpectedToConflictWithSecondaryBatchApplication;
 
     try {
-        auto catalogStateForNamespace = acquireCatalogStateForNamespace(
-            opCtx, nsOrUUID, readConcernArgs, callerExpectedToConflict, _options);
+        auto catalogStateForNamespace =
+            acquireCatalogStateForNamespace(opCtx, nsOrUUID, readConcernArgs, _options);
 
         _resolvedNss = std::move(catalogStateForNamespace.resolvedNss);
         _view = std::move(catalogStateForNamespace.view);
@@ -868,11 +832,6 @@ AutoGetCollectionForReadLockFree::AutoGetCollectionForReadLockFree(
     OperationContext* opCtx, NamespaceStringOrUUID nsOrUUID, AutoGetCollection::Options options)
     : _originalReadSource(opCtx->recoveryUnit()->getTimestampReadSource()),
       _isLockFreeReadSubOperation(opCtx->isLockFreeReadsOp()),  // This has to come before LFRBlock.
-      _callerExpectedToConflictWithSecondaryBatchApplication(
-          opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()),
-      _shouldNotConflictWithSecondaryBatchApplicationBlock(
-          makeShouldNotConflictWithSecondaryBatchApplicationBlock(opCtx,
-                                                                  _isLockFreeReadSubOperation)),
       _lockFreeReadsBlock(opCtx),
       _globalLock(opCtx,
                   MODE_IS,
@@ -924,11 +883,7 @@ AutoGetCollectionForReadLockFree::AutoGetCollectionForReadLockFree(
         });
     } else {
         auto catalogStateForNamespace =
-            acquireCatalogStateForNamespace(opCtx,
-                                            nsOrUUID,
-                                            readConcernArgs,
-                                            _callerExpectedToConflictWithSecondaryBatchApplication,
-                                            _options);
+            acquireCatalogStateForNamespace(opCtx, nsOrUUID, readConcernArgs, _options);
 
         _resolvedNss = std::move(catalogStateForNamespace.resolvedNss);
         _resolvedDbName = _resolvedNss.dbName();
@@ -1207,5 +1162,35 @@ LockMode getLockModeForQuery(OperationContext* opCtx, const NamespaceStringOrUUI
 
 template class AutoGetCollectionForReadCommandBase<AutoGetCollectionForRead>;
 template class AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadLockFree>;
+
+void assertReadConcernSupported(const CollectionPtr& coll,
+                                const repl::ReadConcernArgs& readConcernArgs,
+                                const RecoveryUnit::ReadSource& readSource) {
+    const auto readConcernLevel = readConcernArgs.getLevel();
+    // Ban snapshot reads on capped collections.
+    uassert(ErrorCodes::SnapshotUnavailable,
+            "Reading from capped collections with readConcern snapshot is not supported",
+            !coll->isCapped() || readConcernLevel != repl::ReadConcernLevel::kSnapshotReadConcern);
+
+    // Disallow snapshot reads and causal consistent majority reads on config.transactions
+    // outside of transactions to avoid running the collection at a point-in-time in the middle
+    // of a secondary batch. Such reads are unsafe because config.transactions updates are
+    // coalesced on secondaries. Majority reads without an afterClusterTime is allowed because
+    // they are allowed to return arbitrarily stale data. We allow kNoTimestamp and kLastApplied
+    // reads because they must be from internal readers given the snapshot/majority readConcern
+    // (e.g. for session checkout).
+
+    if (coll->ns() == NamespaceString::kSessionTransactionsTableNamespace &&
+        readSource != RecoveryUnit::ReadSource::kNoTimestamp &&
+        readSource != RecoveryUnit::ReadSource::kLastApplied &&
+        ((readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern &&
+          !readConcernArgs.allowTransactionTableSnapshot()) ||
+         (readConcernLevel == repl::ReadConcernLevel::kMajorityReadConcern &&
+          readConcernArgs.getArgsAfterClusterTime()))) {
+        uasserted(5557800,
+                  "Snapshot reads and causal consistent majority reads on config.transactions "
+                  "are not supported");
+    }
+}
 
 }  // namespace mongo

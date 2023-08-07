@@ -1198,7 +1198,7 @@ Status TenantOplogApplier::_applyOplogEntryOrGroupedInserts(
         auto uuid = op->getUuid();
         uassert(5652700, "Missing UUID from createIndex oplog entry", uuid);
         try {
-            AutoGetCollectionForRead autoColl(opCtx, {op->getNss().db().toString(), *uuid});
+            AutoGetCollectionForRead autoColl(opCtx, {op->getNss().dbName(), *uuid});
             uassert(ErrorCodes::NamespaceNotFound, "Collection does not exist", autoColl);
             // During tenant migration oplog application, we only need to apply createIndex on empty
             // collections. Otherwise, the index is guaranteed to be dropped after. This is because
@@ -1240,9 +1240,6 @@ Status TenantOplogApplier::_applyOplogBatchPerWorker(std::vector<ApplierOperatio
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
     tenantMigrationInfo(opCtx.get()) = boost::make_optional<TenantMigrationInfo>(_migrationUuid);
-
-    // Set this to satisfy low-level locking invariants.
-    opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
 
     auto status = OplogApplierUtils::applyOplogBatchCommon(
         opCtx.get(),

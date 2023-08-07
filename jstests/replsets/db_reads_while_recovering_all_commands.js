@@ -6,11 +6,8 @@
  * @tags: [multiversion_incompatible]
  */
 
-(function() {
-"use strict";
-
 // This will verify the completeness of our map and run all tests.
-load("jstests/libs/all_commands_test.js");
+import {AllCommandsTest} from "jstests/libs/all_commands_test.js";
 
 const name = jsTestName();
 const dbName = "alltestsdb";
@@ -82,9 +79,6 @@ const allCommands = {
     _mergeAuthzCollections: {skip: isPrimaryOnly},
     _migrateClone: {skip: isPrimaryOnly},
     _mongotConnPoolStats: {skip: isAnInternalCommand},
-    _movePrimaryRecipientAbortMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientForgetMigration: {skip: isAnInternalCommand},
-    _movePrimaryRecipientSyncData: {skip: isAnInternalCommand},
     _recvChunkAbort: {skip: isPrimaryOnly},
     _recvChunkCommit: {skip: isPrimaryOnly},
     _recvChunkReleaseCritSec: {skip: isPrimaryOnly},
@@ -214,6 +208,7 @@ const allCommands = {
     createIndexes: {skip: isPrimaryOnly},
     createRole: {skip: isPrimaryOnly},
     createSearchIndexes: {skip: isNotAUserDataRead},
+    createUnsplittableCollection: {skip: isPrimaryOnly},
     createUser: {skip: isPrimaryOnly},
     currentOp: {skip: isNotAUserDataRead},
     dataSize: {
@@ -500,4 +495,3 @@ AllCommandsTest.testAllCommands(secondary, allCommands, function(test) {
 // Turn off maintenance mode and stop the test.
 assert.commandWorked(secondary.adminCommand({replSetMaintenance: 0}));
 rst.stopSet();
-})();

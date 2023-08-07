@@ -56,6 +56,7 @@
 #include "mongo/db/fts/fts_query.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/matcher/expression_hasher.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
@@ -116,13 +117,22 @@ Status filterMatches(const BSONObj& testFilter,
         root = MatchExpression::optimize(std::move(root));
     }
     MatchExpression::sortTree(root.get());
-    if (trueFilterClone->equivalent(root.get())) {
-        return Status::OK();
+    if (!trueFilterClone->equivalent(root.get())) {
+        return {ErrorCodes::Error{5619211},
+                str::stream()
+                    << "Provided filter did not match filter on query solution node. Expected: "
+                    << root->toString() << ". Found: " << trueFilter->toString()};
     }
-    return {
-        ErrorCodes::Error{5619211},
-        str::stream() << "Provided filter did not match filter on query solution node. Expected: "
-                      << root->toString() << ". Found: " << trueFilter->toString()};
+
+    const MatchExpressionHasher hash{};
+    if (hash(trueFilterClone.get()) != hash(root.get())) {
+        return {ErrorCodes::Error{7901821},
+                str::stream() << "Provided filter's hash did not match filter's hash on query "
+                                 "solution node. Expected: "
+                              << root->toString() << ". Found: " << trueFilter->toString()};
+    }
+
+    return Status::OK();
 }
 
 Status nodeHasMatchingFilter(const BSONObj& testFilter,
@@ -1280,7 +1290,10 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         }
 
         BSONObjBuilder bob;
-        actualGroupNode->groupByExpression->serialize(true).addToBsonObj(&bob, "_id");
+        actualGroupNode->groupByExpression
+            ->serialize(SerializationOptions{
+                .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)})
+            .addToBsonObj(&bob, "_id");
         auto actualGroupByObj = bob.done();
         if (!SimpleBSONObjComparator::kInstance.evaluate(actualGroupByObj ==
                                                          expectedGroupByElem.Obj())) {
@@ -1293,7 +1306,10 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         BSONArrayBuilder actualAccs;
         for (auto& acc : actualGroupNode->accumulators) {
             BSONObjBuilder bob;
-            acc.expr.argument->serialize(true).addToBsonObj(&bob, acc.expr.name);
+            acc.expr.argument
+                ->serialize(SerializationOptions{
+                    .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)})
+                .addToBsonObj(&bob, acc.expr.name);
             actualAccs.append(BSON(acc.fieldName << bob.done()));
         }
         auto expectedAccsObj = expectedGroupObj["accs"].Obj();

@@ -11,14 +11,13 @@
  * ]
  */
 
+import "jstests/libs/override_methods/retry_on_killed_session.js";
+
+import {assertAlways} from "jstests/concurrency/fsm_libs/assert.js";
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {
     $config as $baseConfig
 } from "jstests/concurrency/fsm_workloads/random_moveChunk_update_shard_key.js";
-// Transactions that run concurrently with a setFCV may get interrupted due to setFCV issuing for a
-// killSession any open sessions during an FCV change. We want to have to retryability support for
-// such scenarios.
-load('jstests/libs/override_methods/retry_on_killed_session.js');
 
 export const $config = extendWorkload($baseConfig, function($config, $super) {
     // Sessions of open transactions can be killed and throw "Interrupted" if we run it concurrently
@@ -31,7 +30,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         jsTestLog('Executing FCV state, setting to:' + targetFCV);
         try {
             assertAlways.commandWorked(
-                db.adminCommand({setFeatureCompatibilityVersion: targetFCV}));
+                db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
         } catch (e) {
             if (e.code === 5147403) {
                 // Invalid fcv transition (e.g lastContinuous -> lastLTS)
@@ -114,7 +113,8 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     };
 
     $config.teardown = function(db, collName, cluster) {
-        assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: latestFCV}));
+        assert.commandWorked(
+            db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     };
 
     return $config;

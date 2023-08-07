@@ -1247,7 +1247,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
             // should not participate in the shard version protocol.
             shardResults =
                 scatterGatherUnversionedTargetAllShards(opCtx,
-                                                        expCtx->ns.db(),
+                                                        expCtx->ns.db_deprecated(),
                                                         targetedCommand,
                                                         ReadPreferenceSetting::get(opCtx),
                                                         Shard::RetryPolicy::kIdempotent);
@@ -1257,7 +1257,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
             invariant(executionNsRoutingInfo);
             shardResults =
                 scatterGatherVersionedTargetByRoutingTable(expCtx,
-                                                           expCtx->ns.db(),
+                                                           expCtx->ns.db_deprecated(),
                                                            expCtx->ns,
                                                            *executionNsRoutingInfo,
                                                            targetedCommand,
@@ -1291,13 +1291,17 @@ DispatchShardPipelineResults dispatchShardPipeline(
             MONGO_UNREACHABLE_TASSERT(6487201);
         }
 
-        invariant(cursors.size() % shardIds.size() == 0,
-                  str::stream() << "Number of cursors (" << cursors.size()
-                                << ") is not a multiple of producers (" << shardIds.size() << ")");
+        tassert(7937200,
+                str::stream() << "Number of cursors (" << cursors.size()
+                              << ") is not a multiple of the number of targeted shards ("
+                              << shardIds.size()
+                              << ") and we were not targeting each mongod in each shard",
+                targetEveryShardServer || cursors.size() % shardIds.size() == 0);
 
         // For $changeStream, we must open an extra cursor on the 'config.shards' collection, so
         // that we can monitor for the addition of new shards inline with real events.
-        if (hasChangeStream && expCtx->ns.db() != NamespaceString::kConfigsvrShardsNamespace.db()) {
+        if (hasChangeStream &&
+            expCtx->ns.db_deprecated() != NamespaceString::kConfigsvrShardsNamespace.db()) {
             cursors.emplace_back(openChangeStreamNewShardMonitor(expCtx, shardRegistryReloadTime));
         }
     }
@@ -1481,9 +1485,11 @@ Status appendExplainResults(DispatchShardPipelineResults&& dispatchResults,
         MutableDocument pipelinesDoc;
         // We specify "queryPlanner" verbosity when building the output for "shardsPart" because
         // execution stats are reported by each shard individually.
-        pipelinesDoc.addField("shardsPart",
-                              Value(dispatchResults.splitPipeline->shardsPipeline->writeExplainOps(
-                                  ExplainOptions::Verbosity::kQueryPlanner)));
+        auto opts = SerializationOptions{
+            .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
+        pipelinesDoc.addField(
+            "shardsPart",
+            Value(dispatchResults.splitPipeline->shardsPipeline->writeExplainOps(opts)));
         if (dispatchResults.exchangeSpec) {
             BSONObjBuilder bob;
             dispatchResults.exchangeSpec->exchangeSpec.serialize(&bob);
@@ -1492,7 +1498,7 @@ Status appendExplainResults(DispatchShardPipelineResults&& dispatchResults,
         }
         // We specify "queryPlanner" verbosity because execution stats are not currently
         // supported when building the output for "mergerPart".
-        auto explainOps = mergePipeline->writeExplainOps(ExplainOptions::Verbosity::kQueryPlanner);
+        auto explainOps = mergePipeline->writeExplainOps(opts);
 
         // No cursors to remote shards are established for an explain, and the $mergeCursors
         // aggregation stage which is normally built in addMergeCursorsSource() requires vectors of

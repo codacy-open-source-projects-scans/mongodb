@@ -1308,6 +1308,13 @@ inline std::pair<TypeTags, Value> makeCopyDecimal(const Decimal128& inD) {
     return {TypeTags::NumberDecimal, reinterpret_cast<Value>(valueBuffer)};
 }
 
+inline std::pair<TypeTags, Value> makeIntOrLong(int64_t longVal) {
+    if ((int32_t)longVal == longVal) {
+        return {TypeTags::NumberInt32, bitcastFrom<int32_t>((int32_t)longVal)};
+    }
+    return {TypeTags::NumberInt64, bitcastFrom<int64_t>(longVal)};
+}
+
 inline key_string::Value* getKeyStringView(Value val) noexcept {
     return reinterpret_cast<key_string::Value*>(val);
 }
@@ -1583,9 +1590,9 @@ inline std::pair<TypeTags, Value> copyValue(TypeTags tag, Value val) {
         case TypeTags::timeZone:
             return makeCopyTimeZone(*getTimeZoneView(val));
         case TypeTags::valueBlock:
-            return makeCopyValueBlock(*getValueBlock(val));
+            [[fallthrough]];
         case TypeTags::cellBlock:
-            return makeCopyCellBlock(*getCellBlock(val));
+            tasserted(7888700, "Cannot copy a ValueBlock or CellBlock");
         default:
             break;
     }

@@ -7,17 +7,13 @@
 //  requires_replication,
 // ]
 
-load("jstests/noPassthrough/libs/user_write_blocking.js");
-
-(function() {
-'use strict';
-
+import {UserWriteBlockHelpers} from "jstests/noPassthrough/libs/user_write_blocking.js";
 const {ReplicaFixture, ShardingFixture} = UserWriteBlockHelpers;
 
 // Functions run in parallel shells to downgrade FCV and update a cluster parameter.
 const parallelShellSetFCVFn = `({conn}) => {
     assert.commandWorked(
-        conn.getDB('admin').runCommand({setFeatureCompatibilityVersion: "${lastLTSFCV}"}));
+        conn.getDB('admin').runCommand({setFeatureCompatibilityVersion: "${lastLTSFCV}", confirm: true}));
     }`;
 const parallelShellSetCSPFnSuccess =
     `({conn}) => {
@@ -65,8 +61,8 @@ function runReplSetTest(fixture) {
 
     // Verify that FCV upgrade succeeds when there are no ongoing setClusterParameter operations.
     // The cluster parameter should also reenable.
-    fixture.asAdmin(({admin}) => assert.commandWorked(
-                        admin.runCommand({setFeatureCompatibilityVersion: latestFCV})));
+    fixture.asAdmin(({admin}) => assert.commandWorked(admin.runCommand(
+                        {setFeatureCompatibilityVersion: latestFCV, confirm: true})));
     fixture.asAdmin(({admin}) => {
         const intData = assert
                             .commandWorked(admin.runCommand(
@@ -114,8 +110,8 @@ function runShardedTest(fixture) {
     // Set a failpoint to make setFeatureCompatibilityVersion hang on a shard. setClusterParameter
     // should also complete but return an error since testMinFCVClusterParameter is unavailable on
     // the lower FCV.
-    let hangSetFCVWaiter = fixture.hangTransition({setFeatureCompatibilityVersion: lastLTSFCV},
-                                                  'hangBeforeUpdatingFcvDoc');
+    let hangSetFCVWaiter = fixture.hangTransition(
+        {setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}, 'hangBeforeUpdatingFcvDoc');
     fixture.asAdmin(
         ({admin}) => assert.commandFailedWithCode(
             admin.runCommand({setClusterParameter: {testMinFcvClusterParameter: {intData: 106}}}),
@@ -137,8 +133,8 @@ function runShardedTest(fixture) {
 
     // After the failpoint is turned off, FCV upgrade should occur normally.
     // testMinFcvClusterParameter should also become available.
-    fixture.asAdmin(({admin}) => assert.commandWorked(
-                        admin.runCommand({setFeatureCompatibilityVersion: latestFCV})));
+    fixture.asAdmin(({admin}) => assert.commandWorked(admin.runCommand(
+                        {setFeatureCompatibilityVersion: latestFCV, confirm: true})));
     fixture.asAdmin(({admin}) => {
         const intData = assert
                             .commandWorked(admin.runCommand(
@@ -153,9 +149,10 @@ function runShardedTest(fixture) {
     let hangSetClusterParameterWaiter =
         fixture.hangTransition({setClusterParameter: {testMinFcvClusterParameter: {intData: 107}}},
                                'hangInShardsvrSetClusterParameter');
-    fixture.asAdmin(({admin}) => assert.commandFailedWithCode(
-                        admin.runCommand({setFeatureCompatibilityVersion: lastLTSFCV}),
-                        ErrorCodes.CannotDowngrade));
+    fixture.asAdmin(
+        ({admin}) => assert.commandFailedWithCode(
+            admin.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}),
+            ErrorCodes.CannotDowngrade));
 
     // Turn off the failpoint and wait for the hung setClusterParameter operation to drain.
     hangSetClusterParameterWaiter.failpoint.off();
@@ -184,4 +181,3 @@ function runShardedTest(fixture) {
     runShardedTest(st);
     st.stop();
 }
-}());

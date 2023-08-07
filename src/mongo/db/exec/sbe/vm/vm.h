@@ -650,6 +650,7 @@ enum class Builtin : uint8_t {
     ln,
     log10,
     sqrt,
+    pow,
     addToArray,        // agg function to append to an array
     addToArrayCapped,  // agg function to append to an array, fails when the array reaches specified
                        // size
@@ -810,6 +811,15 @@ enum class Builtin : uint8_t {
     aggRankFinalize,
     aggExpMovingAvg,
     aggExpMovingAvgFinalize,
+    aggRemovableSumAdd,
+    aggRemovableSumRemove,
+    aggRemovableSumFinalize,
+    aggIntegralAdd,
+    aggIntegralRemove,
+    aggIntegralFinalize,
+    aggDerivativeAdd,
+    aggDerivativeRemove,
+    aggDerivativeFinalize,
 };
 
 std::string builtinToString(Builtin b);
@@ -956,6 +966,57 @@ enum class AggArrayWithSize { kValues = 0, kSizeOfValues, kLast = kSizeOfValues 
  * This enum defines indices into an 'Array' that stores the state for $expMovingAvg accumulator
  */
 enum class AggExpMovingAvgElems { kResult, kAlpha, kIsDecimal, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for $sum window function
+ * accumulator. Index `kSumAcc` stores the accumulator state of aggDoubleDoubleSum. Rest of the
+ * indices store respective count of values encountered.
+ */
+enum class AggRemovableSumElems {
+    kSumAcc,
+    kNanCount,
+    kPosInfinityCount,
+    kNegInfinityCount,
+    kDoubleCount,
+    kDecimalCount,
+    kSizeOfArray
+};
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for $integral accumulator
+ * Element at `kInputQueue` stores the queue of input values
+ * Element at `kSortByQueue` stores the queue of sortBy values
+ * Element at `kIntegral` stores the integral over the current window
+ * Element at `kNanCount` stores the count of NaN values encountered
+ * Element at `kunitMillis` stores the date unit (Null if not valid)
+ */
+enum class AggIntegralElems {
+    kInputQueue,
+    kSortByQueue,
+    kIntegral,
+    kNanCount,
+    kUnitMillis,
+    kMaxSizeOfArray
+};
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for $derivative accumulator
+ * Element at `kInputQueue` stores the queue of input values
+ * Element at `kSortByQueue` stores the queue of sortBy values
+ * Element at `kunitMillis` stores the date unit (Null if not valid)
+ */
+enum class AggDerivativeElems { kInputQueue, kSortByQueue, kUnitMillis, kMaxSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that stores the state for a queue backed by a
+ * circular array
+ * Element at `kArray` stores the underlying array thats holds the elements. This should be
+ * initialized to a non-zero size initially.
+ * Element at `kStartIdx` stores the start position of the queue
+ * Element at `kQueueSize` stores the size of the queue
+ * The empty values in the array are filled with Null
+ */
+enum class ArrayQueueElems { kArray, kStartIdx, kQueueSize };
 
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
@@ -1269,6 +1330,10 @@ private:
                                                                 value::Value operandValue);
     FastTuple<bool, value::TypeTags, value::Value> genericSqrt(value::TypeTags operandTag,
                                                                value::Value operandValue);
+    FastTuple<bool, value::TypeTags, value::Value> genericPow(value::TypeTags baseTag,
+                                                              value::Value baseValue,
+                                                              value::TypeTags exponentTag,
+                                                              value::Value exponentValue);
     FastTuple<bool, value::TypeTags, value::Value> genericRoundTrunc(
         std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity);
     std::pair<value::TypeTags, value::Value> genericNot(value::TypeTags tag, value::Value value);
@@ -1348,6 +1413,8 @@ private:
     void aggMergeDoubleDoubleSumsImpl(value::Array* accumulator,
                                       value::TypeTags rhsTag,
                                       value::Value rhsValue);
+    FastTuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSumFinalizeImpl(
+        value::Array* accmulator);
 
     // This is an implementation of the following algorithm:
     // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
@@ -1611,6 +1678,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinLn(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinLog10(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSqrt(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinPow(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToArrayCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinMergeObjects(ArityType arity);
@@ -1767,6 +1835,28 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRankFinalize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggExpMovingAvg(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggExpMovingAvgFinalize(ArityType arity);
+    template <int sign>
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableSum(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableSumFinalize(ArityType arity);
+    template <int sign>
+    void aggRemovableSumImpl(value::Array* state, value::TypeTags rhsTag, value::Value rhsVal);
+    FastTuple<bool, value::TypeTags, value::Value> aggRemovableSumFinalizeImpl(value::Array* state);
+    template <class T, int sign>
+    void updateRemovableSumAccForIntegerType(value::Array* sumAcc,
+                                             value::TypeTags rhsTag,
+                                             value::Value rhsVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> integralOfTwoPointsByTrapezoidalRule(
+        std::pair<value::TypeTags, value::Value> prevInput,
+        std::pair<value::TypeTags, value::Value> prevSortByVal,
+        std::pair<value::TypeTags, value::Value> newInput,
+        std::pair<value::TypeTags, value::Value> newSortByVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeFinalize(ArityType arity);
+
 
     FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f, ArityType arity);
 

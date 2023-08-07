@@ -8,10 +8,11 @@
  *   requires_replication,
  * ]
  */
-(function() {
-'use strict';
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
 
-load('jstests/noPassthrough/libs/index_build.js');
+function clearLogInNodes(nodes) {
+    nodes.forEach(node => assert.commandWorked(node.adminCommand({clearLog: "global"})));
+}
 
 // Set up the replica set. We need to set "oplogApplicationEnforcesSteadyStateConstraints=false" as
 // we'll be violating the index build process by having the index already built on the secondary
@@ -69,7 +70,7 @@ let opId = IndexBuildTest.waitForIndexBuildToStart(primaryDB, primaryColl.getNam
 
 checkLog.containsJson(secondaries[0], 7731100);
 checkLog.containsJson(secondaries[1], 7731100);
-clearRawMongoProgramOutput();
+clearLogInNodes(secondaries);
 
 assert.commandWorked(primaryDB.killOp(opId));
 createIdx();
@@ -80,7 +81,7 @@ createIdx = IndexBuildTest.startIndexBuild(
 
 checkLog.containsJson(secondaries[0], 7731101);
 checkLog.containsJson(secondaries[1], 7731101);
-clearRawMongoProgramOutput();
+clearLogInNodes(secondaries);
 
 opId = IndexBuildTest.waitForIndexBuildToStart(primaryDB, primaryColl.getName(), 'x_1', filter);
 assert.commandWorked(primaryDB.killOp(opId));
@@ -102,9 +103,9 @@ opId = IndexBuildTest.waitForIndexBuildToStart(primaryDB, primaryColl.getName(),
 
 checkLog.containsJson(secondaries[0], 7731100);
 checkLog.containsJson(secondaries[1], 7731100);
-clearRawMongoProgramOutput();
+clearLogInNodes(secondaries);
 
-// Step-up secondary one of the secondaries.
+// Step-up one of the secondaries.
 let newPrimary = secondaries[0];
 replTest.stepUp(newPrimary);
 
@@ -133,4 +134,3 @@ createIdx();
 
 TestData.skipCheckDBHashes = true;
 replTest.stopSet();
-}());

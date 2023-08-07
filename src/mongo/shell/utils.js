@@ -42,6 +42,33 @@ function _getErrorWithCode(codeOrObj, message) {
 }
 
 /**
+ * Executes the specified function and retries it if it fails due to retryable error.
+ * If it exhausts the number of allowed retries, it simply throws the last exception.
+ *
+ * Returns the return value of the input call.
+ */
+
+function retryOnRetryableError(func, numRetries, sleepMs) {
+    numRetries = numRetries || 1;
+    sleepMs = sleepMs || 1000;
+
+    while (true) {
+        try {
+            return func();
+        } catch (e) {
+            if (isRetryableError(e) && numRetries > 0) {
+                print("An error occurred and the call will be retried: " +
+                      tojson({error: e.toString(), stack: e.stack}));
+                numRetries--;
+                sleep(sleepMs);
+            } else {
+                throw e;
+            }
+        }
+    }
+}
+
+/**
  * Executes the specified function and retries it if it fails due to exception related to network
  * error. If it exhausts the number of allowed retries, it simply throws the last exception.
  *
@@ -117,7 +144,8 @@ const retryableErrs = [
     "WriteConcernFailed",
     "WriteConcernLegacyOK",
     "UnknownReplWriteConcern",
-    "UnsatisfiableWriteConcern"
+    "UnsatisfiableWriteConcern",
+    "The server is in quiesce mode and will shut down"
 ];
 const retryableErrsPlusShellGeneratedNetworkErrs = [...retryableErrs, ...shellGeneratedNetworkErrs];
 /**
@@ -244,7 +272,7 @@ compareOn = function(field) {
 };
 
 shellPrint = function(x) {
-    it = x;
+    const it = x;
     if (x != undefined)
         shellPrintHelper(x);
 };
@@ -510,6 +538,7 @@ jsTest.authenticateNodes = function(nodes) {
     assert.soonNoExcept(function() {
         for (var i = 0; i < nodes.length; i++) {
             // Don't try to authenticate to arbiters
+            let res = {};
             try {
                 res = nodes[i].getDB("admin")._runCommandWithoutApiStrict({replSetGetStatus: 1});
             } catch (e) {
@@ -890,9 +919,9 @@ shellHelper.set = function(str) {
         print("bad use parameter");
         return;
     }
-    tokens = str.split(" ");
-    param = tokens[0];
-    value = tokens[1];
+    const tokens = str.split(" ");
+    const param = tokens[0];
+    let value = tokens[1];
 
     if (value == undefined)
         value = true;
@@ -1301,10 +1330,10 @@ var Random = (function() {
     function setRandomFixtureSeed() {
         var seed = setRandomSeed(TestData.seed).valueOf();
         print(
-            `Reproduce this randomized jstest fixture topology by adding the --shellSeed 
+            `Reproduce this randomized jstest fixture topology by adding the --shellSeed
             ${seed} option to your resmoke invocation.`);
         print(
-            `ie: buildscripts/resmoke.py run --suites [suite_name] ... --shellSeed 
+            `ie: buildscripts/resmoke.py run --suites [suite_name] ... --shellSeed
             ${seed} [my_jstest.js]`);
     }
 
@@ -1454,6 +1483,7 @@ Geo.sphereDistance = function(a, b) {
     return Math.acos(cross_prod);
 };
 
+// eslint-disable-next-line
 rs = function() {
     return "try rs.help()";
 };
@@ -1613,8 +1643,8 @@ rs._runCmd = function(c) {
 };
 rs.reconfig = function(cfg, options) {
     cfg.version = rs.conf().version + 1;
-    cmd = {replSetReconfig: cfg};
-    for (var i in options) {
+    const cmd = {replSetReconfig: cfg};
+    for (let i in options) {
         cmd[i] = options[i];
     }
     return this._runCmd(cmd);

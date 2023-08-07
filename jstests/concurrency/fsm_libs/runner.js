@@ -1,12 +1,10 @@
-'use strict';
+import {AssertLevel, setGlobalAssertLevel} from "jstests/concurrency/fsm_libs/assert.js";
+import {Cluster} from "jstests/concurrency/fsm_libs/cluster.js";
+import {parseConfig} from "jstests/concurrency/fsm_libs/parse_config.js";
+import {ThreadManager} from "jstests/concurrency/fsm_libs/thread_mgr.js";
+import {uniqueCollName, uniqueDBName} from "jstests/concurrency/fsm_utils/name_utils.js";
 
-load('jstests/concurrency/fsm_libs/assert.js');
-load('jstests/concurrency/fsm_libs/cluster.js');
-load('jstests/concurrency/fsm_libs/parse_config.js');
-load('jstests/concurrency/fsm_libs/thread_mgr.js');
-load('jstests/concurrency/fsm_utils/name_utils.js');  // for uniqueCollName and uniqueDBName
-
-var runner = (function() {
+export const runner = (function() {
     function validateExecutionMode(mode) {
         var allowedKeys = ['composed', 'parallel', 'serial'];
 
@@ -595,7 +593,7 @@ var runner = (function() {
             // that always apply.
             assertLevel = AssertLevel.ALWAYS;
         }
-        globalAssertLevel = assertLevel;
+        setGlobalAssertLevel(assertLevel);
 
         var context = {};
         await loadWorkloadContext(
@@ -705,6 +703,6 @@ var runner = (function() {
     };
 })();
 
-var runWorkloadsSerially = runner.serial;
-var runWorkloadsInParallel = runner.parallel;
-var runCompositionOfWorkloads = runner.composed;
+export const runWorkloadsSerially = runner.serial;
+export const runWorkloadsInParallel = runner.parallel;
+export const runCompositionOfWorkloads = runner.composed;

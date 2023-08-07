@@ -2,8 +2,9 @@
 // The test runs commands that are not allowed with security token: movechunk, split.
 // @tags: [not_allowed_with_security_token]
 
+import {documentEq} from "jstests/aggregation/extras/utils.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
-load("jstests/aggregation/extras/utils.js");
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 export var TimeseriesTest = class {
     static getBucketMaxSpanSecondsFromGranularity(granularity) {
@@ -38,11 +39,6 @@ export var TimeseriesTest = class {
      */
     static timeseriesScalabilityImprovementsEnabled(conn) {
         return FeatureFlagUtil.isPresentAndEnabled(conn, "TimeseriesScalabilityImprovements");
-    }
-
-    // TODO SERVER-65082 remove this helper.
-    static timeseriesMetricIndexesEnabled(conn) {
-        return FeatureFlagUtil.isPresentAndEnabled(conn, "TimeseriesMetricIndexes");
     }
 
     // TODO SERVER-68058 remove this helper.

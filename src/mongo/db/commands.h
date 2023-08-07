@@ -355,9 +355,9 @@ struct CommandHelpers {
 
     /**
      * Verifies that command is allowed to run under a transaction in the given database or
-     * namespace, and throws if that verification doesn't pass.
+     * namespaces, and throws if that verification doesn't pass.
      */
-    static void canUseTransactions(const NamespaceString& nss,
+    static void canUseTransactions(const std::vector<NamespaceString>& namespaces,
                                    StringData cmdName,
                                    bool allowTransactionsOnConfigDatabase);
 
@@ -506,11 +506,19 @@ public:
     virtual AllowedOnSecondary secondaryAllowed(ServiceContext* context) const = 0;
 
     /**
-     * Override and return fales if the command opcounters should not be incremented on
+     * Override and return false if the command opcounters should not be incremented on
      * behalf of this command.
      */
     virtual bool shouldAffectCommandCounter() const {
         return true;
+    }
+
+    /**
+     * Override and return true if the query opcounters should be incremented on
+     * behalf of this command.
+     */
+    virtual bool shouldAffectQueryCounter() const {
+        return false;
     }
 
     /**
@@ -752,6 +760,13 @@ public:
      * The primary namespace on which this command operates. May just be the db.
      */
     virtual NamespaceString ns() const = 0;
+
+    /**
+     * All of the namespaces this command operates on. For most commands will just be ns().
+     */
+    virtual std::vector<NamespaceString> allNamespaces() const {
+        return {ns()};
+    }
 
     /**
      * Returns true if this command should be parsed for a writeConcern field and wait

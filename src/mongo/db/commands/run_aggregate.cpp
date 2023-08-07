@@ -425,7 +425,7 @@ StatusWith<StringMap<ExpressionContext::ResolvedNamespace>> resolveInvolvedNames
         // If the involved namespace is not in the same database as the aggregation, it must be
         // from a $lookup/$graphLookup into a tenant migration donor's oplog view or from an
         // $out/$merge to a collection in a different database.
-        if (involvedNs.db() != request.getNamespace().db()) {
+        if (involvedNs.db_deprecated() != request.getNamespace().db_deprecated()) {
             if (involvedNs == NamespaceString::kTenantMigrationOplogView) {
                 // For tenant migrations, we perform an aggregation on 'config.transactions' but
                 // require a lookup stage involving a view on the 'local' database.
@@ -991,11 +991,12 @@ Status runAggregate(OperationContext* opCtx,
                     !request.getCollectionUUID());
 
             // If this is a collectionless agg with no foreign namespaces, don't acquire any locks.
-            statsTracker.emplace(opCtx,
-                                 nss,
-                                 Top::LockType::NotLocked,
-                                 AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                                 0);
+            statsTracker.emplace(
+                opCtx,
+                nss,
+                Top::LockType::NotLocked,
+                AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
             auto [collator, match] = resolveCollator(
                 opCtx, request.getCollation().get_value_or(BSONObj()), CollectionPtr());
             collatorToUse.emplace(std::move(collator));
@@ -1220,7 +1221,7 @@ Status runAggregate(OperationContext* opCtx,
             auto maybeExec = getSBEExecutorViaCascadesOptimizer(opCtx,
                                                                 expCtx,
                                                                 nss,
-                                                                collections.getMainCollection(),
+                                                                collections,
                                                                 std::move(queryHints),
                                                                 request.getHint(),
                                                                 pipeline.get());
@@ -1281,6 +1282,7 @@ Status runAggregate(OperationContext* opCtx,
         }
     });
     for (auto&& exec : execs) {
+        // TODO SERVER-79373: Do not create a cursor if results can fit in a single batch.
         ClientCursorParams cursorParams(
             std::move(exec),
             origNss,

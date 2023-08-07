@@ -85,10 +85,6 @@ ValidateState::ValidateState(OperationContext* opCtx,
 
     // Subsequent re-locks will use the UUID when 'background' is true.
     if (isBackground()) {
-        // Avoid taking the PBWM lock, which will stall replication if this is a secondary node
-        // being validated.
-        _noPBWM.emplace(opCtx->lockState());
-
         _databaseLock.emplace(opCtx, _nss.dbName(), MODE_IS);
         _collectionLock.emplace(opCtx, _nss, MODE_IS);
     } else {
@@ -409,7 +405,7 @@ void ValidateState::_relockDatabaseAndCollection(OperationContext* opCtx) {
     }
 
     std::string dbErrMsg = str::stream()
-        << "Interrupted due to: database drop: " << _nss.db()
+        << "Interrupted due to: database drop: " << _nss.db_deprecated()
         << " while validating collection: " << _nss.toStringForErrorMsg() << " (" << *_uuid << ")";
 
     _databaseLock.emplace(opCtx, _nss.dbName(), MODE_IS);

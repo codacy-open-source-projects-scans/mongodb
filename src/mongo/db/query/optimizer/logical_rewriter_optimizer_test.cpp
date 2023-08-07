@@ -1800,7 +1800,7 @@ TEST(LogicalRewriter, NotPushdownPathDefaultNested) {
         latest);
 }
 
-TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
+TEST(LogicalRewriter, PlanSimpliificationWithArrayTraversalLambdaAndInequalityExpression) {
     // Example translation of {a: {$elemMatch: {b: {$ne: 2}}}}
     ABT scanNode = make<ScanNode>("scan_0", "coll");
     ABT path = make<PathGet>(
@@ -1848,6 +1848,49 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
     ABT latest = std::move(rootNode);
     phaseManager.optimize(latest);
 
+    // Given the index the field is non-multikey while the $elemMatch requires an array. Thus, the
+    // plan is simplified to a ValueScan [0].
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root [{scan_0}]\n"
+        "ValueScan [arraySize: 0]\n"
+        "    Const [[]]\n",
+        latest);
+}
+
+TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
+    ABT rootNode =
+        NodeBuilder{}
+            .root("scan_0")
+            .filter(_evalf(_get("a",
+                                _traverse1(_plambda(_lambda(
+                                    "match_0_not_0",
+                                    _unary("Not",
+                                           _evalf(_get("b", _traverse1(_cmp("Eq", "2"_cint64))),
+                                                  "match_0_not_0"_var)))))),
+                           "scan_0"_var))
+            .finish(_scan("scan_0", "coll"));
+
+    auto prefixId = PrefixId::createForTests();
+    auto phaseManager = makePhaseManager(
+        {OptPhase::ConstEvalPre, OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        Metadata{{
+            {"coll",
+             createScanDef(
+                 {},
+                 {{"index1",
+                   IndexDefinition{// collation
+                                   {{makeIndexPath(FieldPathType{"a", "b"}, false /*isMultiKey*/),
+                                     CollationOp::Ascending}},
+                                   false /*isMultiKey*/,
+                                   {DistributionType::Centralized},
+                                   {} /*partialReqMap*/}}})},
+        }},
+        boost::none /*costModel*/,
+        DebugInfo::kDefaultForTests);
+    ABT latest = std::move(rootNode);
+    phaseManager.optimize(latest);
+
     // All the Traverses should be eliminated, and the Not ... Eq combined as Neq.
     ASSERT_EXPLAIN_V2_AUTO(
         "Root [{scan_0}]\n"
@@ -1858,15 +1901,6 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaSuccess) {
         "|   PathGet [b]\n"
         "|   PathCompare [Neq]\n"
         "|   Const [2]\n"
-        "Sargable [Complete]\n"
-        "|   |   requirements: \n"
-        "|   |       {{{scan_0, 'PathGet [a] PathIdentity []', {{{[Const [[]], Const [BinData(0, "
-        ")])}}}}}}\n"
-        "|   scanParams: \n"
-        "|       {'a': evalTemp_2}\n"
-        "|           residualReqs: \n"
-        "|               {{{evalTemp_2, 'PathIdentity []', {{{[Const [[]], Const [BinData(0, "
-        ")])}}}, entryIndex: 0}}}\n"
         "Scan [coll, {scan_0}]\n",
         latest);
 }
@@ -2004,6 +2038,154 @@ TEST(LogicalRewriter, NotPushdownUnderLambdaFailsWithFreeVar) {
         "|   Variable [x]\n"
         "Scan [coll, {scan_0}]\n",
         latest);
+}
+
+TEST(LogicalRewriter, PlanSimplificationWithRequirementOverlap) {
+    using namespace properties;
+    auto prefixId = PrefixId::createForTests();
+
+    // MQL query: db.c1.find({stock : { $elemMatch: {$eq: 5 } } })
+
+    ABT rootNode =
+        NodeBuilder{}
+            .root("root")
+            .filter(_evalf(_get("stock", _arr()), "root"_var))
+            .filter(_evalf(_get("stock", _traverse1(_cmp("Eq", "5"_cint64))), "root"_var))
+            .finish(_scan("root", "c1"));
+
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(
+               {},
+               {{"index1",
+                 makeIndexDefinition("stock", CollationOp::Ascending, false /*multiKey*/)}})}}},
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = rootNode;
+    phaseManager.optimize(optimized);
+
+    // The $elemMatch scan on stock (requiring an array) in combination with
+    // the index which ensures that stock is a non-multikey field
+    // allows the simplification of the query.
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root [{root}]\n"
+        "ValueScan [arraySize: 0]\n"
+        "    Const [[]]\n",
+        optimized);
+}
+
+TEST(LogicalRewriter, PlanSimplificationNoRequirementOverlapElemMatchOnNonMultiKeyField) {
+    using namespace properties;
+    auto prefixId = PrefixId::createForTests();
+
+    // MQL query: db.c1.find({stock : { $elemMatch: {size: 5} } })
+
+    ABT rootNode =
+        NodeBuilder{}
+            .root("root")
+            .filter(_evalf(_get("stock", _arr()), "root"_var))
+            .filter(_evalf(_get("stock",
+                                _traverse1(_composem(
+                                    _get("size", _traverse1(_cmp("Eq", "5"_cint64))), _arr()))),
+                           "root"_var))
+            .finish(_scan("root", "c1"));
+
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(
+               {},
+               {{"index1",
+                 makeIndexDefinition("stock", CollationOp::Ascending, false /*multiKey*/)}})}}},
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = rootNode;
+    phaseManager.optimize(optimized);
+
+    // The $elemMatch scan on stock.size (requiring an array on stock) in combination with
+    // the index which ensures that stock is a non-multikey field
+    // allows the simplification of the query.
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root [{root}]\n"
+        "ValueScan [arraySize: 0]\n"
+        "    Const [[]]\n",
+        optimized);
+}
+
+TEST(LogicalRewriter, FailSimplificationNoRequirementOverlapElemMatchOnMultiKeyField) {
+    using namespace properties;
+    auto prefixId = PrefixId::createForTests();
+
+    // MQL query: db.c1.find({stock : { $elemMatch: {size: 5} } })
+
+    auto scanNode = _scan("root", "c1");
+    auto filterNode2 = _filter(
+        _evalf(
+            _get("stock",
+                 _traverse1(_composem(_get("size", _traverse1(_cmp("Eq", "5"_cint64))), _arr()))),
+            "root"_var),
+        std::move(scanNode));
+    auto filterNode = _filter(_evalf(_get("stock", _arr()), "root"_var), std::move(filterNode2));
+    auto rootNode = _root("root")(std::move(filterNode));
+
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(
+               {},
+               {{"index1",
+                 makeIndexDefinition("stock", CollationOp::Ascending, true /*multiKey*/)}})}}},
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = rootNode;
+    phaseManager.optimize(optimized);
+
+    // This query is the opposite of the previous test
+    // (PlanSimplificationNoRequirementOverlapElemMatchOnNonMultiKeyField) with regard to the
+    // multikeyness of the indexed field.
+    // The elemMatch operator requires field 'stock' to be an array. The collection has a key on
+    // field stock which in this case *is* a multikey field.
+    // The simplification of the sargable node based on multikeyness metadata is *not* possible and
+    // the query is *not* simplified to a simple ValueScan
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root [{root}]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [root]\n"
+        "|   PathGet [stock]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathComposeM []\n"
+        "|   |   PathArr []\n"
+        "|   PathGet [size]\n"
+        "|   PathTraverse [1]\n"
+        "|   PathCompare [Eq]\n"
+        "|   Const [5]\n"
+        "Sargable [Complete]\n"
+        "|   |   requirements: \n"
+        "|   |       {{\n"
+        "|   |           {root, 'PathGet [stock] PathIdentity []', {{{[Const [[]], Const "
+        "[BinData(0, )])}}}}\n"
+        "|   |        ^ \n"
+        "|   |           {root, 'PathGet [stock] PathTraverse [1] PathIdentity []', {{{[Const "
+        "[[]], Const [BinData(0, )])}}}, perfOnly}\n"
+        "|   |        ^ \n"
+        "|   |           {root, 'PathGet [stock] PathTraverse [1] PathGet [size] PathTraverse [1] "
+        "PathIdentity []', {{{=Const [5]}}}, perfOnly}\n"
+        "|   |       }}\n"
+        "|   scanParams: \n"
+        "|       {'stock': evalTemp_2}\n"
+        "|           residualReqs: \n"
+        "|               {{{evalTemp_2, 'PathIdentity []', {{{[Const [[]], Const [BinData(0, "
+        ")])}}}, entryIndex: 0}}}\n"
+        "Scan [c1, {root}]\n",
+        optimized);
 }
 
 TEST(LogicalRewriter, RemoveTraverseSplitComposeM) {
@@ -2438,7 +2620,7 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     ASSERT_EQ(1, ci.at(0)._eqPrefixes.size());
 
     // The first index field ("a") is constrained to 1, the remaining fields are not constrained.
-    ASSERT_INTERVAL_AUTO(  // NOLINT
+    ASSERT_COMPOUND_INTERVAL_AUTO(  // NOLINT
         "{{{[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | maxKey | "
         "maxKey]]}}}\n",
         ci.at(0)._eqPrefixes.front()._interval);
@@ -2464,7 +2646,7 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     ASSERT_EQ(2, ci.at(1)._eqPrefixes.size());
 
     // The first index field ("a") is again constrained to 1, and the remaining ones are not.
-    ASSERT_INTERVAL_AUTO(  // NOLINT
+    ASSERT_COMPOUND_INTERVAL_AUTO(  // NOLINT
         "{{{[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | maxKey | "
         "maxKey]]}}}\n",
         ci.at(1)._eqPrefixes.at(0)._interval);
@@ -2474,7 +2656,7 @@ TEST(LogicalRewriter, SargableNodeRIN) {
 
     // The first two index fields are constrained to variables obtained from the first scan, the
     // third one ("c") is bound to "2". The last two fields are unconstrained.
-    ASSERT_INTERVAL_AUTO(  // NOLINT
+    ASSERT_COMPOUND_INTERVAL_AUTO(  // NOLINT
         "{{{[Variable [evalTemp_26] | Variable [evalTemp_27] | Const [2] | Const [minKey] | Const "
         "[minKey], Variable [evalTemp_26] | Variable [evalTemp_27] | Const [2] | Const [maxKey] | "
         "Const [maxKey]]}}}\n",
@@ -2496,14 +2678,14 @@ TEST(LogicalRewriter, SargableNodeRIN) {
     ASSERT_EQ(4, ci.at(2)._correlatedProjNames.getVector().size());
 
     // The first index field ("a") is again constrained to 1.
-    ASSERT_INTERVAL_AUTO(  // NOLINT
+    ASSERT_COMPOUND_INTERVAL_AUTO(  // NOLINT
         "{{{[Const [1 | minKey | minKey | minKey | minKey], Const [1 | maxKey | maxKey | maxKey | "
         "maxKey]]}}}\n",
         ci.at(2)._eqPrefixes.at(0)._interval);
 
     // The first two index fields are constrained to variables obtained from the first scan, the
     // third one ("c") is bound to "2". The last two fields are unconstrained.
-    ASSERT_INTERVAL_AUTO(  // NOLINT
+    ASSERT_COMPOUND_INTERVAL_AUTO(  // NOLINT
         "{{{[Variable [evalTemp_29] | Variable [evalTemp_30] | Const [2] | Const [minKey] | Const "
         "[minKey], Variable [evalTemp_29] | Variable [evalTemp_30] | Const [2] | Const [maxKey] | "
         "Const [maxKey]]}}}\n",
@@ -2511,7 +2693,7 @@ TEST(LogicalRewriter, SargableNodeRIN) {
 
     // The first 4 index fields are constrained to variables from the second scan, and the last one
     // to 4.
-    ASSERT_INTERVAL_AUTO(  // NOLINT
+    ASSERT_COMPOUND_INTERVAL_AUTO(  // NOLINT
         "{{{=Variable [evalTemp_29] | Variable [evalTemp_30] | Variable [evalTemp_31] | Variable "
         "[evalTemp_32] | Const [3]}}}\n",
         ci.at(2)._eqPrefixes.at(2)._interval);

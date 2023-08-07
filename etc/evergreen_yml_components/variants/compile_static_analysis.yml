@@ -205,7 +205,7 @@ buildvariants:
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.8")
       --win-version-min=win10
     num_scons_link_jobs_available: 0.2
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     scons_cache_scope: shared
     compile_variant: *windows-compile-required
   tasks:
@@ -278,12 +278,16 @@ buildvariants:
       ENABLE_GRPC_BUILD=1
     compile_variant: *linux-x86-dynamic-grpc-suggested
     clang_tidy_toolchain: v4
+    test_flags: >-
+      --mongosSetParameters="{featureFlagGRPC: true}"
+      --mongodSetParameters="{featureFlagGRPC: true}"
   tasks:
     - name: compile_ninja_quick_TG
     - name: compile_test_and_package_parallel_unittest_stream_TG
     - name: compile_test_and_package_parallel_core_stream_TG
     - name: compile_test_and_package_parallel_dbtest_stream_TG
     - name: generate_buildid_to_debug_symbols_mapping
+    - name: .jscore .common
     - name: .lint
     - name: libdeps_graph_linting_TG
       distros:

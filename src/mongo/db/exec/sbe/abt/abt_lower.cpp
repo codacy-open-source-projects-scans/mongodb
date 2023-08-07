@@ -345,16 +345,20 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::handleShardFilterFuncti
     for (auto& i : shardKeyPaths) {
         projectFields.push_back(PathStringify::stringify(i));
     }
+
     // Fill out the values with SlotId variables. The specified slot will supply the values
     // corresponding to the shard key.
     for (const ABT& node : fn.nodes()) {
-        const auto* child = node.cast<Variable>();
-        tassert(7814406,
-                "All child nodes of a shardFilter function call must be of type Variable",
-                child);
-        sbe::value::SlotId slotId = _slotMap.at(child->name());
-        auto slotIdVariable = sbe::makeE<sbe::EVariable>(std::move(slotId));
-        projectValues.push_back(std::move(slotIdVariable));
+        // If the child of FunctionCall['shardFilter'] is a Variable, look up the variable in the
+        // slot map.
+        if (node.is<Variable>()) {
+            sbe::value::SlotId slotId = _slotMap.at(node.cast<Variable>()->name());
+            projectValues.push_back(sbe::makeE<sbe::EVariable>(slotId));
+        } else {
+            // Otherwise, lower the expression to be referenced by the 'shardFilter' function call.
+            SBEExpressionLowering exprLower{_env, _slotMap, _runtimeEnv};
+            projectValues.push_back(exprLower.optimize(node));
+        }
     }
 
     auto makeObjSpec = sbe::makeE<sbe::EConstant>(
@@ -573,14 +577,14 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const EvaluationNode& n,
     auto& names = binder.names();
     auto& exprs = binder.exprs();
 
-    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projects;
+    sbe::SlotExprPairVector projects;
 
     for (size_t idx = 0; idx < exprs.size(); ++idx) {
         auto expr = lowerExpression(exprs[idx], slotMap, &_nodeToGroupPropsMap.at(&n));
         auto slot = _slotIdGenerator.generate();
 
         mapProjToSlot(slotMap, names[idx], slot);
-        projects.emplace(slot, std::move(expr));
+        projects.emplace_back(slot, std::move(expr));
     }
 
     const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
@@ -1190,7 +1194,9 @@ void SBENodeLowering::generateSlots(SlotVarMap& slotMap,
 static NamespaceStringOrUUID parseFromScanDef(const ScanDefinition& def) {
     const auto& dbName = def.getOptionsMap().at("database");
     const auto& uuidStr = def.getOptionsMap().at("uuid");
-    return {dbName, UUID::parse(uuidStr).getValue()};
+    // TODO SERVER-79427 we should no longer deserialize in this method since NamespaceStringOrUUID
+    // should be part of the ScanDefinition.
+    return {DatabaseNameUtil::deserialize(boost::none, dbName), UUID::parse(uuidStr).getValue()};
 }
 
 
@@ -1226,7 +1232,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
                                                       boost::none,
                                                       fields,
                                                       vars,
-                                                      nullptr /*yieldPolicy*/,
+                                                      _yieldPolicy /*yieldPolicy*/,
                                                       planNodeId,
                                                       callbacks);
         }
@@ -1256,7 +1262,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
             boost::none /* minRecordIdSlot */,
             boost::none /* maxRecordIdSlot */,
             forwardScan,
-            nullptr /*yieldPolicy*/,
+            _yieldPolicy /*yieldPolicy*/,
             planNodeId,
             callbacks,
             gDeprioritizeUnboundedUserCollectionScans.load(), /* lowPriority */
@@ -1382,7 +1388,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n,
                                                  vars,
                                                  std::move(lowerBoundExpr),
                                                  std::move(upperBoundExpr),
-                                                 nullptr /*yieldPolicy*/,
+                                                 _yieldPolicy /*yieldPolicy*/,
                                                  planNodeId);
 }
 
@@ -1422,7 +1428,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
                                       boost::none /* minRecordIdSlot */,
                                       boost::none /* maxRecordIdSlot */,
                                       true /*forward*/,
-                                      nullptr /*yieldPolicy*/,
+                                      _yieldPolicy /*yieldPolicy*/,
                                       planNodeId,
                                       callbacks);
 }

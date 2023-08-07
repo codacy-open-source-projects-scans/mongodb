@@ -62,7 +62,7 @@ EvalExpr makeBalancedBooleanOpTree(sbe::EPrimBinary::Op logicOp,
 
 std::unique_ptr<sbe::EExpression> abtToExpr(optimizer::ABT& abt,
                                             optimizer::SlotVarMap& slotMap,
-                                            const sbe::RuntimeEnvironment& runtimeEnv);
+                                            StageBuilderState& state);
 
 template <typename... Args>
 inline auto makeABTFunction(StringData name, Args&&... args) {
@@ -104,7 +104,13 @@ optimizer::ABT makeUnaryOp(optimizer::Operations unaryOp, optimizer::ABT operand
 
 optimizer::ABT generateABTNullOrMissing(optimizer::ProjectionName var);
 optimizer::ABT generateABTNullOrMissing(optimizer::ABT var);
+
+/**
+ * Generates an ABT that checks if the input expression is negative assuming that it has already
+ * been verified to have numeric type and to not be NaN.
+ */
 optimizer::ABT generateABTNegativeCheck(optimizer::ProjectionName var);
+
 optimizer::ABT generateABTNonPositiveCheck(optimizer::ProjectionName var);
 optimizer::ABT generateABTPositiveCheck(optimizer::ABT var);
 optimizer::ABT generateABTNonNumericCheck(optimizer::ProjectionName var);

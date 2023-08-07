@@ -172,7 +172,8 @@ StageConstraints DocumentSourceChangeStreamUnwindTransaction::constraints(
                             ChangeStreamRequirement::kChangeStreamStage);
 }
 
-Value DocumentSourceChangeStreamUnwindTransaction::serialize(SerializationOptions opts) const {
+Value DocumentSourceChangeStreamUnwindTransaction::serialize(
+    const SerializationOptions& opts) const {
     tassert(7481400, "expression has not been initialized", _expression);
 
     if (opts.verbosity) {
@@ -507,11 +508,14 @@ void DocumentSourceChangeStreamUnwindTransaction::TransactionOpIterator::_addAff
 
     static const std::vector<std::string> kCollectionField = {"create", "createIndexes"};
 
-    NamespaceString dbCmdNs{doc["ns"].getStringData()};
+    const boost::optional<TenantId> tid = !doc["tid"].missing()
+        ? boost::make_optional<TenantId>(TenantId(doc["tid"].getOid()))
+        : boost::none;
+    const auto dbCmdNs = NamespaceStringUtil::deserialize(tid, doc["ns"].getString());
     const Document& object = doc["o"].getDocument();
     for (const auto& fieldName : kCollectionField) {
         if (object[fieldName].getType() == BSONType::String) {
-            _affectedNamespaces.emplace(str::stream{} << dbCmdNs.db() << "."
+            _affectedNamespaces.emplace(str::stream{} << dbCmdNs.db_deprecated() << "."
                                                       << object[fieldName].getStringData());
             return;
         }

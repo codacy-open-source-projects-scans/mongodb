@@ -9,6 +9,7 @@ import pymongo.errors
 
 from buildscripts.resmokelib.testing.fixtures import interface
 from buildscripts.resmokelib.testing.fixtures import external
+from buildscripts.resmokelib.testing.fixtures import _builder
 
 
 class ShardedClusterFixture(interface.Fixture):
@@ -409,7 +410,6 @@ class ShardedClusterFixture(interface.Fixture):
 
         See https://docs.mongodb.org/manual/reference/command/addShard for more details.
         """
-
         connection_string = shard.get_internal_connection_string()
         if is_config_shard:
             self.logger.info("Adding %s as config shard...", connection_string)
@@ -424,13 +424,29 @@ class ExternalShardedClusterFixture(external.ExternalFixture, ShardedClusterFixt
 
     REGISTERED_NAME = "ExternalShardedClusterFixture"
 
-    def __init__(self, logger, job_num, fixturelib, shell_conn_string):
+    def __init__(self, logger, job_num, fixturelib, shell_conn_string, original_suite_name):
         """Initialize ExternalShardedClusterFixture."""
         external.ExternalFixture.__init__(self, logger, job_num, fixturelib, shell_conn_string)
         ShardedClusterFixture.__init__(self, logger, job_num, fixturelib, mongod_options={})
+        self.dummy_fixture = _builder.make_dummy_fixture(original_suite_name)
 
     def setup(self):
         """Use ExternalFixture method."""
+        client = pymongo.MongoClient(self.get_driver_connection_url())
+        for i in range(50):
+            if i == 49:
+                raise RuntimeError('Sharded Cluster setup has timed out.')
+            payload = client.admin.command({"listShards": 1})
+            if len(payload["shards"]) == self.dummy_fixture.num_shards:
+                print("Sharded Cluster available.")
+                break
+            if len(payload["shards"]) < self.dummy_fixture.num_shards:
+                print("Waiting for shards to be added to cluster.")
+                time.sleep(5)
+                continue
+            if len(payload["shards"]) > self.dummy_fixture.num_shards:
+                raise RuntimeError('More shards in cluster than expected.')
+
         return external.ExternalFixture.setup(self)
 
     def pids(self):
@@ -517,6 +533,14 @@ class _MongoSFixture(interface.Fixture):
             raise self.fixturelib.ServerFailure(msg)
 
         self.mongos = mongos
+
+    def get_options(self):
+        """Return the mongos options of this fixture."""
+        launcher = MongosLauncher(self.fixturelib)
+        _, mongos_options = launcher.launch_mongos_program(self.logger, self.job_num,
+                                                           executable=self.mongos_executable,
+                                                           mongos_options=self.mongos_options)
+        return mongos_options
 
     def pids(self):
         """:return: pids owned by this fixture if any."""
@@ -678,4 +702,3 @@ def _add_testing_set_parameters(suite_set_parameters):
     suite_set_parameters.setdefault("testingDiagnosticsEnabled", True)
     suite_set_parameters.setdefault("enableTestCommands", True)
     suite_set_parameters.setdefault("disableTransitionFromLatestToLastContinuous", False)
-    suite_set_parameters.setdefault("requireConfirmInSetFcv", False)

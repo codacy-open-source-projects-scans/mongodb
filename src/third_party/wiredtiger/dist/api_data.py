@@ -566,14 +566,20 @@ connection_runtime_config = [
         Config('chunk_size', '1MB', r'''
             size of cached chunks''',
             min='512KB', max='100GB'),
-        Config('device_path', '', r'''
-            the absolute path to the file system or a block device used as cache location'''),
+        Config('storage_path', '', r'''
+            the absolute path to the file used as cache location'''),
         Config('enabled', 'false', r'''
             enable chunk cache''',
             type='boolean'),
         Config('hashsize', '1024', r'''
             number of buckets in the hashtable that keeps track of objects''',
             min='64', max='1048576'),
+        Config('pinned', '', r'''
+            List of "table:" URIs exempt from cache eviction. Capacity config overrides this,
+            tables exceeding capacity will not be fully retained. Table names can appear
+            in both this and the preload list, but not in both this and the exclude list.
+            Duplicate names are allowed.''',
+            type='list'),
         Config('type', 'FILE', r'''
             cache location, defaults to the file system.''',
             choices=['FILE', 'DRAM'], undoc=True),
@@ -1336,6 +1342,12 @@ methods = {
 'WT_SESSION.close' : Method([]),
 
 'WT_SESSION.compact' : Method([
+    Config('background', '', r'''
+        enable/disabled the background compaction server.''',
+        type='boolean'),
+    Config('free_space_target', '20MB', r'''
+        minimum amount of space recoverable for compaction to proceed''',
+        min='1MB'),
     Config('timeout', '1200', r'''
         maximum amount of time to allow for compact in seconds. The actual amount of time spent
         in compact may exceed the configured value. A value of zero disables the timeout''',

@@ -38,7 +38,9 @@ import mongo.toolchain as mongo_toolchain
 import mongo.generators as mongo_generators
 import mongo.install_actions as install_actions
 
-EnsurePythonVersion(3, 6)
+# TODO SERVER-79172
+# We cannot set the limit to python 3.10 since python 3.9 is needed for windows testing
+EnsurePythonVersion(3, 9)
 EnsureSConsVersion(3, 1, 1)
 
 utc_starttime = datetime.utcnow()
@@ -1058,6 +1060,14 @@ env_vars.Add(
     'DESTDIR',
     help='Where builds will install files',
     default='$BUILD_ROOT/install',
+)
+
+env_vars.Add(
+    'BAZEL_BUILD_ENABLED',
+    help=
+    'Enables/disables building with bazel. Note that this project is in flight, and thus subject to breaking changes. See https://jira.mongodb.org/browse/PM-3332 for details.',
+    converter=functools.partial(bool_var_converter, var='BAZEL_BUILD_ENABLED'),
+    default="0",
 )
 
 env_vars.Add(
@@ -2389,6 +2399,8 @@ if link_model.startswith("dynamic"):
                     return []
 
                 env['LIBDEPS_TAG_EXPANSIONS'].append(libdeps_tags_expand_incomplete)
+
+env.Tool('integrate_bazel')
 
 if optBuild != "off":
     env.SetConfigHeaderDefine("MONGO_CONFIG_OPTIMIZED_BUILD")

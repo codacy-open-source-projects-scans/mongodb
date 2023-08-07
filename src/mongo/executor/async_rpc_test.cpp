@@ -62,6 +62,7 @@
 #include "mongo/executor/async_rpc_retry_policy.h"
 #include "mongo/executor/async_rpc_targeter.h"
 #include "mongo/executor/async_rpc_test_fixture.h"
+#include "mongo/executor/async_rpc_util.h"
 #include "mongo/executor/async_transaction_rpc.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor.h"
@@ -1207,7 +1208,6 @@ TEST_F(AsyncRPCTestFixture, RemoteErrorAttemptedTargetMatchesActual) {
     initializeCommand(helloCmd);
     HostAndPort target("FakeHost1", 12345);
     auto targeter = std::make_unique<FixedTargeter>(target);
-
 
     auto opCtxHolder = makeOperationContext();
     auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(

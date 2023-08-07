@@ -185,7 +185,7 @@ std::string DurableCatalog::generateUniqueIdent(NamespaceString nss, const char*
     stdx::lock_guard<Latch> lk(_randLock);
     StringBuilder buf;
     if (_directoryPerDb) {
-        buf << escapeDbName(nss.db()) << '/';
+        buf << escapeDbName(nss.db_deprecated()) << '/';
     }
     buf << kind;
     buf << (_directoryForIndexes ? '/' : '-');
@@ -307,6 +307,7 @@ StatusWith<DurableCatalog::EntryIdentifier> DurableCatalog::_addEntry(
             // to false by default as mixed-schema data is only possible in versions 5.1 and
             // earlier.
             md.timeseriesBucketsMayHaveMixedSchemaData = false;
+            md.timeseriesBucketingParametersHaveChanged = false;
         }
         b.append("md", md.toBSON());
         obj = b.obj();
@@ -519,8 +520,8 @@ StatusWith<std::string> DurableCatalog::newOrphanedIdent(OperationContext* opCtx
     // The collection will be named local.orphan.xxxxx.
     std::string identNs = ident;
     std::replace(identNs.begin(), identNs.end(), '-', '_');
-    NamespaceString nss{DatabaseName::kLocal.db(),
-                        NamespaceString::kOrphanCollectionPrefix + identNs};
+    const auto nss = NamespaceStringUtil::deserialize(
+        DatabaseName::kLocal, NamespaceString::kOrphanCollectionPrefix + identNs);
 
     BSONObj obj;
     {

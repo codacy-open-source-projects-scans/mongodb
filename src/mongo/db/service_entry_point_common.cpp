@@ -256,7 +256,7 @@ struct HandleRequest {
             auto& dbmsg = getDbMessage();
             if (!dbmsg.messageShouldHaveNs())
                 return {};
-            return NamespaceString(dbmsg.getns());
+            return NamespaceStringUtil::deserialize(boost::none, dbmsg.getns());
         }
 
         void assertValidNsString() {
@@ -767,7 +767,6 @@ private:
     // Do any initialization of the lock state required for a transaction.
     void _setLockStateForTransaction(OperationContext* opCtx) {
         opCtx->lockState()->setSharedLocksShouldTwoPhaseLock(true);
-        opCtx->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
     }
 
     // Clear any lock state which may have changed after the locker update.
@@ -1572,9 +1571,10 @@ void ExecCommandDatabase::_initiateCommand() {
          serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) ||
         client->isFromSystemConnection();
 
-    const auto invocationNss = _invocation->ns();
-    validateSessionOptions(
-        _sessionOptions, command->getName(), invocationNss, allowTransactionsOnConfigDatabase);
+    validateSessionOptions(_sessionOptions,
+                           command->getName(),
+                           _invocation->allNamespaces(),
+                           allowTransactionsOnConfigDatabase);
 
     BSONElement cmdOptionMaxTimeMSField;
     BSONElement maxTimeMSOpOnlyField;
@@ -1700,6 +1700,10 @@ void ExecCommandDatabase::_initiateCommand() {
             analyze_shard_key::QueryAnalysisSampler::get(opCtx).gotCommand(
                 request.getCommandName());
         }
+    }
+
+    if (command->shouldAffectQueryCounter()) {
+        globalOpCounters.gotQuery();
     }
 
     if (cmdOptionMaxTimeMSField || maxTimeMSOpOnlyField) {
@@ -1840,6 +1844,7 @@ void ExecCommandDatabase::_initiateCommand() {
             // We expect all versioned commands to be sent over 'system.buckets' namespace. But it
             // is possible that a stale mongos may send the request over a view namespace. In this
             // case, we initialize the 'OperationShardingState' with buckets namespace.
+            const auto invocationNss = _invocation->ns();
             auto bucketNss = invocationNss.makeTimeseriesBucketsNamespace();
             // Hold reference to the catalog for collection lookup without locks to be safe.
             auto catalog = CollectionCatalog::get(opCtx);

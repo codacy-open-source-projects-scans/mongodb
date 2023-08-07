@@ -52,6 +52,12 @@
 #include "mongo/util/net/cidr.h"
 #include "mongo/util/version/releases.h"
 
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#endif
+
 namespace mongo {
 
 const int DEFAULT_UNIX_PERMS = 0700;
@@ -67,6 +73,9 @@ struct ServerGlobalParams {
         CryptDServerPort = 27020,
         DefaultDBPort = 27017,
         ShardServerPort = 27018,
+#ifdef MONGO_CONFIG_GRPC
+        DefaultGRPCServerPort = 27021,
+#endif
     };
 
     static std::string getPortSettingHelpText();
@@ -75,11 +84,13 @@ struct ServerGlobalParams {
     bool enableIPv6 = false;
     bool rest = false;  // --rest
 
-    int listenBacklog = 0;  // --listenBacklog, real default is SOMAXCONN
+    int listenBacklog = SOMAXCONN;  // --listenBacklog
 
     AtomicWord<bool> quiet{false};  // --quiet
 
     ClusterRole clusterRole = ClusterRole::None;  // --configsvr/--shardsvr
+
+    int internalPort = ShardServerPort;  // --internalPort
 
     bool objcheck = true;  // --objcheck
 
@@ -139,6 +150,11 @@ struct ServerGlobalParams {
 
     // True if the current binary version is an LTS Version.
     static constexpr bool kIsLTSBinaryVersion = false;
+
+#ifdef MONGO_CONFIG_GRPC
+    int grpcPort = DefaultGRPCServerPort;
+    int grpcServerMaxThreads = 1000;
+#endif
 
     struct FeatureCompatibility {
         using FCV = multiversion::FeatureCompatibilityVersion;

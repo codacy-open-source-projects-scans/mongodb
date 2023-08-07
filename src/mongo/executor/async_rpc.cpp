@@ -41,7 +41,9 @@
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
@@ -60,7 +62,7 @@ public:
      * Do not call directly - this is not part of the public API.
      */
     ExecutorFuture<AsyncRPCInternalResponse> _sendCommand(
-        StringData dbName,
+        const DatabaseName& dbName,
         BSONObj cmdBSON,
         Targeter* targeter,
         OperationContext* opCtx,
@@ -72,7 +74,7 @@ public:
         auto targetsUsed = std::make_shared<std::vector<HostAndPort>>();
         return targeter->resolve(token)
             .thenRunOn(proxyExec)
-            .then([dbName = dbName.toString(),
+            .then([dbName = DatabaseNameUtil::serializeForRemoteCmdRequest(dbName),
                    cmdBSON,
                    opCtx,
                    exec = std::move(exec),

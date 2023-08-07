@@ -133,19 +133,6 @@ structs:
                 type: object
                 optional: true
                 stability: unstable
-            return:
-                description: "When set to 'post', returns the modified document
-                              rather than the original. Default is to return the original ('pre')."
-                type: string
-                optional: true
-                validator:
-                    callback: validateUpdateReturn
-                stability: unstable
-            returnFields:
-                description: "A subset of fields to return."
-                type: object
-                optional: true
-                stability: unstable
 
     BulkWriteDeleteOp:
         description: "A struct representing deletes in the 'bulkWrite' command."
@@ -158,13 +145,13 @@ structs:
                 validator: { gte: 0 }
                 stability: unstable
             filter:
-                description: "The query that matches documents to update. Uses the same query
+                description: "The query that matches documents to delete. Uses the same query
                               selectors as used in the 'find' operation."
                 type: object
                 stability: unstable
             multi:
-                description: "If true, updates all documents that meet the query criteria. If false,
-                              limits the update to one document which meets the query criteria." 
+                description: "If true, deletes all documents that meet the query criteria. If false,
+                              limits the delete to one document which meets the query criteria." 
                 type: bool
                 default: false
                 stability: unstable
@@ -181,15 +168,6 @@ structs:
             sort:
                 description: "Determines which document the operation modifies if the query selects
                               multiple documents."
-                type: object
-                optional: true
-                stability: unstable
-            return:
-                description: "When true, returns the deleted document rather than nothing."
-                type: optionalBool
-                stability: unstable
-            returnFields:
-                description: "A subset of fields to return."
                 type: object
                 optional: true
                 stability: unstable

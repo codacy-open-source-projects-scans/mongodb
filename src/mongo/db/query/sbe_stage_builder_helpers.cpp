@@ -50,6 +50,7 @@
 #include "mongo/db/catalog/health_log_interface.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/exec/docval_to_sbeval.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/branch.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
@@ -71,6 +72,7 @@
 #include "mongo/db/query/bson_typemask.h"
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_ast.h"
+#include "mongo/db/query/projection_ast_path_tracking_visitor.h"
 #include "mongo/db/query/projection_ast_visitor.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
@@ -123,20 +125,11 @@ std::unique_ptr<sbe::EExpression> makeBinaryOp(sbe::EPrimBinary::Op binaryOp,
 std::unique_ptr<sbe::EExpression> makeBinaryOp(sbe::EPrimBinary::Op binaryOp,
                                                std::unique_ptr<sbe::EExpression> lhs,
                                                std::unique_ptr<sbe::EExpression> rhs,
-                                               sbe::RuntimeEnvironment* runtimeEnv) {
-    invariant(runtimeEnv);
-
-    auto collatorSlot = runtimeEnv->getSlotIfExists("collator"_sd);
+                                               StageBuilderState& state) {
+    auto collatorSlot = state.getCollatorSlot();
     auto collatorVar = collatorSlot ? sbe::makeE<sbe::EVariable>(*collatorSlot) : nullptr;
 
     return makeBinaryOp(binaryOp, std::move(lhs), std::move(rhs), std::move(collatorVar));
-}
-
-std::unique_ptr<sbe::EExpression> makeBinaryOp(sbe::EPrimBinary::Op binaryOp,
-                                               std::unique_ptr<sbe::EExpression> lhs,
-                                               std::unique_ptr<sbe::EExpression> rhs,
-                                               PlanStageEnvironment& env) {
-    return makeBinaryOp(binaryOp, std::move(lhs), std::move(rhs), env.runtimeEnv);
 }
 
 std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression> input,
@@ -151,19 +144,11 @@ std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression>
 
 std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression> input,
                                                std::unique_ptr<sbe::EExpression> arr,
-                                               sbe::RuntimeEnvironment* runtimeEnv) {
-    invariant(runtimeEnv);
-
-    auto collatorSlot = runtimeEnv->getSlotIfExists("collator"_sd);
+                                               StageBuilderState& state) {
+    auto collatorSlot = state.getCollatorSlot();
     auto collatorVar = collatorSlot ? sbe::makeE<sbe::EVariable>(*collatorSlot) : nullptr;
 
     return makeIsMember(std::move(input), std::move(arr), std::move(collatorVar));
-}
-
-std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression> input,
-                                               std::unique_ptr<sbe::EExpression> arr,
-                                               PlanStageEnvironment& env) {
-    return makeIsMember(std::move(input), std::move(arr), env.runtimeEnv);
 }
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissingExpr(const sbe::EExpression& expr) {
@@ -193,7 +178,7 @@ std::unique_ptr<sbe::EExpression> generateNullOrMissing(std::unique_ptr<sbe::EEx
 }
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissing(EvalExpr arg, StageBuilderState& state) {
-    auto expr = arg.extractExpr(state.slotVarMap, *state.env);
+    auto expr = arg.extractExpr(state.slotVarMap, state);
     return generateNullOrMissingExpr(*expr);
 }
 
@@ -202,7 +187,7 @@ std::unique_ptr<sbe::EExpression> generateNonNumericCheck(const sbe::EVariable& 
 }
 
 std::unique_ptr<sbe::EExpression> generateNonNumericCheck(EvalExpr expr, StageBuilderState& state) {
-    return makeNot(makeFunction("isNumber", expr.extractExpr(state.slotVarMap, *state.env)));
+    return makeNot(makeFunction("isNumber", expr.extractExpr(state.slotVarMap, state)));
 }
 
 std::unique_ptr<sbe::EExpression> generateLongLongMinCheck(const sbe::EVariable& var) {
@@ -225,7 +210,7 @@ std::unique_ptr<sbe::EExpression> generateNaNCheck(const sbe::EVariable& var) {
 }
 
 std::unique_ptr<sbe::EExpression> generateNaNCheck(EvalExpr expr, StageBuilderState& state) {
-    return makeFunction("isNaN", expr.extractExpr(state.slotVarMap, *state.env));
+    return makeFunction("isNaN", expr.extractExpr(state.slotVarMap, state));
 }
 
 std::unique_ptr<sbe::EExpression> generateInfinityCheck(const sbe::EVariable& var) {
@@ -233,7 +218,7 @@ std::unique_ptr<sbe::EExpression> generateInfinityCheck(const sbe::EVariable& va
 }
 
 std::unique_ptr<sbe::EExpression> generateInfinityCheck(EvalExpr expr, StageBuilderState& state) {
-    return makeFunction("isInfinity"_sd, expr.extractExpr(state.slotVarMap, *state.env));
+    return makeFunction("isInfinity"_sd, expr.extractExpr(state.slotVarMap, state));
 }
 
 std::unique_ptr<sbe::EExpression> generateNonPositiveCheck(const sbe::EVariable& var) {
@@ -390,14 +375,12 @@ std::pair<sbe::value::SlotId, EvalStage> projectEvalExpr(
     // If expr's value is an expression, create a ProjectStage to evaluate the expression
     // into a slot.
     auto slot = slotIdGenerator->generate();
-    stage = makeProject(
-        std::move(stage), planNodeId, slot, expr.extractExpr(state.slotVarMap, *state.env));
+    stage =
+        makeProject(std::move(stage), planNodeId, slot, expr.extractExpr(state.slotVarMap, state));
     return {slot, std::move(stage)};
 }
 
-EvalStage makeProject(EvalStage stage,
-                      sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projects,
-                      PlanNodeId planNodeId) {
+EvalStage makeProject(EvalStage stage, sbe::SlotExprPairVector projects, PlanNodeId planNodeId) {
     auto outSlots = stage.extractOutSlots();
     for (auto& [slot, _] : projects) {
         outSlots.push_back(slot);
@@ -653,10 +636,10 @@ std::pair<sbe::value::SlotVector, std::unique_ptr<sbe::PlanStage>> generateVirtu
     // Create a ProjectStage that will read the data from 'scanStage' and split it up
     // across multiple output slots.
     sbe::value::SlotVector projectSlots;
-    sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projections;
+    sbe::SlotExprPairVector projections;
     for (int32_t i = 0; i < numSlots; ++i) {
         projectSlots.emplace_back(slotIdGenerator->generate());
-        projections.emplace(
+        projections.emplace_back(
             projectSlots.back(),
             makeFunction("getElement"_sd,
                          sbe::makeE<sbe::EVariable>(scanSlot),
@@ -941,6 +924,75 @@ sbe::value::SlotId StageBuilderState::registerInputParamSlot(
     return slotId;
 }
 
+boost::optional<sbe::value::SlotId> StageBuilderState::getTimeZoneDBSlot() {
+    auto slotId = env->getSlotIfExists("timeZoneDB"_sd);
+
+    if (!slotId) {
+        return env->registerSlot(
+            "timeZoneDB"_sd,
+            sbe::value::TypeTags::timeZoneDB,
+            sbe::value::bitcastFrom<const TimeZoneDatabase*>(getTimeZoneDatabase(opCtx)),
+            false,
+            slotIdGenerator);
+    }
+
+    return slotId;
+}
+
+boost::optional<sbe::value::SlotId> StageBuilderState::getCollatorSlot() {
+    auto slotId = env->getSlotIfExists("collator"_sd);
+
+    if (!slotId && data != nullptr) {
+        if (auto coll = data->queryCollator.get()) {
+            return env->registerSlot("collator"_sd,
+                                     sbe::value::TypeTags::collator,
+                                     sbe::value::bitcastFrom<const CollatorInterface*>(coll),
+                                     false,
+                                     slotIdGenerator);
+        }
+    }
+
+    return slotId;
+}
+
+boost::optional<sbe::value::SlotId> StageBuilderState::getOplogTsSlot() {
+    auto slotId = env->getSlotIfExists("oplogTs"_sd);
+
+    if (!slotId) {
+        return env->registerSlot(
+            "oplogTs"_sd, sbe::value::TypeTags::Nothing, 0, false, slotIdGenerator);
+    }
+
+    return slotId;
+}
+
+boost::optional<sbe::value::SlotId> StageBuilderState::getBuiltinVarSlot(Variables::Id id) {
+    if (id == Variables::kRootId || id == Variables::kRemoveId) {
+        return boost::none;
+    }
+
+    auto it = Variables::kIdToBuiltinVarName.find(id);
+    tassert(1234567, "Expected 'id' to be in map", it != Variables::kIdToBuiltinVarName.end());
+
+    auto& name = it->second;
+    auto slotId = env->getSlotIfExists(name);
+    if (!slotId) {
+        if (variables.hasValue(id)) {
+            auto [tag, val] = sbe::value::makeValue(variables.getValue(id));
+            return env->registerSlot(name, tag, val, true, slotIdGenerator);
+        } else if (id == Variables::kSearchMetaId) {
+            // Normally, $search is responsible for setting a value for SEARCH_META, in which case
+            // we will bind the value to a slot above. However, in the event of a query that does
+            // not use $search, but references SEARCH_META, we need to bind a value of 'missing' to
+            // a slot so that the plan can run correctly.
+            return env->registerSlot(
+                name, sbe::value::TypeTags::Nothing, 0, false, slotIdGenerator);
+        }
+    }
+
+    return slotId;
+}
+
 /**
  * Given a key pattern and an array of slots of equal size, builds a SlotTreeNode representing the
  * mapping between key pattern component and slot.
@@ -957,9 +1009,8 @@ std::unique_ptr<SlotTreeNode> buildKeyPatternTree(const BSONObj& keyPattern,
         paths.emplace_back(elem.fieldNameStringData());
     }
 
-    const bool removeConflictingPaths = true;
     return buildPathTree<boost::optional<sbe::value::SlotId>>(
-        paths, slots.begin(), slots.end(), removeConflictingPaths);
+        paths, slots.begin(), slots.end(), BuildPathTreeMode::RemoveConflictingPaths);
 }
 
 /**
@@ -1005,155 +1056,70 @@ std::unique_ptr<sbe::PlanStage> rehydrateIndexKey(std::unique_ptr<sbe::PlanStage
     return sbe::makeProjectStage(std::move(stage), nodeId, resultSlot, std::move(keyExpr));
 }
 
-/**
- * For covered projections, each of the projection field paths represent respective index key. To
- * rehydrate index keys into the result object, we first need to convert projection AST into
- * 'SlotTreeNode' structure. Context structure and visitors below are used for this
- * purpose.
- */
-struct IndexKeysBuilderContext {
-    IndexKeysBuilderContext() = default;
-    explicit IndexKeysBuilderContext(std::unique_ptr<SlotTreeNode> root) : root(std::move(root)) {}
-
-    // Contains resulting tree of index keys converted from projection AST.
-    std::unique_ptr<SlotTreeNode> root;
-
-    // Full field path of the currently visited projection node.
-    std::vector<StringData> currentFieldPath;
-
-    // Each projection node has a vector of field names. This stack contains indexes of the
-    // currently visited field names for each of the projection nodes.
-    std::vector<size_t> currentFieldIndex;
+namespace {
+struct GetProjectionNodesData {
+    projection_ast::ProjectType projectType = projection_ast::ProjectType::kInclusion;
+    std::vector<std::string> paths;
+    std::vector<ProjectionNode> nodes;
 };
+using GetProjectionNodesContext =
+    projection_ast::PathTrackingVisitorContext<GetProjectionNodesData>;
 
-/**
- * Covered projections are always inclusion-only, so we ban all other operators.
- */
-class IndexKeysBuilder : public projection_ast::ProjectionASTConstVisitor {
+class GetProjectionNodesVisitor final : public projection_ast::ProjectionASTConstVisitor {
 public:
-    using projection_ast::ProjectionASTConstVisitor::visit;
+    explicit GetProjectionNodesVisitor(GetProjectionNodesContext* context) : _context{context} {}
 
-    IndexKeysBuilder(IndexKeysBuilderContext* context) : _context{context} {}
+    void visit(const projection_ast::BooleanConstantASTNode* node) final {
+        bool isInclusion = _context->data().projectType == projection_ast::ProjectType::kInclusion;
+        auto path = getCurrentPath();
 
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {
-        tasserted(5474501, "Positional projection is not allowed in simple or covered projections");
-    }
-
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {
-        tasserted(5474502, "$slice is not allowed in simple or covered projections");
-    }
-
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {
-        tasserted(5474503, "$elemMatch is not allowed in simple or covered projections");
-    }
-
-    void visit(const projection_ast::ExpressionASTNode* node) final {
-        tasserted(5474504, "Expressions are not allowed in simple or covered projections");
-    }
-
-    void visit(const projection_ast::MatchExpressionASTNode* node) final {
-        tasserted(
-            5474505,
-            "$elemMatch / positional projection are not allowed in simple or covered projections");
-    }
-
-    void visit(const projection_ast::BooleanConstantASTNode* node) override {}
-
-protected:
-    IndexKeysBuilderContext* _context;
-};
-
-class IndexKeysPreBuilder final : public IndexKeysBuilder {
-public:
-    using IndexKeysBuilder::IndexKeysBuilder;
-    using IndexKeysBuilder::visit;
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        _context->currentFieldIndex.push_back(0);
-        _context->currentFieldPath.emplace_back(node->fieldNames().front());
-    }
-};
-
-class IndexKeysInBuilder final : public IndexKeysBuilder {
-public:
-    using IndexKeysBuilder::IndexKeysBuilder;
-    using IndexKeysBuilder::visit;
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        auto& currentIndex = _context->currentFieldIndex.back();
-        currentIndex++;
-        _context->currentFieldPath.back() = node->fieldNames()[currentIndex];
-    }
-};
-
-class IndexKeysPostBuilder final : public IndexKeysBuilder {
-public:
-    using IndexKeysBuilder::IndexKeysBuilder;
-    using IndexKeysBuilder::visit;
-
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {
-        _context->currentFieldIndex.pop_back();
-        _context->currentFieldPath.pop_back();
-    }
-
-    void visit(const projection_ast::BooleanConstantASTNode* constantNode) final {
-        if (!constantNode->value()) {
-            // Even though only inclusion is allowed in covered projection, there still can be
-            // {_id: 0} component. We do not need to generate any nodes for it.
+        // For inclusion projections, if we encounter "{_id: 0}" we ignore it. Likewise, for
+        // exclusion projections, if we encounter "{_id: 1}" we ignore it. ("_id" is the only
+        // field that gets special treatment by the projection parser, so it's the only field
+        // where this check is necessary.)
+        if (isInclusion != node->value() && path == "_id") {
             return;
         }
 
-        // Insert current field path into the index keys tree if it does not exist yet.
-        auto* node = _context->root.get();
-        for (const auto& part : _context->currentFieldPath) {
-            if (auto child = node->findChild(part)) {
-                node = child;
-            } else {
-                node = node->emplace_back(std::string(part));
-            }
-        }
+        _context->data().paths.emplace_back(std::move(path));
+        _context->data().nodes.emplace_back(node);
     }
-};
-
-std::unique_ptr<SlotTreeNode> buildSlotTreeForProjection(const projection_ast::Projection& proj) {
-    IndexKeysBuilderContext context{std::make_unique<SlotTreeNode>()};
-    IndexKeysPreBuilder preVisitor{&context};
-    IndexKeysInBuilder inVisitor{&context};
-    IndexKeysPostBuilder postVisitor{&context};
-
-    projection_ast::ProjectionASTConstWalker walker{&preVisitor, &inVisitor, &postVisitor};
-
-    tree_walker::walk<true, projection_ast::ASTNode>(proj.root(), &walker);
-
-    return std::move(context.root);
-}
-
-namespace {
-class ProjectionExprDepsBuilder final : public projection_ast::ProjectionASTConstVisitor {
-public:
-    explicit ProjectionExprDepsBuilder(DepsTracker* deps) : _deps(deps) {}
-
     void visit(const projection_ast::ExpressionASTNode* node) final {
-        expression::addDependencies(node->expressionRaw(), _deps);
+        _context->data().paths.emplace_back(getCurrentPath());
+        _context->data().nodes.emplace_back(node);
     }
-
+    void visit(const projection_ast::ProjectionSliceASTNode* node) final {
+        _context->data().paths.emplace_back(getCurrentPath());
+        _context->data().nodes.emplace_back(node);
+    }
+    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {
+        tasserted(7580705, "Positional projections are not supported in SBE");
+    }
+    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {
+        tasserted(7580706, "ElemMatch projections are not supported in SBE");
+    }
     void visit(const projection_ast::ProjectionPathASTNode* node) final {}
-    void visit(const projection_ast::BooleanConstantASTNode* node) final {}
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {}
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {}
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {}
     void visit(const projection_ast::MatchExpressionASTNode* node) final {}
 
 private:
-    DepsTracker* _deps = nullptr;
+    std::string getCurrentPath() {
+        return _context->fullPath().fullPath();
+    }
+
+    GetProjectionNodesContext* _context;
 };
 }  // namespace
 
-void addProjectionExprDependencies(const projection_ast::Projection& projection,
-                                   DepsTracker* deps) {
-    ProjectionExprDepsBuilder visitor{deps};
-    projection_ast::ProjectionASTConstWalker walker{nullptr, nullptr, &visitor};
+std::pair<std::vector<std::string>, std::vector<ProjectionNode>> getProjectionNodes(
+    const projection_ast::Projection& projection) {
+    GetProjectionNodesContext ctx{{projection.type(), {}, {}}};
+    GetProjectionNodesVisitor visitor(&ctx);
+
+    projection_ast::PathTrackingConstWalker<GetProjectionNodesData> walker{&ctx, {}, {&visitor}};
+
     tree_walker::walk<true, projection_ast::ASTNode>(projection.root(), &walker);
+
+    return {std::move(ctx.data().paths), std::move(ctx.data().nodes)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFieldsToSlots(
@@ -1174,7 +1140,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
     const bool topLevelFieldsOnly = std::all_of(
         fields.begin(), fields.end(), [](auto&& s) { return s.find('.') == std::string::npos; });
     if (topLevelFieldsOnly) {
-        sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>> projects;
+        sbe::SlotExprPairVector projects;
         for (size_t i = 0; i < fields.size(); ++i) {
             auto name = std::make_pair(PlanStageSlots::kField, StringData(fields[i]));
             auto fieldSlot = slots != nullptr ? slots->getIfExists(name) : boost::none;
@@ -1185,7 +1151,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
                 auto getFieldExpr =
                     makeFunction("getField"_sd, makeVariable(resultSlot), makeConstant(fields[i]));
                 outputSlots.emplace_back(slot);
-                projects.insert({slot, std::move(getFieldExpr)});
+                projects.emplace_back(slot, std::move(getFieldExpr));
             }
         }
         if (!projects.empty()) {
@@ -1198,8 +1164,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
     // Handle the case where 'fields' contains at least one dotted path. We begin by creating a
     // path tree from 'fields'.
     using Node = PathTreeNode<EvalExpr>;
-    const bool removeConflictingPaths = false;
-    auto treeRoot = buildPathTree<EvalExpr>(fields, removeConflictingPaths);
+    auto treeRoot = buildPathTree<EvalExpr>(fields, BuildPathTreeMode::AllowConflictingPaths);
 
     std::vector<Node*> fieldNodes;
     for (const auto& field : fields) {
@@ -1239,7 +1204,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
         visitPathTreeNodes(treeRoot.get(), preVisit, postVisit);
     }
 
-    std::vector<sbe::value::SlotMap<std::unique_ptr<sbe::EExpression>>> stackOfProjects;
+    std::vector<sbe::SlotExprPairVector> stackOfProjects;
     using DfsState = std::vector<std::pair<Node*, size_t>>;
     size_t depth = 0;
 
@@ -1259,12 +1224,11 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
                 tassert(7182002, "Expected DfsState to have at least 2 entries", dfs.size() >= 2);
 
                 auto parent = dfs[dfs.size() - 2].first;
-                auto getFieldExpr =
-                    makeFunction("getField"_sd,
-                                 parent->value.hasSlot()
-                                     ? makeVariable(*parent->value.getSlot())
-                                     : parent->value.extractExpr(state.slotVarMap, *state.env),
-                                 makeConstant(node->name));
+                auto getFieldExpr = makeFunction(
+                    "getField"_sd,
+                    parent->value.hasSlot() ? makeVariable(*parent->value.getSlot())
+                                            : parent->value.extractExpr(state.slotVarMap, state),
+                    makeConstant(node->name));
 
                 auto hasOneChildToVisit = [&] {
                     size_t count = 0;
@@ -1292,7 +1256,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
                 }
                 // Add the projection to the appropriate level of 'stackOfProjects'.
                 auto& projects = stackOfProjects[depth];
-                projects.insert({slot, std::move(getFieldExpr)});
+                projects.emplace_back(slot, std::move(getFieldExpr));
                 // Increment the depth while we visit node's descendents.
                 ++depth;
 

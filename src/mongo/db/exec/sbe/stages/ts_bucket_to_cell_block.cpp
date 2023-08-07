@@ -29,13 +29,19 @@
 
 #include "mongo/db/exec/sbe/stages/ts_bucket_to_cell_block.h"
 
+#include <cstddef>
+#include <string>
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/empty_cell_block.h"
+#include "mongo/db/exec/sbe/values/scalar_mono_cell_block.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/ts_block.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
@@ -118,57 +124,7 @@ PlanState TsBucketToCellBlockStage::getNext() {
         return trackPlanState(state);
     }
 
-    auto [bucketTag, bucketVal] = _bucketAccessor->getViewOfValue();
-    invariant(bucketTag == value::TypeTags::bsonObject);
-
-    BSONObj bucketObj(value::getRawPointerView(bucketVal));
-
-    if (_metaOutSlotId && _hasMetaField) {
-        auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
-        auto [metaTag, metaVal] = bson::convertFrom<true>(metaElt);
-        _metaOutAccessor.reset(false, metaTag, metaVal);
-    }
-
-    BSONElement bucketControl = bucketObj[timeseries::kBucketControlFieldName];
-    invariant(!bucketControl.eoo());
-    BSONElement data = bucketObj[timeseries::kBucketDataFieldName];
-    invariant(!data.eoo());
-    invariant(data.type() == BSONType::Object);
-
-    for (auto elt : data.embeddedObject()) {
-        for (size_t i = 0; i < _topLevelPaths.size(); ++i) {
-            if (elt.fieldName() == _topLevelPaths[i]) {
-                {
-                    auto [blockTag, blockVal] = bson::convertFrom<true>(elt);
-                    tassert(7796400,
-                            "Unsupported type for timeseries bucket data",
-                            blockTag == value::TypeTags::bsonObject ||
-                                blockTag == value::TypeTags::bsonBinData);
-
-                    // Up to this point, the storage engine owns the underlying storage buffer for
-                    // the block and so the CellBlock must not own it.
-                    _tsCellBlocks[i].emplace(/*owned*/ false, blockTag, blockVal);
-                }
-
-                _blocksOutAccessor[i].reset(
-                    false,
-                    value::TypeTags::cellBlock,
-                    value::bitcastFrom<value::CellBlock*>(&_tsCellBlocks[i].get()));
-            }
-        }
-    }
-
-    // Any block slots that are still Nothing get filled with an EmptyBlock. This way later stages
-    // do not have to deal with block slots being Nothing.
-    for (size_t i = 0; i < _blocksOutAccessor.size(); ++i) {
-        if (_blocksOutAccessor[i].getViewOfValue().first == value::TypeTags::Nothing) {
-            auto emptyBlock = std::make_unique<value::EmptyCellBlock>();
-            _blocksOutAccessor[i].reset(
-                true,
-                value::TypeTags::cellBlock,
-                value::bitcastFrom<value::CellBlock*>(emptyBlock.release()));
-        }
-    }
+    initCellBlocks();
 
     return trackPlanState(state);
 }
@@ -223,5 +179,70 @@ size_t TsBucketToCellBlockStage::estimateCompileTimeSize() const {
     size_t size = sizeof(*this);
     size += size_estimator::estimate(_children);
     return size;
+}
+
+void TsBucketToCellBlockStage::doRestoreState(bool) {
+    initCellBlocks();
+}
+
+// The underlying storage buffer for the bucket has been updated after getNext() on the child or
+// yielding, so we need to restore states from the updated bucket.
+void TsBucketToCellBlockStage::initCellBlocks() {
+    auto [bucketTag, bucketVal] = _bucketAccessor->getViewOfValue();
+    invariant(bucketTag == value::TypeTags::bsonObject);
+
+    BSONObj bucketObj(value::getRawPointerView(bucketVal));
+    const int noOfMeasurements =
+        BucketUnpacker::computeMeasurementCount(bucketObj, StringData(_timeField));
+    tassert(7962100, "1 or more measurements must exist", noOfMeasurements > 0);
+
+    if (_metaOutSlotId && _hasMetaField) {
+        auto metaElt = bucketObj[timeseries::kBucketMetaFieldName];
+        auto [metaTag, metaVal] = bson::convertFrom<true>(metaElt);
+        _metaOutAccessor.reset(false, metaTag, metaVal);
+    }
+
+    BSONElement bucketControl = bucketObj[timeseries::kBucketControlFieldName];
+    invariant(!bucketControl.eoo());
+    BSONElement data = bucketObj[timeseries::kBucketDataFieldName];
+    invariant(!data.eoo());
+    invariant(data.type() == BSONType::Object);
+
+    for (auto elt : data.embeddedObject()) {
+        for (size_t i = 0; i < _topLevelPaths.size(); ++i) {
+            if (elt.fieldName() == _topLevelPaths[i]) {
+                {
+                    auto [blockTag, blockVal] = bson::convertFrom<true>(elt);
+                    tassert(7796400,
+                            "Unsupported type for timeseries bucket data",
+                            blockTag == value::TypeTags::bsonObject ||
+                                blockTag == value::TypeTags::bsonBinData);
+
+                    // Up to this point, the stage tree below owns the underlying buffer for the
+                    // bucket and the TsCellBlock must not own it.
+                    _tsCellBlocks[i] = std::make_unique<value::TsCellBlock>(
+                        noOfMeasurements, /*owned*/ false, blockTag, blockVal);
+                }
+
+                _blocksOutAccessor[i].reset(
+                    false,
+                    value::TypeTags::cellBlock,
+                    value::bitcastFrom<value::CellBlock*>(_tsCellBlocks[i].get()));
+            }
+        }
+    }
+
+    // Any block slots that are still Nothing get filled with an ScalarMonoCellBlock of Nothing.
+    // This way later stages do not have to deal with block slots being Nothing.
+    for (size_t i = 0; i < _blocksOutAccessor.size(); ++i) {
+        if (_blocksOutAccessor[i].getViewOfValue().first == value::TypeTags::Nothing) {
+            auto emptyBlock = std::make_unique<value::ScalarMonoCellBlock>(
+                noOfMeasurements, value::TypeTags::Nothing, value::Value(0));
+            _blocksOutAccessor[i].reset(
+                true,
+                value::TypeTags::cellBlock,
+                value::bitcastFrom<value::CellBlock*>(emptyBlock.release()));
+        }
+    }
 }
 }  // namespace mongo::sbe

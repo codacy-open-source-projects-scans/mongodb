@@ -168,7 +168,7 @@ variables:
       -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
       --win-version-min=win10
     num_scons_link_jobs_available: 0.5
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     scons_cache_scope: shared
     multiversion_platform: windows
@@ -276,6 +276,8 @@ variables:
     distros:
     - ubuntu2004-package
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: selinux_rhel7_enterprise
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -501,17 +503,6 @@ buildvariants:
   - name: powercycle_sentinel
   - name: powercycle_smoke_skip_compile_gen
 
-- name: &security-daily-cron security-daily-cron
-  modules:
-  - enterprise
-  display_name: "~ Security Daily Cron"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  run_on:
-  - rhel80-small
-  stepback: false
-  tasks:
-  - name: blackduck_scanner
-
 - name: tooling-metrics-x86
   display_name: "* Tooling Metrics x86"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
@@ -549,7 +540,7 @@ buildvariants:
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.8")
       MONGO_DISTMOD=windows
     num_scons_link_jobs_available: 0.2
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     scons_cache_scope: shared
     multiversion_platform: windows
@@ -629,7 +620,7 @@ buildvariants:
     burn_in_tests_build_variant: enterprise-windows-all-feature-flags-required
     exe: ".exe"
     content_type: application/zip
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     multiversion_platform: windows
     multiversion_edition: enterprise
@@ -682,7 +673,7 @@ buildvariants:
     burn_in_tests_build_variant: enterprise-windows-all-feature-flags-required
     exe: ".exe"
     content_type: application/zip
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     multiversion_platform: windows
     multiversion_edition: enterprise
@@ -771,7 +762,7 @@ buildvariants:
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
       --win-version-min=win10
     num_scons_link_jobs_available: 0.25
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     resmoke_jobs_max: 1
     scons_cache_scope: shared
@@ -1075,6 +1066,8 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
 
 - <<: *enterprise-rhel-80-64-bit-dynamic-template
   name: &enterprise-rhel-80-64-bit-dynamic-debug-mode enterprise-rhel-80-64-bit-dynamic-debug-mode
@@ -1109,7 +1102,9 @@ buildvariants:
   - name: compile_integration_and_test_parallel_stream_TG
     distros:
     - rhel80-large
-  - name: test_api_version_compatibility
+  # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
+  # IDL compiler issue has been resolved.
+  # - name: test_api_version_compatibility
   - name: .aggfuzzer !.feature_flag_guarded !.no_debug_mode
   - name: .aggregation !.feature_flag_guarded !.no_debug_mode
   - name: audit
@@ -1202,6 +1197,8 @@ buildvariants:
   - name: streams
   - name: streams_auth
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: generate_buildid_to_debug_symbols_mapping
 
 - &enterprise-rhel-80-64-bit-dynamic-all-feature-flags-template
@@ -1240,7 +1237,9 @@ buildvariants:
   - name: cqf_parallel
   - name: query_golden_classic
   - name: lint_fuzzer_sanity_patch
-  - name: test_api_version_compatibility
+  # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
+  # IDL compiler issue has been resolved.
+  # - name: test_api_version_compatibility
   # - name: burn_in_tasks_gen
   #   depends_on:
   #   - name: version_burn_in_gen
@@ -1350,6 +1349,8 @@ buildvariants:
   - name: streams
   - name: streams_auth
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: query_stats_passthrough
   - name: query_stats_passthrough_writeonly
   - name: query_stats_mongos_passthrough
@@ -1466,9 +1467,13 @@ buildvariants:
   - name: secondary_reads_passthrough_gen
   - name: session_jscore_passthrough
   - name: sharding_api_version_jscore_passthrough_gen
-  - name: test_api_version_compatibility
+  # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
+  # IDL compiler issue has been resolved.
+  # - name: test_api_version_compatibility
   - name: unittest_shell_hang_analyzer_gen
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
 
 # The CQF feature flag is currently part of the always-disabled feature flags list, so it is not
 # enabled in all-feature-flags variants besides this one. This variant allows us to get some initial
@@ -1495,7 +1500,9 @@ buildvariants:
   - name: analyze_shard_key_jscore_passthrough_gen
   - name: .cqf
   - name: lint_fuzzer_sanity_patch
-  - name: test_api_version_compatibility
+  # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
+  # IDL compiler issue has been resolved.
+  # - name: test_api_version_compatibility
   # - name: burn_in_tasks_gen
   #   depends_on:
   #   - name: version_burn_in_gen
@@ -1797,6 +1804,8 @@ buildvariants:
     distros:
     - ubuntu2004-package
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: selinux_rhel8_enterprise
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -1870,7 +1879,7 @@ buildvariants:
       LIBPATH="c:/sasl/lib"
       -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
       --win-version-min=win10
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
   tasks:
   - name: build_metrics_gen_TG
 
@@ -1924,14 +1933,7 @@ buildvariants:
       --link-model=dynamic
       --linker=gold
     resmoke_jobs_max: 2
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: rhel72
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-rhel72
+    has_packages: false
     repo_edition: enterprise
     multiversion_platform: rhel72
     multiversion_architecture: s390x
@@ -2000,7 +2002,9 @@ buildvariants:
   - name: analyze_shard_key_jscore_passthrough_gen
   - name: query_golden_classic
   - name: lint_fuzzer_sanity_patch
-  - name: test_api_version_compatibility
+  # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
+  # IDL compiler issue has been resolved.
+  # - name: test_api_version_compatibility
   - name: check_feature_flag_tags
   - name: check_for_todos
   - name: .aggfuzzer
@@ -2009,6 +2013,7 @@ buildvariants:
   - name: audit
   - name: .auth
   - name: buildscripts_test
+  - name: .bulk_write
   - name: resmoke_end2end_tests
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
@@ -2090,6 +2095,8 @@ buildvariants:
   - name: streams_auth
   - name: .updatefuzzer
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: query_stats_passthrough
   - name: query_stats_passthrough_writeonly
   - name: query_stats_mongos_passthrough
@@ -2361,20 +2368,12 @@ buildvariants:
       --excludeWithAnyTags=tsan_incompatible
   tasks:
   - name: compile_test_and_package_serial_TG
-  # - name: compile_integration_and_test_parallel_stream_TG # Not passing
-  # - name: test_api_version_compatibility # Not relevant for TSAN
+  - name: compile_integration_and_test_parallel_stream_TG
   - name: check_feature_flag_tags
   - name: .aggfuzzer !.feature_flag_guarded
-  # - name: .aggregation !.feature_flag_guarded # Not passing
+  - name: .aggregation !.feature_flag_guarded
   - name: audit
   # - name: .auth  # Not passing
-  # - name: burn_in_tags_gen # No burn in tests needed
-  #   depends_on:
-  #   - name: version_burn_in_gen
-  #     variant: generate-tasks-for-version
-  #     omit_generated_tasks: true
-  #   - name: archive_dist_test_debug
-  #     variant: *enterprise-rhel80-debug-tsan
   - name: buildscripts_test
   # - name: unittest_shell_hang_analyzer_gen # Not passing
   # - name: .config_fuzzer # Not passing
@@ -2382,9 +2381,9 @@ buildvariants:
   - name: cqf
   - name: cqf_disabled_pipeline_opt
   - name: cqf_parallel
-  # - name: .causally_consistent !.sharding # Not passing
-  # - name: .change_streams # Not passing
-  # - name: .change_stream_fuzzer # Not passing
+  - name: .causally_consistent !.sharding
+  - name: .change_streams
+  - name: .change_stream_fuzzer
   # - name: .misc_js # Not passing
   # - name: .concurrency !.large !.ubsan !.no_txns # Not passing
   # - name: .concurrency .large !.ubsan !.no_txns # Not passing
@@ -2392,10 +2391,7 @@ buildvariants:
   #   - rhel80-medium
   - name: disk_wiredtiger
   # - name: .encrypt # Not passing
-  # - name: idl_tests # Not relevant for TSAN
   - name: initial_sync_fuzzer_gen
-  #   distros:
-  #   - rhel80-medium
   - name: jsCore
     distros:
     - rhel80-xlarge
@@ -2420,18 +2416,24 @@ buildvariants:
   # - name: .replica_sets !.encrypt !.auth # Not passing
   #   distros:
   #   - rhel80-xlarge
-  # - name: replica_sets_api_version_jscore_passthrough_gen # Not passing
-  # - name: replica_sets_reconfig_jscore_passthrough_gen # Not passing
-  # - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen # Not passing
-  #   distros:
-  #   - rhel80-xlarge
-  # - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen # Not passing
+  - name: replica_sets_api_version_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_passthrough_gen
+  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  - name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
+    distros:
+    - rhel80-xlarge
+  # - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen # Not passing
   #   distros:
   #   - rhel80-xlarge
   # - name: retryable_writes_jscore_passthrough_gen # Not passing
-  # - name: retryable_writes_jscore_stepdown_passthrough_gen # Not passing
-  #   distros:
-  #   - rhel80-medium
+  - name: retryable_writes_jscore_stepdown_passthrough_gen
+    distros:
+    - rhel80-medium
   - name: .read_only
   - name: .rollbackfuzzer
   - name: sasl
@@ -2441,7 +2443,7 @@ buildvariants:
   - name: search_ssl
   - name: session_jscore_passthrough
   # - name: .sharding .jscore !.wo_snapshot !.multi_stmt # Not passing
-  # - name: sharding_api_version_jscore_passthrough_gen # Not passing
+  - name: sharding_api_version_jscore_passthrough_gen # Not passing
   # - name: .sharding .txns # Not passing
   # - name: .sharding .common # Not passing
   # - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen # Not passing
@@ -2450,7 +2452,7 @@ buildvariants:
   #   distros:
   #   - rhel80-xlarge
   # - name: .updatefuzzer # Cannot find the variant on older versions. Should not be enabled with TSAN
-  # - name: secondary_reads_passthrough_gen # Not passing
+  - name: secondary_reads_passthrough_gen
   - name: server_discovery_and_monitoring_json_test_TG
   # - name: .serverless # Not passing
   #   distros:
@@ -2458,7 +2460,11 @@ buildvariants:
   - name: server_selection_json_test_TG
     distros:
     - rhel80-xlarge
+  - name: streams
+  - name: streams_auth
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: generate_buildid_to_debug_symbols_mapping
 
 - &enterprise-rhel80-debug-complete-tsan-template
@@ -2476,13 +2482,8 @@ buildvariants:
     compile_variant: *enterprise-rhel80-debug-complete-tsan
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: compile_integration_and_test_parallel_stream_TG
-  - name: .aggregation !.feature_flag_guarded
   - name: .auth
   - name: unittest_shell_hang_analyzer_gen
-  - name: .causally_consistent !.sharding
-  - name: .change_streams
-  - name: .change_stream_fuzzer
   - name: .misc_js
   - name: .concurrency !.large !.ubsan !.no_txns !.compute_mode
   - name: .concurrency .large !.ubsan !.no_txns !.compute_mode
@@ -2504,26 +2505,11 @@ buildvariants:
   - name: .replica_sets !.encrypt !.auth
     distros:
     - rhel80-xlarge
-  - name: replica_sets_api_version_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
-  - name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
-    distros:
-    - rhel80-xlarge
   - name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
     distros:
     - rhel80-xlarge
   - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough_gen
-    distros:
-    - rhel80-medium
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: sharding_api_version_jscore_passthrough_gen
   - name: .sharding .txns
   - name: .sharding .common
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
@@ -2531,12 +2517,9 @@ buildvariants:
   #   distros:
   #   - rhel80-xlarge
   # - name: .updatefuzzer # Cannot find the variant on older versions
-  - name: secondary_reads_passthrough_gen
   - name: .serverless
     distros:
     - rhel80-xlarge
-  - name: streams
-  - name: streams_auth
   - name: generate_buildid_to_debug_symbols_mapping
 
 - name: &enterprise-rhel80-no-latch-64-bit enterprise-rhel80-no-latch-64-bit
@@ -2888,7 +2871,7 @@ buildvariants:
   - windows-vsCurrent-small
   stepback: false
   expansions:
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
   tasks:
   - name: win_shared_scons_cache_pruning
 
@@ -2932,7 +2915,9 @@ buildvariants:
     distros:
     - amazon2-arm64-large
   - name: .lint
-  - name: test_api_version_compatibility
+  # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
+  # IDL compiler issue has been resolved.
+  # - name: test_api_version_compatibility
   - name: validate_commit_message
   - name: lint_large_files_check
   - name: check_feature_flag_tags
@@ -2953,7 +2938,7 @@ buildvariants:
       LIBPATH="c:/sasl/lib"
       -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 ))
       --win-version-min=win10
-    python: '/cygdrive/c/python/python37/python.exe'
+    python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
     has_packages: false
     scons_cache_scope: shared
@@ -2986,7 +2971,9 @@ buildvariants:
   - name: analyze_shard_key_jscore_passthrough_gen
   - name: query_golden_classic
   - name: lint_fuzzer_sanity_patch
-  - name: test_api_version_compatibility
+  # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
+  # IDL compiler issue has been resolved.
+  # - name: test_api_version_compatibility
   - name: check_feature_flag_tags
   - name: check_for_todos
   - name: .aggfuzzer
@@ -3072,6 +3059,8 @@ buildvariants:
   - name: streams_auth
   - name: .updatefuzzer
   - name: vector_search
+  - name: vector_search_auth
+  - name: vector_search_ssl
   - name: query_stats_passthrough
   - name: query_stats_passthrough_writeonly
   - name: query_stats_mongos_passthrough
@@ -3170,7 +3159,7 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_and_archive_dist_test_TG
-  - name: antithesis_build_test_push_TG
+  - name: antithesis_TG
   - name: generate_buildid_to_debug_symbols_mapping
 
 - <<: *enterprise-windows-nopush-template
@@ -3184,7 +3173,7 @@ buildvariants:
   - name: compile_upload_benchmarks_TG
     distros:
     - windows-vsCurrent-large
-  - name: .benchmarks !benchmarks_orphaned
+  - name: .benchmarks !benchmarks_orphaned_first_half !benchmarks_orphaned_second_half
 
 - <<: *enterprise-windows-nopush-template
   name: &enterprise-windows-wtdevelop enterprise-windows-wtdevelop

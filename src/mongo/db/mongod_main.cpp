@@ -67,6 +67,7 @@
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/audit.h"
+#include "mongo/db/audit_interface.h"
 #include "mongo/db/auth/auth_op_observer.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/catalog/collection.h"
@@ -125,6 +126,7 @@
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
 #include "mongo/db/op_observer/fallback_op_observer.h"
 #include "mongo/db/op_observer/fcv_op_observer.h"
+#include "mongo/db/op_observer/find_and_modify_images_op_observer.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
@@ -314,6 +316,25 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeShutdown);
 const ntservice::NtServiceDefaultStrings defaultServiceStrings = {
     L"MongoDB", L"MongoDB", L"MongoDB Server"};
 #endif
+
+auto makeTransportLayer(ServiceContext* svcCtx) {
+    boost::optional<int> internalPort;
+    boost::optional<int> loadBalancerPort;
+
+    if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+        internalPort = serverGlobalParams.internalPort;
+        if (*internalPort == serverGlobalParams.port) {
+            LOGV2_ERROR(7791701,
+                        "The internal port must be different from the public listening port.",
+                        "port"_attr = serverGlobalParams.port);
+            quickExit(ExitCode::badOptions);
+        }
+        // TODO SERVER-78730: add support for load-balanced connections.
+    }
+
+    return transport::TransportLayerManager::createWithConfig(
+        &serverGlobalParams, svcCtx, std::move(loadBalancerPort), std::move(internalPort));
+}
 
 void logStartup(OperationContext* opCtx) {
     BSONObjBuilder toLog;
@@ -524,10 +545,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 #endif
 
     if (!storageGlobalParams.repair) {
-        auto tl =
-            transport::TransportLayerManager::createWithConfig(&serverGlobalParams, serviceContext);
-        auto res = tl->setup();
-        if (!res.isOK()) {
+        auto tl = makeTransportLayer(serviceContext);
+        if (auto res = tl->setup(); !res.isOK()) {
             LOGV2_ERROR(20568,
                         "Error setting up listener: {error}",
                         "Error setting up listener",
@@ -1321,6 +1340,7 @@ void setUpObservers(ServiceContext* serviceContext) {
             ->registerPin(std::make_unique<ReshardingHistoryHook>());
         opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>(
             std::make_unique<OplogWriterTransactionProxy>(std::make_unique<OplogWriterImpl>())));
+        opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<MigrationChunkClonerSourceOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
@@ -1353,6 +1373,7 @@ void setUpObservers(ServiceContext* serviceContext) {
     if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
         opObserverRegistry->addObserver(
             std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+        opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
         if (getGlobalReplSettings().isServerless()) {
@@ -1784,6 +1805,10 @@ int mongod_main(int argc, char* argv[]) {
             quickExit(ExitCode::fail);
         }
     }();
+
+    if (audit::setAuditInterface) {
+        audit::setAuditInterface(service);
+    }
 
     {
         // Create the durable history registry prior to calling the `setUp*` methods. They may

@@ -2,7 +2,7 @@
 // plan. For instance, there are helpers for checking whether a plan is a collection
 // scan or whether the plan is covered (index only).
 
-load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 /**
  * Returns a sub-element of the 'queryPlanner' explain output which represents a winning plan.
@@ -639,4 +639,13 @@ export function assertFetchFilter({coll, predicate, expectedFilter, nReturned}) 
                   nReturned,
                   "Expected " + nReturned + " documents, got " + exp.executionStats.nReturned);
     }
+}
+
+/**
+ * Assert that a pipeline runs with the engine that is passed in as a parameter.
+ */
+export function assertEngine(pipeline, engine, coll) {
+    const explain = coll.explain().aggregate(pipeline);
+    assert(explain.hasOwnProperty("explainVersion"), explain);
+    assert.eq(explain.explainVersion, engine === "sbe" ? "2" : "1", explain);
 }

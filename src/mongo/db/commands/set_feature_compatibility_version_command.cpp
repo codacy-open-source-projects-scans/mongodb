@@ -320,21 +320,18 @@ public:
         const auto actualVersion = serverGlobalParams.featureCompatibility.getVersion();
 
         auto isConfirmed = request.getConfirm().value_or(false);
-        // TODO (SERVER-74398): Remove this flag once 7.0 is last LTS.
-        if (mongo::repl::requireConfirmInSetFcv) {
-            const auto upgradeMsg =
-                "Once you have upgraded to {}, you will not be able to downgrade FCV and binary version without support assistance. Please re-run this command with 'confirm: true' to acknowledge this and continue with the FCV upgrade."_format(
-                    multiversion::toString(requestedVersion));
-            const auto downgradeMsg =
-                "Once you have downgraded the FCV, if you choose to downgrade the binary version, "
-                "it will require support assistance. Please re-run this command with 'confirm: "
-                "true' to acknowledge this and continue with the FCV downgrade.";
-            uassert(7369100,
-                    (requestedVersion > actualVersion ? upgradeMsg : downgradeMsg),
-                    // If the request is from a config svr, skip requiring the 'confirm: true'
-                    // parameter.
-                    (isFromConfigServer || isConfirmed));
-        }
+        const auto upgradeMsg =
+            "Once you have upgraded to {}, you will not be able to downgrade FCV and binary version without support assistance. Please re-run this command with 'confirm: true' to acknowledge this and continue with the FCV upgrade."_format(
+                multiversion::toString(requestedVersion));
+        const auto downgradeMsg =
+            "Once you have downgraded the FCV, if you choose to downgrade the binary version, "
+            "it will require support assistance. Please re-run this command with 'confirm: "
+            "true' to acknowledge this and continue with the FCV downgrade.";
+        uassert(7369100,
+                (requestedVersion > actualVersion ? upgradeMsg : downgradeMsg),
+                // If the request is from a config svr, skip requiring the 'confirm: true'
+                // parameter.
+                (isFromConfigServer || isConfirmed));
 
         // Always wait for at least majority writeConcern to ensure all writes involved in the
         // upgrade/downgrade process cannot be rolled back. There is currently no mechanism to
@@ -550,7 +547,6 @@ public:
                 false /* setIsCleaningServerMetadata */);
         }
 
-
         // _finalizeUpgrade is only for any tasks that must be done to fully complete the FCV
         // upgrade AFTER the FCV document has already been updated to the UPGRADED FCV.
         // This is because during _runUpgrade, the FCV is still in the transitional state (which
@@ -590,13 +586,22 @@ private:
         const auto isDowngrading = originalVersion > requestedVersion;
         const auto isUpgrading = originalVersion < requestedVersion;
 
-        // TODO SERVER-72796: Remove once gGlobalIndexesShardingCatalog is enabled.
+        // TODO SERVER-67392: Remove once gGlobalIndexesShardingCatalog is enabled.
         if (isDowngrading &&
             feature_flags::gGlobalIndexesShardingCatalog
                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
+        }
+
+        // TODO SERVER-79304 Remove once shardCollection authoritative version becomes LTS
+        if (isDowngrading &&
+            feature_flags::gAuthoritativeShardCollection
+                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kCreateCollection);
         }
 
         if (isUpgrading) {
@@ -1441,6 +1446,13 @@ private:
     // back to the user/client. Therefore, these tasks **must** be idempotent/retryable.
     void _finalizeUpgrade(OperationContext* opCtx,
                           const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        // TODO SERVER-79304 Remove once shardCollection authoritative version becomes LTS
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
+            feature_flags::gAuthoritativeShardCollection.isEnabledOnVersion(requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kCreateCollectionPre71Compatible);
+        }
         _maybeRemoveOldAuditConfig(opCtx, requestedVersion);
     }
 

@@ -1635,6 +1635,22 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggSum(value::TypeTags 
     return genericAdd(accTag, accValue, fieldTag, fieldValue);
 }
 
+std::pair<value::TypeTags, value::Value> initializeDoubleDoubleSumState() {
+    auto [accTag, accValue] = value::makeNewArray();
+    value::ValueGuard newArrGuard{accTag, accValue};
+    auto arr = value::getArrayView(accValue);
+    arr->reserve(AggSumValueElems::kMaxSizeOfArray);
+
+    // The order of the following three elements should match to 'AggSumValueElems'. An absent
+    // 'kDecimalTotal' element means that we've not seen any decimal value. So, we're not adding
+    // 'kDecimalTotal' element yet.
+    arr->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0));
+    arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+    arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
+    newArrGuard.reset();
+    return {accTag, accValue};
+}
+
 template <bool merging>
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDoubleDoubleSum(
     ArityType arity) {
@@ -1645,18 +1661,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDoubleDoubleS
 
     // Initialize the accumulator.
     if (accTag == value::TypeTags::Nothing) {
-        std::tie(accTag, accValue) = value::makeNewArray();
-        value::ValueGuard newArrGuard{accTag, accValue};
-        auto arr = value::getArrayView(accValue);
-        arr->reserve(AggSumValueElems::kMaxSizeOfArray);
-
-        // The order of the following three elements should match to 'AggSumValueElems'. An absent
-        // 'kDecimalTotal' element means that we've not seen any decimal value. So, we're not adding
-        // 'kDecimalTotal' element yet.
-        arr->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int32_t>(0));
-        arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
-        arr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(0.0));
-        newArrGuard.reset();
+        std::tie(accTag, accValue) = initializeDoubleDoubleSumState();
     }
 
     value::ValueGuard guard{accTag, accValue};
@@ -1679,70 +1684,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoubleSumF
     ArityType arity) {
     auto [_, fieldTag, fieldValue] = getFromStack(0);
     auto arr = value::getArrayView(fieldValue);
-    tassert(5755321,
-            str::stream() << "The result slot must have at least "
-                          << AggSumValueElems::kMaxSizeOfArray - 1
-                          << " elements but got: " << arr->size(),
-            arr->size() >= AggSumValueElems::kMaxSizeOfArray - 1);
-
-    auto nonDecimalTotalTag = arr->getAt(AggSumValueElems::kNonDecimalTotalTag).first;
-    tassert(5755322,
-            "The nonDecimalTag can't be NumberDecimal",
-            nonDecimalTotalTag != value::TypeTags::NumberDecimal);
-    auto [sumTag, sum] = arr->getAt(AggSumValueElems::kNonDecimalTotalSum);
-    auto [addendTag, addend] = arr->getAt(AggSumValueElems::kNonDecimalTotalAddend);
-    tassert(5755323,
-            "The sum and addend must be NumberDouble",
-            sumTag == addendTag && sumTag == value::TypeTags::NumberDouble);
-
-    // We're guaranteed to always have a valid nonDecimalTotal value.
-    auto nonDecimalTotal = DoubleDoubleSummation::create(value::bitcastTo<double>(sum),
-                                                         value::bitcastTo<double>(addend));
-
-    if (auto nElems = arr->size(); nElems < AggSumValueElems::kMaxSizeOfArray) {
-        // We've not seen any decimal value.
-        switch (nonDecimalTotalTag) {
-            case value::TypeTags::NumberInt32:
-            case value::TypeTags::NumberInt64:
-                if (nonDecimalTotal.fitsLong()) {
-                    auto longVal = nonDecimalTotal.getLong();
-                    if (int intVal = longVal;
-                        nonDecimalTotalTag == value::TypeTags::NumberInt32 && intVal == longVal) {
-                        return {true,
-                                value::TypeTags::NumberInt32,
-                                value::bitcastFrom<int32_t>(intVal)};
-                    } else {
-                        return {true,
-                                value::TypeTags::NumberInt64,
-                                value::bitcastFrom<int64_t>(longVal)};
-                    }
-                }
-
-                // Sum doesn't fit a NumberLong, so return a NumberDouble instead.
-                [[fallthrough]];
-            case value::TypeTags::NumberDouble:
-                return {true,
-                        value::TypeTags::NumberDouble,
-                        value::bitcastFrom<double>(nonDecimalTotal.getDouble())};
-            default:
-                MONGO_UNREACHABLE_TASSERT(5755324);
-        }
-    } else {
-        // We've seen a decimal value.
-        tassert(5755325,
-                str::stream() << "The result slot must have at most "
-                              << AggSumValueElems::kMaxSizeOfArray
-                              << " elements but got: " << arr->size(),
-                nElems == AggSumValueElems::kMaxSizeOfArray);
-        auto [decimalTotalTag, decimalTotalVal] = arr->getAt(AggSumValueElems::kDecimalTotal);
-        tassert(5755326,
-                "The decimalTotal must be NumberDecimal",
-                decimalTotalTag == value::TypeTags::NumberDecimal);
-
-        auto decimalTotal = value::bitcastTo<Decimal128>(decimalTotalVal);
-        auto [tag, val] = value::makeCopyDecimal(decimalTotal.add(nonDecimalTotal.getDecimal()));
-        return {true, tag, val};
-    }
+    return aggDoubleDoubleSumFinalizeImpl(arr);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoublePartialSumFinalize(
@@ -2514,6 +2456,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSqrt(ArityType a
     auto [_, tagOperand, valOperand] = getFromStack(0);
 
     return genericSqrt(tagOperand, valOperand);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinPow(ArityType arity) {
+    invariant(arity == 2);
+    auto [baseOwned, baseTag, baseValue] = getFromStack(0);
+    auto [exponentOwned, exponentTag, exponentValue] = getFromStack(1);
+
+    return genericPow(baseTag, baseValue, exponentTag, exponentValue);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAddToArray(ArityType arity) {
@@ -6849,6 +6799,815 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggExpMovingAvgF
     }
 }
 
+std::tuple<value::Array*, int64_t, int64_t, int64_t, int64_t, int64_t> removableSumState(
+    value::Array* state) {
+    uassert(7795101,
+            "incorrect size of state array",
+            state->size() == static_cast<size_t>(AggRemovableSumElems::kSizeOfArray));
+
+    auto [sumAccTag, sumAccVal] = state->getAt(static_cast<size_t>(AggRemovableSumElems::kSumAcc));
+    uassert(7795102,
+            "sum accumulator elem should be of array type",
+            sumAccTag == value::TypeTags::Array);
+    auto sumAcc = value::getArrayView(sumAccVal);
+
+    auto [nanCountTag, nanCountVal] =
+        state->getAt(static_cast<size_t>(AggRemovableSumElems::kNanCount));
+    uassert(7795103,
+            "nanCount elem should be of int64 type",
+            nanCountTag == value::TypeTags::NumberInt64);
+    auto nanCount = value::bitcastTo<int64_t>(nanCountVal);
+
+    auto [posInfinityCountTag, posInfinityCountVal] =
+        state->getAt(static_cast<size_t>(AggRemovableSumElems::kPosInfinityCount));
+    uassert(7795104,
+            "posInfinityCount elem should be of int64 type",
+            posInfinityCountTag == value::TypeTags::NumberInt64);
+    auto posInfinityCount = value::bitcastTo<int64_t>(posInfinityCountVal);
+
+    auto [negInfinityCountTag, negInfinityCountVal] =
+        state->getAt(static_cast<size_t>(AggRemovableSumElems::kNegInfinityCount));
+    uassert(7795105,
+            "negInfinityCount elem should be of int64 type",
+            negInfinityCountTag == value::TypeTags::NumberInt64);
+    auto negInfinityCount = value::bitcastTo<int64_t>(negInfinityCountVal);
+
+    auto [doubleCountTag, doubleCountVal] =
+        state->getAt(static_cast<size_t>(AggRemovableSumElems::kDoubleCount));
+    uassert(7795106,
+            "doubleCount elem should be of int64 type",
+            doubleCountTag == value::TypeTags::NumberInt64);
+    auto doubleCount = value::bitcastTo<int64_t>(doubleCountVal);
+
+    auto [decimalCountTag, decimalCountVal] =
+        state->getAt(static_cast<size_t>(AggRemovableSumElems::kDecimalCount));
+    uassert(7795107,
+            "decimalCount elem should be of int64 type",
+            decimalCountTag == value::TypeTags::NumberInt64);
+    auto decimalCount = value::bitcastTo<int64_t>(decimalCountVal);
+
+    return {sumAcc, nanCount, posInfinityCount, negInfinityCount, doubleCount, decimalCount};
+}
+
+void updateRemovableSumState(value::Array* state,
+                             int64_t nanCount,
+                             int64_t posInfinityCount,
+                             int64_t negInfinityCount,
+                             int64_t doubleCount,
+                             int64_t decimalCount) {
+    state->setAt(static_cast<size_t>(AggRemovableSumElems::kNanCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(nanCount));
+    state->setAt(static_cast<size_t>(AggRemovableSumElems::kPosInfinityCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(posInfinityCount));
+    state->setAt(static_cast<size_t>(AggRemovableSumElems::kNegInfinityCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(negInfinityCount));
+    state->setAt(static_cast<size_t>(AggRemovableSumElems::kDoubleCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(doubleCount));
+    state->setAt(static_cast<size_t>(AggRemovableSumElems::kDecimalCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(decimalCount));
+}
+
+template <class T, int sign>
+void ByteCode::updateRemovableSumAccForIntegerType(value::Array* sumAcc,
+                                                   value::TypeTags rhsTag,
+                                                   value::Value rhsVal) {
+    auto value = value::bitcastTo<T>(rhsVal);
+    if (value == std::numeric_limits<T>::min() && sign == -1) {
+        // Avoid overflow by processing in two parts.
+        aggDoubleDoubleSumImpl(sumAcc, rhsTag, std::numeric_limits<T>::max());
+        aggDoubleDoubleSumImpl(sumAcc, rhsTag, value::bitcastFrom<T>(1));
+    } else {
+        aggDoubleDoubleSumImpl(sumAcc, rhsTag, value::bitcastFrom<T>(value * sign));
+    }
+}
+
+template <int sign>
+void ByteCode::aggRemovableSumImpl(value::Array* state,
+                                   value::TypeTags rhsTag,
+                                   value::Value rhsVal) {
+    static_assert(sign == 1 || sign == -1);
+    if (!value::isNumber(rhsTag)) {
+        return;
+    }
+
+    auto [sumAcc, nanCount, posInfinityCount, negInfinityCount, doubleCount, decimalCount] =
+        removableSumState(state);
+
+    if (rhsTag == value::TypeTags::NumberInt32) {
+        updateRemovableSumAccForIntegerType<int32_t, sign>(sumAcc, rhsTag, rhsVal);
+    } else if (rhsTag == value::TypeTags::NumberInt64) {
+        updateRemovableSumAccForIntegerType<int64_t, sign>(sumAcc, rhsTag, rhsVal);
+    } else if (rhsTag == value::TypeTags::NumberDouble) {
+        doubleCount += sign;
+        auto value = value::bitcastTo<double>(rhsVal);
+        if (std::isnan(value)) {
+            nanCount += sign;
+        } else if (value == std::numeric_limits<double>::infinity()) {
+            posInfinityCount += sign;
+        } else if (value == -std::numeric_limits<double>::infinity()) {
+            negInfinityCount += sign;
+        } else {
+            if constexpr (sign == -1) {
+                value *= -1;
+            }
+            aggDoubleDoubleSumImpl(
+                sumAcc, value::TypeTags::NumberDouble, value::bitcastFrom<double>(value));
+        }
+        updateRemovableSumState(
+            state, nanCount, posInfinityCount, negInfinityCount, doubleCount, decimalCount);
+    } else if (rhsTag == value::TypeTags::NumberDecimal) {
+        decimalCount += sign;
+        auto value = value::bitcastTo<Decimal128>(rhsVal);
+        if (value.isNaN()) {
+            nanCount += sign;
+        } else if (value.isInfinite() && !value.isNegative()) {
+            posInfinityCount += sign;
+        } else if (value.isInfinite() && value.isNegative()) {
+            negInfinityCount += sign;
+        } else {
+            if constexpr (sign == -1) {
+                auto [negDecTag, negDecVal] = value::makeCopyDecimal(value.negate());
+                aggDoubleDoubleSumImpl(sumAcc, negDecTag, negDecVal);
+                value::releaseValue(negDecTag, negDecVal);
+            } else {
+                aggDoubleDoubleSumImpl(sumAcc, rhsTag, rhsVal);
+            }
+        }
+        updateRemovableSumState(
+            state, nanCount, posInfinityCount, negInfinityCount, doubleCount, decimalCount);
+    } else {
+        MONGO_UNREACHABLE;
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggRemovableSumFinalizeImpl(
+    value::Array* state) {
+    auto [sumAcc, nanCount, posInfinityCount, negInfinityCount, doubleCount, decimalCount] =
+        removableSumState(state);
+
+    if (nanCount > 0) {
+        if (decimalCount > 0) {
+            return {true,
+                    value::TypeTags::NumberDecimal,
+                    value::makeCopyDecimal(Decimal128::kPositiveNaN).second};
+        } else {
+            return {false,
+                    value::TypeTags::NumberDouble,
+                    value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN())};
+        }
+    }
+    if (posInfinityCount > 0 && negInfinityCount > 0) {
+        if (decimalCount > 0) {
+            return {true,
+                    value::TypeTags::NumberDecimal,
+                    value::makeCopyDecimal(Decimal128::kPositiveNaN).second};
+        } else {
+            return {false,
+                    value::TypeTags::NumberDouble,
+                    value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN())};
+        }
+    }
+    if (posInfinityCount > 0) {
+        if (decimalCount > 0) {
+            return {true,
+                    value::TypeTags::NumberDecimal,
+                    value::makeCopyDecimal(Decimal128::kPositiveInfinity).second};
+        } else {
+            return {false,
+                    value::TypeTags::NumberDouble,
+                    value::bitcastFrom<double>(std::numeric_limits<double>::infinity())};
+        }
+    }
+    if (negInfinityCount > 0) {
+        if (decimalCount > 0) {
+            return {true,
+                    value::TypeTags::NumberDecimal,
+                    value::makeCopyDecimal(Decimal128::kNegativeInfinity).second};
+        } else {
+            return {false,
+                    value::TypeTags::NumberDouble,
+                    value::bitcastFrom<double>(-std::numeric_limits<double>::infinity())};
+        }
+    }
+
+    auto [sumOwned, sumTag, sumVal] = aggDoubleDoubleSumFinalizeImpl(sumAcc);
+    value::ValueGuard sumGuard{sumOwned, sumTag, sumVal};
+
+    if (sumTag == value::TypeTags::NumberDecimal && decimalCount == 0) {
+        auto decimalVal = value::bitcastTo<Decimal128>(sumVal);
+        if (doubleCount > 0) {  // Narrow Decimal128 to double.
+            return {false,
+                    value::TypeTags::NumberDouble,
+                    value::bitcastFrom<double>(decimalVal.toDouble())};
+        }
+        std::uint32_t signalingFlags = Decimal128::SignalingFlag::kNoFlag;
+        auto longVal = decimalVal.toLong(&signalingFlags);  // Narrow Decimal128 to integral.
+        if (signalingFlags == Decimal128::SignalingFlag::kNoFlag) {
+            auto [numTag, numVal] = value::makeIntOrLong(longVal);
+            return {false, numTag, numVal};
+        }
+        // Narrow Decimal128 to double if overflows long.
+        return {false,
+                value::TypeTags::NumberDouble,
+                value::bitcastFrom<double>(decimalVal.toDouble())};
+    }
+    if (sumTag == value::TypeTags::NumberDouble && doubleCount == 0 &&
+        value::bitcastTo<double>(sumVal) >= std::numeric_limits<long long>::min() &&
+        value::bitcastTo<double>(sumVal) <
+            static_cast<double>(std::numeric_limits<long long>::max())) {
+        // Narrow double to integral.
+        auto longVal = llround(value::bitcastTo<double>(sumVal));
+        auto [numTag, numVal] = value::makeIntOrLong(longVal);
+        return {false, numTag, numVal};
+    }
+    if (sumTag == value::TypeTags::NumberInt64) {  // Narrow long to int
+        auto longVal = value::bitcastTo<long long>(sumVal);
+        auto [numTag, numVal] = value::makeIntOrLong(longVal);
+        return {false, numTag, numVal};
+    }
+    sumGuard.reset();
+    return {sumOwned, sumTag, sumVal};
+}
+
+template <int sign>
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableSum(ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto [_, fieldTag, fieldVal] = getFromStack(1);
+
+    // Initialize the accumulator.
+    if (stateTag == value::TypeTags::Nothing) {
+        std::tie(stateTag, stateVal) = value::makeNewArray();
+        value::ValueGuard newStateGuard{stateTag, stateVal};
+        auto state = value::getArrayView(stateVal);
+        state->reserve(static_cast<size_t>(AggRemovableSumElems::kSizeOfArray));
+
+        auto [sumAccTag, sumAccVal] = initializeDoubleDoubleSumState();
+        state->push_back(sumAccTag, sumAccVal);  // kSumAcc
+        state->push_back(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kNanCount
+        state->push_back(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kPosInfinityCount
+        state->push_back(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kNegInfinityCount
+        state->push_back(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kDoubleCount
+        state->push_back(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kDecimalCount
+        newStateGuard.reset();
+    }
+
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    uassert(7795108, "state should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+
+    aggRemovableSumImpl<sign>(state, fieldTag, fieldVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableSumFinalize(
+    ArityType arity) {
+    auto [_, stateTag, stateVal] = getFromStack(0);
+
+    uassert(7795109, "state should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+    return aggRemovableSumFinalizeImpl(state);
+}
+
+/**
+ * Functions that operate on `ArrayQueue`
+ */
+// Get the underlying array, and start index and end index that demarcates the queue
+std::tuple<value::Array*, size_t, size_t> getArrayQueueState(value::Array* arrayQueue) {
+    auto [arrayTag, arrayVal] = arrayQueue->getAt(static_cast<size_t>(ArrayQueueElems::kArray));
+    uassert(7821100, "Expected an array", arrayTag == value::TypeTags::Array);
+    auto array = value::getArrayView(arrayVal);
+    auto size = array->size();
+    uassert(7821116, "Expected non-empty array", size > 0);
+
+    auto [startIdxTag, startIdxVal] =
+        arrayQueue->getAt(static_cast<size_t>(ArrayQueueElems::kStartIdx));
+    uassert(7821101, "Expected NumberInt64 type", startIdxTag == value::TypeTags::NumberInt64);
+    auto startIdx = value::bitcastTo<size_t>(startIdxVal);
+    uassert(7821114,
+            str::stream() << "Invalid startIdx " << startIdx << " with array size " << size,
+            startIdx < size);
+
+    auto [queueSizeTag, queueSizeVal] =
+        arrayQueue->getAt(static_cast<size_t>(ArrayQueueElems::kQueueSize));
+    uassert(7821102, "Expected NumberInt64 type", queueSizeTag == value::TypeTags::NumberInt64);
+    auto queueSize = value::bitcastTo<size_t>(queueSizeVal);
+    uassert(7821115,
+            str::stream() << "Invalid queueSize " << queueSize << " with array size " << size,
+            queueSize <= size);
+
+    return {array, startIdx, queueSize};
+}
+
+// Update the startIdex and index of the `ArrayQueue`
+void updateArrayQueueState(value::Array* arrayQueue, size_t startIdx, size_t queueSize) {
+    arrayQueue->setAt(static_cast<size_t>(ArrayQueueElems::kStartIdx),
+                      value::TypeTags::NumberInt64,
+                      value::bitcastFrom<size_t>(startIdx));
+    arrayQueue->setAt(static_cast<size_t>(ArrayQueueElems::kQueueSize),
+                      value::TypeTags::NumberInt64,
+                      value::bitcastFrom<size_t>(queueSize));
+}
+
+// Return the size of the queue
+size_t arrayQueueSize(value::Array* arrayQueue) {
+    auto [array, startIdx, queueSize] = getArrayQueueState(arrayQueue);
+    return queueSize;
+}
+
+// Push an element {tag, value} into the queue
+void arrayQueuePush(value::Array* arrayQueue, value::TypeTags tag, value::Value val) {
+    /* The underlying array acts as a circular buffer for the queue with `startIdx` and `queueSize`
+     * demarcating the filled region (with remaining region containing nulls). When pushing an
+     * element to the queue, we set at the corresponding index [= (startIdx + queueSize) %
+     * arraySize] the element to be added. If the underlying array is filled, we double the size of
+     * the array (by adding nulls); the existing elements in the queue may need to be rearranged
+     * when that happens.
+     *
+     * Eg, Push {v} :
+     * => Initial State: (x = filled; _ = empty)
+     *       [x x x x]
+     *            |
+     *         startIdx (queueSize = 4, arraySize = 4)
+     *
+     * => Double array size:
+     *       [x x x x _ _ _ _]
+     *            |
+     *          startIdx (queueSize = 4, arraySize = 8)
+     *
+     * => Rearrange elements:
+     *       [x x _ _ _ _ x x]
+     *                    |
+     *                    startIdx (queueSize = 4, arraySize = 8)
+     *
+     * => Add element:
+     *       [x x v _ _ _ x x]
+     *                    |
+     *                   startIdx (queueSize = 5, arraySize = 8)
+     */
+    value::ValueGuard guard{tag, val};
+    auto [array, startIdx, queueSize] = getArrayQueueState(arrayQueue);
+    auto cap = array->size();
+
+    if (queueSize == cap) {
+        // reallocate with twice size
+        auto newCap = cap * 2;
+        array->reserve(newCap);
+        auto extend = newCap - cap;
+
+        for (size_t i = 0; i < extend; ++i) {
+            array->push_back(value::TypeTags::Null, 0);
+        }
+
+        if (startIdx > 0) {
+            // existing values wrap over the array
+            // need to rearrange the values from [startIdx, cap-1]
+            for (size_t from = cap - 1, to = newCap - 1; from >= startIdx; --from, --to) {
+                auto [movTag, movVal] = array->swapAt(from, value::TypeTags::Null, 0);
+                array->setAt(to, movTag, movVal);
+            }
+            startIdx += extend;
+        }
+        cap = newCap;
+    }
+
+    auto endIdx = (startIdx + queueSize) % cap;
+    guard.reset();
+    array->setAt(endIdx, tag, val);
+    updateArrayQueueState(arrayQueue, startIdx, queueSize + 1);
+}
+
+/* Pops an element {tag, value} from the queue and returns it */
+std::pair<value::TypeTags, value::Value> arrayQueuePop(value::Array* arrayQueue) {
+    auto [array, startIdx, queueSize] = getArrayQueueState(arrayQueue);
+    if (queueSize == 0) {
+        return {value::TypeTags::Nothing, 0};
+    }
+    auto cap = array->size();
+    auto pair = array->swapAt(startIdx, value::TypeTags::Null, 0);
+
+    startIdx = (startIdx + 1) % cap;
+    updateArrayQueueState(arrayQueue, startIdx, queueSize - 1);
+    return pair;
+}
+
+std::pair<value::TypeTags, value::Value> arrayQueueFront(value::Array* arrayQueue) {
+    auto [array, startIdx, queueSize] = getArrayQueueState(arrayQueue);
+    if (queueSize == 0) {
+        return {value::TypeTags::Nothing, 0};
+    }
+    return array->getAt(startIdx);
+}
+
+std::pair<value::TypeTags, value::Value> arrayQueueBack(value::Array* arrayQueue) {
+    auto [array, startIdx, queueSize] = getArrayQueueState(arrayQueue);
+    if (queueSize == 0) {
+        return {value::TypeTags::Nothing, 0};
+    }
+    auto cap = array->size();
+    auto endIdx = (startIdx + queueSize - 1) % cap;
+    return array->getAt(endIdx);
+}
+
+/**
+ * Helper functions for integralAdd/Remove/Finalize
+ */
+std::tuple<value::Array*,
+           value::Array*,
+           value::Array*,
+           value::Array*,
+           int64_t,
+           boost::optional<int64_t>>
+getIntegralState(value::TypeTags stateTag, value::Value stateVal) {
+    uassert(
+        7821103, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+
+    auto maxSize = static_cast<size_t>(AggIntegralElems::kMaxSizeOfArray);
+    uassert(7821104,
+            "The accumulator state should have correct number of elements",
+            state->size() == maxSize);
+
+    auto [inputQueueTag, inputQueueVal] =
+        state->getAt(static_cast<size_t>(AggIntegralElems::kInputQueue));
+    uassert(7821105, "InputQueue should be of array type", inputQueueTag == value::TypeTags::Array);
+    auto inputQueue = value::getArrayView(inputQueueVal);
+
+    auto [sortByQueueTag, sortByQueueVal] =
+        state->getAt(static_cast<size_t>(AggIntegralElems::kSortByQueue));
+    uassert(
+        7821121, "SortByQueue should be of array type", sortByQueueTag == value::TypeTags::Array);
+    auto sortByQueue = value::getArrayView(sortByQueueVal);
+
+    auto [integralTag, integralVal] =
+        state->getAt(static_cast<size_t>(AggIntegralElems::kIntegral));
+    uassert(7821106, "Integral should be of array type", integralTag == value::TypeTags::Array);
+    auto integral = value::getArrayView(integralVal);
+
+    auto [nanCountTag, nanCountVal] =
+        state->getAt(static_cast<size_t>(AggIntegralElems::kNanCount));
+    uassert(7821107,
+            "nanCount should be of NumberInt64 type",
+            nanCountTag == value::TypeTags::NumberInt64);
+    auto nanCount = value::bitcastTo<int64_t>(nanCountVal);
+
+    boost::optional<int64_t> unitMillis;
+    auto [unitMillisTag, unitMillisVal] =
+        state->getAt(static_cast<size_t>(AggIntegralElems::kUnitMillis));
+    if (unitMillisTag != value::TypeTags::Null) {
+        uassert(7821108,
+                "unitMillis should be of type NumberInt64",
+                unitMillisTag == value::TypeTags::NumberInt64);
+        unitMillis = value::bitcastTo<int64_t>(unitMillisVal);
+    }
+
+    return {state, inputQueue, sortByQueue, integral, nanCount, unitMillis};
+}
+
+void updateNaNCount(value::Array* state, int64_t nanCount) {
+    state->setAt(static_cast<size_t>(AggIntegralElems::kNanCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(nanCount));
+}
+
+void assertTypesForIntegeral(value::TypeTags inputTag,
+                             value::TypeTags sortByTag,
+                             boost::optional<int64_t> unitMillis) {
+    uassert(7821109, "input value should be of numberic type", value::isNumber(inputTag));
+    if (unitMillis) {
+        uassert(7821110,
+                "Sort-by value should be of date type when unitMillis is provided",
+                sortByTag == value::TypeTags::Date);
+    } else {
+        uassert(7821111, "Sort-by value should be of numeric type", value::isNumber(sortByTag));
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::integralOfTwoPointsByTrapezoidalRule(
+    std::pair<value::TypeTags, value::Value> prevInput,
+    std::pair<value::TypeTags, value::Value> prevSortByVal,
+    std::pair<value::TypeTags, value::Value> newInput,
+    std::pair<value::TypeTags, value::Value> newSortByVal) {
+    if (value::isNaN(prevInput.first, prevInput.second) ||
+        value::isNaN(prevSortByVal.first, prevSortByVal.second) ||
+        value::isNaN(newInput.first, newInput.second) ||
+        value::isNaN(newSortByVal.first, newSortByVal.second)) {
+        return {false, value::TypeTags::NumberInt64, 0};
+    }
+
+    if ((prevSortByVal.first == value::TypeTags::Date &&
+         newSortByVal.first == value::TypeTags::Date) ||
+        (value::isNumber(prevSortByVal.first) && value::isNumber(newSortByVal.first))) {
+        auto [deltaOwned, deltaTag, deltaVal] = genericSub(
+            newSortByVal.first, newSortByVal.second, prevSortByVal.first, prevSortByVal.second);
+        value::ValueGuard deltaGuard{deltaOwned, deltaTag, deltaVal};
+
+        auto [sumYOwned, sumYTag, sumYVal] =
+            genericAdd(newInput.first, newInput.second, prevInput.first, prevInput.second);
+        value::ValueGuard sumYGuard{sumYOwned, sumYTag, sumYVal};
+
+        auto [integralOwned, integralTag, integralVal] =
+            genericMul(sumYTag, sumYVal, deltaTag, deltaVal);
+        value::ValueGuard integralGuard{integralOwned, integralTag, integralVal};
+
+        auto result = genericDiv(
+            integralTag, integralVal, value::TypeTags::NumberInt64, value::bitcastFrom<int32_t>(2));
+        return result;
+    } else {
+        return {false, value::TypeTags::NumberInt64, 0};
+    }
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralAdd(ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto [inputTag, inputVal] = moveOwnedFromStack(1);
+    auto [sortByTag, sortByVal] = moveOwnedFromStack(2);
+
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    value::ValueGuard inputGuard{inputTag, inputVal};
+    value::ValueGuard sortByGuard{sortByTag, sortByVal};
+
+    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis] =
+        getIntegralState(stateTag, stateVal);
+
+    assertTypesForIntegeral(inputTag, sortByTag, unitMillis);
+
+    if (value::isNaN(inputTag, inputVal) || value::isNaN(sortByTag, sortByVal)) {
+        nanCount++;
+        updateNaNCount(state, nanCount);
+    }
+
+    auto queueSize = arrayQueueSize(inputQueue);
+    uassert(7821119, "Queue sizes should match", queueSize == arrayQueueSize(sortByQueue));
+    if (queueSize > 0) {
+        auto inputBack = arrayQueueBack(inputQueue);
+        auto sortByBack = arrayQueueBack(sortByQueue);
+
+        auto [integralDeltaOwned, integralDeltaTag, integralDeltaVal] =
+            integralOfTwoPointsByTrapezoidalRule(
+                inputBack, sortByBack, {inputTag, inputVal}, {sortByTag, sortByVal});
+        value::ValueGuard integralDeltaGuard{
+            integralDeltaOwned, integralDeltaTag, integralDeltaVal};
+        aggRemovableSumImpl<1>(integral, integralDeltaTag, integralDeltaVal);
+    }
+
+    inputGuard.reset();
+    arrayQueuePush(inputQueue, inputTag, inputVal);
+
+    sortByGuard.reset();
+    arrayQueuePush(sortByQueue, sortByTag, sortByVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralRemove(ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto [inputOwned, inputTag, inputVal] = getFromStack(1);
+    auto [sortByOwned, sortByTag, sortByVal] = getFromStack(2);
+
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis] =
+        getIntegralState(stateTag, stateVal);
+
+    assertTypesForIntegeral(inputTag, sortByTag, unitMillis);
+
+    // verify that the input and sortby value to be removed are the first elements of the queues
+    auto [frontInputTag, frontInputVal] = arrayQueuePop(inputQueue);
+    value::ValueGuard frontInputGuard{frontInputTag, frontInputVal};
+    auto [cmpTag, cmpVal] = value::compareValue(frontInputTag, frontInputVal, inputTag, inputVal);
+    uassert(7821113,
+            "Attempted to remove unexpected input value",
+            cmpTag == value::TypeTags::NumberInt32 && value::bitcastTo<int32_t>(cmpVal) == 0);
+
+    auto [frontSortByTag, frontSortByVal] = arrayQueuePop(sortByQueue);
+    value::ValueGuard frontSortByGuard{frontSortByTag, frontSortByVal};
+    std::tie(cmpTag, cmpVal) =
+        value::compareValue(frontSortByTag, frontSortByVal, sortByTag, sortByVal);
+    uassert(7821117,
+            "Attempted to remove unexpected sortby value",
+            cmpTag == value::TypeTags::NumberInt32 && value::bitcastTo<int32_t>(cmpVal) == 0);
+
+    if (value::isNaN(inputTag, inputVal) || value::isNaN(sortByTag, sortByVal)) {
+        nanCount--;
+        updateNaNCount(state, nanCount);
+    }
+
+    auto queueSize = arrayQueueSize(inputQueue);
+    uassert(7821120, "Queue sizes should match", queueSize == arrayQueueSize(sortByQueue));
+    if (queueSize > 0) {
+        auto inputPair = arrayQueueFront(inputQueue);
+        auto sortByPair = arrayQueueFront(sortByQueue);
+
+        auto [integralDeltaOwned, integralDeltaTag, integralDeltaVal] =
+            integralOfTwoPointsByTrapezoidalRule(
+                {inputTag, inputVal}, {sortByTag, sortByVal}, inputPair, sortByPair);
+        value::ValueGuard integralDeltaGuard{
+            integralDeltaOwned, integralDeltaTag, integralDeltaVal};
+        aggRemovableSumImpl<-1>(integral, integralDeltaTag, integralDeltaVal);
+    }
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralFinalize(
+    ArityType arity) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+
+    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis] =
+        getIntegralState(stateTag, stateVal);
+
+    auto queueSize = arrayQueueSize(inputQueue);
+    uassert(7821118, "Queue sizes should match", queueSize == arrayQueueSize(sortByQueue));
+    if (queueSize == 0) {
+        return {false, value::TypeTags::Null, 0};
+    }
+
+    if (nanCount > 0) {
+        return {false,
+                value::TypeTags::NumberDouble,
+                value::bitcastFrom<double>(std::numeric_limits<double>::quiet_NaN())};
+    }
+
+    auto [resultOwned, resultTag, resultVal] = aggRemovableSumFinalizeImpl(integral);
+    value::ValueGuard resultGuard{resultOwned, resultTag, resultVal};
+    if (unitMillis) {
+        auto [divResultOwned, divResultTag, divResultVal] =
+            genericDiv(resultTag,
+                       resultVal,
+                       value::TypeTags::NumberInt64,
+                       value::bitcastFrom<int64_t>(*unitMillis));
+        return {divResultOwned, divResultTag, divResultVal};
+    } else {
+        resultGuard.reset();
+        return {resultOwned, resultTag, resultVal};
+    }
+}
+
+/**
+ * functions for $derivative
+ */
+std::tuple<value::Array*, value::Array*, value::Array*, boost::optional<int64_t>>
+getDerivativeState(value::TypeTags stateTag, value::Value stateVal) {
+    uassert(
+        7821000, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+
+    auto maxSize = static_cast<size_t>(AggDerivativeElems::kMaxSizeOfArray);
+    uassert(7821001,
+            "The accumulator state should have correct number of elements",
+            state->size() == maxSize);
+
+    auto [inputQueueTag, inputQueueVal] =
+        state->getAt(static_cast<size_t>(AggDerivativeElems::kInputQueue));
+    uassert(7821002, "InputQueue should be of array type", inputQueueTag == value::TypeTags::Array);
+    auto inputQueue = value::getArrayView(inputQueueVal);
+
+    auto [sortByQueueTag, sortByQueueVal] =
+        state->getAt(static_cast<size_t>(AggDerivativeElems::kSortByQueue));
+    uassert(
+        7821003, "SortByQueue should be of array type", sortByQueueTag == value::TypeTags::Array);
+    auto sortByQueue = value::getArrayView(sortByQueueVal);
+
+    boost::optional<int64_t> unitMillis;
+    auto [unitMillisTag, unitMillisVal] =
+        state->getAt(static_cast<size_t>(AggDerivativeElems::kUnitMillis));
+    if (unitMillisTag != value::TypeTags::Null) {
+        uassert(7821004,
+                "unitMillis should be of type NumberInt64",
+                unitMillisTag == value::TypeTags::NumberInt64);
+        unitMillis = value::bitcastTo<int64_t>(unitMillisVal);
+    }
+
+    return {state, inputQueue, sortByQueue, unitMillis};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDerivativeAdd(ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto [inputTag, inputVal] = moveOwnedFromStack(1);
+    auto [sortByTag, sortByVal] = moveOwnedFromStack(2);
+
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    value::ValueGuard inputGuard{inputTag, inputVal};
+    value::ValueGuard sortByGuard{sortByTag, sortByVal};
+
+    auto [state, inputQueue, sortByQueue, unitMillis] = getDerivativeState(stateTag, stateVal);
+
+    if (unitMillis) {
+        uassert(7821005, "Unexpected type for sortBy value", sortByTag == value::TypeTags::Date);
+    } else {
+        uassert(7821006, "Unexpected type for sortBy value", value::isNumber(sortByTag));
+    }
+    uassert(7821007,
+            "Unexpected type for input value",
+            value::isNumber(inputTag) || inputTag == value::TypeTags::Date);
+
+    inputGuard.reset();
+    arrayQueuePush(inputQueue, inputTag, inputVal);
+
+    sortByGuard.reset();
+    arrayQueuePush(sortByQueue, sortByTag, sortByVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDerivativeRemove(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto [inputOwned, inputTag, inputVal] = getFromStack(1);
+    auto [sortByOwned, sortByTag, sortByVal] = getFromStack(2);
+
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto [state, inputQueue, sortByQueue, unitMillis] = getDerivativeState(stateTag, stateVal);
+
+    // verify that the input and sortby value to be removed are the first elements of the queues
+    auto [frontInputTag, frontInputVal] = arrayQueuePop(inputQueue);
+    value::ValueGuard frontInputGuard{frontInputTag, frontInputVal};
+    auto [cmpTag, cmpVal] = value::compareValue(frontInputTag, frontInputVal, inputTag, inputVal);
+    uassert(7821008,
+            "Attempted to remove an unexpected input value",
+            cmpTag == value::TypeTags::NumberInt32 && value::bitcastTo<int32_t>(cmpVal) == 0);
+
+    auto [frontSortByTag, frontSortByVal] = arrayQueuePop(sortByQueue);
+    value::ValueGuard frontSortByGuard{frontSortByTag, frontSortByVal};
+    std::tie(cmpTag, cmpVal) =
+        value::compareValue(frontSortByTag, frontSortByVal, sortByTag, sortByVal);
+    uassert(7821009,
+            "Attempted to remove an unexpected sortby value",
+            cmpTag == value::TypeTags::NumberInt32 && value::bitcastTo<int32_t>(cmpVal) == 0);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDerivativeFinalize(
+    ArityType arity) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+
+    auto [state, inputQueue, sortByQueue, unitMillis] = getDerivativeState(stateTag, stateVal);
+
+    auto queueSize = arrayQueueSize(inputQueue);
+    uassert(7821010,
+            "Input and sortby queues should be of equal size",
+            queueSize == arrayQueueSize(sortByQueue));
+    if (queueSize <= 1) {
+        return {false, value::TypeTags::Null, 0};
+    }
+
+    auto [leftInputTag, leftInputVal] = arrayQueueFront(inputQueue);
+    auto [leftSortByTag, leftSortByVal] = arrayQueueFront(sortByQueue);
+    auto [rightInputTag, rightInputVal] = arrayQueueBack(inputQueue);
+    auto [rightSortByTag, rightSortByVal] = arrayQueueBack(sortByQueue);
+
+    auto [runOwned, runTag, runVal] =
+        genericSub(rightSortByTag, rightSortByVal, leftSortByTag, leftSortByVal);
+    value::ValueGuard runGuard{runOwned, runTag, runVal};
+
+    // Return null if the sortBy delta is zero
+    if (runTag == value::TypeTags::NumberDecimal) {
+        if (numericCast<Decimal128>(runTag, runVal).isZero()) {
+            return {false, value::TypeTags::Null, 0};
+        }
+    } else {
+        if (numericCast<double>(runTag, runVal) == 0) {
+            return {false, value::TypeTags::Null, 0};
+        }
+    }
+
+    auto [riseOwned, riseTag, riseVal] =
+        genericSub(rightInputTag, rightInputVal, leftInputTag, leftInputVal);
+    value::ValueGuard riseGuard{riseOwned, riseTag, riseVal};
+
+    uassert(7821012, "Input delta should be numeric", value::isNumber(riseTag));
+
+    auto [divOwned, divTag, divVal] = genericDiv(riseTag, riseVal, runTag, runVal);
+    value::ValueGuard divGuard{divOwned, divTag, divVal};
+
+    if (unitMillis) {
+        auto [mulOwned, mulTag, mulVal] = genericMul(
+            divTag, divVal, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(*unitMillis));
+        return {mulOwned, mulTag, mulVal};
+    } else {
+        divGuard.reset();
+        return {divOwned, divTag, divVal};
+    }
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin f,
                                                                          ArityType arity) {
     switch (f) {
@@ -6912,6 +7671,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinLog10(arity);
         case Builtin::sqrt:
             return builtinSqrt(arity);
+        case Builtin::pow:
+            return builtinPow(arity);
         case Builtin::addToArray:
             return builtinAddToArray(arity);
         case Builtin::addToArrayCapped:
@@ -7175,6 +7936,24 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinAggExpMovingAvg(arity);
         case Builtin::aggExpMovingAvgFinalize:
             return builtinAggExpMovingAvgFinalize(arity);
+        case Builtin::aggRemovableSumAdd:
+            return builtinAggRemovableSum<1 /*sign*/>(arity);
+        case Builtin::aggRemovableSumRemove:
+            return builtinAggRemovableSum<-1 /*sign*/>(arity);
+        case Builtin::aggRemovableSumFinalize:
+            return builtinAggRemovableSumFinalize(arity);
+        case Builtin::aggIntegralAdd:
+            return builtinAggIntegralAdd(arity);
+        case Builtin::aggIntegralRemove:
+            return builtinAggIntegralRemove(arity);
+        case Builtin::aggIntegralFinalize:
+            return builtinAggIntegralFinalize(arity);
+        case Builtin::aggDerivativeAdd:
+            return builtinAggDerivativeAdd(arity);
+        case Builtin::aggDerivativeRemove:
+            return builtinAggDerivativeRemove(arity);
+        case Builtin::aggDerivativeFinalize:
+            return builtinAggDerivativeFinalize(arity);
     }
 
     MONGO_UNREACHABLE;
@@ -7243,6 +8022,8 @@ std::string builtinToString(Builtin b) {
             return "log10";
         case Builtin::sqrt:
             return "sqrt";
+        case Builtin::pow:
+            return "pow";
         case Builtin::addToArray:
             return "addToArray";
         case Builtin::addToArrayCapped:
@@ -7507,6 +8288,24 @@ std::string builtinToString(Builtin b) {
             return "aggExpMovingAvg";
         case Builtin::aggExpMovingAvgFinalize:
             return "aggExpMovingAvgFinalize";
+        case Builtin::aggRemovableSumAdd:
+            return "aggRemovableSumAdd";
+        case Builtin::aggRemovableSumRemove:
+            return "aggRemovableSumRemove";
+        case Builtin::aggRemovableSumFinalize:
+            return "aggRemovableSumFinalize";
+        case Builtin::aggIntegralAdd:
+            return "aggIntegralAdd";
+        case Builtin::aggIntegralRemove:
+            return "aggIntegralRemove";
+        case Builtin::aggIntegralFinalize:
+            return "aggIntegralFinalize";
+        case Builtin::aggDerivativeAdd:
+            return "aggDerivativeAdd";
+        case Builtin::aggDerivativeRemove:
+            return "aggDerivativeRemove";
+        case Builtin::aggDerivativeFinalize:
+            return "aggDerivativeFinalize";
         default:
             MONGO_UNREACHABLE;
     }

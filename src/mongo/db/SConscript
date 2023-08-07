@@ -377,6 +377,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/cluster_auth_mode',
+        '$BUILD_DIR/mongo/db/repl/repl_server_parameters',
         '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/db/repl/replica_set_messages',
         '$BUILD_DIR/mongo/db/storage/storage_options',
@@ -715,6 +716,7 @@ env.Clone().InjectModule("enterprise").Library(
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/base",
+        "service_context",
     ],
 )
 
@@ -765,6 +767,18 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'client_out_of_line_executor',
+    ],
+)
+
+env.CppUnitTest(
+    target='mongod_options_test',
+    source=[
+        'mongod_options_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/util/options_parser/options_parser',
+        'mongod_options',
+        'server_base',
     ],
 )
 
@@ -1061,6 +1075,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         'repl/repl_coordinator_interface',
         'repl/repl_settings',
+        'shard_role',
     ],
 )
 
@@ -1666,6 +1681,7 @@ env.Library(
         'matcher/expression_expr.cpp',
         'matcher/expression_geo.cpp',
         'matcher/expression_geo_serializer.cpp',
+        'matcher/expression_hasher.cpp',
         'matcher/expression_internal_bucket_geo_within.cpp',
         'matcher/expression_leaf.cpp',
         'matcher/expression_parameterization.cpp',
@@ -2497,6 +2513,7 @@ env.Library(
         'op_observer/change_stream_pre_images_op_observer',
         'op_observer/fallback_op_observer',
         'op_observer/fcv_op_observer',
+        'op_observer/find_and_modify_images_op_observer',
         'op_observer/op_observer',
         'op_observer/oplog_writer_impl',
         'op_observer/oplog_writer_transaction_proxy',

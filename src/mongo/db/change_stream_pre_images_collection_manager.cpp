@@ -257,6 +257,8 @@ void ChangeStreamPreImagesCollectionManager::insertPreImage(OperationContext* op
             insertionStatus != ErrorCodes::DuplicateKey);
     uassertStatusOK(insertionStatus);
 
+    _docsInserted.fetchAndAddRelaxed(1);
+
     if (useUnreplicatedTruncates()) {
         // This is a no-op until the 'tenantId' is registered with the 'truncateManager' in the
         // expired pre-image removal path.
@@ -429,15 +431,6 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithCollSc
     // users from running out of disk space.
     ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
                                                         AdmissionContext::Priority::kImmediate);
-
-    // Truncate marker initialisation and truncates don't need to block on oplog application
-    // provided the following holds:
-    //      (1) Initial truncate markers are approximations. If initialization is necessary, it is
-    //      okay that a few entries are missed while reading the pre-images collection during
-    //      initialization.
-    //      (2) Truncates will only occur on ranges with no "holes" - this should be true regardless
-    //      of whether the node is a primary or secondary.
-    ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(opCtx->lockState());
 
     // Acquire intent-exclusive lock on the change collection.
     const auto preImageColl =

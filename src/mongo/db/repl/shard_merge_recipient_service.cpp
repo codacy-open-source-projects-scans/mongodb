@@ -111,6 +111,7 @@
 #include "mongo/db/repl/shard_merge_recipient_service.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_source_selector.h"
+#include "mongo/db/repl/tenant_file_importer_service.h"
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/repl/tenant_migration_shard_merge_util.h"
 #include "mongo/db/repl/tenant_migration_statistics.h"
@@ -567,6 +568,8 @@ boost::optional<BSONObj> ShardMergeRecipientService::Instance::reportForCurrentO
     bob.append("migrationCompleted", _migrationCompletionPromise.getFuture().isReady());
     bob.append("garbageCollectable", _forgetMigrationDurablePromise.getFuture().isReady());
 
+    repl::TenantFileImporterService::get(getGlobalServiceContext())->getStats(bob, _migrationUuid);
+
     if (_stateDoc.getStartFetchingDonorOpTime())
         _stateDoc.getStartFetchingDonorOpTime()->append(&bob, "startFetchingDonorOpTime");
     if (_stateDoc.getStartApplyingDonorOpTime())
@@ -996,7 +999,7 @@ SemiFuture<void> ShardMergeRecipientService::Instance::_killBackupCursor() {
             stdx::lock_guard lk(_mutex);
             executor::RemoteCommandRequest request(
                 _client->getServerHostAndPort(),
-                donorBackupCursorInfo.nss.db().toString(),
+                donorBackupCursorInfo.nss.db_deprecated().toString(),
                 BSON("killCursors" << donorBackupCursorInfo.nss.coll().toString() << "cursors"
                                    << BSON_ARRAY(donorBackupCursorInfo.cursorId)),
                 nullptr);
@@ -1175,7 +1178,7 @@ ShardMergeRecipientService::Instance::_scheduleKillBackupCursorWithLock(
     auto& donorBackupCursorInfo = _getDonorBackupCursorInfo(lk);
     executor::RemoteCommandRequest killCursorsRequest(
         _client->getServerHostAndPort(),
-        donorBackupCursorInfo.nss.db().toString(),
+        donorBackupCursorInfo.nss.db_deprecated().toString(),
         BSON("killCursors" << donorBackupCursorInfo.nss.coll().toString() << "cursors"
                            << BSON_ARRAY(donorBackupCursorInfo.cursorId)),
         nullptr);

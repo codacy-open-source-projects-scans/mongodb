@@ -1290,6 +1290,30 @@ std::unique_ptr<QuerySolutionNode> ReturnKeyNode::clone() const {
 }
 
 //
+// MatchNode
+//
+
+void MatchNode::appendToString(str::stream* ss, int indent) const {
+    addIndent(ss, indent);
+    *ss << "MATCH\n";
+    if (nullptr != filter) {
+        addIndent(ss, indent + 1);
+        *ss << "filter:\n";
+        StringBuilder sb;
+        filter->debugString(sb, indent + 2);
+        *ss << sb.str();
+    }
+    addCommon(ss, indent);
+    addIndent(ss, indent + 1);
+    *ss << "Child:" << '\n';
+    children[0]->appendToString(ss, indent + 2);
+}
+
+std::unique_ptr<QuerySolutionNode> MatchNode::clone() const {
+    return std::make_unique<MatchNode>(children[0]->clone(), filter ? filter->clone() : nullptr);
+}
+
+//
 // ProjectionNode
 //
 
@@ -1708,11 +1732,12 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
             if (idx > 0) {
                 *ss << ", ";
             }
-            *ss << "{" << groupName << ": " << exprObj->serialize(false).toString() << "}";
+            *ss << "{" << groupName << ": " << exprObj->serialize(SerializationOptions{}).toString()
+                << "}";
             ++idx;
         }
     } else {
-        *ss << "{_id: " << groupByExpression->serialize(false).toString() << "}";
+        *ss << "{_id: " << groupByExpression->serialize(SerializationOptions{}).toString() << "}";
     }
     *ss << '\n';
     addIndent(ss, indent + 1);
@@ -1723,7 +1748,11 @@ void GroupNode::appendToString(str::stream* ss, int indent) const {
         }
         auto& acc = accumulators[idx];
         *ss << "{" << acc.fieldName << ": {" << acc.expr.name << ": "
-            << acc.expr.argument->serialize(true).toString() << "}}";
+            << acc.expr.argument
+                   ->serialize(SerializationOptions{
+                       .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)})
+                   .toString()
+            << "}}";
     }
     *ss << "]" << '\n';
     addCommon(ss, indent);

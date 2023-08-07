@@ -56,6 +56,7 @@
 #include "mongo/db/commands/bulk_write_parser.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
@@ -277,7 +278,7 @@ public:
                 "BulkWrite may not be run without featureFlagBulkWriteCommand enabled",
                 gFeatureFlagBulkWriteCommand.isEnabled(serverGlobalParams.featureCompatibility));
 
-            bulk_write_common::validateRequest(bulkRequest, opCtx->isRetryableWrite());
+            bulk_write_common::validateRequest(bulkRequest);
 
             auto replyItems = cluster::bulkWrite(opCtx, bulkRequest);
             response = _populateCursorReply(opCtx, bulkRequest, request, std::move(replyItems));

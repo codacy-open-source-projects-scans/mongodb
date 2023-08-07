@@ -300,6 +300,27 @@ variables:
   teardown_group:
   - func: "umount shared scons directory"
 
+- &antithesis_config_build_and_push_template
+  name: antithesis_config_build_and_push_template
+  tags: ["antithesis"]
+  depends_on:
+  - name: antithesis_base_image_build_and_push
+  commands:
+  - func: "antithesis config image build and push"
+    vars:
+      suite: suite_name
+
+- &antithesis_config_test_template
+  name: antithesis_config_test_template
+  tags: ["antithesis"]
+  exec_timeout_secs: 14400 # Time out the task if it runs for more than 4 hours.
+  depends_on:
+  - name: antithesis_config_build_and_push_task
+  commands:
+  - func: "antithesis config image test"
+    vars:
+      suite: suite_name
+
 # TODO: split this up into the user files.
 # List of all variants that make mongocryptd
 # If a variant is listed here and has a push task, mongocryptd is pushed
@@ -2448,6 +2469,35 @@ functions:
       content_type: text/plain
       display_name: multiversion_exclude_tags.yml from resmoke invocation
 
+  "antithesis config image build and push":
+  - *f_expansions_write
+  - command: s3.get
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      remote_file: ${mongo_debugsymbols}
+      bucket: mciuploads
+      local_file: src/mongo-debugsymbols.${ext|tgz}
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/modify_debug_symbols.sh"
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/antithesis_config_image_build_and_push.sh"
+
+  "antithesis config image test":
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/antithesis_config_image_test.sh"
+
 # Pre task steps
 pre:
 - func: "set task expansion macros"
@@ -3638,19 +3688,32 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *benchmark_template
-  name: benchmarks_orphaned
+  name: benchmarks_orphaned_first_half
   tags: ["benchmarks"]
   commands:
   - func: "do benchmark setup"
   - func: "run tests"
     vars:
-      suite: benchmarks
+      suite: benchmarks_first_half
       exec_timeout_secs: 21600 # 6 hour timeout.
       resmoke_jobs_max: 1
   - func: "send benchmark results"
-#  - func: "analyze benchmark results"
     vars:
-      suite: benchmarks
+      suite: benchmarks_first_half
+
+- <<: *benchmark_template
+  name: benchmarks_orphaned_second_half
+  tags: ["benchmarks"]
+  commands:
+  - func: "do benchmark setup"
+  - func: "run tests"
+    vars:
+      suite: benchmarks_second_half
+      exec_timeout_secs: 21600 # 6 hour timeout.
+      resmoke_jobs_max: 1
+  - func: "send benchmark results"
+    vars:
+      suite: benchmarks_second_half
 
 - <<: *benchmark_template
   name: benchmarks_sharding
@@ -3970,6 +4033,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 10
       num_tasks: 5
+      jstestfuzz_vars: --useEsModules
       npm_command: initsync-fuzzer
       suite: initial_sync_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -3985,6 +4049,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 10
       num_tasks: 5
+      jstestfuzz_vars: --useEsModules
       npm_command: initsync-fuzzer
       suite: initial_sync_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -4174,6 +4239,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 5
       num_tasks: 5
+      jstestfuzz_vars: --useEsModules
       npm_command: update-fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       run_no_feature_flag_tests: "true"
@@ -4188,7 +4254,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 5
       num_tasks: 5
-      jstestfuzz_vars: --diffTestingMode timeseries
+      jstestfuzz_vars: --diffTestingMode timeseries --useEsModules
       npm_command: update-fuzzer
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -4207,6 +4273,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 5
       num_tasks: 5
+      jstestfuzz_vars: --useEsModules
       npm_command: update-fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
       run_no_feature_flag_tests: "true"
@@ -4225,6 +4292,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 3
       num_tasks: 5
+      jstestfuzz_vars: --useEsModules
       npm_command: rollback-fuzzer
       suite: rollback_fuzzer
       # Rollback suites create indexes with majority of nodes not available for replication. So, disabling
@@ -4242,6 +4310,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 3
       num_tasks: 5
+      jstestfuzz_vars: --useEsModules
       npm_command: rollback-fuzzer
       suite: rollback_fuzzer
       # Rollback suites create indexes with majority of nodes not available for replication. So, disabling
@@ -4258,7 +4327,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 1
       num_tasks: 4
-      jstestfuzz_vars: --numLinesPerFile 300 --maxLinesBetweenEvents 50
+      jstestfuzz_vars: --numLinesPerFile 300 --maxLinesBetweenEvents 50 --useEsModules
       npm_command: rollback-fuzzer
       suite: rollback_fuzzer_clean_shutdowns
       # Rollback suites create indexes with majority of nodes not available for replication. So, disabling
@@ -4275,7 +4344,7 @@ tasks:
       <<: *jstestfuzz_config_vars
       num_files: 1
       num_tasks: 4
-      jstestfuzz_vars: --numLinesPerFile 300 --maxLinesBetweenEvents 50
+      jstestfuzz_vars: --numLinesPerFile 300 --maxLinesBetweenEvents 50 --useEsModules
       npm_command: rollback-fuzzer
       suite: rollback_fuzzer_unclean_shutdowns
       # Rollback suites create indexes with majority of nodes not available for replication. So, disabling
@@ -4673,7 +4742,7 @@ tasks:
       num_files: 10
       num_tasks: 5
       npm_command: resharding-fuzzer
-      jstestfuzz_vars: --numDonors 2 --numRecipients 2 --inPlace yes
+      jstestfuzz_vars: --numDonors 2 --numRecipients 2 --inPlace yes --useEsModules
       suite: resharding_fuzzer
 
 - <<: *jstestfuzz_template
@@ -4686,7 +4755,7 @@ tasks:
       num_files: 10
       num_tasks: 5
       npm_command: resharding-fuzzer
-      jstestfuzz_vars: --numDonors 1 --numRecipients 2 --inPlace no
+      jstestfuzz_vars: --numDonors 1 --numRecipients 2 --inPlace no --useEsModules
       suite: resharding_fuzzer
 
 - <<: *jstestfuzz_template
@@ -4699,7 +4768,7 @@ tasks:
       num_files: 10
       num_tasks: 5
       npm_command: resharding-fuzzer
-      jstestfuzz_vars: --numDonors 2 --numRecipients 1 --inPlace no
+      jstestfuzz_vars: --numDonors 2 --numRecipients 1 --inPlace no --useEsModules
       suite: resharding_fuzzer
 
 - <<: *jstestfuzz_template
@@ -4712,7 +4781,7 @@ tasks:
       num_files: 10
       num_tasks: 5
       npm_command: resharding-fuzzer
-      jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no
+      jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no --useEsModules
       suite: resharding_fuzzer
 
 - <<: *jstestfuzz_template
@@ -4725,7 +4794,7 @@ tasks:
       num_files: 10
       num_tasks: 5
       npm_command: resharding-fuzzer
-      jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no
+      jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no --useEsModules
       suite: resharding_fuzzer_idempotency
 
 - <<: *jstestfuzz_template
@@ -4741,6 +4810,7 @@ tasks:
       jstestfuzz_vars: >-
         --numDonors 3 --numRecipients 3 --inPlace yes
         --electionMech stepup --electionRole donor --electionRole recipient
+        --useEsModules
       suite: resharding_fuzzer
 
 ## Tests that the multiversion test generation logic is not broken.
@@ -5943,7 +6013,14 @@ tasks:
     vars:
       use_large_distro: "true"
 
-# TODO(SERVER-65178): Add "serverless" tag to shard split passthrough when no longer feature flagged
+- <<: *gen_task_template
+  name: bulk_write_replica_sets_jscore_passthrough_gen
+  tags: ["bulk_write"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
 - <<: *gen_task_template
   name: shard_split_jscore_passthrough_gen
   tags: ["shard_split"]
@@ -8266,6 +8343,24 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *task_template
+  name: vector_search_auth
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *task_template
+  name: vector_search_ssl
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_jobs_max: 1
+
+- <<: *task_template
   name: cqf
   tags: [cqf]
   commands:
@@ -8438,7 +8533,7 @@ tasks:
       args:
       - "./src/evergreen/feature_flag_tags_check.sh"
 
-- name: antithesis_image_build
+- name: antithesis_base_image_build_and_push
   tags: ["antithesis"]
   depends_on:
   - name: archive_dist_test_debug
@@ -8461,30 +8556,7 @@ tasks:
     params:
       binary: bash
       args:
-      - "./src/evergreen/antithesis_image_build.sh"
-
-- name: antithesis_image_push
-  tags: ["antithesis"]
-  depends_on:
-  - name: antithesis_image_build
-  commands:
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/antithesis_image_push.sh"
-
-- name: antithesis_image_test
-  tags: ["antithesis"]
-  exec_timeout_secs: 14400 # Time out the task if it runs for more than 4 hours.
-  depends_on:
-  - name: antithesis_image_build
-  commands:
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "./src/evergreen/antithesis_dry_run.sh"
+      - "./src/evergreen/antithesis_base_image_build_and_push.sh"
 
 - name: generate_buildid_to_debug_symbols_mapping
   tags: ["symbolizer"]
@@ -8501,6 +8573,22 @@ tasks:
       binary: bash
       args:
       - "./src/evergreen/generate_buildid_debug_symbols_mapping.sh"
+
+- <<: *antithesis_config_build_and_push_template
+  name: antithesis_config_build_and_push_concurrency_sharded_with_stepdowns_and_balancer
+  commands:
+  - func: "antithesis config image build and push"
+    vars:
+      suite: concurrency_sharded_with_stepdowns_and_balancer
+
+- <<: *antithesis_config_test_template
+  name: antithesis_config_test_concurrency_sharded_with_stepdowns_and_balancer
+  depends_on:
+  - name: antithesis_config_build_and_push_concurrency_sharded_with_stepdowns_and_balancer
+  commands:
+  - func: "antithesis config image test"
+    vars:
+      suite: concurrency_sharded_with_stepdowns_and_balancer
 
 - <<: *task_template
   name: query_golden_classic
@@ -8968,13 +9056,19 @@ task_groups:
   - "crypt_install_tests"
   - "crypt_run_tests"
 
-- name: antithesis_build_test_push_TG
+- name: antithesis_TG
   max_hosts: 1
   share_processes: true
+  setup_group:
+  - func: "f_expansions_write"
+  - func: "git get project no modules"
+  - func: "f_expansions_write"
+  - func: "kill processes"
+  - func: "cleanup environment"
+  - func: "set up venv"
+  - func: "do setup"
   setup_task:
   - func: "set task expansion macros"
   - func: "f_expansions_write"
   tasks:
-    - antithesis_image_build
-    - antithesis_image_push
-    - antithesis_image_test
+    - .antithesis

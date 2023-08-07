@@ -478,7 +478,7 @@ void fillOutPlannerParams(OperationContext* opCtx,
 
     // If the caller wants a shard filter, make sure we're actually sharded.
     if (plannerParams->options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
-        if (collection.isSharded()) {
+        if (collection.isSharded_DEPRECATED()) {
             const auto& shardKeyPattern = collection.getShardKeyPattern();
 
             // If the shard key is specified exactly, the query is guaranteed to only target one
@@ -1621,7 +1621,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
             optimizer::QueryHints queryHints = getHintsFromQueryKnobs();
             const bool fastIndexNullHandling = queryHints._fastIndexNullHandling;
             auto maybeExec = getSBEExecutorViaCascadesOptimizer(
-                mainColl, std::move(queryHints), canonicalQuery.get());
+                collections, std::move(queryHints), canonicalQuery.get());
             if (maybeExec) {
                 auto exec = uassertStatusOK(
                     makeExecFromParams(std::move(canonicalQuery), std::move(*maybeExec)));
@@ -1736,13 +1736,20 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
     OperationContext* opCtx,
-    const CollectionPtr* coll,
+    VariantCollectionPtrOrAcquisition coll,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     std::function<void(CanonicalQuery*, bool)> extractAndAttachPipelineStages,
     bool permitYield,
     size_t plannerOptions) {
 
-    MultipleCollectionAccessor multi{*coll};
+    auto multi = stdx::visit(OverloadedVisitor{[](const CollectionPtr* collPtr) {
+                                                   return MultipleCollectionAccessor{*collPtr};
+                                               },
+                                               [](const CollectionAcquisition& acq) {
+                                                   return MultipleCollectionAccessor{acq};
+                                               }},
+                             coll.get());
+
     return getExecutorFind(opCtx,
                            multi,
                            std::move(canonicalQuery),
@@ -1811,13 +1818,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
     const DeleteRequest* request = parsedDelete->getRequest();
 
     const NamespaceString& nss(request->getNsString());
-    if (!request->getGod()) {
-        if (nss.isSystem() && opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
-            uassert(12050,
-                    "cannot delete from system namespace",
-                    nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility));
-        }
-    }
 
     if (collectionPtr && collectionPtr->isCapped()) {
         expCtx->setIsCappedDelete();
@@ -2042,12 +2042,6 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
     UpdateDriver* driver = parsedUpdate->getDriver();
 
     const NamespaceString& nss = request->getNamespaceString();
-
-    if (nss.isSystem() && opCtx->lockState()->shouldConflictWithSecondaryBatchApplication()) {
-        uassert(10156,
-                str::stream() << "cannot update a system namespace: " << nss.toStringForErrorMsg(),
-                nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility));
-    }
 
     // If there is no collection and this is an upsert, callers are supposed to create
     // the collection prior to calling this method. Explain, however, will never do

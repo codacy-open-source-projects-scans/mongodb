@@ -14,17 +14,16 @@
  * ]
  */
 
+import {configureFailPoint} from "jstests/libs/fail_point_util.js";
+import {Thread} from "jstests/libs/parallelTester.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {TenantMigrationTest} from "jstests/replsets/libs/tenant_migration_test.js";
 import {
     forgetMigrationAsync,
     isShardMergeEnabled,
     makeTenantDB
 } from "jstests/replsets/libs/tenant_migration_util.js";
-
-load("jstests/libs/uuid_util.js");        // For extractUUIDFromObject().
-load("jstests/libs/fail_point_util.js");  // For configureFailPoint().
-load("jstests/libs/parallelTester.js");   // For the Thread().
-load('jstests/replsets/rslib.js');        // For 'createRstArgs'
+import {createRstArgs} from "jstests/replsets/rslib.js";
 
 const tenantMigrationTest = new TenantMigrationTest({name: jsTestName()});
 
@@ -69,6 +68,22 @@ function checkStandardFieldsOK(res) {
     assert.eq(bsonWoCompare(res.inprog[0].instanceID, kMigrationId), 0, res);
     assert.eq(res.inprog[0].donorConnectionString, tenantMigrationTest.getDonorRst().getURL(), res);
     assert.eq(bsonWoCompare(res.inprog[0].readPreference, kReadPreference), 0, res);
+}
+
+function checkStatFieldsOK(res) {
+    const currOp = res.inprog[0];
+    assert(currOp.hasOwnProperty("approxTotalDataSize") &&
+               currOp.approxTotalDataSize instanceof NumberLong,
+           res);
+    assert(currOp.hasOwnProperty("approxTotalBytesCopied") &&
+               currOp.approxTotalBytesCopied instanceof NumberLong,
+           res);
+    assert(currOp.hasOwnProperty("totalReceiveElapsedMillis") &&
+               currOp.totalReceiveElapsedMillis instanceof NumberLong,
+           res);
+    assert(currOp.hasOwnProperty("remainingReceiveEstimatedMillis") &&
+               currOp.remainingReceiveEstimatedMillis instanceof NumberLong,
+           res);
 }
 
 // Check currentOp fields' expected value once the recipient is in state "consistent" or later.
@@ -121,6 +136,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     let currOp = res.inprog[0];
     assert.eq(currOp.state, TenantMigrationTest.ShardMergeRecipientState.kStarted, res);
     assert.eq(currOp.garbageCollectable, false, res);
@@ -142,6 +158,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     let currOp = res.inprog[0];
     assert.gt(new Date(), currOp.receiveStart, tojson(res));
     assert.eq(currOp.state, TenantMigrationTest.ShardMergeRecipientState.kLearnedFilenames, res);
@@ -168,6 +185,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     checkPostConsistentFieldsOK(res);
     let currOp = res.inprog[0];
     // State should have changed.
@@ -182,6 +200,7 @@ const fpBeforePersistingRejectReadsBeforeTimestamp = configureFailPoint(
 
     res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     checkPostConsistentFieldsOK(res);
     currOp = res.inprog[0];
     // State should have changed.
@@ -211,6 +230,7 @@ forgetMigrationThread.start();
 
     let res = recipientPrimary.adminCommand({currentOp: true, desc: "shard merge recipient"});
     checkStandardFieldsOK(res);
+    checkStatFieldsOK(res);
     checkPostConsistentFieldsOK(res);
     let currOp = res.inprog[0];
     assert.eq(currOp.state, TenantMigrationTest.ShardMergeRecipientState.kConsistent, res);

@@ -139,6 +139,14 @@ NamespaceString NamespaceStringUtil::deserialize(boost::optional<TenantId> tenan
     return deserializeForStorage(std::move(tenantId), ns, context);
 }
 
+NamespaceString NamespaceStringUtil::deserialize(const DatabaseName& dbName, StringData coll) {
+    // TODO SERVER-78534: if gMultitenancySupport is false, create a NamespaceString object
+    // directly. Otherwise, check the tenant id, db name and collection name before creating a
+    // NamespaceString object, because We allow only specific global internal collections to be
+    // created without a tenantId.
+    return NamespaceString{dbName, coll};
+}
+
 NamespaceString NamespaceStringUtil::deserializeForStorage(boost::optional<TenantId> tenantId,
                                                            StringData ns,
                                                            const SerializationContext& context) {
@@ -331,6 +339,12 @@ NamespaceString NamespaceStringUtil::parseFailPointData(const BSONObj& data,
         ? boost::none
         : boost::optional<TenantId>(TenantId::parseFromBSON(tenantField));
     return NamespaceStringUtil::deserialize(tenantId, ns);
+}
+
+NamespaceString NamespaceStringUtil::deserializeForErrorMsg(StringData nsInErrMsg) {
+    // TenantId always prefix in the error message. This method returns either (tenantId,
+    // nonPrefixedDb) or (none, prefixedDb) depending on gMultitenancySupport flag.
+    return NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(nsInErrMsg);
 }
 
 }  // namespace mongo

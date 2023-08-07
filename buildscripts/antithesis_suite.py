@@ -22,6 +22,8 @@ HOOKS_BLACKLIST = [
 
 _SUITES_PATH = os.path.join("buildscripts", "resmokeconfig", "suites")
 
+MONGOS_PORT = 27017
+
 
 def delete_archival(suite):
     """Remove archival for Antithesis environment."""
@@ -45,13 +47,28 @@ def make_hooks_compatible(suite):
             raise RuntimeError('Unknown structure in hook. File a TIG ticket.')
 
 
-def use_external_fixture(suite):
+def use_external_fixture(suite_name, suite):
     """Use external version of this fixture."""
     if suite.get("executor", {}).get("fixture", None):
         suite["executor"]["fixture"] = {
             "class": f"External{suite['executor']['fixture']['class']}",
-            "shell_conn_string": "mongodb://mongos:27017"
+            "shell_conn_string": get_mongos_connection_url(suite),
+            "original_suite_name": suite_name,
         }
+
+
+def get_mongos_connection_url(suite):
+    """
+    Return the mongos connection URL for suite if Antithesis compatible.
+
+    :param suite: Parsed YAML document for the suite we wish to connect to.
+    :return: Connection url for the suite, or a warning if Antithesis incompatible.
+    """
+    if suite.get("executor", {}).get("fixture", {}).get("num_mongos", None):
+        return "mongodb://" + ",".join(
+            [f"mongos{i}:{MONGOS_PORT}" for i in range(suite['executor']['fixture']['num_mongos'])])
+    else:
+        return "ANTITHESIS_INCOMPATIBLE"
 
 
 def update_test_data(suite):
@@ -77,11 +94,11 @@ def update_exclude_tags(suite):
         suite['selector']['exclude_with_any_tags'].append('antithesis_incompatible')
 
 
-def make_suite_antithesis_compatible(suite):
+def make_suite_antithesis_compatible(suite_name, suite):
     """Modify suite in-place to be antithesis compatible."""
     delete_archival(suite)
     make_hooks_compatible(suite)
-    use_external_fixture(suite)
+    use_external_fixture(suite_name, suite)
     update_test_data(suite)
     update_shell(suite)
     update_exclude_tags(suite)
@@ -97,7 +114,7 @@ def _generate(suite_name: str) -> None:
     with open(os.path.join(_SUITES_PATH, f"{suite_name}.yml")) as fstream:
         suite = yaml.safe_load(fstream)
 
-    make_suite_antithesis_compatible(suite)
+    make_suite_antithesis_compatible(suite_name, suite)
 
     out = yaml.dump(suite)
     with open(os.path.join(_SUITES_PATH, f"antithesis_{suite_name}.yml"), "w") as fstream:

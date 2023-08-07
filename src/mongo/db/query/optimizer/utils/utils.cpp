@@ -62,6 +62,42 @@
 
 namespace mongo::optimizer {
 
+void handleScanNodeRemoveOrphansRequirement(const ABTVector& shardKeyPaths,
+                                            PhysPlanBuilder& builder,
+                                            FieldProjectionMap& fieldProjectionMap,
+                                            const IndexReqTarget indexReqTarget,
+                                            const CEType groupCE,
+                                            PrefixId& prefixId) {
+    // Seek nodes are created with a Limit of 1, so the CE will be 1.
+    const auto calculatedCE = indexReqTarget == IndexReqTarget::Seek ? CEType{1.0} : groupCE;
+    // Use EvaluationNodes to get the projections needed to perform shard filtering. Note that
+    // the appropriate top-level projection is used as the input.
+    ABTVector shardKeyComponentProjections;
+    for (auto& path : shardKeyPaths) {
+        const PathGet* pathGet = path.cast<PathGet>();
+        const auto& fieldName = FieldNameType{pathGet->name().value().toString()};
+        // The caller ensures that the top level path element of each component of the shard key is
+        // pushed down as a projection produced by the PhysicalScan/Seek.
+        auto projName = fieldProjectionMap._fieldProjections.at(fieldName);
+
+        // If the path is dotted, get the needed information
+        if (pathGet->getPath().is<PathGet>()) {
+            auto parentProjName = projName;
+            projName = prefixId.getNextId("shardKey");
+            builder.make<EvaluationNode>(
+                calculatedCE,
+                projName,
+                make<EvalPath>(pathGet->getPath(), make<Variable>(parentProjName)),
+                std::move(builder._node));
+        }
+        shardKeyComponentProjections.push_back(make<Variable>(projName));
+    }
+    // Make the FunctionCall and FilterNode.
+    auto functionCallNode =
+        make<FunctionCall>("shardFilter", std::move(shardKeyComponentProjections));
+    builder.make<FilterNode>(calculatedCE, std::move(functionCallNode), std::move(builder._node));
+}
+
 ABT makeBalancedBooleanOpTree(Operations logicOp, std::vector<ABT> leaves) {
     auto builder = [=](ABT lhs, ABT rhs) {
         return make<BinaryOp>(logicOp, std::move(lhs), std::move(rhs));
@@ -291,7 +327,8 @@ public:
                                               {} /*multikeynessTrie*/,
                                               leftReqMap,
                                               renames_unused,
-                                              {} /*constFold*/);
+                                              {} /*constFold*/,
+                                              {} /*pathToInterval*/);
             tassert(6624168,
                     "Cannot detect empty intervals without providing a constant folder",
                     !hasEmptyInterval);
@@ -346,8 +383,9 @@ public:
      * When this function returns a nonempty optional, it may modify or move from the arguments.
      * When it returns boost::none the arguments are unchanged.
      *
-     * TODO SERVER-73827 Instead of handling these special cases, just construct a disjunction and
-     * then simplify; and get rid of this function.
+     * TODO SERVER-79620: Incorporate PSR simplifications into BoolExpr builder.
+     * Instead of handling these special cases, construct a disjunction and then simplify; and
+     * remove this function.
      */
     static ResultType createSameFieldDisjunction(ResultType& leftResult, ResultType& rightResult) {
         auto& leftReqMap = leftResult->_reqMap;
@@ -374,7 +412,7 @@ public:
             // Each side is a conjunction, and we're taking a disjunction.
             // Use the fact that OR distributes over AND to build a new conjunction:
             //     (a & b) | (x & y) == (a | x) & (a | y) & (b | x) & (b | y)
-            PSRExpr::Builder resultReqs;
+            BoolExprBuilder<PartialSchemaEntry> resultReqs;
             resultReqs.pushDisj().pushConj();
             PSRExpr::visitDNF(
                 rightReqMap.getRoot(),
@@ -612,7 +650,7 @@ public:
         // combineIntervalsDNF() because this function would end up adding its first argument to
         // itself for each new bound, thus creating N*(N+1)/2 duplicates.
 
-        IntervalReqExpr::Builder builder;
+        BoolExprBuilder<IntervalRequirement> builder;
         builder.pushDisj();
         for (size_t i = 0; i < boundArray->size(); i++) {
             auto singleBoundLow =
@@ -772,7 +810,8 @@ bool simplifyPartialSchemaReqPaths(const boost::optional<ProjectionName>& scanPr
                                    const MultikeynessTrie& multikeynessTrie,
                                    PartialSchemaRequirements& reqMap,
                                    ProjectionRenames& projectionRenames,
-                                   const ConstFoldFn& constFold) {
+                                   const ConstFoldFn& constFold,
+                                   const PathToIntervalFn& pathToInterval) {
     const auto simplifyFn = [&constFold](IntervalReqExpr::Node& intervals) -> bool {
         normalizeIntervals(intervals);
         auto simplified = simplifyDNFIntervals(intervals, constFold);
@@ -782,10 +821,10 @@ bool simplifyPartialSchemaReqPaths(const boost::optional<ProjectionName>& scanPr
         return simplified.has_value();
     };
 
-    PSRExpr::Builder resultReqs;
+    BoolExprBuilder<PartialSchemaEntry> resultReqs;
     resultReqs.pushDisj();
 
-    // TODO SERVER-73827 The builder should track trivially true/false correctly.
+    // TODO SERVER-79620: Incorporate PSR simplifications into BoolExpr builder.
     // If any one conjunction is empty, the overall disjunction is trivially true.
     bool hasEmptyConjunction = false;
 
@@ -856,8 +895,7 @@ bool simplifyPartialSchemaReqPaths(const boost::optional<ProjectionName>& scanPr
                     }
 
                     if (constFold && !simplifyFn(resultIntervals)) {
-                        // TODO SERVER-73827 Consider having the BoolExpr builder handle simplifying
-                        // away trivial (always-true or always-false) clauses.
+                        // TODO SERVER-79620: Incorporate PSR simplifications into BoolExpr builder.
 
                         // An always-false conjunct means the whole conjunction is always-false.
                         // However, there can be other disjuncts, so we can't short-circuit the
@@ -882,7 +920,7 @@ bool simplifyPartialSchemaReqPaths(const boost::optional<ProjectionName>& scanPr
 
     boost::optional<PSRExpr::Node> builderResult = resultReqs.finish();
     if (!builderResult) {
-        // TODO SERVER-73827 The builder should track trivially true/false correctly.
+        // TODO SERVER-79620: Incorporate PSR simplifications into BoolExpr builder.
         if (hasEmptyConjunction) {
             // We have an empty conjunction -> trivially true.
             reqMap = PartialSchemaRequirements{};
@@ -896,7 +934,7 @@ bool simplifyPartialSchemaReqPaths(const boost::optional<ProjectionName>& scanPr
 
     if (constFold) {
         // Intersect and normalize intervals.
-        const bool representable = newReqs.simplify([&](const PartialSchemaKey&,
+        const bool representable = newReqs.simplify([&](const PartialSchemaKey& key,
                                                         PartialSchemaRequirement& req) -> bool {
             auto resultIntervals = req.getIntervals();
             if (!simplifyFn(resultIntervals)) {
@@ -904,6 +942,12 @@ bool simplifyPartialSchemaReqPaths(const boost::optional<ProjectionName>& scanPr
             }
 
             normalizeIntervals(resultIntervals);
+
+            if (pathToInterval &&
+                requiresArrayOnNonMultikeyPath(
+                    key._path, resultIntervals, multikeynessTrie, pathToInterval)) {
+                return false;
+            }
 
             req = {req.getBoundProjectionName(), std::move(resultIntervals), req.getIsPerfOnly()};
             return true;
@@ -1002,7 +1046,8 @@ bool isSubsetOfPartialSchemaReq(const PartialSchemaRequirements& lhs,
                                                                 {} /*multikeynessTrie*/,
                                                                 intersection,
                                                                 renames_unused,
-                                                                {} /*constFold*/);
+                                                                {} /*constFold*/,
+                                                                {} /*pathToInterval*/);
     tassert(6624169,
             "Cannot detect empty intervals without providing a constant folder",
             !hasEmptyInterval);
@@ -1238,7 +1283,7 @@ static bool computeCandidateIndexEntry(PrefixId& prefixId,
     }
 
     // Compute residual predicates from unsatisfied partial schema keys.
-    ResidualRequirements::Builder residualReqs;
+    BoolExprBuilder<ResidualRequirement> residualReqs;
     residualReqs.pushDisj().pushConj();
     for (auto queryKeyIt = unsatisfiedKeys.begin(); queryKeyIt != unsatisfiedKeys.end();) {
         const auto& queryKey = *queryKeyIt;
@@ -1423,7 +1468,7 @@ boost::optional<ScanParams> computeScanParams(PrefixId& prefixId,
                                               const ProjectionName& rootProj) {
     ScanParams result;
     auto& fieldProjMap = result._fieldProjectionMap;
-    ResidualRequirements::Builder residReqs;
+    BoolExprBuilder<ResidualRequirement> residReqs;
 
     bool invalid = false;
     size_t entryIndex = 0;
@@ -1770,13 +1815,13 @@ void lowerPartialSchemaRequirements(boost::optional<CEType> scanGroupCE,
                                    const Requirements::VisitorContext&) {
                                    auto residualCE = baseCE;
                                    if (residualCE) {
+                                       // Compute CE for the node implementing the current
+                                       // PartialSchemaRequirement.
+                                       if (entry._ce && *scanGroupCE > 0.0) {
+                                           indexPredSels.push_back(*entry._ce / *scanGroupCE);
+                                       }
                                        if (!indexPredSels.empty()) {
                                            *residualCE *= ce::conjExponentialBackoff(indexPredSels);
-                                       }
-                                       if (entry._ce && *scanGroupCE > 0.0) {
-                                           // Compute the selectivity after we assign CE, which is
-                                           // the "input" to the cost.
-                                           indexPredSels.push_back(*entry._ce / *scanGroupCE);
                                        }
                                    }
 
@@ -1885,7 +1930,7 @@ void sortResidualRequirements(ResidualRequirementsWithOptionalCE::Node& residual
 
 ResidualRequirementsWithOptionalCE::Node createResidualReqsWithCE(
     const ResidualRequirements::Node& residReqs, const PartialSchemaKeyCE& partialSchemaKeyCE) {
-    ResidualRequirementsWithOptionalCE::Builder b;
+    BoolExprBuilder<ResidualRequirementWithOptionalCE> b;
     b.pushDisj();
 
     ResidualRequirements::visitDisjuncts(
@@ -1913,7 +1958,7 @@ ResidualRequirementsWithOptionalCE::Node createResidualReqsWithCE(
 }
 
 ResidualRequirementsWithOptionalCE::Node createResidualReqsWithEmptyCE(const PSRExpr::Node& reqs) {
-    ResidualRequirementsWithOptionalCE::Builder b;
+    BoolExprBuilder<ResidualRequirementWithOptionalCE> b;
     b.pushDisj();
 
     PSRExpr::visitDisjuncts(reqs, [&](const PSRExpr::Node& child, const PSRExpr::VisitorContext&) {
@@ -1947,7 +1992,7 @@ void removeRedundantResidualPredicates(const ProjectionNameOrderPreservingSet& r
 
     // Remove unused residual requirements.
     if (residualReqs) {
-        ResidualRequirements::Builder newReqs;
+        BoolExprBuilder<ResidualRequirement> newReqs;
         newReqs.pushDisj();
 
         ResidualRequirements::visitDisjuncts(

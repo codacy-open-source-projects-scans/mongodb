@@ -109,7 +109,8 @@ public:
             opCtx->sleepFor(Milliseconds(millis));
             return;
         }
-        auto nss = NamespaceString(ns);
+        // This is not ran in multitenancy since sleep is an internal testing command.
+        auto nss = NamespaceStringUtil::deserialize(boost::none, ns);
         uassert(50961,
                 "lockTarget is not a valid namespace",
                 NamespaceString::validDBName(nss.dbName()));
@@ -138,12 +139,6 @@ public:
         LOGV2(6001603,
               "Collection lock acquired by sleep command.",
               "lockMode"_attr = modeName(mode));
-        opCtx->sleepFor(Milliseconds(millis));
-    }
-
-    void _sleepInPBWM(mongo::OperationContext* opCtx, long long millis) {
-        Lock::ResourceLock pbwm(opCtx, resourceIdParallelBatchWriterMode, MODE_X);
-        LOGV2(6001604, "PBWM MODE_X lock acquired by sleep command.");
         opCtx->sleepFor(Milliseconds(millis));
     }
 
@@ -204,11 +199,6 @@ public:
             StringData lockTarget;
             if (cmdObj["lockTarget"]) {
                 lockTarget = cmdObj["lockTarget"].checkAndGetStringData();
-            }
-
-            if (lockTarget == "ParallelBatchWriterMode") {
-                _sleepInPBWM(opCtx, msRemaining.count());
-                continue;
             }
 
             if (lockTarget == "RSTL") {

@@ -400,7 +400,6 @@ protected:
 
     std::unique_ptr<MongoDSessionCatalog::Session> checkOutSession(
         boost::optional<bool> startNewTxn = true) {
-        opCtx()->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
         opCtx()->setInMultiDocumentTransaction();
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
         auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
@@ -1395,12 +1394,12 @@ TEST_F(TxnParticipantTest, ContinuingATransactionWithNoResourcesAborts) {
 }
 
 TEST_F(TxnParticipantTest, CannotStartNewTransactionIfNotPrimary) {
-    ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
-        repl::MemberState::RS_SECONDARY));
-
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
     auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
+        repl::MemberState::RS_SECONDARY));
 
     // Include 'autocommit=false' for transactions.
     ASSERT_THROWS_CODE(txnParticipant.beginOrContinue(opCtx(),
@@ -1412,12 +1411,12 @@ TEST_F(TxnParticipantTest, CannotStartNewTransactionIfNotPrimary) {
 }
 
 TEST_F(TxnParticipantTest, CannotStartRetryableWriteIfNotPrimary) {
-    ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
-        repl::MemberState::RS_SECONDARY));
-
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
     auto opCtxSession = mongoDSessionCatalog->checkOutSession(opCtx());
     auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    ASSERT_OK(repl::ReplicationCoordinator::get(opCtx())->setFollowerMode(
+        repl::MemberState::RS_SECONDARY));
 
     // Omit the 'autocommit' field for retryable writes.
     ASSERT_THROWS_CODE(txnParticipant.beginOrContinue(opCtx(),

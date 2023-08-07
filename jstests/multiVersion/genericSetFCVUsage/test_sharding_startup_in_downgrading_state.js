@@ -1,12 +1,4 @@
-/*
- * Tests startup with a node in downgrading state.
- * Starts a sharded cluster with 2 shards, each with 2 nodes.
- *
- *  @tags: [requires_fcv_70]
- */
-
-load('jstests/multiVersion/libs/verify_versions.js');
-load('jstests/libs/fail_point_util.js');
+import "jstests/multiVersion/libs/verify_versions.js";
 
 function runSharding() {
     let fcvDoc;
@@ -38,7 +30,8 @@ function runSharding() {
         configPrimary.adminCommand({configureFailPoint: "failDowngrading", mode: "alwaysOn"}));
 
     // Start downgrading. It will fail.
-    assert.commandFailed(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV}));
+    assert.commandFailed(
+        mongosAdminDB.runCommand({setFeatureCompatibilityVersion: lastLTSFCV, confirm: true}));
 
     st.rs0.awaitReplication();
     st.rs1.awaitReplication();
@@ -87,7 +80,8 @@ function runSharding() {
 
     // Upgrade the sharded cluster to upgraded (latestFCV).
     mongosAdminDB = st.s.getDB("admin");
-    assert.commandWorked(mongosAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV}));
+    assert.commandWorked(
+        mongosAdminDB.runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 
     st.rs0.awaitReplication();
     st.rs1.awaitReplication();

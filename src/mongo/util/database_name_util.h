@@ -65,18 +65,20 @@ public:
                                  const SerializationContext& context = SerializationContext());
 
     /**
-     *
-     * TODO SERVER-76294 Remove this function. Any remaining call sites must be changed to use a
-     * function on DatabaseNameUtil.
-     */
-    static std::string serializeForAuth(
-        const DatabaseName& dbName, const SerializationContext& context = SerializationContext());
-    /**
      * To be used only for durable catalog. We always include the tenantId as prefixed in a
      * databasename for the catalog.
      */
     static std::string serializeForCatalog(
         const DatabaseName& dbName, const SerializationContext& context = SerializationContext());
+
+    /**
+     * To be used only for RemoteCommandRequest.
+     * We always include the tenant as prefixed in the `dbname` for the RemoteCommandRequest
+     * objects.
+     * TODO SERVER-73658: remove this function once RemoteCommandRequest is switched over to use
+     * DatabaseName.
+     */
+    static std::string serializeForRemoteCmdRequest(const DatabaseName& dbName);
 
     /**
      * Deserializes StringData dbName to a DatabaseName object.
@@ -111,6 +113,11 @@ public:
      */
     static DatabaseName deserializeForCatalog(
         StringData db, const SerializationContext& context = SerializationContext());
+
+    /**
+     * To be used only for deserializing a DatabaseName object from a db string in error messages.
+     */
+    static DatabaseName deserializeForErrorMsg(StringData dbInErrMsg);
 
 private:
     static DatabaseName parseFromStringExpectTenantIdInMultitenancyMode(StringData dbName);
