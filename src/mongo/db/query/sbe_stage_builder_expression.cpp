@@ -56,6 +56,7 @@
 #include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
+#include "mongo/db/exec/sbe/util/pcre.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
@@ -293,13 +294,12 @@ void generateStringCaseConversionExpression(ExpressionVisitorContext* _context,
  */
 std::unique_ptr<sbe::EExpression> generateRegexNullResponse(StringData exprName) {
     if (exprName.toString().compare(std::string("regexMatch")) == 0) {
-        return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean,
-                                          sbe::value::bitcastFrom<bool>(false));
+        return makeBoolConstant(false);
     } else if (exprName.toString().compare("regexFindAll") == 0) {
         auto [arrTag, arrVal] = sbe::value::makeNewArray();
-        return sbe::makeE<sbe::EConstant>(arrTag, arrVal);
+        return makeConstant(arrTag, arrVal);
     }
-    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0);
+    return makeNullConstant();
 }
 
 class ExpressionPreVisitor final : public ExpressionConstVisitor {
@@ -3648,10 +3648,7 @@ private:
                                                           StringData expressionName,
                                                           StringData parameterName) {
         return {
-            makeNot(makeFunction("typeMatch",
-                                 dateRef.clone(),
-                                 makeConstant(sbe::value::TypeTags::NumberInt64,
-                                              sbe::value::bitcastFrom<int64_t>(dateTypeMask())))),
+            makeNot(makeFunction("typeMatch", dateRef.clone(), makeInt32Constant(dateTypeMask()))),
             sbe::makeE<sbe::EFail>(errorCode,
                                    str::stream()
                                        << expressionName << " parameter '" << parameterName
@@ -3674,7 +3671,7 @@ private:
      * 'variable' is null or missing.
      */
     static CaseValuePair generateReturnNullIfNullOrMissing(const sbe::EVariable& variable) {
-        return {generateNullOrMissing(variable), makeConstant(sbe::value::TypeTags::Null, 0)};
+        return {generateNullOrMissing(variable), makeNullConstant()};
     }
 
     static ABTCaseValuePair generateABTReturnNullIfNullOrMissing(const optimizer::ABT& name) {
@@ -3682,8 +3679,7 @@ private:
     }
 
     static CaseValuePair generateReturnNullIfNullOrMissing(std::unique_ptr<sbe::EExpression> expr) {
-        return {generateNullOrMissing(std::move(expr)),
-                makeConstant(sbe::value::TypeTags::Null, 0)};
+        return {generateNullOrMissing(std::move(expr)), makeNullConstant()};
     }
 
     /**
@@ -3691,10 +3687,11 @@ private:
      */
     static std::unique_ptr<sbe::EExpression> generateIsEqualToStringCheck(
         const sbe::EExpression& expr, StringData string) {
-        return sbe::makeE<sbe::EPrimBinary>(
-            sbe::EPrimBinary::logicAnd,
-            makeFunction("isString", expr.clone()),
-            sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::eq, expr.clone(), makeConstant(string)));
+        return sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::logicAnd,
+                                            makeFunction("isString", expr.clone()),
+                                            sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::eq,
+                                                                         expr.clone(),
+                                                                         makeStrConstant(string)));
     }
 
     static optimizer::ABT generateABTIsEqualToStringCheck(const optimizer::ABT& expr,
@@ -4068,7 +4065,7 @@ private:
                 }
 
                 // Create the compiled Regex from constant pattern and options.
-                auto [regexTag, regexVal] = sbe::value::makeNewPcreRegex(*pattern, options);
+                auto [regexTag, regexVal] = sbe::makeNewPcreRegex(*pattern, options);
                 auto compiledRegex = makeABTConstant(regexTag, regexVal);
                 return makeRegexFunctionCall(std::move(compiledRegex));
             }

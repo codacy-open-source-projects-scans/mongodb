@@ -86,6 +86,15 @@ public:
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
     GetModPathsReturn getModifiedPaths() const final;
+
+    /**
+     * Returns a map with the fieldPath and expression of the _id field for $group.
+     * If _id is a single expression, such as {_id: "$field"}, the function will return {_id:
+     * "$field"}.
+     * If _id is a nested expression, such as  {_id: {c: "$field"}}, the function will
+     * return {_id.c: "$field"}}.
+     * Both maps are the same length, even though the original '_id' fields are different.
+     */
     StringMap<boost::intrusive_ptr<Expression>> getIdFields() const;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final;
@@ -155,6 +164,22 @@ public:
         return _groupProcessor.getMemoryTracker()._maxAllowedMemoryUsageBytes;
     }
 
+    /**
+     * Returns a vector of the _id field names. If the id field is a single expression, this will
+     * return an empty vector.
+     */
+    const std::vector<std::string>& getIdFieldNames() const {
+        return _groupProcessor.getIdFieldNames();
+    }
+
+    /**
+     * Returns a vector of the expressions in the _id field. If the id field is a single expression,
+     * this will return a vector with one element.
+     */
+    const std::vector<boost::intrusive_ptr<Expression>>& getIdExpressions() const {
+        return _groupProcessor.getIdExpressions();
+    }
+
     bool canRunInParallelBeforeWriteStage(
         const OrderedPathSet& nameOfShardKeyFieldsUponEntryToStage) const final;
 
@@ -178,7 +203,7 @@ public:
 protected:
     DocumentSourceGroupBase(StringData stageName,
                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                            boost::optional<size_t> maxMemoryUsageBytes = boost::none);
+                            boost::optional<int64_t> maxMemoryUsageBytes = boost::none);
 
     virtual ~DocumentSourceGroupBase();
 

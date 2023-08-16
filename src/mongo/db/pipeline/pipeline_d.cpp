@@ -98,6 +98,7 @@
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_sample.h"
 #include "mongo/db/pipeline/document_source_sample_from_random_cursor.h"
+#include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
@@ -124,6 +125,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/stage_types.h"
@@ -212,7 +214,10 @@ struct CompatiblePipelineStages {
     bool transform : 1;
 
     bool match : 1;
+    bool sort : 1;
     bool search : 1;
+
+    bool window : 1;
 };
 
 // Determine if 'stage' is eligible for SBE, and if it is add it to the 'stagesForPushdown' list as
@@ -266,6 +271,14 @@ bool pushDownPipelineStageIfCompatible(
         stagesForPushdown.emplace_back(
             std::make_unique<InnerPipelineStageImpl>(matchStage, isLastSource));
         return true;
+    } else if (auto sortStage = dynamic_cast<DocumentSourceSort*>(stage.get())) {
+        if (!allowedStages.sort || !isSortSbeCompatible(sortStage->getSortKeyPattern())) {
+            return false;
+        }
+
+        stagesForPushdown.emplace_back(
+            std::make_unique<InnerPipelineStageImpl>(sortStage, isLastSource));
+        return true;
     } else if (const auto& searchHelpers = getSearchHelpers(opCtx->getServiceContext());
                searchHelpers->isSearchStage(stage.get()) ||
                searchHelpers->isSearchMetaStage(stage.get())) {
@@ -273,7 +286,16 @@ bool pushDownPipelineStageIfCompatible(
             return false;
         }
 
-        stagesForPushdown.push_back(std::make_unique<InnerPipelineStageImpl>(stage, isLastSource));
+        stagesForPushdown.emplace_back(
+            std::make_unique<InnerPipelineStageImpl>(stage, isLastSource));
+        return true;
+    } else if (auto windowStage =
+                   dynamic_cast<DocumentSourceInternalSetWindowFields*>(stage.get())) {
+        if (!allowedStages.window || windowStage->sbeCompatibility() < minRequiredCompatibility) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(
+            std::make_unique<InnerPipelineStageImpl>(windowStage, isLastSource));
         return true;
     }
 
@@ -316,6 +338,7 @@ constexpr size_t kSbeMaxPipelineStages = 100;
 std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStagesForPushdown(
     const MultipleCollectionAccessor& collections,
     const CanonicalQuery* cq,
+    bool needsMerge,
     const Pipeline* pipeline) {
     // We will eventually use the extracted group stages to populate 'CanonicalQuery::pipeline'
     // which requires stages to be wrapped in an interface.
@@ -366,11 +389,19 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
         .transform = SbeCompatibility::flagGuarded >= minRequiredCompatibility,
         .match = SbeCompatibility::flagGuarded >= minRequiredCompatibility,
 
+        // Note: even if its sort pattern is SBE compatible, we cannot push down a $sort stage when
+        // the pipeline is the shard part of a sorted-merge query on a sharded collection. It is
+        // possible that the merge operation will need a $sortKey field from the sort, and SBE plans
+        // do not yet support metadata fields.
+        .sort = (SbeCompatibility::flagGuarded >= minRequiredCompatibility) && !needsMerge,
+
         // TODO (SERVER-77229): SBE execution of $search requires 'featureFlagSearchInSbe' to be
         // enabled.
         // (Ignore FCV check): As with 'featureFlagSbeFull' (above), the effects of
         // 'featureFlagSearchInSbe' are local to this node, making it safe to ignore the FCV.
         .search = feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe(),
+
+        .window = !(SbeCompatibility::fullyCompatible < minRequiredCompatibility),
     };
 
     for (auto itr = sources.begin(); itr != sources.end(); ++itr) {
@@ -536,11 +567,11 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
     // call this lambda in two phases: 1) determine compatible stages and attach them to the
     // canonical query, and 2) finalize the push down and trim the pushed-down stages from the
     // original pipeline.
-    auto extractAndAttachPipelineStages = [&collections, &pipeline](auto* canonicalQuery,
-                                                                    bool attachOnly) {
+    auto extractAndAttachPipelineStages = [&collections, &pipeline, needsMerge{expCtx->needsMerge}](
+                                              auto* canonicalQuery, bool attachOnly) {
         if (attachOnly) {
-            canonicalQuery->setPipeline(
-                findSbeCompatibleStagesForPushdown(collections, canonicalQuery, pipeline));
+            canonicalQuery->setPipeline(findSbeCompatibleStagesForPushdown(
+                collections, canonicalQuery, needsMerge, pipeline));
         } else {
             trimPipelineStages(pipeline, canonicalQuery->pipeline().size());
         }
@@ -676,33 +707,36 @@ bool areSortFieldsModifiedByProjection(bool seenUnpack,
     }
 }
 
-std::tuple<DocumentSourceInternalUnpackBucket*, DocumentSourceSort*> findUnpackThenSort(
-    const Pipeline::SourceContainer& sources) {
-    DocumentSourceSort* sortStage = nullptr;
-    DocumentSourceInternalUnpackBucket* unpackStage = nullptr;
+// There can be exactly one unpack stage in a pipeline but multiple sort stages. We'll find the
+// _first_ sort.
+struct SortAndUnpackInPipeline {
+    DocumentSourceInternalUnpackBucket* unpack = nullptr;
+    DocumentSourceSort* sort = nullptr;
+    int unpackIdx = -1;
+    int sortIdx = -1;
+};
+SortAndUnpackInPipeline findUnpackAndSort(const Pipeline::SourceContainer& sources) {
+    SortAndUnpackInPipeline su;
 
-    auto sourcesIt = sources.begin();
-    while (sourcesIt != sources.end()) {
-        if (!sortStage) {
-            sortStage = dynamic_cast<DocumentSourceSort*>(sourcesIt->get());
-
-            if (sortStage) {
-                // Do not double optimize
-                if (sortStage->isBoundedSortStage()) {
-                    return {nullptr, nullptr};
-                }
-
-                return {unpackStage, sortStage};
-            }
+    int idx = 0;
+    auto itr = sources.begin();
+    while (itr != sources.end()) {
+        if (!su.unpack) {
+            su.unpack = dynamic_cast<DocumentSourceInternalUnpackBucket*>(itr->get());
+            su.unpackIdx = idx;
+        }
+        if (!su.sort) {
+            su.sort = dynamic_cast<DocumentSourceSort*>(itr->get());
+            su.sortIdx = idx;
+        }
+        if (su.unpack && su.sort) {
+            break;
         }
 
-        if (!unpackStage) {
-            unpackStage = dynamic_cast<DocumentSourceInternalUnpackBucket*>(sourcesIt->get());
-        }
-        ++sourcesIt;
+        ++itr;
+        ++idx;
     }
-
-    return {unpackStage, sortStage};
+    return su;
 }
 }  // namespace
 
@@ -969,7 +1003,7 @@ PipelineD::buildInnerQueryExecutorSample(DocumentSourceSample* sampleStage,
 
     boost::optional<BucketUnpacker> bucketUnpacker;
     if (unpackBucketStage) {
-        bucketUnpacker = unpackBucketStage->bucketUnpacker();
+        bucketUnpacker = unpackBucketStage->bucketUnpacker().copy();
     }
     auto exec = uassertStatusOK(createRandomCursorExecutor(
         collection, expCtx, pipeline, sampleSize, numRecords, std::move(bucketUnpacker)));
@@ -1534,10 +1568,27 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
         ? DepsTracker::kDefaultUnavailableMetadata & ~DepsTracker::kOnlyTextScore
         : DepsTracker::kDefaultUnavailableMetadata;
 
-    // If this is a query on a time-series collection then it may be eligible for a post-planning
-    // sort optimization. We check eligibility and perform the rewrite here.
-    auto [unpack, sort] = findUnpackThenSort(pipeline->_sources);
-    const bool timeseriesBoundedSortOptimization = unpack && sort;
+    // If this is a query on a time-series collection we might need to keep it fully classic to
+    // ensure no perf regressions until we implement the corresponding scenarios fully in SBE.
+    SortAndUnpackInPipeline su = findUnpackAndSort(pipeline->_sources);
+    // Do not double-optimize the sort.
+    auto sort = (su.sort && su.sort->isBoundedSortStage()) ? nullptr : su.sort;
+    auto unpack = su.unpack;
+    if (unpack &&
+        unpack->bucketUnpacker().bucketSpec().behavior() == BucketSpec::Behavior::kExclude) {
+        // Currently we only support in SBE unpacking with a statically known set of fields.
+        expCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
+    }
+    if (unpack && sort) {
+        // TODO SERVER-79061: disable only the case when it's possible for bounded sort to be used.
+        // NB: tests in jstests/core/timeseries/timeseries_lastpoint.js over-specify the expected
+        // plan shapes and fail when lowered to SBE even if the bounded sort isn't used.
+        expCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
+    }
+
+    // But in classic it may be eligible for a post-planning sort optimization. We check eligibility
+    // and perform the rewrite here.
+    const bool timeseriesBoundedSortOptimization = unpack && sort && (su.unpackIdx < su.sortIdx);
     QueryPlannerParams plannerOpts;
     if (timeseriesBoundedSortOptimization) {
         plannerOpts.traversalPreference = createTimeSeriesTraversalPreference(unpack, sort);
@@ -1764,14 +1815,21 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
         (pipeline->peekFront() && pipeline->peekFront()->constraints().isChangeStreamStage()) ||
         (aggRequest && aggRequest->getRequestReshardingResumeToken());
 
-    auto attachExecutorCallback =
-        [cursorType, trackOplogTS](const MultipleCollectionAccessor& collections,
-                                   std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
-                                   Pipeline* pipeline) {
-            auto cursor = DocumentSourceCursor::create(
-                collections, std::move(exec), pipeline->getContext(), cursorType, trackOplogTS);
-            pipeline->addInitialSource(std::move(cursor));
-        };
+    auto resumeTrackingType = DocumentSourceCursor::ResumeTrackingType::kNone;
+    if (trackOplogTS) {
+        resumeTrackingType = DocumentSourceCursor::ResumeTrackingType::kOplog;
+    } else if (aggRequest && aggRequest->getRequestResumeToken()) {
+        resumeTrackingType = DocumentSourceCursor::ResumeTrackingType::kNonOplog;
+    }
+
+    auto attachExecutorCallback = [cursorType, resumeTrackingType](
+                                      const MultipleCollectionAccessor& collections,
+                                      std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
+                                      Pipeline* pipeline) {
+        auto cursor = DocumentSourceCursor::create(
+            collections, std::move(exec), pipeline->getContext(), cursorType, resumeTrackingType);
+        pipeline->addInitialSource(std::move(cursor));
+    };
     return std::make_pair(std::move(attachExecutorCallback), std::move(exec));
 }
 

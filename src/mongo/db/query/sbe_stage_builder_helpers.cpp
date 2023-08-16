@@ -132,35 +132,13 @@ std::unique_ptr<sbe::EExpression> makeBinaryOp(sbe::EPrimBinary::Op binaryOp,
     return makeBinaryOp(binaryOp, std::move(lhs), std::move(rhs), std::move(collatorVar));
 }
 
-std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression> input,
-                                               std::unique_ptr<sbe::EExpression> arr,
-                                               std::unique_ptr<sbe::EExpression> collator) {
-    if (collator) {
-        return makeFunction("collIsMember", std::move(collator), std::move(input), std::move(arr));
-    } else {
-        return makeFunction("isMember", std::move(input), std::move(arr));
-    }
-}
-
-std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression> input,
-                                               std::unique_ptr<sbe::EExpression> arr,
-                                               StageBuilderState& state) {
-    auto collatorSlot = state.getCollatorSlot();
-    auto collatorVar = collatorSlot ? sbe::makeE<sbe::EVariable>(*collatorSlot) : nullptr;
-
-    return makeIsMember(std::move(input), std::move(arr), std::move(collatorVar));
-}
-
 std::unique_ptr<sbe::EExpression> generateNullOrMissingExpr(const sbe::EExpression& expr) {
     return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
                         makeFunction("typeMatch",
                                      expr.clone(),
-                                     makeConstant(sbe::value::TypeTags::NumberInt64,
-                                                  sbe::value::bitcastFrom<int64_t>(
-                                                      getBSONTypeMask(BSONType::jstNULL) |
-                                                      getBSONTypeMask(BSONType::Undefined)))),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean,
-                                                   sbe::value::bitcastFrom<bool>(true)));
+                                     makeInt32Constant(getBSONTypeMask(BSONType::jstNULL) |
+                                                       getBSONTypeMask(BSONType::Undefined))),
+                        makeBoolConstant(true));
 }
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissing(const sbe::EVariable& var) {
@@ -195,14 +173,10 @@ std::unique_ptr<sbe::EExpression> generateLongLongMinCheck(const sbe::EVariable&
         sbe::EPrimBinary::logicAnd,
         makeFunction("typeMatch",
                      var.clone(),
-                     makeConstant(sbe::value::TypeTags::NumberInt64,
-                                  sbe::value::bitcastFrom<int64_t>(
-                                      MatcherTypeSet{BSONType::NumberLong}.getBSONTypeMask()))),
+                     makeInt32Constant(MatcherTypeSet{BSONType::NumberLong}.getBSONTypeMask())),
         makeBinaryOp(sbe::EPrimBinary::eq,
                      var.clone(),
-                     sbe::makeE<sbe::EConstant>(
-                         sbe::value::TypeTags::NumberInt64,
-                         sbe::value::bitcastFrom<int64_t>(std::numeric_limits<int64_t>::min()))));
+                     makeInt64Constant(std::numeric_limits<int64_t>::min())));
 }
 
 std::unique_ptr<sbe::EExpression> generateNaNCheck(const sbe::EVariable& var) {
@@ -222,24 +196,15 @@ std::unique_ptr<sbe::EExpression> generateInfinityCheck(EvalExpr expr, StageBuil
 }
 
 std::unique_ptr<sbe::EExpression> generateNonPositiveCheck(const sbe::EVariable& var) {
-    return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::lessEq,
-                        var.clone(),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
-                                                   sbe::value::bitcastFrom<int32_t>(0)));
+    return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::lessEq, var.clone(), makeInt32Constant(0));
 }
 
 std::unique_ptr<sbe::EExpression> generatePositiveCheck(const sbe::EExpression& expr) {
-    return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::greater,
-                        expr.clone(),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
-                                                   sbe::value::bitcastFrom<int32_t>(0)));
+    return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::greater, expr.clone(), makeInt32Constant(0));
 }
 
 std::unique_ptr<sbe::EExpression> generateNegativeCheck(const sbe::EVariable& var) {
-    return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::less,
-                        var.clone(),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
-                                                   sbe::value::bitcastFrom<int32_t>(0)));
+    return makeBinaryOp(sbe::EPrimBinary::EPrimBinary::less, var.clone(), makeInt32Constant(0));
 }
 
 std::unique_ptr<sbe::EExpression> generateNonObjectCheck(const sbe::EVariable& var) {
@@ -293,10 +258,7 @@ std::unique_ptr<sbe::PlanStage> makeLimitCoScanTree(PlanNodeId planNodeId, long 
 
 std::unique_ptr<sbe::EExpression> makeFillEmptyFalse(std::unique_ptr<sbe::EExpression> e) {
     using namespace std::literals;
-    return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
-                        std::move(e),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean,
-                                                   sbe::value::bitcastFrom<bool>(false)));
+    return makeBinaryOp(sbe::EPrimBinary::fillEmpty, std::move(e), makeBoolConstant(false));
 }
 
 std::unique_ptr<sbe::EExpression> makeVariable(sbe::value::SlotId slotId) {
@@ -314,51 +276,70 @@ std::unique_ptr<sbe::EExpression> makeMoveVariable(sbe::FrameId frameId,
 
 std::unique_ptr<sbe::EExpression> makeFillEmptyNull(std::unique_ptr<sbe::EExpression> e) {
     using namespace std::literals;
-    return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
-                        std::move(e),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0));
+    return makeBinaryOp(sbe::EPrimBinary::fillEmpty, std::move(e), makeNullConstant());
 }
 
 std::unique_ptr<sbe::EExpression> makeFillEmptyUndefined(std::unique_ptr<sbe::EExpression> e) {
     using namespace std::literals;
     return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
                         std::move(e),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::bsonUndefined, 0));
-}
-
-std::unique_ptr<sbe::EExpression> generateShardKeyBinding(
-    const sbe::MatchPath& keyPatternField,
-    sbe::value::FrameIdGenerator& frameIdGenerator,
-    std::unique_ptr<sbe::EExpression> inputExpr,
-    int level) {
-    invariant(level >= 0);
-
-    auto makeGetFieldKeyPattern = [&](std::unique_ptr<sbe::EExpression> slot) {
-        return makeFillEmptyNull(makeFunction(
-            "getField"_sd, std::move(slot), sbe::makeE<sbe::EConstant>(keyPatternField[level])));
-    };
-
-    if (level == keyPatternField.numParts() - 1) {
-        auto frameId = frameIdGenerator.generate();
-        auto bindSlot = sbe::makeE<sbe::EVariable>(frameId, 0);
-        return makeGetFieldKeyPattern(std::move(inputExpr));
-    }
-
-    auto frameId = frameIdGenerator.generate();
-    auto nextSlot = sbe::makeE<sbe::EVariable>(frameId, 0);
-    auto shardKeyBinding =
-        generateShardKeyBinding(keyPatternField, frameIdGenerator, nextSlot->clone(), level + 1);
-
-    return sbe::makeE<sbe::ELocalBind>(
-        frameId,
-        sbe::makeEs(makeGetFieldKeyPattern(std::move(inputExpr))),
-        sbe::makeE<sbe::EIf>(makeFunction("isArray"_sd, nextSlot->clone()),
-                             nextSlot->clone(),
-                             std::move(shardKeyBinding)));
+                        makeConstant(sbe::value::TypeTags::bsonUndefined, 0));
 }
 
 EvalStage makeLimitCoScanStage(PlanNodeId planNodeId, long long limit) {
     return {makeLimitCoScanTree(planNodeId, limit), sbe::makeSV()};
+}
+
+std::unique_ptr<sbe::EExpression> makeNewBsonObject(std::vector<std::string> projectFields,
+                                                    sbe::EExpression::Vector projectValues) {
+    auto makeObjSpec = makeConstant(
+        sbe::value::TypeTags::makeObjSpec,
+        sbe::value::bitcastFrom<sbe::MakeObjSpec*>(new sbe::MakeObjSpec(
+            sbe::MakeObjSpec::FieldBehavior::drop, {} /* fields */, std::move(projectFields))));
+    auto makeObjRoot = makeNothingConstant();
+    sbe::EExpression::Vector makeObjArgs;
+    makeObjArgs.reserve(2 + projectValues.size());
+    makeObjArgs.push_back(std::move(makeObjSpec));
+    makeObjArgs.push_back(std::move(makeObjRoot));
+    std::move(projectValues.begin(), projectValues.end(), std::back_inserter(makeObjArgs));
+
+    return sbe::makeE<sbe::EFunction>("makeBsonObj", std::move(makeObjArgs));
+}
+
+std::unique_ptr<sbe::EExpression> makeShardKeyFunctionForPersistedDocuments(
+    const std::vector<sbe::MatchPath>& shardKeyPaths,
+    const std::vector<bool>& shardKeyHashed,
+    const PlanStageSlots& slots) {
+    // Build an expression to extract the shard key from the document based on the shard key
+    // pattern. To do this, we iterate over the shard key pattern parts and build nested 'getField'
+    // expressions. This will handle single-element paths, and dotted paths for each shard key part.
+    std::vector<std::string> projectFields;
+    sbe::EExpression::Vector projectValues;
+
+    projectFields.reserve(shardKeyPaths.size());
+    projectValues.reserve(shardKeyPaths.size());
+    for (size_t i = 0; i < shardKeyPaths.size(); ++i) {
+        const auto& fieldRef = shardKeyPaths[i];
+
+        auto shardKeyBinding = sbe::makeE<sbe::EVariable>(
+            slots.get(std::make_pair(PlanStageSlots::kField, fieldRef.getPart(0))));
+        if (fieldRef.numParts() > 1) {
+            for (size_t level = 1; level < fieldRef.numParts(); ++level) {
+                shardKeyBinding = makeFunction(
+                    "getField", std::move(shardKeyBinding), makeStrConstant(fieldRef[level]));
+            }
+        }
+        shardKeyBinding = makeFillEmptyNull(std::move(shardKeyBinding));
+        // If this is a hashed shard key then compute the hash value.
+        if (shardKeyHashed[i]) {
+            shardKeyBinding = makeFunction("shardHash"_sd, std::move(shardKeyBinding));
+        }
+
+        projectFields.push_back(fieldRef.dottedField().toString());
+        projectValues.push_back(std::move(shardKeyBinding));
+    }
+
+    return makeNewBsonObject(std::move(projectFields), std::move(projectValues));
 }
 
 std::pair<sbe::value::SlotId, EvalStage> projectEvalExpr(
@@ -598,7 +579,7 @@ std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateVirtualSc
     invariant(sbe::value::isArray(arrTag));
 
     // Make an EConstant expression for the array.
-    auto arrayExpression = sbe::makeE<sbe::EConstant>(arrTag, arrVal);
+    auto arrayExpression = makeConstant(arrTag, arrVal);
 
     // Build the unwind/project/limit/coscan subtree.
     auto projectSlot = slotIdGenerator->generate();
@@ -639,12 +620,10 @@ std::pair<sbe::value::SlotVector, std::unique_ptr<sbe::PlanStage>> generateVirtu
     sbe::SlotExprPairVector projections;
     for (int32_t i = 0; i < numSlots; ++i) {
         projectSlots.emplace_back(slotIdGenerator->generate());
-        projections.emplace_back(
-            projectSlots.back(),
-            makeFunction("getElement"_sd,
-                         sbe::makeE<sbe::EVariable>(scanSlot),
-                         sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
-                                                    sbe::value::bitcastFrom<int32_t>(i))));
+        projections.emplace_back(projectSlots.back(),
+                                 makeFunction("getElement"_sd,
+                                              sbe::makeE<sbe::EVariable>(scanSlot),
+                                              makeInt32Constant(i)));
     }
 
     return {std::move(projectSlots),
@@ -679,6 +658,70 @@ sbe::value::SlotId StageBuilderState::getGlobalVariableSlot(Variables::Id variab
         env->registerSlot(sbe::value::TypeTags::Nothing, 0, false /* owned */, slotIdGenerator);
     data->variableIdToSlotMap.emplace(variableId, slotId);
     return slotId;
+}
+
+const CollatorInterface* StageBuilderState::makeCollatorOwned(const CollatorInterface* coll) {
+    if (!coll) {
+        return nullptr;
+    }
+
+    auto queryColl = data->queryCollator.get();
+    if (coll == queryColl || CollatorInterface::collatorsMatch(coll, queryColl)) {
+        return queryColl;
+    }
+
+    if (auto it = collatorsMap->find(coll); it != collatorsMap->end()) {
+        return it->second;
+    }
+
+    data->collators.emplace_back(coll->clone());
+    auto clonedColl = data->collators.back().get();
+
+    (*collatorsMap)[coll] = clonedColl;
+    (*collatorsMap)[clonedColl] = clonedColl;
+    return clonedColl;
+}
+
+InListData* StageBuilderState::prepareOwnedInList(const std::shared_ptr<InListData>& inList) {
+    // If 'l' is already in 'inListsSet', then there's no further work to do and we can just
+    // use 'l' as-is.
+    InListData* l = inList.get();
+    if (inListsSet->count(l)) {
+        tassert(7690410,
+                "Expected InListData to be in the 'prepared' state and own its BSON data",
+                l->isPrepared() && l->isBSONOwned());
+        return l;
+    }
+
+    // If 'l' is already prepared and its BSON is saved and it doesn't have a collator, then we can
+    // just add it to 'inLists' and 'inListsSet' and use it as-is.
+    if (l->isPrepared() && l->isBSONOwned() && l->getCollator() == nullptr) {
+        data->inLists.emplace_back(inList);
+        inListsSet->emplace(l);
+        return l;
+    }
+
+    // Otherwise, make a copy of 'l' if needed, save l's BSON and collator, mark 'l' as "prepared",
+    // and then add 'l' to 'inLists' and 'inListsSet' and return it.
+    if (l->isPrepared()) {
+        auto inListCopy = l->clone();
+        l = inListCopy.get();
+        data->inLists.emplace_back(std::move(inListCopy));
+
+        tassert(7690411, "Expected InListData to not be in the 'prepared' state", !l->isPrepared());
+    } else {
+        data->inLists.emplace_back(inList);
+    }
+
+    inListsSet->emplace(l);
+    l->makeBSONOwned();
+    if (auto coll = l->getCollator()) {
+        l->setCollator(makeCollatorOwned(coll));
+    }
+
+    l->prepare();
+
+    return l;
 }
 
 /**
@@ -972,7 +1015,7 @@ boost::optional<sbe::value::SlotId> StageBuilderState::getBuiltinVarSlot(Variabl
     }
 
     auto it = Variables::kIdToBuiltinVarName.find(id);
-    tassert(1234567, "Expected 'id' to be in map", it != Variables::kIdToBuiltinVarName.end());
+    tassert(7690415, "Expected 'id' to be in map", it != Variables::kIdToBuiltinVarName.end());
 
     auto& name = it->second;
     auto slotId = env->getSlotIfExists(name);
@@ -1026,7 +1069,7 @@ std::unique_ptr<sbe::EExpression> buildNewObjExpr(const SlotTreeNode* kpTree) {
     for (auto&& node : kpTree->children) {
         auto& fieldName = node->name;
 
-        args.emplace_back(makeConstant(fieldName));
+        args.emplace_back(makeStrConstant(fieldName));
         if (node->value) {
             args.emplace_back(makeVariable(*node->value));
         } else {
@@ -1148,8 +1191,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
                 outputSlots.emplace_back(*fieldSlot);
             } else {
                 auto slot = slotIdGenerator->generate();
-                auto getFieldExpr =
-                    makeFunction("getField"_sd, makeVariable(resultSlot), makeConstant(fields[i]));
+                auto getFieldExpr = makeFunction(
+                    "getField"_sd, makeVariable(resultSlot), makeStrConstant(fields[i]));
                 outputSlots.emplace_back(slot);
                 projects.emplace_back(slot, std::move(getFieldExpr));
             }
@@ -1228,7 +1271,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, sbe::value::SlotVector> projectFields
                     "getField"_sd,
                     parent->value.hasSlot() ? makeVariable(*parent->value.getSlot())
                                             : parent->value.extractExpr(state.slotVarMap, state),
-                    makeConstant(node->name));
+                    makeStrConstant(node->name));
 
                 auto hasOneChildToVisit = [&] {
                     size_t count = 0;

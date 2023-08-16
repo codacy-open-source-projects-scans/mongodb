@@ -213,8 +213,8 @@ public:
             getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove();
         if (mustRemoveOrphans) {
             const auto& topLevelFieldNames = _metadata._scanDefs.at(node.getScanDefName())
-                                                 .getDistributionAndPaths()
-                                                 ._topLevelShardKeyFieldNames;
+                                                 .shardingMetadata()
+                                                 .topLevelShardKeyFieldNames();
             for (auto& fieldName : topLevelFieldNames) {
                 if (!fieldProjectionMap._fieldProjections.contains(fieldName)) {
                     auto projName = _prefixId.getNextId("shardKey");
@@ -240,7 +240,7 @@ public:
         // If needed, add EvaluationNodes to collect the shard key from dotted paths.
         if (mustRemoveOrphans) {
             handleScanNodeRemoveOrphansRequirement(
-                _metadata._scanDefs.at(node.getScanDefName()).getDistributionAndPaths()._paths,
+                _metadata._scanDefs.at(node.getScanDefName()).shardingMetadata().shardKey(),
                 builder,
                 fieldProjectionMap,
                 indexReqTarget,
@@ -503,10 +503,6 @@ public:
 
             case IndexReqTarget::Index:
                 if (candidateIndexes.empty()) {
-                    return;
-                }
-
-                if (node.getTarget() == IndexReqTarget::Seek) {
                     return;
                 }
                 [[fallthrough]];
@@ -868,22 +864,6 @@ public:
 
         const LogicalProps& leftLogicalProps = _memo.getLogicalProps(leftGroupId);
         const LogicalProps& rightLogicalProps = _memo.getLogicalProps(rightGroupId);
-
-        const bool hasScanChild = rightGroupId == indexingAvailability.getScanGroupId();
-
-        if (hasScanChild && !isIndex) {
-            // This is a special RIDIntersectNode that has the Scan as its right child and has all
-            // predicates in its left child. We should optimize only the left child to support
-            // covering queries.
-            PhysProps newProps = _physProps;
-            setPropertyOverwrite<IndexingRequirement>(
-                newProps,
-                {IndexReqTarget::Index,
-                 dedupRID,
-                 requirements.getSatisfiedPartialIndexesGroupId()});
-            optimizeUnderNewProperties<PhysicalRewriteType::AttemptCoveringQuery>(
-                _queue, kDefaultPriority, node.getLeftChild(), std::move(newProps));
-        }
 
         const bool hasProperIntervalLeft =
             getPropertyConst<IndexingAvailability>(leftLogicalProps).hasProperInterval();

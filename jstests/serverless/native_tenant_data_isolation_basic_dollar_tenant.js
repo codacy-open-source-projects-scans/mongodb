@@ -407,13 +407,8 @@ const testColl = testDb.getCollection(kCollName);
         "collMod": kCollName,
         "index": {"keyPattern": {c: 1}, expireAfterSeconds: 100},
     });
-    if (featureFlagRequireTenantId) {
-        // When the feature flag is enabled, the server will assert that all requests contain a
-        // tenantId.
-        assert.commandFailedWithCode(res, 6972100);
-    } else {
-        assert.commandFailedWithCode(res, ErrorCodes.NamespaceNotFound);
-    }
+
+    assert.commandFailedWithCode(res, ErrorCodes.NamespaceNotFound);
 
     // Modify the index with the tenantId
     res = assert.commandWorked(testDb.runCommand({

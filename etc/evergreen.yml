@@ -684,7 +684,7 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
       --excludeWithAnyTags=incompatible_with_windows_tls
       --excludeWithAnyTags=incompatible_with_shard_merge
     external_auth_jobs_max: 1
@@ -693,9 +693,7 @@ buildvariants:
     # run too long and hit execution timeouts.
     # burn_in_task_name: jsCore
   tasks:
-  - name: cqf
-  - name: cqf_disabled_pipeline_opt
-  - name: cqf_parallel
+  - name: .cqf
   - name: query_golden_classic
   # - name: burn_in_tasks_gen
   #   depends_on:
@@ -818,38 +816,6 @@ buildvariants:
   - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: .ssl
   - name: .stitch
-
-- name: &enterprise-macos-rosetta-2 enterprise-macos-rosetta-2
-  display_name: "Enterprise macOS Via Rosetta 2"
-  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
-  modules:
-  - enterprise
-  run_on:
-  - macos-1100-arm64
-  expansions:
-    compile_variant: *enterprise-macos-rosetta-2
-    test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_gcm
-    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
-    compile_flags: >-
-      --ssl
-      -j$(sysctl -n hw.logicalcpu)
-      --libc++
-      --variables-files=etc/scons/xcode_macosx.vars
-    resmoke_jobs_max: 6
-    num_scons_link_jobs_available: 0.99
-  tasks:
-  - name: compile_test_and_package_serial_TG
-  - name: audit
-  - name: auth_audit_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore !.ssl
-  - name: .jscore .common !.decimal !.sharding
-  - name: mqlrun
-  # TODO(SERVER-64009): Re-enable replica_sets_auth_gen.
-  # - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough_gen
-  - name: sasl
-  - name: .crypt
 
 - name: &enterprise-macos enterprise-macos
   display_name: "Enterprise macOS DEBUG"
@@ -1216,7 +1182,7 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
       --excludeWithAnyTags=incompatible_with_shard_merge
     # Uncomment expansion and `burn_in_tasks_gen` task below and add resmoke task name to burn-in.
     # WARNING! Task splitting is not supported for burn-in tasks. Large unsplitted `_gen` tasks may
@@ -1232,9 +1198,6 @@ buildvariants:
     omit_generated_tasks: true
   tasks:
   - name: analyze_shard_key_jscore_passthrough_gen
-  - name: cqf
-  - name: cqf_disabled_pipeline_opt
-  - name: cqf_parallel
   - name: query_golden_classic
   - name: lint_fuzzer_sanity_patch
   # TODO (SERVER-79361): Re-enable the IDL compatibility checker once the
@@ -1249,7 +1212,7 @@ buildvariants:
   #     variant: *linux_x86_dynamic_compile_variant_name
   - name: check_feature_flag_tags
   - name: check_for_todos
-  - name: .aggfuzzer
+  - name: .aggfuzzer !.cqf_only
   - name: .aggregation
   - name: aggregation_repeat_queries
   - name: audit
@@ -1383,7 +1346,7 @@ buildvariants:
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
   tasks:
-  - name: .aggfuzzer !.sbe_only
+  - name: .aggfuzzer !.sbe_only !.cqf_only
   - name: .aggregation !.sbe_only
   - name: .auth
   - name: .causally_consistent !.sharding
@@ -1491,7 +1454,7 @@ buildvariants:
   expansions:
     <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
     test_flags: >-
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
       --excludeWithAnyTags=incompatible_with_shard_merge
       --excludeWithAnyTags=cqf_incompatible
       --mongosSetParameters="{featureFlagCommonQueryFramework: true, internalQueryFrameworkControl: 'tryBonsai'}"
@@ -1996,7 +1959,7 @@ buildvariants:
     idle_timeout_factor: 1.5
     exec_timeout_factor: 1.5
     test_flags: >-
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
       --excludeWithAnyTags=incompatible_with_amazon_linux,incompatible_with_shard_merge,requires_external_data_source
   tasks:
   - name: analyze_shard_key_jscore_passthrough_gen
@@ -2007,7 +1970,7 @@ buildvariants:
   # - name: test_api_version_compatibility
   - name: check_feature_flag_tags
   - name: check_for_todos
-  - name: .aggfuzzer
+  - name: .aggfuzzer !.cqf_only
   - name: .aggregation
   - name: aggregation_repeat_queries
   - name: audit
@@ -2022,9 +1985,7 @@ buildvariants:
   # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
   - name: change_streams_multitenant_passthrough
   - name: change_streams_multitenant_sharded_collections_passthrough
-  - name: cqf
-  - name: cqf_disabled_pipeline_opt
-  - name: cqf_parallel
+  - name: .cqf
   - name: .misc_js
   - name: .clustered_collections
   - name: .concurrency !.large !.ubsan !.no_txns
@@ -2136,7 +2097,7 @@ buildvariants:
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
       --excludeWithAnyTags=incompatible_with_shard_merge
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
     multiversion_platform: rhel80
     multiversion_edition: enterprise
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under UBSAN build.
@@ -2239,7 +2200,7 @@ buildvariants:
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
       --excludeWithAnyTags=incompatible_with_shard_merge
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
   tasks:
   - name: jsCore
   - name: jsCore_txns
@@ -2257,7 +2218,7 @@ buildvariants:
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
       --excludeWithAnyTags=incompatible_with_shard_merge
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
   tasks:
   - name: audit
   - name: .aggregation
@@ -2265,9 +2226,7 @@ buildvariants:
   - name: .concurrency !.no_txns !.repl !.kill_terminate
   - name: .config_fuzzer
   - name: .config_fuzzer_stress
-  - name: cqf
-  - name: cqf_disabled_pipeline_opt
-  - name: cqf_parallel
+  - name: .cqf
   - name: .causally_consistent !.wo_snapshot
   - name: .change_streams
   # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
@@ -2381,6 +2340,9 @@ buildvariants:
   - name: cqf
   - name: cqf_disabled_pipeline_opt
   - name: cqf_parallel
+  - name: query_golden_cqf
+  - name: cqf_experimental_jscore_passthrough
+  - name: cqf_experimental_aggregation_passthrough
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .change_stream_fuzzer
@@ -2391,6 +2353,7 @@ buildvariants:
   #   - rhel80-medium
   - name: disk_wiredtiger
   # - name: .encrypt # Not passing
+  - name: external_auth
   - name: initial_sync_fuzzer_gen
   - name: jsCore
     distros:
@@ -2976,7 +2939,7 @@ buildvariants:
   # - name: test_api_version_compatibility
   - name: check_feature_flag_tags
   - name: check_for_todos
-  - name: .aggfuzzer
+  - name: .aggfuzzer !.cqf_only
   - name: .aggregation !.feature_flag_guarded
   - name: aggregation_repeat_queries
   - name: audit
@@ -3061,9 +3024,6 @@ buildvariants:
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
-  - name: query_stats_passthrough
-  - name: query_stats_passthrough_writeonly
-  - name: query_stats_mongos_passthrough
 
 ### QO & QE Patch-Specific Build Variants ###
 
@@ -3092,7 +3052,7 @@ buildvariants:
     target_resmoke_time: 30
     max_sub_suites: 3
     test_flags: >-
-      --additionalFeatureFlagsFile all_feature_flags.txt
+      --runAllFeatureFlagTests
       --excludeWithAnyTags=resource_intensive
       --excludeWithAnyTags=incompatible_with_shard_merge
 
@@ -3159,7 +3119,7 @@ buildvariants:
     scons_cache_scope: shared
   tasks:
   - name: compile_and_archive_dist_test_TG
-  - name: antithesis_TG
+  - name: .antithesis
   - name: generate_buildid_to_debug_symbols_mapping
 
 - <<: *enterprise-windows-nopush-template

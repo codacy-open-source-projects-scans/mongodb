@@ -83,6 +83,7 @@
 #include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
@@ -91,6 +92,7 @@
 #include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/vector_clock.h"
@@ -251,6 +253,7 @@ std::vector<RemoteCursor> establishShardCursors(
     const boost::optional<analyze_shard_key::TargetedSampleId>& sampleId,
     const ReadPreferenceSetting& readPref,
     AsyncRequestsSender::ShardHostMap designatedHostsMap,
+    stdx::unordered_map<ShardId, BSONObj> resumeTokenMap,
     bool targetEveryShardServer) {
     LOGV2_DEBUG(20904,
                 1,
@@ -265,6 +268,9 @@ std::vector<RemoteCursor> establishShardCursors(
     if (targetEveryShardServer) {
         // If we are running on all shard servers we should never designate a particular server.
         invariant(designatedHostsMap.empty());
+        // Resume tokens are particular to a host, so it will never make sense to use them when
+        // running on all shard servers.
+        invariant(resumeTokenMap.empty());
         if (MONGO_unlikely(shardedAggregateHangBeforeEstablishingShardCursors.shouldFail())) {
             LOGV2(
                 7355704,
@@ -312,6 +318,20 @@ std::vector<RemoteCursor> establishShardCursors(
         }
 
         requests.emplace_back(cri->cm.dbPrimary(), std::move(versionedCmdObj));
+    }
+
+    // If we have resume data, use it.
+    if (!resumeTokenMap.empty()) {
+        for (auto& requestPair : requests) {
+            const auto& shardId = requestPair.first;
+            auto& request = requestPair.second;
+            auto resumeTokenIter = resumeTokenMap.find(shardId);
+            if (resumeTokenIter != resumeTokenMap.end()) {
+                request = request.addField(
+                    BSON(AggregateCommandRequest::kResumeAfterFieldName << resumeTokenIter->second)
+                        .firstElement());
+            }
+        }
     }
 
     if (MONGO_unlikely(shardedAggregateHangBeforeEstablishingShardCursors.shouldFail())) {
@@ -1109,7 +1129,8 @@ DispatchShardPipelineResults dispatchShardPipeline(
     boost::optional<ExplainOptions::Verbosity> explain,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern,
-    AsyncRequestsSender::ShardHostMap designatedHostsMap) {
+    AsyncRequestsSender::ShardHostMap designatedHostsMap,
+    stdx::unordered_map<ShardId, BSONObj> resumeTokenMap) {
     auto expCtx = pipeline->getContext();
 
     // The process is as follows:
@@ -1184,8 +1205,8 @@ DispatchShardPipelineResults dispatchShardPipeline(
         // TODO SERVER-65349 Investigate relaxing this restriction.
         if (!splitPipelines || !splitPipelines->shardsPipeline ||
             !splitPipelines->shardsPipeline->peekFront() ||
-            splitPipelines->shardsPipeline->peekFront()->getSourceName() !=
-                "$_internalSearchMongotRemote"_sd) {
+            !getSearchHelpers(expCtx->opCtx->getServiceContext())
+                 ->isSearchPipeline(splitPipelines->shardsPipeline.get())) {
             exchangeSpec = checkIfEligibleForExchange(opCtx, splitPipelines->mergePipeline.get());
         }
     }
@@ -1278,6 +1299,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                             targetedSampleId,
                                             ReadPreferenceSetting::get(opCtx),
                                             designatedHostsMap,
+                                            resumeTokenMap,
                                             targetEveryShardServer);
 
         } catch (const ExceptionFor<ErrorCodes::StaleConfig>& e) {
@@ -1300,8 +1322,7 @@ DispatchShardPipelineResults dispatchShardPipeline(
 
         // For $changeStream, we must open an extra cursor on the 'config.shards' collection, so
         // that we can monitor for the addition of new shards inline with real events.
-        if (hasChangeStream &&
-            expCtx->ns.db_deprecated() != NamespaceString::kConfigsvrShardsNamespace.db()) {
+        if (hasChangeStream && !expCtx->ns.isEqualDb(NamespaceString::kConfigsvrShardsNamespace)) {
             cursors.emplace_back(openChangeStreamNewShardMonitor(expCtx, shardRegistryReloadTime));
         }
     }
@@ -1682,7 +1703,14 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
             const auto& cm = cri.cm;
             auto pipelineToTarget = pipeline->clone();
 
-            if (!cm.isSharded()) {
+            const bool useLocalRead = !cm.isSharded() &&
+                (!expCtx->mongoProcessInterface->inShardedEnvironment(opCtx) ||
+                 cm.dbPrimary() ==
+                     (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)
+                          ? ShardId::kConfigServerId
+                          : ShardingState::get(opCtx)->shardId()));
+
+            if (useLocalRead) {
                 // If the collection is unsharded and we are on the primary, we should be able to
                 // do a local read. The primary may be moved right after the primary shard check,
                 // but the local read path will do a db version check before it establishes a cursor
@@ -1692,21 +1720,23 @@ std::unique_ptr<Pipeline, PipelineDeleter> attachCursorToPipeline(
                         expCtx->mongoProcessInterface->expectUnshardedCollectionInScope(
                             expCtx->opCtx, expCtx->ns, cm.dbVersion()));
 
-                    expCtx->mongoProcessInterface->checkOnPrimaryShardForDb(expCtx->opCtx,
-                                                                            expCtx->ns);
+                    // TODO SERVER-77402 Wrap this in a shardRoleRetry loop instead of
+                    // catching gexceptions. attachCursorSourceToPipelineForLocalRead enters the
+                    // shard role but does not refresh the shard if the shard has stale metadata.
+                    // Proceeding to do normal shard targeting, which will go through the
+                    // service_entry_point and refresh the shard if needed.
+                    auto pipelineWithCursor =
+                        expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
+                            pipelineToTarget.release());
 
                     LOGV2_DEBUG(5837600,
                                 3,
                                 "Performing local read",
                                 logAttrs(expCtx->ns),
-                                "pipeline"_attr = pipelineToTarget->serializeToBson(),
+                                "pipeline"_attr = pipelineWithCursor->serializeToBson(),
                                 "comment"_attr = expCtx->opCtx->getComment());
 
-                    return expCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
-                        pipelineToTarget.release());
-                } catch (ExceptionFor<ErrorCodes::IllegalOperation>&) {
-                    // The current node isn't the primary for or has stale information about this
-                    // collection, proceed with shard targeting.
+                    return pipelineWithCursor;
                 } catch (ExceptionFor<ErrorCodes::StaleDbVersion>&) {
                     // The current node has stale information about this collection, proceed with
                     // shard targeting, which has logic to handle refreshing that may be needed.

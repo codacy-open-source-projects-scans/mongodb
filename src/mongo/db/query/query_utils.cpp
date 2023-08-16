@@ -46,6 +46,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/projection.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/string_map.h"
 
@@ -75,6 +76,14 @@ bool isIdHackEligibleQuery(const CollectionPtr& collection, const CanonicalQuery
         CollatorInterface::collatorsMatch(query.getCollator(), collection->getDefaultCollator());
 }
 
+bool isSortSbeCompatible(const SortPattern& sortPattern) {
+    // If the sort has meta or numeric path components, we cannot use SBE.
+    return std::all_of(sortPattern.begin(), sortPattern.end(), [](auto&& part) {
+        return part.fieldPath &&
+            !sbe::MatchPath(part.fieldPath->fullPath()).hasNumericPathComponents();
+    });
+}
+
 bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery* cq) {
     tassert(6071400,
             "Expected CanonicalQuery and Collection pointer to not be nullptr",
@@ -83,6 +92,7 @@ bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery*
 
     // If we don't support all expressions used or the query is eligible for IDHack, don't use SBE.
     if (!expCtx || expCtx->sbeCompatibility == SbeCompatibility::notCompatible ||
+        expCtx->sbePipelineCompatibility == SbeCompatibility::notCompatible ||
         (*collection && isIdHackEligibleQuery(*collection, *cq))) {
         return false;
     }
@@ -92,20 +102,23 @@ bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery*
         return false;
     }
 
-    // Queries against the oplog, a change collection, or a time-series collection are not
-    // supported. Also queries on the inner side of a $lookup are not considered for SBE.
     const auto& nss = cq->nss();
+
+    if (!feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
+            serverGlobalParams.featureCompatibility) &&
+        nss.isTimeseriesBucketsCollection()) {
+        return false;
+    }
+
+    // Queries against the oplog or a change collection are not supported. Also queries on the inner
+    // side of a $lookup are not considered for SBE.
     if (expCtx->inLookup || nss.isOplog() || nss.isChangeCollection() ||
-        nss.isTimeseriesBucketsCollection() || !cq->metadataDeps().none()) {
+        !cq->metadataDeps().none()) {
         return false;
     }
 
     const auto& sortPattern = cq->getSortPattern();
-    // If the sort has meta or numeric path components, we cannot use SBE.
-    return !sortPattern || std::all_of(sortPattern->begin(), sortPattern->end(), [](auto&& part) {
-        return part.fieldPath &&
-            !sbe::MatchPath(part.fieldPath->fullPath()).hasNumericPathComponents();
-    });
+    return !sortPattern || isSortSbeCompatible(*sortPattern);
 }
 
 }  // namespace mongo

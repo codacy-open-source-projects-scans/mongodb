@@ -71,6 +71,7 @@
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
@@ -1784,6 +1785,18 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             continue;
         }
 
+        auto sortStage = dynamic_cast<DocumentSourceSort*>(innerStage->documentSource());
+        if (sortStage) {
+            auto pattern =
+                sortStage->getSortKeyPattern()
+                    .serialize(SortPattern::SortKeySerialization::kForPipelineSerialization)
+                    .toBson();
+            auto limit = sortStage->getLimit().get_value_or(0);
+            solnForAgg =
+                std::make_unique<SortNodeDefault>(std::move(solnForAgg), std::move(pattern), limit);
+            continue;
+        }
+
         auto isSearch = getSearchHelpers(query.getOpCtx()->getServiceContext())
                             ->isSearchStage(innerStage->documentSource());
         auto isSearchMeta = getSearchHelpers(query.getOpCtx()->getServiceContext())
@@ -1794,6 +1807,18 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             // and continue in creating the query plan.
             // TODO: SERVER-78565 add tests to test pushing down $search + $group and $search +
             // $lookup pipelines to make sure pushdown works correctly.
+            continue;
+        }
+
+        auto windowStage =
+            dynamic_cast<DocumentSourceInternalSetWindowFields*>(innerStage->documentSource());
+        if (windowStage) {
+            auto windowNode = std::make_unique<WindowNode>(std::move(solnForAgg),
+                                                           windowStage->getPartitionBy(),
+                                                           windowStage->getSortBy(),
+                                                           windowStage->getOutputFields(),
+                                                           innerStage->isLastSource());
+            solnForAgg = std::move(windowNode);
             continue;
         }
 

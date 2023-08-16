@@ -111,14 +111,6 @@ std::unique_ptr<sbe::EExpression> makeBinaryOp(sbe::EPrimBinary::Op binaryOp,
                                                std::unique_ptr<sbe::EExpression> rhs,
                                                StageBuilderState& state);
 
-std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression> input,
-                                               std::unique_ptr<sbe::EExpression> arr,
-                                               std::unique_ptr<sbe::EExpression> collator = {});
-
-std::unique_ptr<sbe::EExpression> makeIsMember(std::unique_ptr<sbe::EExpression> input,
-                                               std::unique_ptr<sbe::EExpression> arr,
-                                               StageBuilderState& state);
-
 /**
  * Generates an EExpression that checks if the input expression is null or missing.
  */
@@ -257,14 +249,39 @@ inline std::unique_ptr<sbe::EExpression> makeFunction(StringData name, Args&&...
     return sbe::makeE<sbe::EFunction>(name, sbe::makeEs(std::forward<Args>(args)...));
 }
 
-template <typename T>
-inline auto makeConstant(sbe::value::TypeTags tag, T value) {
-    return sbe::makeE<sbe::EConstant>(tag, sbe::value::bitcastFrom<T>(value));
+inline auto makeConstant(sbe::value::TypeTags tag, sbe::value::Value val) {
+    return sbe::makeE<sbe::EConstant>(tag, val);
 }
 
-inline auto makeConstant(StringData str) {
-    auto [tag, value] = sbe::value::makeNewString(str);
-    return sbe::makeE<sbe::EConstant>(tag, value);
+inline auto makeNothingConstant() {
+    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Nothing, 0);
+}
+inline auto makeNullConstant() {
+    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0);
+}
+inline auto makeBoolConstant(bool boolVal) {
+    auto val = sbe::value::bitcastFrom<bool>(boolVal);
+    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean, val);
+}
+inline auto makeInt32Constant(int32_t num) {
+    auto val = sbe::value::bitcastFrom<int32_t>(num);
+    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32, val);
+}
+inline auto makeInt64Constant(int64_t num) {
+    auto val = sbe::value::bitcastFrom<int64_t>(num);
+    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt64, val);
+}
+inline auto makeDoubleConstant(double num) {
+    auto val = sbe::value::bitcastFrom<double>(num);
+    return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberDouble, val);
+}
+inline auto makeDecimalConstant(const Decimal128& num) {
+    auto [tag, val] = sbe::value::makeCopyDecimal(num);
+    return sbe::makeE<sbe::EConstant>(tag, val);
+}
+inline auto makeStrConstant(StringData str) {
+    auto [tag, val] = sbe::value::makeNewString(str);
+    return sbe::makeE<sbe::EConstant>(tag, val);
 }
 
 std::unique_ptr<sbe::EExpression> makeVariable(sbe::value::SlotId slotId);
@@ -312,7 +329,7 @@ template <size_t N>
 FieldExprs<N + 2> array_append(FieldExprs<N> fieldExprs, FieldPair field) {
     return array_append(std::move(fieldExprs),
                         std::make_index_sequence<N>{},
-                        makeConstant(field.first),
+                        makeStrConstant(field.first),
                         std::move(field.second));
 }
 
@@ -346,27 +363,22 @@ std::unique_ptr<sbe::EExpression> makeNewObjFunction(FieldExprs<N> fieldExprs,
 // Deals with the first 'FieldPair' and adds it to the 'EExpression' array.
 template <typename... Ts>
 std::unique_ptr<sbe::EExpression> makeNewObjFunction(FieldPair field, Ts... fields) {
-    return makeNewObjFunction(FieldExprs<2>{makeConstant(field.first), std::move(field.second)},
+    return makeNewObjFunction(FieldExprs<2>{makeStrConstant(field.first), std::move(field.second)},
                               std::forward<Ts>(fields)...);
 }
 
+std::unique_ptr<sbe::EExpression> makeNewBsonObject(std::vector<std::string> projectFields,
+                                                    sbe::EExpression::Vector projectValues);
+
 /**
- * Creates an expression to extract a shard key part from inputExpr. The generated expression is a
- * let binding that binds a getField expression to extract the shard key part value from the
- * inputExpr. If the binding is an array, the array is returned. This is done so caller can check
- * for array and generate an empty shard key. Here is an example expression generated from this
- * function for a shard key pattern {'a.b.c': 1}:
- *
- * let [l1.0 = getField (s1, "a") ?: null]
- *   if (isArray (l1.0), l1.0,
- *     let [l2.0 = getField (l1.0, "b") ?: null]
- *       if (isArray (l2.0), l2.0, getField (l2.0, "c") ?: null))
+ * Generates an expression that returns shard key that behaves similarly to
+ * ShardKeyPattern::extractShardKeyFromDoc. However, it will not check for arrays in shard key, as
+ * it is used only for documents that are already persisted in a sharded collection
  */
-std::unique_ptr<sbe::EExpression> generateShardKeyBinding(
-    const sbe::MatchPath& keyPatternField,
-    sbe::value::FrameIdGenerator& frameIdGenerator,
-    std::unique_ptr<sbe::EExpression> inputExpr,
-    int level);
+std::unique_ptr<sbe::EExpression> makeShardKeyFunctionForPersistedDocuments(
+    const std::vector<sbe::MatchPath>& shardKeyPaths,
+    const std::vector<bool>& shardKeyHashed,
+    const PlanStageSlots& slots);
 
 /**
  * If given 'EvalExpr' already contains a slot, simply returns it. Otherwise, allocates a new slot
@@ -599,6 +611,9 @@ std::pair<sbe::IndexKeysInclusionSet, std::vector<std::string>> makeIndexKeyIncl
  * argument passing. Also contains a mapping of global variable ids to slot ids.
  */
 struct StageBuilderState {
+    using InListsSet = absl::flat_hash_set<InListData*>;
+    using CollatorsMap = absl::flat_hash_map<const CollatorInterface*, const CollatorInterface*>;
+
     StageBuilderState(OperationContext* opCtx,
                       Environment& env,
                       PlanStageStaticData* data,
@@ -606,11 +621,15 @@ struct StageBuilderState {
                       sbe::value::SlotIdGenerator* slotIdGenerator,
                       sbe::value::FrameIdGenerator* frameIdGenerator,
                       sbe::value::SpoolIdGenerator* spoolIdGenerator,
+                      InListsSet* inListsSet,
+                      CollatorsMap* collatorsMap,
                       bool needsMerge,
                       bool allowDiskUse)
         : slotIdGenerator{slotIdGenerator},
           frameIdGenerator{frameIdGenerator},
           spoolIdGenerator{spoolIdGenerator},
+          inListsSet{inListsSet},
+          collatorsMap{collatorsMap},
           opCtx{opCtx},
           env{env},
           data{data},
@@ -640,6 +659,20 @@ struct StageBuilderState {
     boost::optional<sbe::value::SlotId> getBuiltinVarSlot(Variables::Id id);
 
     /**
+     * Given a CollatorInterface, returns a copy of the CollatorInterface that is owned by the
+     * SBE plan currently being built. If 'coll' is already owned by the SBE plan being built,
+     * then this method will simply return 'coll'.
+     */
+    const CollatorInterface* makeCollatorOwned(const CollatorInterface* coll);
+
+    /**
+     * Given an InListData 'inList', this method makes inList's BSON owned, it makes the inList's
+     * Collator owned, it sorts and de-dups the inList's elements if needed, it initializes the
+     * inList's hash set if needed, and it marks the 'inList' as "prepared".
+     */
+    InListData* prepareOwnedInList(const std::shared_ptr<InListData>& inList);
+
+    /**
      * Register a Slot in the 'RuntimeEnvironment'. The newly registered Slot should be associated
      * with 'paramId' and tracked in the 'InputParamToSlotMap' for auto-parameterization use. The
      * slot is set to 'Nothing' on registration and will be populated with the real value when
@@ -650,6 +683,9 @@ struct StageBuilderState {
     sbe::value::SlotIdGenerator* const slotIdGenerator;
     sbe::value::FrameIdGenerator* const frameIdGenerator;
     sbe::value::SpoolIdGenerator* const spoolIdGenerator;
+
+    absl::flat_hash_set<InListData*>* const inListsSet;
+    absl::flat_hash_map<const CollatorInterface*, const CollatorInterface*>* const collatorsMap;
 
     OperationContext* const opCtx;
     Environment& env;

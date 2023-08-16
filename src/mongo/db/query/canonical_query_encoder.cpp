@@ -77,6 +77,7 @@
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/pipeline/search_helper.h"
@@ -457,40 +458,17 @@ void encodePipeline(const OperationContext* opCtx,
                     const std::vector<std::unique_ptr<InnerPipelineStageInterface>>& pipeline,
                     BufBuilder* bufBuilder) {
     bufBuilder->appendChar(kEncodeSectionDelimiter);
+    std::vector<Value> serializedArray;
     for (auto& stage : pipeline) {
-        std::vector<Value> serializedArray;
-        if (auto lookupStage = dynamic_cast<DocumentSourceLookUp*>(stage->documentSource())) {
-            lookupStage->serializeToArray(serializedArray);
+        serializedArray.clear();
+        stage->documentSource()->serializeToArray(serializedArray);
+
+        for (const auto& value : serializedArray) {
             tassert(6443201,
-                    "$lookup stage isn't serialized to a single bson object",
-                    serializedArray.size() == 1 && serializedArray[0].getType() == Object);
-            const auto bson = serializedArray[0].getDocument().toBson();
+                    "Expected pipeline stage to serialize to objects",
+                    value.getType() == Object);
+            const auto bson = value.getDocument().toBson();
             bufBuilder->appendBuf(bson.objdata(), bson.objsize());
-        } else if (auto groupStage = dynamic_cast<DocumentSourceGroup*>(stage->documentSource())) {
-            auto serializedGroup = groupStage->serialize();
-            const auto bson = serializedGroup.getDocument().toBson();
-            bufBuilder->appendBuf(bson.objdata(), bson.objsize());
-        } else if (auto projectionStage =
-                       dynamic_cast<DocumentSourceInternalProjection*>(stage->documentSource())) {
-            projectionStage->serializeToArray(serializedArray, {});
-            tassert(7824600,
-                    "stage isn't serialized to a single bson object",
-                    serializedArray.size() == 1 && serializedArray[0].getType() == Object);
-            const auto bson = serializedArray[0].getDocument().toBson();
-            bufBuilder->appendBuf(bson.objdata(), bson.objsize());
-        } else if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(stage->documentSource())) {
-            auto serializedMatch = matchStage->serialize();
-            const auto bson = serializedMatch.getDocument().toBson();
-            bufBuilder->appendBuf(bson.objdata(), bson.objsize());
-        } else if (getSearchHelpers(opCtx->getServiceContext())
-                       ->isSearchStage(stage->documentSource()) ||
-                   getSearchHelpers(opCtx->getServiceContext())
-                       ->isSearchMetaStage(stage->documentSource())) {
-            // TODO: SERVER-78565 Support $search in SBE plan cache.
-        } else {
-            tasserted(6443200,
-                      str::stream() << "Pipeline stage cannot be encoded in plan cache key: "
-                                    << stage->documentSource()->getSourceName());
         }
     }
 }
@@ -798,6 +776,7 @@ public:
 
     void visit(const InMatchExpression* expr) final {
         encodeSingleParamPathNode(expr);
+
         // Encode the number of unique $in values as part of the plan cache key. If the query is
         // optimized by exploding for sort, the number of unique elements in $in determines how many
         // merge branches we get in the query plan.
@@ -1045,7 +1024,11 @@ private:
      * parameter marker.
      */
     void encodeRhs(const PathMatchExpression* expr) {
-        encodeHelper(expr->getSerializedRightHandSide());
+        // Call getSerializedRightHandSide() with 'inMatchExprSortAndDedupElements' set to false.
+        SerializationOptions opts;
+        opts.inMatchExprSortAndDedupElements = false;
+
+        encodeHelper(expr->getSerializedRightHandSide(std::move(opts)));
     }
 
     /**
