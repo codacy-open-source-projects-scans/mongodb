@@ -4,7 +4,7 @@ runs an fsyncLock which should fail and timeout as the global S lock cannot be t
  * @tags: [
  *   requires_sharding,
  *   requires_fsync,
- *   featureFlagClusterFsyncLock
+ *   requires_fcv_71
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -12,11 +12,8 @@ import {Thread} from "jstests/libs/parallelTester.js";
 
 const st = new ShardingTest({
     shards: 2,
-    shardOptions: {setParameter: {featureFlagClusterFsyncLock: true}},
     mongos: 1,
-    mongosOptions: {setParameter: {featureFlagClusterFsyncLock: true}},
     config: 1,
-    configOptions: {setParameter: {featureFlagClusterFsyncLock: true}},
 });
 const shard0Primary = st.rs0.getPrimary();
 
@@ -30,6 +27,23 @@ assert.commandWorked(st.s.adminCommand({split: ns, middle: {x: 0}}));
 assert.commandWorked(
     st.s.adminCommand({moveChunk: ns, find: {x: MinKey}, to: st.shard0.shardName}));
 assert.commandWorked(st.s.adminCommand({moveChunk: ns, find: {x: 1}, to: st.shard1.shardName}));
+
+function waitForFsyncLockToWaitForLock(st, numThreads) {
+    assert.soon(() => {
+        let ops = st.s.getDB('admin')
+                      .aggregate([
+                          {$currentOp: {allUsers: true, idleConnections: true}},
+                          {$match: {desc: "fsyncLockWorker", waitingForLock: true}},
+                      ])
+                      .toArray();
+        if (ops.length != numThreads) {
+            jsTest.log("Num operations: " + ops.length + ", expected: " + numThreads);
+            jsTest.log(ops);
+            return false;
+        }
+        return true;
+    });
+}
 
 function runTxn(mongosHost, dbName, collName) {
     const mongosConn = new Mongo(mongosHost);
@@ -78,9 +92,9 @@ writeDecisionFp.wait();
 let fsyncLockThread = new Thread(runFsyncLock, st.s.host);
 fsyncLockThread.start();
 
-// Wait for fsyncLock to wait for the global S lock, may have to be changed to a failpoint in the
-// future (sleep is not as deterministic)
-sleep(100);
+// Wait for fsyncLockWorker threads on the shard primaries to wait for the global S lock (enqueued
+// in the conflict queue).
+waitForFsyncLockToWaitForLock(st, 2 /*blocked fsyncLockWorker threads*/);
 
 // Unpause the TransactionCoordinator.
 // The transaction thread can now acquire the IX locks since the blocking fsyncLock request (with an

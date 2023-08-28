@@ -279,11 +279,6 @@ OpMsgRequest OpMsgRequest::fromDBAndBody(const DatabaseName& db,
     return OpMsgRequestBuilder::create(db, std::move(body), extraFields);
 }
 
-OpMsgRequest OpMsgRequest::fromDBAndBody(StringData db, BSONObj body, const BSONObj& extraFields) {
-    return fromDBAndBody(
-        DatabaseNameUtil::deserialize(boost::none, db), std::move(body), extraFields);
-}
-
 boost::optional<TenantId> parseDollarTenant(const BSONObj body) {
     if (auto tenant = body.getField("$tenant")) {
         return TenantId::parseFromBSON(tenant);
@@ -296,19 +291,25 @@ DatabaseName OpMsgRequest::getDbName() const {
     if (!gMultitenancySupport) {
         return DatabaseNameUtil::deserialize(boost::none, getDatabase());
     }
+    auto tenantId = getValidatedTenantId() ? getValidatedTenantId() : parseDollarTenant(body);
 
-    SerializationContext sc = SerializationContext::stateCommandRequest();
-    auto tenantId = getValidatedTenantId();
-    if (!tenantId) {
-        tenantId = parseDollarTenant(body);
-    }
-    sc.setTenantIdSource(tenantId ? true : false);
-
-    if (auto const expectPrefix = body.getField("expectPrefix")) {
-        sc.setPrefixState(expectPrefix.boolean());
-    }
-    return DatabaseNameUtil::deserialize(tenantId, getDatabase(), sc);
+    return DatabaseNameUtil::deserialize(tenantId, getDatabase(), getSerializationContext());
 }
+
+SerializationContext OpMsgRequest::getSerializationContext() const {
+    if (!gMultitenancySupport) {
+        return SerializationContext::stateDefault();
+    }
+    auto serializationCtx = SerializationContext::stateCommandRequest();
+    auto tenantId = getValidatedTenantId() ? getValidatedTenantId() : parseDollarTenant(body);
+
+    serializationCtx.setTenantIdSource(tenantId ? true : false);
+    if (auto const expectPrefix = body.getField("expectPrefix")) {
+        serializationCtx.setPrefixState(expectPrefix.boolean());
+    }
+    return serializationCtx;
+}
+
 
 bool appendDollarTenant(BSONObjBuilder& builder,
                         const TenantId& tenant,

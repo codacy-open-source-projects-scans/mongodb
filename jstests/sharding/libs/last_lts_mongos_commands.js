@@ -11,10 +11,14 @@ export const commandsRemovedFromMongosSinceLastLTS = [];
 export const commandsAddedToMongosSinceLastLTS = [
     "_clusterQueryWithoutShardKey",
     "_clusterWriteWithoutShardKey",
+    "abortMoveCollection",
     "cleanupStructuredEncryptionData",
     "cpuload",
     "createUnsplittableCollection",
     "fsyncUnlock",
+    "lockInfo",
+    "moveCollection",
     "setQuerySettings",
     "removeQuerySettings",
+    "unshardCollection",
 ];

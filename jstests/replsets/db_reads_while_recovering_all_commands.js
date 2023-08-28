@@ -42,6 +42,7 @@ const allCommands = {
     _configsvrCommitIndex: {skip: isPrimaryOnly},
     _configsvrCommitMergeAllChunksOnShard: {skip: isPrimaryOnly},
     _configsvrCommitMovePrimary: {skip: isPrimaryOnly},
+    _configsvrCommitRefineCollectionShardKey: {skip: isPrimaryOnly},
     _configsvrCommitReshardCollection: {skip: isPrimaryOnly},
     _configsvrConfigureCollectionBalancing: {skip: isPrimaryOnly},
     _configsvrCreateDatabase: {skip: isPrimaryOnly},
@@ -142,6 +143,7 @@ const allCommands = {
     streams_getMetrics: {skip: isAnInternalCommand},
     _transferMods: {skip: isPrimaryOnly},
     _vectorClockPersist: {skip: isPrimaryOnly},
+    abortMoveCollection: {skip: isPrimaryOnly},
     abortReshardCollection: {skip: isPrimaryOnly},
     abortTransaction: {skip: isPrimaryOnly},
     aggregate: {
@@ -273,7 +275,6 @@ const allCommands = {
     getDatabaseVersion: {skip: isNotAUserDataRead},
     getDefaultRWConcern: {skip: isNotAUserDataRead},
     getDiagnosticData: {skip: isNotAUserDataRead},
-    getFreeMonitoringStatus: {skip: isNotAUserDataRead},
     getLog: {skip: isNotAUserDataRead},
     getMore: {
         command: {getMore: NumberLong(123), collection: collName},
@@ -326,7 +327,7 @@ const allCommands = {
         expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
     },
     listSearchIndexes: {skip: isNotAUserDataRead},
-    lockInfo: {skip: isPrimaryOnly},
+    lockInfo: {skip: isAnInternalCommand},
     logApplicationMessage: {skip: isNotAUserDataRead},
     logMessage: {skip: isNotAUserDataRead},
     logRotate: {skip: isNotAUserDataRead},
@@ -396,7 +397,6 @@ const allCommands = {
     setDefaultRWConcern: {skip: isPrimaryOnly},
     setIndexCommitQuorum: {skip: isPrimaryOnly},
     setFeatureCompatibilityVersion: {skip: isPrimaryOnly},
-    setFreeMonitoring: {skip: isPrimaryOnly},
     setProfilingFilterGlobally: {skip: isNotAUserDataRead},
     setParameter: {skip: isNotAUserDataRead},
     setShardVersion: {skip: isNotAUserDataRead},
@@ -421,6 +421,7 @@ const allCommands = {
     testReshardCloneCollection: {skip: isNotAUserDataRead},
     testVersions1And2: {skip: isNotAUserDataRead},
     testVersion2: {skip: isNotAUserDataRead},
+    timeseriesCatalogBucketParamsChanged: {skip: isAnInternalCommand},
     top: {skip: isNotAUserDataRead},
     update: {skip: isPrimaryOnly},
     updateRole: {skip: isPrimaryOnly},

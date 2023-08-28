@@ -34,8 +34,10 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 #include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -45,9 +47,6 @@
 #include <tuple>
 #include <type_traits>
 #include <vector>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/exact_cast.h"
@@ -72,7 +71,6 @@
 #include "mongo/db/exec/shard_filter.h"
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
-#include "mongo/db/exec/timeseries/bucket_spec.h"
 #include "mongo/db/exec/trial_stage.h"
 #include "mongo/db/exec/unpack_timeseries_bucket.h"
 #include "mongo/db/exec/working_set.h"
@@ -102,6 +100,7 @@
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_impl.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/pipeline/pipeline.h"
@@ -121,15 +120,18 @@
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/projection_policies.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/db/query/tailable_mode_gen.h"
+#include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -218,6 +220,7 @@ struct CompatiblePipelineStages {
     bool search : 1;
 
     bool window : 1;
+    bool unpackBucket : 1;
 };
 
 // Determine if 'stage' is eligible for SBE, and if it is add it to the 'stagesForPushdown' list as
@@ -297,6 +300,15 @@ bool pushDownPipelineStageIfCompatible(
         stagesForPushdown.emplace_back(
             std::make_unique<InnerPipelineStageImpl>(windowStage, isLastSource));
         return true;
+    } else if (auto unpackBucketStage =
+                   dynamic_cast<DocumentSourceInternalUnpackBucket*>(stage.get())) {
+        if (!allowedStages.unpackBucket) {
+            return false;
+        }
+
+        stagesForPushdown.emplace_back(
+            std::make_unique<InnerPipelineStageImpl>(unpackBucketStage, isLastSource));
+        return true;
     }
 
     return false;
@@ -334,6 +346,12 @@ constexpr size_t kSbeMaxPipelineStages = 100;
  * Search is extracted from the pipeline when the following conditions are met:
  *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
  *    - When 'featureFlagSearchInSbe' is true.
+ *
+ * $_internalUnpackBucket stages ('DocumentSourceInternalUnpackBucket') are extracted when all of:
+ *    - When the 'internalQueryFrameworkControl' is not set to "forceClassicEngine".
+ *    - When 'featureFlagTimeSeriesInSbe' is true.
+ *    - When ExpressionContext::sbePipelineCompatibility is set to
+ *      'SbeCompatibility::fullyCompatible'.
  */
 std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStagesForPushdown(
     const MultipleCollectionAccessor& collections,
@@ -370,8 +388,9 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
         ? SbeCompatibility::flagGuarded
         : SbeCompatibility::fullyCompatible;
 
+    auto& queryKnob = QueryKnobConfiguration::decoration(cq->getExpCtxRaw()->opCtx);
     CompatiblePipelineStages allowedStages = {
-        .group = !internalQuerySlotBasedExecutionDisableGroupPushdown.load(),
+        .group = !queryKnob.getSbeDisableGroupPushdownForOp(),
 
         // If lookup pushdown isn't enabled or the main collection is sharded or any of the
         // secondary namespaces are sharded or are a view, then no $lookup stage will be eligible
@@ -381,8 +400,8 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
         // whether any secondary collection is a view or is sharded, not which ones are a view or
         // are sharded and which ones aren't. As such, if any secondary collection is a view or is
         // sharded, no $lookup will be eligible for pushdown.
-        .lookup = !internalQuerySlotBasedExecutionDisableLookupPushdown.load() &&
-            !isMainCollectionSharded && !collections.isAnySecondaryNamespaceAViewOrSharded(),
+        .lookup = !queryKnob.getSbeDisableLookupPushdownForOp() && !isMainCollectionSharded &&
+            !collections.isAnySecondaryNamespaceAViewOrSharded(),
 
         // TODO (SERVER-72549): SBE execution of 'transform' and 'match' stages requires
         // 'featureFlagSbeFull' to be enabled.
@@ -402,6 +421,11 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
         .search = feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe(),
 
         .window = !(SbeCompatibility::fullyCompatible < minRequiredCompatibility),
+
+        // TODO (SERVER-80243): Remove 'featureFlagTimeSeriesInSbe' check.
+        .unpackBucket = feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
+                            serverGlobalParams.featureCompatibility) &&
+            cq->getExpCtx()->sbePipelineCompatibility == SbeCompatibility::fullyCompatible,
     };
 
     for (auto itr = sources.begin(); itr != sources.end(); ++itr) {
@@ -1053,12 +1077,9 @@ PipelineD::buildInnerQueryExecutor(const MultipleCollectionAccessor& collections
     // (Ignore FCV check): FCV checking is unnecessary because SBE execution is local to a given
     // node.
     auto searchInSbeEnabled = feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe();
-
-    // TODO SERVER-78998: This check should be modified once we've refactored checking
-    // 'internalQueryFrameworkControl'.
-    auto forceClassicEngine = ServerParameterSet::getNodeParameterSet()
-                                  ->get<QueryFrameworkControl>("internalQueryFrameworkControl")
-                                  ->_data.get() == QueryFrameworkControlEnum::kForceClassicEngine;
+    auto forceClassicEngine =
+        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp() ==
+        QueryFrameworkControlEnum::kForceClassicEngine;
 
     bool skipRequiresInputDocSourceCheck =
         firstStageIsSearch && searchInSbeEnabled && !forceClassicEngine;
@@ -1574,9 +1595,7 @@ PipelineD::buildInnerQueryExecutorGeneric(const MultipleCollectionAccessor& coll
     // Do not double-optimize the sort.
     auto sort = (su.sort && su.sort->isBoundedSortStage()) ? nullptr : su.sort;
     auto unpack = su.unpack;
-    if (unpack &&
-        unpack->bucketUnpacker().bucketSpec().behavior() == BucketSpec::Behavior::kExclude) {
-        // Currently we only support in SBE unpacking with a statically known set of fields.
+    if (unpack && !unpack->isSbeCompatible()) {
         expCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
     }
     if (unpack && sort) {

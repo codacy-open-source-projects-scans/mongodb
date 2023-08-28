@@ -174,6 +174,7 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
         _getMetadataWithVersionCheckAt(opCtx,
                                        repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime(),
                                        optReceivedShardVersion,
+                                       true /* preserveRange */,
                                        supportNonVersionedOperations);
 
     return {std::move(metadata)};
@@ -183,8 +184,10 @@ ScopedCollectionFilter CollectionShardingRuntime::getOwnershipFilter(
     OperationContext* opCtx,
     OrphanCleanupPolicy orphanCleanupPolicy,
     const ShardVersion& receivedShardVersion) const {
-    return _getMetadataWithVersionCheckAt(
-        opCtx, repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime(), receivedShardVersion);
+    return _getMetadataWithVersionCheckAt(opCtx,
+                                          repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime(),
+                                          receivedShardVersion,
+                                          true /* preserveRange */);
 }
 
 ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
@@ -206,7 +209,7 @@ ScopedCollectionDescription CollectionShardingRuntime::getCollectionDescription(
 
     auto& oss = OperationShardingState::get(opCtx);
 
-    auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
+    auto optMetadata = _getCurrentMetadataIfKnown(boost::none, false /* preserveRange */);
     const auto receivedShardVersion{oss.getShardVersion(_nss)};
     uassert(
         StaleConfigInfo(_nss,
@@ -228,7 +231,7 @@ boost::optional<ShardingIndexesCatalogCache> CollectionShardingRuntime::getIndex
 }
 
 boost::optional<CollectionMetadata> CollectionShardingRuntime::getCurrentMetadataIfKnown() const {
-    auto optMetadata = _getCurrentMetadataIfKnown(boost::none);
+    auto optMetadata = _getCurrentMetadataIfKnown(boost::none, false /* preserveRange */);
     if (!optMetadata)
         return boost::none;
     return optMetadata->get();
@@ -243,7 +246,8 @@ void CollectionShardingRuntime::checkShardVersionOrThrow(OperationContext* opCtx
 
 void CollectionShardingRuntime::checkShardVersionOrThrow(
     OperationContext* opCtx, const ShardVersion& receivedShardVersion) const {
-    (void)_getMetadataWithVersionCheckAt(opCtx, boost::none, receivedShardVersion);
+    (void)_getMetadataWithVersionCheckAt(
+        opCtx, boost::none, receivedShardVersion, false /* preserveRange */);
 }
 
 void CollectionShardingRuntime::enterCriticalSectionCatchUpPhase(const BSONObj& reason) {
@@ -433,7 +437,7 @@ SharedSemiFuture<void> CollectionShardingRuntime::getOngoingQueriesCompletionFut
 
 std::shared_ptr<ScopedCollectionDescription::Impl>
 CollectionShardingRuntime::_getCurrentMetadataIfKnown(
-    const boost::optional<LogicalTime>& atClusterTime) const {
+    const boost::optional<LogicalTime>& atClusterTime, bool preserveRange) const {
     stdx::lock_guard lk(_metadataManagerLock);
     switch (_metadataType) {
         case MetadataType::kUnknown:
@@ -447,7 +451,7 @@ CollectionShardingRuntime::_getCurrentMetadataIfKnown(
         case MetadataType::kUntracked:
             return kUntrackedCollection;
         case MetadataType::kTracked:
-            return _metadataManager->getActiveMetadata(atClusterTime);
+            return _metadataManager->getActiveMetadata(atClusterTime, preserveRange);
     };
     MONGO_UNREACHABLE;
 }
@@ -457,6 +461,7 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
     OperationContext* opCtx,
     const boost::optional<mongo::LogicalTime>& atClusterTime,
     const boost::optional<ShardVersion>& optReceivedShardVersion,
+    bool preserveRange,
     bool supportNonVersionedOperations) const {
     // If the server has been started with --shardsvr, but hasn't been added to a cluster we should
     // consider all collections as unsharded
@@ -493,7 +498,7 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
                 !criticalSectionSignal);
     }
 
-    auto optCurrentMetadata = _getCurrentMetadataIfKnown(atClusterTime);
+    auto optCurrentMetadata = _getCurrentMetadataIfKnown(atClusterTime, preserveRange);
     uassert(StaleConfigInfo(_nss,
                             receivedShardVersion,
                             boost::none /* wantedVersion */,
@@ -516,8 +521,25 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
         ShardVersionFactory::make(currentMetadata, wantedCollectionIndexes);
 
     const ChunkVersion receivedPlacementVersion = receivedShardVersion.placementVersion();
-    const bool isPlacementVersionIgnored =
-        ShardVersion::isPlacementVersionIgnored(receivedShardVersion);
+
+    const bool isPlacementVersionIgnored = [&]() {
+        if (feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
+                serverGlobalParams.featureCompatibility) &&
+            receivedShardVersion == ShardVersion::UNSHARDED() && currentMetadata.isUnsplittable()) {
+            // Any unsplittable collections request should attach a valid non-UNSHARDED ShardVersion
+            // However, this is not the case right now since the unsplittable collections project
+            // is still in progress. So, as a workaround to avoid throwing infinite StaleConfig
+            // errors, we are ignoring the ShardVersion::UNSHARDED for an unsplittable collection
+            // request which is fine as long as the unsplittable collections remain always on the
+            // same shard.
+            //
+            // TODO (SERVER-80337): Stop ignoring ShardVersion::UNSHARDED for unsplittable
+            // collections.
+            return true;
+        }
+        return ShardVersion::isPlacementVersionIgnored(receivedShardVersion);
+    }();
+
     const boost::optional<Timestamp> receivedIndexVersion = receivedShardVersion.indexVersion();
 
     if ((wantedPlacementVersion.isWriteCompatibleWith(receivedPlacementVersion) &&

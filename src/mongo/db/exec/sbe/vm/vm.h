@@ -813,9 +813,11 @@ enum class Builtin : uint8_t {
     aggRemovableSumAdd,
     aggRemovableSumRemove,
     aggRemovableSumFinalize,
+    aggIntegralInit,
     aggIntegralAdd,
     aggIntegralRemove,
     aggIntegralFinalize,
+    aggDerivativeInit,
     aggDerivativeAdd,
     aggDerivativeRemove,
     aggDerivativeFinalize,
@@ -823,6 +825,25 @@ enum class Builtin : uint8_t {
     aggCovarianceRemove,
     aggCovarianceSampFinalize,
     aggCovariancePopFinalize,
+    aggRemovablePushAdd,
+    aggRemovablePushRemove,
+    aggRemovablePushFinalize,
+    aggRemovableStdDevAdd,
+    aggRemovableStdDevRemove,
+    aggRemovableStdDevSampFinalize,
+    aggRemovableStdDevPopFinalize,
+
+    valueBlockExists,
+    valueBlockFillEmpty,
+    valueBlockMin,
+    valueBlockMax,
+    valueBlockCount,
+    valueBlockGtScalar,
+    valueBlockGteScalar,
+    valueBlockEqScalar,
+    valueBlockLtScalar,
+    valueBlockLteScalar,
+    valueBlockCombine,
 };
 
 std::string builtinToString(Builtin b);
@@ -992,6 +1013,7 @@ enum class AggRemovableSumElems {
  * Element at `kIntegral` stores the integral over the current window
  * Element at `kNanCount` stores the count of NaN values encountered
  * Element at `kunitMillis` stores the date unit (Null if not valid)
+ * Element at `kIsNonRemovable` stores whether it belongs to a non-removable window
  */
 enum class AggIntegralElems {
     kInputQueue,
@@ -999,6 +1021,7 @@ enum class AggIntegralElems {
     kIntegral,
     kNanCount,
     kUnitMillis,
+    kIsNonRemovable,
     kMaxSizeOfArray
 };
 
@@ -1019,9 +1042,19 @@ enum class AggDerivativeElems { kInputQueue, kSortByQueue, kUnitMillis, kMaxSize
  * Element at `kQueueSize` stores the size of the queue
  * The empty values in the array are filled with Null
  */
-enum class ArrayQueueElems { kArray, kStartIdx, kQueueSize };
+enum class ArrayQueueElems { kArray, kStartIdx, kQueueSize, kSizeOfArray };
 
+/**
+ * This enum defines indices into an 'Array' that store state for the removable
+ * $covarianceSamp/$covariancePop expressions.
+ */
 enum class AggCovarianceElems { kSumX, kSumY, kCXY, kCount, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that store state for the removable
+ * $stdDevSamp/$stdDevPop expressions.
+ */
+enum class AggRemovableStdDevElems { kSum, kM2, kCount, kNonFiniteCount, kSizeOfArray };
 
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
@@ -1640,10 +1673,36 @@ private:
      * not appear before F1 in 'root', -OR- if both F1 and F2 are not in 'root' and F2 does not
      * appear before F1 in the "computed" list, then F2 will appear after F1 in the output object.
      */
-    std::pair<value::TypeTags, value::Value> produceBsonObject(const MakeObjSpec* mos,
-                                                               value::TypeTags rootTag,
-                                                               value::Value rootVal,
-                                                               int stackOffset);
+    void produceBsonObject(const MakeObjSpec* spec,
+                           value::TypeTags rootTag,
+                           value::Value rootVal,
+                           int stackOffset,
+                           const CodeFragment* code,
+                           UniqueBSONObjBuilder& bob);
+
+    /**
+     * This struct is used by traverseAndProduceBsonObj() to hold args that stay the same across
+     * each level of recursion. Also, by making use of this struct, on most common platforms we
+     * will be able to pass all of traverseAndProduceBsonObj()'s args via CPU registers (rather
+     * than passing them via the native stack).
+     */
+    struct TraverseAndProduceBsonObjContext {
+        const MakeObjSpec* spec;
+        int stackStartOffset;
+        const CodeFragment* code;
+    };
+
+    void traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext& ctx,
+                                   value::TypeTags tag,
+                                   value::Value val,
+                                   int64_t maxDepth,
+                                   UniqueBSONArrayBuilder& bab);
+
+    void traverseAndProduceBsonObj(const TraverseAndProduceBsonObjContext& ctx,
+                                   value::TypeTags tag,
+                                   value::Value val,
+                                   StringData fieldName,
+                                   UniqueBSONObjBuilder& bob);
 
     FastTuple<bool, value::TypeTags, value::Value> builtinSplit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDate(ArityType arity);
@@ -1781,7 +1840,8 @@ private:
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSortKeyComponentVectorToArray(
         ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinMakeBsonObj(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinMakeBsonObj(ArityType arity,
+                                                                      const CodeFragment* code);
     FastTuple<bool, value::TypeTags, value::Value> builtinTsSecond(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTsIncrement(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTypeMatch(ArityType arity);
@@ -1839,6 +1899,7 @@ private:
     void updateRemovableSumAccForIntegerType(value::Array* sumAcc,
                                              value::TypeTags rhsTag,
                                              value::Value rhsVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralInit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralAdd(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralRemove(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggIntegralFinalize(ArityType arity);
@@ -1847,6 +1908,7 @@ private:
         std::pair<value::TypeTags, value::Value> prevSortByVal,
         std::pair<value::TypeTags, value::Value> newInput,
         std::pair<value::TypeTags, value::Value> newSortByVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeInit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeAdd(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeRemove(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeFinalize(ArityType arity);
@@ -1859,8 +1921,38 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggCovarianceSampFinalize(
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggCovariancePopFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovablePushAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovablePushRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovablePushFinalize(ArityType arity);
+    template <int quantity>
+    void aggRemovableStdDevImpl(value::TypeTags stateTag,
+                                value::Value stateVal,
+                                value::TypeTags inputTag,
+                                value::Value inputVal);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevRemove(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevFinalize(
+        ArityType arity, bool isSamp);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevSampFinalize(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevPopFinalize(
+        ArityType arity);
 
-    FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f, ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMin(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGtScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGteScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockEqScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLtScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLteScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCombine(ArityType arity);
+
+    FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f,
+                                                                   ArityType arity,
+                                                                   const CodeFragment* code);
 
     static constexpr size_t offsetOwned = 0;
     static constexpr size_t offsetTag = 1;

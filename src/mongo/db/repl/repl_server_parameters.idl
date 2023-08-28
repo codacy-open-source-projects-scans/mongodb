@@ -564,14 +564,13 @@ server_parameters:
         validator:
             gte: 1
 
-    # TODO (SERVER-54085): Remove server parameter tenantMigrationDisableX509Auth.
     tenantMigrationDisableX509Auth:
         description: >-
             Disable x509 authentication for all ingoing and outgoing tenant migrations.
         set_at: [ startup ]
         cpp_vartype: bool
         cpp_varname: tenantMigrationDisableX509Auth
-        default: false
+        default: true
 
     tenantMigrationExcludeDonorHostTimeoutMS:
         description: >-
@@ -763,6 +762,17 @@ server_parameters:
         cpp_varname: unsupportedSyncSource
         default: ""
         validator: { callback: 'validateHostAndPort' }
+    
+    dbCheckMaxExtraIndexKeysReverseLookupPerSnapshot:
+        description: >-
+            The maximum number of index keys to be checked in reverse lookup in one storage catalog
+            snapshot during dbcheck's extraIndexKeys mode.
+        set_at: [ startup, runtime ]
+        cpp_vartype: AtomicWord<int>
+        cpp_varname: dbCheckMaxExtraIndexKeysReverseLookupPerSnapshot
+        default: 1000
+        validator:
+            gt: 0 
 
 feature_flags:
     featureFlagShardMerge:

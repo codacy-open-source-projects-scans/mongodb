@@ -1,6 +1,8 @@
-// The test runs commands that are not allowed with security token: ConnectionStatus,
-// connectionStatus, createUser, logout.
+// Tests the connectionStatus command
+//
 // @tags: [
+//   # The test runs commands that are not allowed with security token: ConnectionStatus,
+//   # connectionStatus, createUser, logout.
 //   not_allowed_with_security_token,
 //   assumes_superuser_permissions,
 //   assumes_write_concern_unchanged,
@@ -8,11 +10,10 @@
 //   requires_auth,
 //   requires_non_retryable_commands,
 //   # This test uses db._authOrThrow which does not use runCommand (required by the
-//   # inject_tenant_prefix.js override).
+//   # simulate_atlas_proxy.js override).
 //   tenant_migration_incompatible,
 // ]
 
-// Tests the connectionStatus command
 const kAdminDbName = 'admin';
 const kTestDbName = 'connection_status';
 

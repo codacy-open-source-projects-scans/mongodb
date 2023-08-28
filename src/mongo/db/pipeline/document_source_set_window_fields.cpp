@@ -114,32 +114,6 @@ REGISTER_DOCUMENT_SOURCE(_internalSetWindowFields,
                          DocumentSourceInternalSetWindowFields::createFromBson,
                          AllowedWithApiStrict::kAlways);
 
-// TODO SERVER-79565: Implement time range pushdown in SBE
-bool hasTimeUnit(const std::vector<WindowFunctionStatement>& outputFields) {
-    for (const auto& outputField : outputFields) {
-        auto found =
-            stdx::visit(OverloadedVisitor{[](const WindowBounds::DocumentBased&) { return false; },
-                                          [](const WindowBounds::RangeBased& range) {
-                                              return range.unit.has_value();
-                                          }},
-                        outputField.expr->bounds().bounds);
-        if (found) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// TODO SERVER-79563: Allow nested field to be projected for window function results
-bool hasNestedField(const std::vector<WindowFunctionStatement>& outputFields) {
-    for (const auto& outputField : outputFields) {
-        if (FieldPath{outputField.fieldName}.getPathLength() > 1) {
-            return true;
-        }
-    }
-    return false;
-}
-
 list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(ErrorCodes::FailedToParse,
@@ -179,7 +153,8 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFro
         outputFields.push_back(WindowFunctionStatement::parse(outputElem, sortBy, expCtx.get()));
     }
     auto sbeCompatibility = std::min(expCtx->sbeWindowCompatibility, expCtx->sbeCompatibility);
-    if (hasTimeUnit(outputFields) || hasNestedField(outputFields)) {
+    // TODO: (SERVER-78708) Add collation support to window stage in sbe
+    if (expCtx->getCollator()) {
         sbeCompatibility = SbeCompatibility::notCompatible;
     }
 
@@ -416,7 +391,8 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::crea
         outputFields.push_back(WindowFunctionStatement::parse(elem, sortBy, expCtx.get()));
     }
     auto sbeCompatibility = std::min(expCtx->sbeWindowCompatibility, expCtx->sbeCompatibility);
-    if (hasTimeUnit(outputFields) || hasNestedField(outputFields)) {
+    // TODO: (SERVER-78708) Add collation support to window stage in sbe
+    if (expCtx->getCollator()) {
         sbeCompatibility = SbeCompatibility::notCompatible;
     }
 
@@ -562,7 +538,7 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
             inMemoryLimit = _numDocsProcessed <= data["maxDocsBeforeSpill"].numberInt();
         });
 
-        if (!inMemoryLimit && _memoryTracker._allowDiskUse) {
+        if (!inMemoryLimit && _memoryTracker.allowDiskUse()) {
             // Attempt to spill where possible.
             _iterator.spillToDisk();
         }
@@ -572,7 +548,7 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
                       str::stream()
                           << "Exceeded memory limit in DocumentSourceSetWindowFields, used "
                           << _memoryTracker.currentMemoryBytes() << " bytes but max allowed is "
-                          << _memoryTracker._maxAllowedMemoryUsageBytes);
+                          << _memoryTracker.maxAllowedMemoryUsageBytes());
         }
     }
 
@@ -581,15 +557,10 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
         case PartitionIterator::AdvanceResult::kAdvanced:
             break;
         case PartitionIterator::AdvanceResult::kNewPartition:
-            // We've advanced to a new partition, reset the state of every function as well as the
-            // memory tracker.
-            _memoryTracker.resetCurrent();
+            // We've advanced to a new partition, reset the state of every function.
             for (auto&& [fieldName, function] : _executableOutputs) {
                 function->reset();
             }
-
-            // Account for the memory in the iterator for the new partition.
-            _memoryTracker.set(_iterator.getApproximateSize());
             break;
         case PartitionIterator::AdvanceResult::kEOF:
             _eof = true;

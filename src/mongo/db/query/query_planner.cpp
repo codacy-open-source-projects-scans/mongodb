@@ -70,6 +70,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
+#include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -556,8 +557,11 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
                 "Pushing down $search into SBE but featureFlagSearchInSbe is disabled.",
                 feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe());
 
+        auto searchNode =
+            getSearchHelpers(query.getOpCtx()->getServiceContext())->getSearchNode(stage);
+
         auto querySoln = std::make_unique<QuerySolution>();
-        querySoln->setRoot(std::make_unique<SearchNode>(isSearchMeta));
+        querySoln->setRoot(std::move(searchNode));
         return std::move(querySoln);
     }
 
@@ -1816,9 +1820,27 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
             auto windowNode = std::make_unique<WindowNode>(std::move(solnForAgg),
                                                            windowStage->getPartitionBy(),
                                                            windowStage->getSortBy(),
-                                                           windowStage->getOutputFields(),
-                                                           innerStage->isLastSource());
+                                                           windowStage->getOutputFields());
             solnForAgg = std::move(windowNode);
+            continue;
+        }
+
+        auto unpackBucketStage =
+            dynamic_cast<DocumentSourceInternalUnpackBucket*>(innerStage->documentSource());
+        if (unpackBucketStage) {
+            const auto& unpacker = unpackBucketStage->bucketUnpacker();
+
+            auto eventFilter = unpackBucketStage->eventFilter()
+                ? unpackBucketStage->eventFilter()->clone()
+                : nullptr;
+            auto wholeBucketFilter = unpackBucketStage->wholeBucketFilter()
+                ? unpackBucketStage->wholeBucketFilter()->clone()
+                : nullptr;
+            solnForAgg = std::make_unique<UnpackTsBucketNode>(std::move(solnForAgg),
+                                                              unpacker.bucketSpec(),
+                                                              std::move(eventFilter),
+                                                              std::move(wholeBucketFilter),
+                                                              unpacker.includeMetaField());
             continue;
         }
 

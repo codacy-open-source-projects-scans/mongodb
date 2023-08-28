@@ -109,7 +109,7 @@ public:
             uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
         auto results = scatterGatherVersionedTargetByRoutingTable(
             opCtx,
-            nss.db_forSharding(),
+            nss.dbName(),
             nss,
             cri,
             applyReadWriteConcern(
@@ -174,8 +174,8 @@ public:
         uassertStatusOK(firstFailedShardStatus);
         return true;
     }
-
-} validateCmd;
+};
+MONGO_REGISTER_COMMAND(ValidateCmd);
 
 }  // namespace
 }  // namespace mongo

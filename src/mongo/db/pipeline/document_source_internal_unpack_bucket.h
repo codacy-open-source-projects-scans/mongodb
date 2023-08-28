@@ -47,7 +47,6 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/index_scan.h"
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/timeseries/bucket_spec.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/dependencies.h"
@@ -58,6 +57,7 @@
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -290,6 +290,16 @@ public:
                                             Pipeline::SourceContainer* container,
                                             bool includeEventFilter) const;
 
+    const MatchExpression* eventFilter() const {
+        return _eventFilter.get();
+    }
+
+    const MatchExpression* wholeBucketFilter() const {
+        return _wholeBucketFilter.get();
+    }
+
+    bool isSbeCompatible();
+
 private:
     GetNextResult doGetNext() final;
 
@@ -336,5 +346,8 @@ private:
     bool _triedInternalizeProject = false;
     bool _triedLastpointRewrite = false;
     bool _triedLimitPushDown = false;
+
+    // Caches the SBE-compatibility status result of this stage.
+    boost::optional<bool> _isSbeCompatible = boost::none;
 };
 }  // namespace mongo

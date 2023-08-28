@@ -1,6 +1,6 @@
-// The test runs a lot of commands that are not allowed with security token: addShard,
-// addShardToZone, appendOplogNote, applyOps, and so on.
 // @tags: [
+//   # The test runs a lot of commands that are not allowed with security token: addShard,
+//   # addShardToZone, appendOplogNote, applyOps, and so on.
 //   not_allowed_with_security_token,
 //   assumes_unsharded_collection,
 //   assumes_superuser_permissions,
@@ -108,6 +108,7 @@ let viewsCommandTests = {
     _configsvrCommitMergeAllChunksOnShard: {skip: isAnInternalCommand},
     _configsvrCommitMovePrimary:
         {skip: isAnInternalCommand},  // Can be removed once 6.0 is last LTS
+    _configsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
@@ -217,6 +218,7 @@ let viewsCommandTests = {
     streams_getMetrics: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
+    abortMoveCollection: {skip: isUnrelated},
     abortReshardCollection: {skip: isUnrelated},
     abortTransaction: {skip: isUnrelated},
     addShard: {skip: isUnrelated},
@@ -423,7 +425,6 @@ let viewsCommandTests = {
     getCmdLineOpts: {skip: isUnrelated},
     getDefaultRWConcern: {skip: isUnrelated},
     getDiagnosticData: {skip: isUnrelated},
-    getFreeMonitoringStatus: {skip: isUnrelated},
     getLog: {skip: isUnrelated},
     getMore: {
         setup: function(conn) {
@@ -555,6 +556,17 @@ let viewsCommandTests = {
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NamespaceNotSharded,
     },
+    moveCollection: {
+        // TODO(SERVER-80156): update test case to succeed on unsharded collections
+        command: {moveCollection: "test.view", toShard: "move_collection-rs"},
+        setup: function(conn) {
+            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
+        },
+        expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true,
+    },
     movePrimary: {skip: "Tested in sharding/movePrimary1.js"},
     moveRange: {skip: isUnrelated},
     multicast: {skip: isUnrelated},
@@ -669,7 +681,6 @@ let viewsCommandTests = {
     setCommittedSnapshot: {skip: isAnInternalCommand},
     setDefaultRWConcern: {skip: isUnrelated},
     setFeatureCompatibilityVersion: {skip: isUnrelated},
-    setFreeMonitoring: {skip: isUnrelated},
     setProfilingFilterGlobally: {skip: isUnrelated},
     setParameter: {skip: isUnrelated},
     setShardVersion: {skip: isUnrelated},
@@ -731,9 +742,20 @@ let viewsCommandTests = {
     testReshardCloneCollection: {skip: isAnInternalCommand},
     testVersion2: {skip: isAnInternalCommand},
     testVersions1And2: {skip: isAnInternalCommand},
+    timeseriesCatalogBucketParamsChanged: {skip: isAnInternalCommand},
     top: {skip: "tested in views/views_stats.js"},
     transitionFromDedicatedConfigServer: {skip: isUnrelated},
     transitionToDedicatedConfigServer: {skip: isUnrelated},
+    unshardCollection: {
+        command: {unshardCollection: "test.view", toShard: "unshard_collection-rs"},
+        setup: function(conn) {
+            assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
+        },
+        expectedErrorCode: ErrorCodes.NamespaceNotSharded,
+        skipStandalone: true,
+        expectFailure: true,
+        isAdminCommand: true,
+    },
     update: {command: {update: "view", updates: [{q: {x: 1}, u: {x: 2}}]}, expectFailure: true},
     updateRole: {
         command: {

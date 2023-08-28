@@ -232,28 +232,6 @@ void appendNamespaceShape(BSONObjBuilder& bob,
     bob.append("coll", opts.serializeIdentifier(nss.coll()));
 }
 
-BSONObj extractQueryShape(const BSONObj& cmd,
-                          const SerializationOptions& opts,
-                          const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                          const boost::optional<TenantId>& tenantId) {
-    if (cmd.firstElementFieldName() == FindCommandRequest::kCommandName) {
-        auto findCommandRequest = std::make_unique<FindCommandRequest>(FindCommandRequest::parse(
-            IDLParserContext("findCommandRequest", false /* apiStrict */, tenantId), cmd));
-        auto parsedFindCommand =
-            uassertStatusOK(parsed_find_command::parse(expCtx, std::move(findCommandRequest)));
-        return extractQueryShape(*parsedFindCommand, opts, expCtx);
-    } else if (cmd.firstElementFieldName() == AggregateCommandRequest::kCommandName) {
-        auto aggregateCommandRequest = AggregateCommandRequest::parse(
-            IDLParserContext("aggregateCommandRequest", false /* apiStrict */, tenantId), cmd);
-        auto pipeline = Pipeline::parse(aggregateCommandRequest.getPipeline(), expCtx);
-        auto ns = aggregateCommandRequest.getNamespace();
-        return extractQueryShape(
-            std::move(aggregateCommandRequest), std::move(*pipeline), opts, expCtx, ns);
-    } else {
-        uasserted(7746402, str::stream() << "QueryShape can not be computed for command: " << cmd);
-    }
-}
-
 BSONObj extractQueryShape(const ParsedFindCommand& findRequest,
                           const SerializationOptions& opts,
                           const boost::intrusive_ptr<ExpressionContext>& expCtx) {
@@ -378,7 +356,9 @@ BSONObj extractQueryShape(const AggregateCommandRequest& aggregateCommand,
 
 NamespaceStringOrUUID parseNamespaceShape(BSONElement cmdNsElt) {
     tassert(7632900, "cmdNs must be an object.", cmdNsElt.type() == BSONType::Object);
-    auto cmdNs = CommandNamespace::parse(IDLParserContext("cmdNs"), cmdNsElt.embeddedObject());
+    // cmdNs is internally built from structured requests and can be deserialized as storage.
+    auto cmdNs = CommandNamespace::parse(
+        IDLParserContext("cmdNs", false /*apiStrict*/, boost::none), cmdNsElt.embeddedObject());
 
     boost::optional<TenantId> tenantId = cmdNs.getTenantId().map(TenantId::parseFromString);
 
@@ -386,8 +366,7 @@ NamespaceStringOrUUID parseNamespaceShape(BSONElement cmdNsElt) {
         tassert(7632903,
                 "Exactly one of 'uuid' and 'coll' can be defined.",
                 !cmdNs.getUuid().has_value());
-        return NamespaceStringUtil::parseNamespaceFromRequest(
-            tenantId, cmdNs.getDb(), cmdNs.getColl().value());
+        return NamespaceStringUtil::deserialize(tenantId, cmdNs.getDb(), cmdNs.getColl().value());
     } else {
         tassert(7632904,
                 "Exactly one of 'uuid' and 'coll' can be defined.",

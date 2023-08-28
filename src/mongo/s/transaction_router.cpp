@@ -814,7 +814,7 @@ void TransactionRouter::Router::_clearPendingParticipants(OperationContext* opCt
                                             << WriteConcernOptions().toBSON()));
         }
         auto responses = gatherResponses(opCtx,
-                                         DatabaseName::kAdmin.db(),
+                                         DatabaseName::kAdmin,
                                          ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                          Shard::RetryPolicy::kIdempotent,
                                          abortRequests);
@@ -1017,6 +1017,14 @@ void TransactionRouter::Router::_continueTxn(OperationContext* opCtx,
             if (!o().participants.empty()) {
                 ++p().latestStmtId;
             }
+
+            uassert(
+                8027900,
+                str::stream() << "attempting to continue transaction that was not started lsid: "
+                              << _sessionId()
+                              << " txnNumber: " << o().txnNumberAndRetryCounter.getTxnNumber(),
+                o().atClusterTimeForSnapshotReadConcern ||
+                    o().placementConflictTimeForNonSnapshotReadConcern);
 
             _onContinue(opCtx);
             break;
@@ -1411,7 +1419,7 @@ BSONObj TransactionRouter::Router::abortTransaction(OperationContext* opCtx) {
                 "numParticipantShards"_attr = o().participants.size());
 
     const auto responses = gatherResponses(opCtx,
-                                           DatabaseName::kAdmin.db(),
+                                           DatabaseName::kAdmin,
                                            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                            Shard::RetryPolicy::kIdempotent,
                                            abortRequests);
@@ -1498,7 +1506,7 @@ void TransactionRouter::Router::implicitlyAbortTransaction(OperationContext* opC
     try {
         // Ignore the responses.
         gatherResponses(opCtx,
-                        DatabaseName::kAdmin.db(),
+                        DatabaseName::kAdmin,
                         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                         Shard::RetryPolicy::kIdempotent,
                         abortRequests);
@@ -1635,7 +1643,7 @@ BSONObj TransactionRouter::Router::_commitWithRecoveryToken(OperationContext* op
     return uassertStatusOK(recoveryShard->runCommandWithFixedRetryAttempts(
                                opCtx,
                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                               "admin",
+                               DatabaseName::kAdmin,
                                coordinateCommitCmd,
                                Shard::RetryPolicy::kIdempotent))
         .response;

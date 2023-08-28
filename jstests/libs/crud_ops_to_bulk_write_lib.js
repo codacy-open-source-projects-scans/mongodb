@@ -85,10 +85,6 @@ export const BulkWriteUtils = (function() {
 
     function flushCurrentBulkWriteBatch(
         conn, originalRunCommand, makeRunCommandArgs, additionalParameters = {}) {
-        if (bufferedOps.length == 0) {
-            return {};
-        }
-
         // Should not be possible to reach if bypassDocumentValidation is not set.
         assert(bypassDocumentValidation != null);
 
@@ -214,8 +210,8 @@ export const BulkWriteUtils = (function() {
                             if (!resp.hasOwnProperty("upserted")) {
                                 resp["upserted"] = [];
                             }
-                            // Need to update the index of the upserted doc.
-                            current.upserted.index = cursorIdx;
+                            // Need to add the index of the upserted doc.
+                            current.upserted["index"] = cursorIdx;
                             resp["upserted"].push(current.upserted);
                         }
                     }

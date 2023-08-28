@@ -53,7 +53,7 @@ namespace mongo {
 std::string DatabaseNameUtil::serialize(const DatabaseName& dbName,
                                         const SerializationContext& context) {
     if (!gMultitenancySupport)
-        dbName.toString();
+        return dbName.toString();
 
     if (context.getSource() == SerializationContext::Source::Command)
         return serializeForCommands(dbName, context);
@@ -72,10 +72,6 @@ std::string DatabaseNameUtil::serializeForStorage(const DatabaseName& dbName,
 
 std::string DatabaseNameUtil::serializeForCatalog(const DatabaseName& dbName,
                                                   const SerializationContext& context) {
-    return dbName.toStringWithTenantId();
-}
-
-std::string DatabaseNameUtil::serializeForRemoteCmdRequest(const DatabaseName& dbName) {
     return dbName.toStringWithTenantId();
 }
 

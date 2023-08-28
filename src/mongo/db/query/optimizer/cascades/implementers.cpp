@@ -185,7 +185,7 @@ public:
                 _metadata._scanDefs.at(node.getScanDefName()).getDistributionAndPaths(),
                 node.getProjectionName(),
                 _logicalProps,
-                {},
+                psr::makeNoOp(),
                 canUseParallelScan)) {
             return;
         }
@@ -466,10 +466,6 @@ public:
             // Cannot satisfy limit-skip.
             return;
         }
-        if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
-            // TODO SERVER-78507: Implement this implementer.
-            return;
-        }
 
         const IndexingAvailability& indexingAvailability =
             getPropertyConst<IndexingAvailability>(_logicalProps);
@@ -489,20 +485,24 @@ public:
         const IndexingRequirement& requirements = getPropertyConst<IndexingRequirement>(_physProps);
         const CandidateIndexes& candidateIndexes = node.getCandidateIndexes();
         const IndexReqTarget indexReqTarget = requirements.getIndexReqTarget();
-        const PartialSchemaRequirements& reqMap = node.getReqMap();
+        const PSRExpr::Node& reqMap = node.getReqMap();
 
         switch (indexReqTarget) {
             case IndexReqTarget::Complete:
                 if (_hints._disableScan) {
                     return;
                 }
-                if (_hints._forceIndexScanForPredicates && hasProperIntervals(reqMap.getRoot())) {
+                if (_hints._forceIndexScanForPredicates && hasProperIntervals(reqMap)) {
                     return;
                 }
                 break;
 
             case IndexReqTarget::Index:
                 if (candidateIndexes.empty()) {
+                    return;
+                }
+
+                if (node.getTarget() == IndexReqTarget::Seek) {
                     return;
                 }
                 [[fallthrough]];
@@ -527,7 +527,7 @@ public:
         const ProjectionName& scanProjectionName = indexingAvailability.getScanProjection();
 
         // We can only satisfy partial schema requirements using our root projection.
-        if (PSRExpr::any(reqMap.getRoot(), [&](const PartialSchemaEntry& e) {
+        if (PSRExpr::any(reqMap, [&](const PartialSchemaEntry& e) {
                 return e.first._projectionName != scanProjectionName;
             })) {
             return;
@@ -547,7 +547,7 @@ public:
                 requiresRootProjection = projectionsLeftToSatisfy.erase(scanProjectionName);
             }
 
-            for (const auto& [key, boundProjName] : getBoundProjections(reqMap)) {
+            for (const auto& [key, boundProjName] : psr::getBoundProjections(reqMap)) {
                 projectionsLeftToSatisfy.erase(boundProjName);
             }
             if (!projectionsLeftToSatisfy.getVector().empty()) {
@@ -566,6 +566,10 @@ public:
         const PartialSchemaKeyCE& partialSchemaKeyCE = ceProperty.getPartialSchemaKeyCE();
 
         if (indexReqTarget == IndexReqTarget::Index) {
+            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+                // TODO SERVER-79608: Implement this implementer for index target.
+                return;
+            }
             ProjectionCollationSpec requiredCollation;
             if (hasProperty<CollationRequirement>(_physProps)) {
                 requiredCollation =
@@ -583,7 +587,7 @@ public:
                 const auto& indexDefName = candidateIndexEntry._indexDefName;
                 const auto& indexDef = scanDef.getIndexDefs().at(indexDefName);
 
-                if (!indexDef.getPartialReqMap().isNoop() &&
+                if (!psr::isNoop(indexDef.getPartialReqMap()) &&
                     (_hints._disableIndexes == DisableIndexOptions::DisablePartialOnly ||
                      satisfiedPartialIndexes.count(indexDefName) == 0)) {
                     // Consider only indexes for which we satisfy partial requirements.
@@ -639,7 +643,7 @@ public:
                         std::vector<SelectivityType> atomSels;
                         std::vector<SelectivityType> conjuctionSels;
                         PSRExpr::visitDisjuncts(
-                            reqMap.getRoot(),
+                            reqMap,
                             [&](const PSRExpr::Node& child, const PSRExpr::VisitorContext&) {
                                 atomSels.clear();
 
@@ -789,6 +793,20 @@ public:
                 fieldProjectionMap._rootProjection = scanProjectionName;
             }
 
+            // TODO SERVER-79854: Omit shard filtering if there equality on the shard key.
+            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+                // Add top level fields of the shard key to the fieldProjectionMap used to create
+                // the PhysicalScan.
+                const auto& topLevelFieldNames =
+                    scanDef.shardingMetadata().topLevelShardKeyFieldNames();
+                for (auto&& fieldName : topLevelFieldNames) {
+                    if (!fieldProjectionMap._fieldProjections.contains(fieldName)) {
+                        fieldProjectionMap._fieldProjections.insert(
+                            {fieldName, _prefixId.getNextId("evalTemp")});
+                    }
+                }
+            }
+
             PhysPlanBuilder builder;
             CEType baseCE{0.0};
 
@@ -798,14 +816,13 @@ public:
 
                 // Return a physical scan with field map.
                 builder.make<PhysicalScanNode>(
-                    baseCE, std::move(fieldProjectionMap), scanDefName, canUseParallelScan);
+                    baseCE, fieldProjectionMap, scanDefName, canUseParallelScan);
                 rule = PhysicalRewriteType::SargableToPhysicalScan;
             } else {
                 baseCE = {1.0};
 
                 // Try Seek with Limit 1.
-                builder.make<SeekNode>(
-                    baseCE, ridProjName, std::move(fieldProjectionMap), scanDefName);
+                builder.make<SeekNode>(baseCE, ridProjName, fieldProjectionMap, scanDefName);
 
                 builder.make<LimitSkipNode>(
                     baseCE, LimitSkipRequirement{1, 0}, std::move(builder._node));
@@ -820,6 +837,17 @@ public:
                                                std::move(reqsWithCE),
                                                _pathToInterval,
                                                builder);
+            }
+
+            // Insert evaluation nodes to project the fields of the shard key if we couldn't push
+            // them down to the PhysicalScan and insert a FilterNode which performs shard filtering.
+            if (getPropertyConst<RemoveOrphansRequirement>(_physProps).mustRemove()) {
+                handleScanNodeRemoveOrphansRequirement(scanDef.shardingMetadata().shardKey(),
+                                                       builder,
+                                                       fieldProjectionMap,
+                                                       indexReqTarget,
+                                                       currentGroupCE,
+                                                       _prefixId);
             }
 
             optimizeChildrenNoAssert(_queue,
@@ -864,6 +892,22 @@ public:
 
         const LogicalProps& leftLogicalProps = _memo.getLogicalProps(leftGroupId);
         const LogicalProps& rightLogicalProps = _memo.getLogicalProps(rightGroupId);
+
+        const bool hasScanChild = rightGroupId == indexingAvailability.getScanGroupId();
+
+        if (hasScanChild && !isIndex) {
+            // This is a special RIDIntersectNode that has the Scan as its right child and has all
+            // predicates in its left child. We should optimize only the left child to support
+            // covering queries.
+            PhysProps newProps = _physProps;
+            setPropertyOverwrite<IndexingRequirement>(
+                newProps,
+                {IndexReqTarget::Index,
+                 dedupRID,
+                 requirements.getSatisfiedPartialIndexesGroupId()});
+            optimizeUnderNewProperties<PhysicalRewriteType::AttemptCoveringQuery>(
+                _queue, kDefaultPriority, node.getLeftChild(), std::move(newProps));
+        }
 
         const bool hasProperIntervalLeft =
             getPropertyConst<IndexingAvailability>(leftLogicalProps).hasProperInterval();
@@ -1690,7 +1734,7 @@ private:
                                  const DistributionAndPaths& distributionAndPaths,
                                  const ProjectionName& scanProjection,
                                  const LogicalProps& scanLogicalProps,
-                                 const PartialSchemaRequirements& reqMap,
+                                 const PSRExpr::Node& reqMap,
                                  bool& canUseParallelScan) {
         const DistributionRequirement& required =
             getPropertyConst<DistributionRequirement>(_physProps);
@@ -1741,8 +1785,8 @@ private:
                     distribAndProjections._projectionNames;
 
                 for (const ABT& partitioningPath : distributionAndPaths._paths) {
-                    if (auto proj = reqMap.findProjection(
-                            PartialSchemaKey{scanProjection, partitioningPath});
+                    if (auto proj = psr::findProjection(
+                            reqMap, PartialSchemaKey{scanProjection, partitioningPath});
                         proj && *proj == requiredProjections.at(distributionPartitionIndex)) {
                         distributionPartitionIndex++;
                     } else {

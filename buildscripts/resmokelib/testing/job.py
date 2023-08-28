@@ -21,8 +21,8 @@ from buildscripts.resmokelib.testing.testcases import fixture as _fixture
 from buildscripts.resmokelib.utils import queue as _queue
 
 from opentelemetry import trace, context
+from opentelemetry.context.context import Context
 from opentelemetry.trace.status import StatusCode
-from opentelemetry.trace import NonRecordingSpan, SpanContext
 
 # TODO: if we ever fix the circular deps in resmoke we will be able to get rid of this
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ class Job(object):
             self,
             queue: 'TestQueue[Union[QueueElemRepeatTime, QueueElem]]',
             interrupt_flag: threading.Event,
-            parent_span_context: SpanContext,
+            parent_context: Context,
             setup_flag: Optional[threading.Event] = None,
             teardown_flag: Optional[threading.Event] = None,
             hook_failure_flag: Optional[threading.Event] = None,
@@ -87,8 +87,7 @@ class Job(object):
         """
         # Since this is called from another thread we need to pass the context in
         # This will make it have the correct parent and traceid
-        ctx = trace.set_span_in_context(NonRecordingSpan(parent_span_context))
-        context.attach(ctx)
+        context.attach(parent_context)
 
         setup_succeeded = True
         if setup_flag is not None:
@@ -202,7 +201,7 @@ class Job(object):
     def _execute_test(self, test: TestCase, hook_failure_flag: Optional[threading.Event]):
         """Call the before/after test hooks and execute 'test'."""
 
-        common_test_attributes = test.get_test_attributes()
+        common_test_attributes = test.get_test_otel_attributes()
         execute_test_span = trace.get_current_span()
         execute_test_span.set_attributes(attributes=common_test_attributes)
         execute_test_span.set_status(StatusCode.ERROR, "fail_early")
@@ -271,6 +270,7 @@ class Job(object):
     @TRACER.start_as_current_span("job._run_hooks_before_suite")
     def _run_hooks_before_suite(self, hook_failure_flag: Optional[threading.Event]):
         """Run the before_suite method on each of the hooks."""
+        run_hooks_before_suite_span = trace.get_current_span()
         hooks_failed = True
         try:
             for hook in self.hooks:
@@ -279,11 +279,14 @@ class Job(object):
         finally:
             if hooks_failed and hook_failure_flag is not None:
                 hook_failure_flag.set()
+            run_hooks_before_suite_span.set_status(
+                StatusCode.ERROR if hooks_failed else StatusCode.OK)
 
     @TRACER.start_as_current_span("job._run_hooks_after_suite")
     def _run_hooks_after_suite(self, teardown_flag: Optional[threading.Event],
                                hook_failure_flag: Optional[threading.Event]):
         """Run the after_suite method on each of the hooks."""
+        run_hooks_after_suite_span = trace.get_current_span()
         hooks_failed = True
         try:
             for hook in self.hooks:
@@ -292,6 +295,8 @@ class Job(object):
         finally:
             if hooks_failed and hook_failure_flag is not None:
                 hook_failure_flag.set()
+            run_hooks_after_suite_span.set_status(
+                StatusCode.ERROR if hooks_failed else StatusCode.OK)
 
     @TRACER.start_as_current_span("job._run_hooks_before_tests")
     def _run_hooks_before_tests(self, test: TestCase, hook_failure_flag: Optional[threading.Event]):
@@ -301,25 +306,28 @@ class Job(object):
         failure, and reraises any other exceptions.
         """
         run_hooks_before_tests_span = trace.get_current_span()
-        run_hooks_before_tests_span.set_attributes(attributes=test.get_test_attributes())
+        run_hooks_before_tests_span.set_attributes(attributes=test.get_test_otel_attributes())
 
         try:
             for hook in self.hooks:
                 self._run_hook(hook, hook.before_test, test, hook_failure_flag)
 
         except errors.StopExecution:
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             raise
 
         except errors.ServerFailure:
             self.logger.exception("%s marked as a failure by a hook's before_test.",
                                   test.short_description())
             self._fail_test(test, sys.exc_info(), return_code=2)
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             raise errors.StopExecution("A hook's before_test failed")
 
         except errors.TestFailure:
             self.logger.exception("%s marked as a failure by a hook's before_test.",
                                   test.short_description())
             self._fail_test(test, sys.exc_info(), return_code=1)
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             if self.suite_options.fail_fast:
                 raise errors.StopExecution("A hook's before_test failed")
 
@@ -328,7 +336,10 @@ class Job(object):
             self.report.startTest(test)
             self.report.addError(test, sys.exc_info())
             self.report.stopTest(test)
+            run_hooks_before_tests_span.set_status(StatusCode.ERROR)
             raise
+
+        run_hooks_before_tests_span.set_status(StatusCode.OK)
 
     @TRACER.start_as_current_span("job._run_hooks_after_tests")
     def _run_hooks_after_tests(self, test: TestCase, hook_failure_flag: Optional[threading.Event],
@@ -343,8 +354,8 @@ class Job(object):
         """
 
         run_hooks_after_tests_span = trace.get_current_span()
-        run_hooks_after_tests_span.set_attributes(attributes=test.get_test_attributes())
-        run_hooks_after_tests_span.set_attribute("background", background)
+        run_hooks_after_tests_span.set_attributes(attributes=test.get_test_otel_attributes())
+        run_hooks_after_tests_span.set_attribute(TestCase.METRIC_NAMES.BACKGROUND, background)
 
         suite_with_balancer = isinstance(
             self.fixture, shardedcluster.ShardedClusterFixture) and self.fixture.enable_balancer
@@ -357,6 +368,7 @@ class Job(object):
                 self.logger.exception("%s failed while stopping the balancer for end-test hooks",
                                       test.short_description())
                 self.report.setFailure(test, return_code=2)
+                run_hooks_after_tests_span.set_status(StatusCode.ERROR)
                 if self.archival:
                     result = TestResult(test=test, hook=None, success=False)
                     self.archival.archive(self.logger, result, self.manager)
@@ -368,23 +380,27 @@ class Job(object):
                     self._run_hook(hook, hook.after_test, test, hook_failure_flag)
 
         except errors.StopExecution:
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             raise
 
         except errors.ServerFailure:
             self.logger.exception("%s marked as a failure by a hook's after_test.",
                                   test.short_description())
             self.report.setFailure(test, return_code=2)
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             raise errors.StopExecution("A hook's after_test failed")
 
         except errors.TestFailure:
             self.logger.exception("%s marked as a failure by a hook's after_test.",
                                   test.short_description())
             self.report.setFailure(test, return_code=1)
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             if self.suite_options.fail_fast:
                 raise errors.StopExecution("A hook's after_test failed")
 
         except:
             self.report.setError(test, sys.exc_info())
+            run_hooks_after_tests_span.set_status(StatusCode.ERROR)
             raise
 
         if not background and suite_with_balancer:
@@ -396,6 +412,7 @@ class Job(object):
                     "%s failed while re-starting the balancer after end-test hooks",
                     test.short_description())
                 self.report.setFailure(test, return_code=2)
+                run_hooks_after_tests_span.set_status(StatusCode.ERROR)
                 if self.archival:
                     result = TestResult(test=test, hook=None, success=False)
                     self.archival.archive(self.logger, result, self.manager)

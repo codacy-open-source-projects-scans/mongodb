@@ -112,8 +112,7 @@ public:
         if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
             // Acquire the DDL lock to serialize with other DDL operations. It also makes sure that
             // we are targeting the primary shard for this database.
-            _collDDLLock.emplace(
-                opCtx, nss, "configureQueryAnalyzer", MODE_X, DDLLockManager::kDefaultLockTimeout);
+            _collDDLLock.emplace(opCtx, nss, "configureQueryAnalyzer", MODE_X);
         } else {
             _autoColl.emplace(opCtx,
                               nss,
@@ -259,7 +258,7 @@ public:
                     auto swResponse = configShard->runCommandWithFixedRetryAttempts(
                         opCtx,
                         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                        DatabaseName::kConfig.toString(),
+                        DatabaseName::kConfig,
                         request.toBSON({}),
                         Shard::RetryPolicy::kIdempotent);
                     uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(swResponse));
@@ -331,7 +330,8 @@ public:
         return "Starts or stops collecting metrics about read and write queries against a "
                "collection.";
     }
-} configureQueryAnalyzerCmd;
+};
+MONGO_REGISTER_COMMAND(ConfigureQueryAnalyzerCmd);
 
 }  // namespace
 

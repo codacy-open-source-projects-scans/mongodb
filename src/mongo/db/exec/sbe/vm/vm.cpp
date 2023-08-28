@@ -1638,7 +1638,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggSum(value::TypeTags 
 }
 
 void resetDoubleDoubleSumState(value::Array* state) {
-    state->values().clear();
+    state->clear();
     // The order of the following three elements should match to 'AggSumValueElems'. An absent
     // 'kDecimalTotal' element means that we've not seen any decimal value. So, we're not adding
     // 'kDecimalTotal' element yet.
@@ -5367,207 +5367,44 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortKeyComponent
     }
 }
 
-std::pair<value::TypeTags, value::Value> ByteCode::produceBsonObject(const MakeObjSpec* spec,
-                                                                     value::TypeTags rootTag,
-                                                                     value::Value rootVal,
-                                                                     int stackOffset) {
-    auto& fieldNames = spec->fieldNames;
-
-    const bool isInclusion = spec->fieldBehavior == MakeObjSpec::FieldBehavior::keep;
-    const size_t numFields = fieldNames.size();
-    const size_t numKeepOrDrops = spec->numKeepOrDrops;
-    const size_t numComputedFields = numFields - numKeepOrDrops;
-
-    // The "visited" array keeps track of which computed fields have been visited so far so that
-    // later we can append the non-visited computed fields to the end of the object.
-    char* visited = nullptr;
-    char localVisitedArr[64];
-    std::unique_ptr<char[]> allocatedVisitedArr;
-    if (MONGO_unlikely(numComputedFields > 64)) {
-        allocatedVisitedArr = std::make_unique<char[]>(numComputedFields);
-        visited = allocatedVisitedArr.get();
-    } else {
-        visited = &localVisitedArr[0];
-    }
-
-    memset(visited, 0, numComputedFields);
-
-    UniqueBSONObjBuilder bob;
-
-    size_t numFieldsRemaining = numFields;
-    size_t numComputedFieldsRemaining = numComputedFields;
-
-    const size_t numFieldsRemainingThreshold = isInclusion ? 1 : 0;
-
-    if (value::isObject(rootTag)) {
-        if (rootTag == value::TypeTags::bsonObject) {
-            auto be = value::bitcastTo<const char*>(rootVal);
-            const auto end = be + ConstDataView(be).read<LittleEndian<uint32_t>>();
-
-            // Skip document length.
-            be += 4;
-
-            // Let N = the # of "computed" fields, and let K = (isInclusion && N > 0 ? N-1 : N).
-            //
-            // When we have seen all of the "keepOrDrop" fields and when we have seen K of the
-            // "computed" fields, we can break out of this loop, ignore or copy the remaining
-            // fields from 'rootVal' (depending on whether 'isInclusion' is true or false), and
-            // then finally append the remaining computed field (if there is one) to the output
-            // object.
-            //
-            // (When isInclusion == true and a single "computed" field remains, it's okay to stop
-            // scanning 'rootVal' and append the remaining computed field to the end of the output
-            // object because it will have no observable effect on field order.)
-            if (numFieldsRemaining > numFieldsRemainingThreshold ||
-                numFieldsRemaining != numComputedFieldsRemaining) {
-                while (be != end - 1) {
-                    auto sv = bson::fieldNameAndLength(be);
-                    auto nextBe = bson::advance(be, sv.size());
-                    size_t pos = fieldNames.findPos(sv);
-
-                    if (pos == IndexedStringVector::npos) {
-                        if (!isInclusion) {
-                            bob.append(BSONElement(be, sv.size() + 1, nextBe - be));
-                        }
-                    } else if (pos < numKeepOrDrops) {
-                        --numFieldsRemaining;
-
-                        if (isInclusion) {
-                            bob.append(BSONElement(be, sv.size() + 1, nextBe - be));
-                        }
-                    } else {
-                        --numFieldsRemaining;
-                        --numComputedFieldsRemaining;
-
-                        auto projectIdx = pos - numKeepOrDrops;
-                        visited[projectIdx] = 1;
-
-                        size_t argIdx = stackOffset + projectIdx;
-                        auto [_, tag, val] = getFromStack(argIdx);
-                        bson::appendValueToBsonObj(bob, fieldNames[pos], tag, val);
-                    }
-
-                    be = nextBe;
-
-                    if (numFieldsRemaining <= numFieldsRemainingThreshold &&
-                        numFieldsRemaining == numComputedFieldsRemaining) {
-                        break;
-                    }
-                }
-            }
-
-            // If isInclusion == false and 'be' has not reached the end of 'rootVal', copy over
-            // the remaining fields from 'rootVal' to the output object.
-            if (!isInclusion) {
-                while (be != end - 1) {
-                    auto sv = bson::fieldNameAndLength(be);
-                    auto nextBe = bson::advance(be, sv.size());
-                    bob.append(BSONElement(be, sv.size() + 1, nextBe - be));
-
-                    be = nextBe;
-                }
-            }
-        } else if (rootTag == value::TypeTags::Object) {
-            auto objRoot = value::getObjectView(rootVal);
-            size_t idx = 0;
-
-            // Let N = number of "computed" fields, and let K = (isInclusion && N > 0 ? N-1 : N).
-            //
-            // When we have seen all of the "keepOrDrop" fields and when we have seen K of the
-            // "computed" fields, we can break out of this loop, ignore or copy the remaining
-            // fields from 'rootVal' (depending on whether 'isInclusion' is true or false), and
-            // then finally append the remaining computed field (if there is one) to the output
-            // object.
-            //
-            // (When isInclusion == true and a single "computed" field remains, it's okay to stop
-            // scanning 'rootVal' and append the remaining computed field to the end of the output
-            // object because it will have no observable effect on field order.)
-            if (numFieldsRemaining > numFieldsRemainingThreshold ||
-                numFieldsRemaining != numComputedFieldsRemaining) {
-                for (; idx < objRoot->size(); ++idx) {
-                    auto sv = StringData(objRoot->field(idx));
-                    size_t pos = fieldNames.findPos(sv);
-
-                    if (pos == IndexedStringVector::npos) {
-                        if (!isInclusion) {
-                            auto [tag, val] = objRoot->getAt(idx);
-                            bson::appendValueToBsonObj(bob, objRoot->field(idx), tag, val);
-                        }
-                    } else if (pos < numKeepOrDrops) {
-                        --numFieldsRemaining;
-
-                        if (isInclusion) {
-                            auto [tag, val] = objRoot->getAt(idx);
-                            bson::appendValueToBsonObj(bob, objRoot->field(idx), tag, val);
-                        }
-                    } else {
-                        --numFieldsRemaining;
-                        --numComputedFieldsRemaining;
-
-                        auto projectIdx = pos - numKeepOrDrops;
-                        visited[projectIdx] = 1;
-
-                        size_t argIdx = stackOffset + projectIdx;
-                        auto [_, tag, val] = getFromStack(argIdx);
-                        bson::appendValueToBsonObj(bob, fieldNames[pos], tag, val);
-                    }
-
-                    if (numFieldsRemaining <= numFieldsRemainingThreshold &&
-                        numFieldsRemaining == numComputedFieldsRemaining) {
-                        ++idx;
-                        break;
-                    }
-                }
-            }
-
-            // If isInclusion == false and 'be' has not reached the end of 'rootVal', copy over
-            // the remaining fields from 'rootVal' to the output object.
-            if (!isInclusion) {
-                for (; idx < objRoot->size(); ++idx) {
-                    auto sv = StringData(objRoot->field(idx));
-                    auto [fieldTag, fieldVal] = objRoot->getAt(idx);
-                    bson::appendValueToBsonObj(bob, sv, fieldTag, fieldVal);
-                }
-            }
-        }
-    }
-
-    // Append the remaining computed fields (if any) to the output object.
-    if (numComputedFieldsRemaining > 0) {
-        for (size_t pos = numKeepOrDrops; pos < fieldNames.size(); ++pos) {
-            auto projectIdx = pos - numKeepOrDrops;
-            if (!visited[projectIdx]) {
-                size_t argIdx = stackOffset + projectIdx;
-                auto [_, tag, val] = getFromStack(argIdx);
-                bson::appendValueToBsonObj(bob, fieldNames[pos], tag, val);
-            }
-        }
-    }
-
-    bob.doneFast();
-    char* data = bob.bb().release().release();
-    return {value::TypeTags::bsonObject, value::bitcastFrom<char*>(data)};
-}
-
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMakeBsonObj(ArityType arity) {
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMakeBsonObj(
+    ArityType arity, const CodeFragment* code) {
     tassert(6897002,
             str::stream() << "Unsupported number of arguments passed to makeBsonObj(): " << arity,
             arity >= 2);
 
-    auto [mosOwned, mosTag, mosVal] = getFromStack(0);
+    auto [specOwned, specTag, specVal] = getFromStack(0);
     auto [objOwned, objTag, objVal] = getFromStack(1);
 
-    if (mosTag != value::TypeTags::makeObjSpec) {
+    if (specTag != value::TypeTags::makeObjSpec) {
         return {false, value::TypeTags::Nothing, 0};
     }
 
-    auto mos = value::getMakeObjSpecView(mosVal);
+    auto spec = value::getMakeObjSpecView(specVal);
 
-    const int stackOffset = 2;
+    if (spec->nonObjInputBehavior != MakeObjSpec::NonObjInputBehavior::kNewObj &&
+        !value::isObject(objTag)) {
+        if (spec->nonObjInputBehavior == MakeObjSpec::NonObjInputBehavior::kReturnNothing) {
+            // If the input is Nothing or not an Object and if 'nonObjInputBehavior' equals
+            // 'kReturnNothing', then return Nothing.
+            return {false, value::TypeTags::Nothing, 0};
+        } else if (spec->nonObjInputBehavior == MakeObjSpec::NonObjInputBehavior::kReturnInput) {
+            // If the input is Nothing or not an Object and if 'nonObjInputBehavior' equals
+            // 'kReturnInput', then return the input.
+            topStack(false, value::TypeTags::Nothing, 0);
+            return {objOwned, objTag, objVal};
+        }
+    }
 
-    auto [tag, val] = produceBsonObject(mos, objTag, objVal, stackOffset);
+    const int stackStartOffset = 2;
 
-    return {true, tag, val};
+    UniqueBSONObjBuilder bob;
+
+    produceBsonObject(spec, objTag, objVal, stackStartOffset, code, bob);
+
+    bob.doneFast();
+    char* data = bob.bb().release().release();
+    return {true, value::TypeTags::bsonObject, value::bitcastFrom<char*>(data)};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinReverseArray(ArityType arity) {
@@ -7158,6 +6995,29 @@ size_t arrayQueueSize(value::Array* arrayQueue) {
     return queueSize;
 }
 
+// Initialize an array queue
+std::tuple<value::TypeTags, value::Value> arrayQueueInit(size_t bufferSize = 4) {
+    auto [arrayQueueTag, arrayQueueVal] = value::makeNewArray();
+    value::ValueGuard arrayQueueGuard{arrayQueueTag, arrayQueueVal};
+    auto arrayQueue = value::getArrayView(arrayQueueVal);
+    arrayQueue->reserve(static_cast<size_t>(ArrayQueueElems::kSizeOfArray));
+
+    auto [bufferTag, bufferVal] = value::makeNewArray();
+    value::ValueGuard bufferGuard{bufferTag, bufferVal};
+    auto buffer = value::getArrayView(bufferVal);
+    buffer->reserve(bufferSize);
+    for (size_t i = 0; i < bufferSize; ++i) {
+        buffer->push_back(value::TypeTags::Null, 0);
+    }
+
+    bufferGuard.reset();
+    arrayQueue->push_back(bufferTag, bufferVal);
+    arrayQueue->push_back(value::TypeTags::NumberInt64, 0);  // kStartIdx
+    arrayQueue->push_back(value::TypeTags::NumberInt64, 0);  // kQueueSize
+    arrayQueueGuard.reset();
+    return {arrayQueueTag, arrayQueueVal};
+}
+
 // Push an element {tag, value} into the queue
 void arrayQueuePush(value::Array* arrayQueue, value::TypeTags tag, value::Value val) {
     /* The underlying array acts as a circular buffer for the queue with `startIdx` and `queueSize`
@@ -7260,7 +7120,8 @@ std::tuple<value::Array*,
            value::Array*,
            value::Array*,
            int64_t,
-           boost::optional<int64_t>>
+           boost::optional<int64_t>,
+           bool>
 getIntegralState(value::TypeTags stateTag, value::Value stateVal) {
     uassert(
         7821103, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
@@ -7304,7 +7165,14 @@ getIntegralState(value::TypeTags stateTag, value::Value stateVal) {
         unitMillis = value::bitcastTo<int64_t>(unitMillisVal);
     }
 
-    return {state, inputQueue, sortByQueue, integral, nanCount, unitMillis};
+    auto [isNonRemovableTag, isNonRemovableVal] =
+        state->getAt(static_cast<size_t>(AggIntegralElems::kIsNonRemovable));
+    uassert(7996800,
+            "isNonRemovable should be of boolean type",
+            isNonRemovableTag == value::TypeTags::Boolean);
+    auto isNonRemovable = value::bitcastTo<bool>(isNonRemovableVal);
+
+    return {state, inputQueue, sortByQueue, integral, nanCount, unitMillis, isNonRemovable};
 }
 
 void updateNaNCount(value::Array* state, int64_t nanCount) {
@@ -7361,6 +7229,46 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::integralOfTwoPointsByTr
     }
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralInit(ArityType arity) {
+    auto [unitOwned, unitTag, unitVal] = getFromStack(0);
+    auto [isNonRemovableOwned, isNonRemovableTag, isNonRemovableVal] = getFromStack(1);
+
+    tassert(7996820,
+            "Invalid unit type",
+            unitTag == value::TypeTags::Null || unitTag == value::TypeTags::NumberInt64);
+    tassert(7996821, "Invalid isNonRemovable type", isNonRemovableTag == value::TypeTags::Boolean);
+
+    auto [stateTag, stateVal] = value::makeNewArray();
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto state = value::getArrayView(stateVal);
+    state->reserve(static_cast<size_t>(AggIntegralElems::kMaxSizeOfArray));
+
+    // AggIntegralElems::kInputQueue
+    auto [inputQueueTag, inputQueueVal] = arrayQueueInit();
+    state->push_back(inputQueueTag, inputQueueVal);
+
+    // AggIntegralElems::kSortByQueue
+    auto [sortByQueueTag, sortByQueueVal] = arrayQueueInit();
+    state->push_back(sortByQueueTag, sortByQueueVal);
+
+    // AggIntegralElems::kIntegral
+    auto [integralTag, integralVal] = initializeRemovableSumState();
+    state->push_back(integralTag, integralVal);
+
+    // AggIntegralElems::kNanCount
+    state->push_back(value::TypeTags::NumberInt64, 0);
+
+    // AggIntegralElems::kUnitMillis
+    state->push_back(unitTag, unitVal);
+
+    // AggIntegralElems::kIsNonRemovable
+    state->push_back(isNonRemovableTag, isNonRemovableVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralAdd(ArityType arity) {
     auto [stateTag, stateVal] = moveOwnedFromStack(0);
     auto [inputTag, inputVal] = moveOwnedFromStack(1);
@@ -7370,7 +7278,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralAdd(A
     value::ValueGuard inputGuard{inputTag, inputVal};
     value::ValueGuard sortByGuard{sortByTag, sortByVal};
 
-    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis] =
+    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis, isNonRemovable] =
         getIntegralState(stateTag, stateVal);
 
     assertTypesForIntegeral(inputTag, sortByTag, unitMillis);
@@ -7394,6 +7302,13 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralAdd(A
         aggRemovableSumImpl<1>(integral, integralDeltaTag, integralDeltaVal);
     }
 
+    if (isNonRemovable) {
+        auto [tag, val] = arrayQueuePop(inputQueue);
+        value::releaseValue(tag, val);
+        std::tie(tag, val) = arrayQueuePop(sortByQueue);
+        value::releaseValue(tag, val);
+    }
+
     inputGuard.reset();
     arrayQueuePush(inputQueue, inputTag, inputVal);
 
@@ -7411,8 +7326,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralRemov
 
     value::ValueGuard stateGuard{stateTag, stateVal};
 
-    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis] =
+    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis, isNonRemovable] =
         getIntegralState(stateTag, stateVal);
+    uassert(7996801, "Expected integral window to be removable", !isNonRemovable);
 
     assertTypesForIntegeral(inputTag, sortByTag, unitMillis);
 
@@ -7459,7 +7375,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggIntegralFinal
     ArityType arity) {
     auto [stateOwned, stateTag, stateVal] = getFromStack(0);
 
-    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis] =
+    auto [state, inputQueue, sortByQueue, integral, nanCount, unitMillis, isNonRemovable] =
         getIntegralState(stateTag, stateVal);
 
     auto queueSize = arrayQueueSize(inputQueue);
@@ -7525,6 +7441,34 @@ getDerivativeState(value::TypeTags stateTag, value::Value stateVal) {
     }
 
     return {state, inputQueue, sortByQueue, unitMillis};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDerivativeInit(ArityType arity) {
+    auto [unitOwned, unitTag, unitVal] = getFromStack(0);
+
+    tassert(7996822,
+            "Invalid unit type",
+            unitTag == value::TypeTags::Null || unitTag == value::TypeTags::NumberInt64);
+
+    auto [stateTag, stateVal] = value::makeNewArray();
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto state = value::getArrayView(stateVal);
+    state->reserve(static_cast<size_t>(AggIntegralElems::kMaxSizeOfArray));
+
+    // AggDerivativeElems::kInputQueue
+    auto [inputQueueTag, inputQueueVal] = arrayQueueInit();
+    state->push_back(inputQueueTag, inputQueueVal);
+
+    // AggDerivativeElems::kSortByQueue
+    auto [sortByQueueTag, sortByQueueVal] = arrayQueueInit();
+    state->push_back(sortByQueueTag, sortByQueueVal);
+
+    // AggDerivativeElems::kUnitMillis
+    state->push_back(unitTag, unitVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDerivativeAdd(ArityType arity) {
@@ -7927,8 +7871,232 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggCovariancePop
     return builtinAggCovarianceFinalize(arity, false /* isSamp */);
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovablePushAdd(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    if (stateTag == value::TypeTags::Nothing) {
+        std::tie(stateTag, stateVal) = arrayQueueInit();
+    }
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto [inputTag, inputVal] = moveOwnedFromStack(1);
+    value::ValueGuard inputGuard{inputTag, inputVal};
+
+    uassert(7993100, "State should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+    inputGuard.reset();
+    arrayQueuePush(state, inputTag, inputVal);
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovablePushRemove(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    uassert(7993101, "State should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+    auto [tag, val] = arrayQueuePop(state);
+    value::releaseValue(tag, val);
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovablePushFinalize(
+    ArityType arity) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+    uassert(7993102, "State should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+    auto [queueBuffer, startIdx, queueSize] = getArrayQueueState(state);
+
+    auto [resultTag, resultVal] = value::makeNewArray();
+    auto result = value::getArrayView(resultVal);
+    result->reserve(queueSize);
+
+    for (size_t i = 0; i < queueSize; ++i) {
+        auto idx = startIdx + i;
+        if (idx >= queueBuffer->size()) {
+            idx -= queueBuffer->size();
+        }
+        auto [tag, val] = queueBuffer->getAt(idx);
+        std::tie(tag, val) = value::copyValue(tag, val);
+        result->push_back(tag, val);
+    }
+    return {true, resultTag, resultVal};
+}
+
+std::tuple<value::Array*, value::Array*, value::Array*, int64_t, int64_t> removableStdDevState(
+    value::TypeTags stateTag, value::Value stateVal) {
+    uassert(8019600, "state should be of array type", stateTag == value::TypeTags::Array);
+    auto state = value::getArrayView(stateVal);
+
+    uassert(8019601,
+            "incorrect size of state array",
+            state->size() == static_cast<size_t>(AggRemovableStdDevElems::kSizeOfArray));
+
+    auto [sumTag, sumVal] = state->getAt(static_cast<size_t>(AggRemovableStdDevElems::kSum));
+    uassert(8019602, "sum elem should be of array type", sumTag == value::TypeTags::Array);
+    auto sum = value::getArrayView(sumVal);
+
+    auto [m2Tag, m2Val] = state->getAt(static_cast<size_t>(AggRemovableStdDevElems::kM2));
+    uassert(8019603, "m2 elem should be of array type", m2Tag == value::TypeTags::Array);
+    auto m2 = value::getArrayView(m2Val);
+
+    auto [countTag, countVal] = state->getAt(static_cast<size_t>(AggRemovableStdDevElems::kCount));
+    uassert(
+        8019604, "count elem should be of int64 type", countTag == value::TypeTags::NumberInt64);
+    auto count = value::bitcastTo<int64_t>(countVal);
+
+    auto [nonFiniteCountTag, nonFiniteCountVal] =
+        state->getAt(static_cast<size_t>(AggRemovableStdDevElems::kNonFiniteCount));
+    uassert(8019605,
+            "non finite count elem should be of int64 type",
+            nonFiniteCountTag == value::TypeTags::NumberInt64);
+    auto nonFiniteCount = value::bitcastTo<int64_t>(nonFiniteCountVal);
+
+    return {state, sum, m2, count, nonFiniteCount};
+}
+
+void updateRemovableStdDevState(value::Array* state, int64_t count, int64_t nonFiniteCount) {
+    state->setAt(static_cast<size_t>(AggRemovableStdDevElems::kCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(count));
+    state->setAt(static_cast<size_t>(AggRemovableStdDevElems::kNonFiniteCount),
+                 value::TypeTags::NumberInt64,
+                 value::bitcastFrom<int64_t>(nonFiniteCount));
+}
+
+template <int quantity>
+void ByteCode::aggRemovableStdDevImpl(value::TypeTags stateTag,
+                                      value::Value stateVal,
+                                      value::TypeTags inputTag,
+                                      value::Value inputVal) {
+    static_assert(quantity == 1 || quantity == -1);
+    auto [state, sumState, m2State, count, nonFiniteCount] =
+        removableStdDevState(stateTag, stateVal);
+    if (!value::isNumber(inputTag)) {
+        return;
+    }
+    if ((inputTag == value::TypeTags::NumberDouble &&
+         !std::isfinite(value::bitcastTo<double>(inputVal))) ||
+        (inputTag == value::TypeTags::NumberDecimal &&
+         !value::bitcastTo<Decimal128>(inputVal).isFinite())) {
+        count += quantity;
+        nonFiniteCount += quantity;
+        updateRemovableStdDevState(state, count, nonFiniteCount);
+        return;
+    }
+
+    if (count == 0) {
+        // Assuming we are adding value if count == 0.
+        aggDoubleDoubleSumImpl(sumState, inputTag, inputVal);
+        updateRemovableStdDevState(state, ++count, nonFiniteCount);
+        return;
+    } else if (count + quantity == 0) {
+        resetDoubleDoubleSumState(sumState);
+        resetDoubleDoubleSumState(m2State);
+        updateRemovableStdDevState(state, 0, 0);
+        return;
+    }
+
+    auto inputDouble = value::bitcastTo<double>(value::coerceToDouble(inputTag, inputVal).second);
+    auto [sumOwned, sumTag, sumVal] = aggDoubleDoubleSumFinalizeImpl(sumState);
+    value::ValueGuard sumGuard{sumOwned, sumTag, sumVal};
+    double x = count * inputDouble -
+        value::bitcastTo<double>(value::coerceToDouble(sumTag, sumVal).second);
+    count += quantity;
+    aggDoubleDoubleSumImpl(sumState,
+                           value::TypeTags::NumberDouble,
+                           value::bitcastFrom<double>(inputDouble * quantity));
+    aggDoubleDoubleSumImpl(
+        m2State,
+        value::TypeTags::NumberDouble,
+        value::bitcastFrom<double>(x * x * quantity / (count * (count - quantity))));
+    updateRemovableStdDevState(state, count, nonFiniteCount);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableStdDevAdd(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto [inputOwned, inputTag, inputVal] = getFromStack(1);
+    // Initialize the accumulator.
+    if (stateTag == value::TypeTags::Nothing) {
+        std::tie(stateTag, stateVal) = value::makeNewArray();
+        value::ValueGuard newStateGuard{stateTag, stateVal};
+        auto state = value::getArrayView(stateVal);
+        state->reserve(static_cast<size_t>(AggRemovableStdDevElems::kSizeOfArray));
+
+        auto [sumStateTag, sumStateVal] = initializeDoubleDoubleSumState();
+        state->push_back(sumStateTag, sumStateVal);  // kSum
+        auto [m2StateTag, m2StateVal] = initializeDoubleDoubleSumState();
+        state->push_back(m2StateTag, m2StateVal);                                        // kM2
+        state->push_back(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(0));  // kCount
+        state->push_back(value::TypeTags::NumberInt64,
+                         value::bitcastFrom<int64_t>(0));  // kNonFiniteCount
+        newStateGuard.reset();
+    }
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    aggRemovableStdDevImpl<1>(stateTag, stateVal, inputTag, inputVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableStdDevRemove(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    auto [inputOwned, inputTag, inputVal] = getFromStack(1);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    aggRemovableStdDevImpl<-1>(stateTag, stateVal, inputTag, inputVal);
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableStdDevFinalize(
+    ArityType arity, bool isSamp) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+    auto [state, sumState, m2State, count, nonFiniteCount] =
+        removableStdDevState(stateTag, stateVal);
+    if (nonFiniteCount > 0) {
+        return {false, value::TypeTags::Null, 0};
+    }
+    const long long adjustedCount = isSamp ? count - 1 : count;
+    if (adjustedCount <= 0) {
+        return {false, value::TypeTags::Null, 0};
+    }
+    auto [m2Owned, m2Tag, m2Val] = aggDoubleDoubleSumFinalizeImpl(m2State);
+    value::ValueGuard m2Guard{m2Owned, m2Tag, m2Val};
+    auto squaredDifferences = value::bitcastTo<double>(value::coerceToDouble(m2Tag, m2Val).second);
+    if (squaredDifferences < 0 || (!isSamp && count == 1)) {
+        // m2 is the sum of squared differences from the mean, so it should always be
+        // nonnegative. It may take on a small negative value due to floating point error, which
+        // breaks the sqrt calculation. In this case, the closest valid value for _m2 is 0, so
+        // we reset _m2 and return 0 for the standard deviation.
+        // If we're doing a population std dev of one element, it is also correct to return 0.
+        resetDoubleDoubleSumState(m2State);
+        return {false, value::TypeTags::NumberInt32, 0};
+    }
+    return {false,
+            value::TypeTags::NumberDouble,
+            value::bitcastFrom<double>(sqrt(squaredDifferences / adjustedCount))};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableStdDevSampFinalize(
+    ArityType arity) {
+    return builtinAggRemovableStdDevFinalize(arity, true /* isSamp */);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableStdDevPopFinalize(
+    ArityType arity) {
+    return builtinAggRemovableStdDevFinalize(arity, false /* isSamp */);
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin f,
-                                                                         ArityType arity) {
+                                                                         ArityType arity,
+                                                                         const CodeFragment* code) {
     switch (f) {
         case Builtin::dateDiff:
             return builtinDateDiff(arity);
@@ -8167,7 +8335,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
         case Builtin::sortKeyComponentVectorToArray:
             return builtinSortKeyComponentVectorToArray(arity);
         case Builtin::makeBsonObj:
-            return builtinMakeBsonObj(arity);
+            return builtinMakeBsonObj(arity, code);
         case Builtin::tsSecond:
             return builtinTsSecond(arity);
         case Builtin::tsIncrement:
@@ -8261,12 +8429,16 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinAggRemovableSum<-1 /*sign*/>(arity);
         case Builtin::aggRemovableSumFinalize:
             return builtinAggRemovableSumFinalize(arity);
+        case Builtin::aggIntegralInit:
+            return builtinAggIntegralInit(arity);
         case Builtin::aggIntegralAdd:
             return builtinAggIntegralAdd(arity);
         case Builtin::aggIntegralRemove:
             return builtinAggIntegralRemove(arity);
         case Builtin::aggIntegralFinalize:
             return builtinAggIntegralFinalize(arity);
+        case Builtin::aggDerivativeInit:
+            return builtinAggDerivativeInit(arity);
         case Builtin::aggDerivativeAdd:
             return builtinAggDerivativeAdd(arity);
         case Builtin::aggDerivativeRemove:
@@ -8281,6 +8453,42 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinAggCovarianceSampFinalize(arity);
         case Builtin::aggCovariancePopFinalize:
             return builtinAggCovariancePopFinalize(arity);
+        case Builtin::aggRemovablePushAdd:
+            return builtinAggRemovablePushAdd(arity);
+        case Builtin::aggRemovablePushRemove:
+            return builtinAggRemovablePushRemove(arity);
+        case Builtin::aggRemovablePushFinalize:
+            return builtinAggRemovablePushFinalize(arity);
+        case Builtin::aggRemovableStdDevAdd:
+            return builtinAggRemovableStdDevAdd(arity);
+        case Builtin::aggRemovableStdDevRemove:
+            return builtinAggRemovableStdDevRemove(arity);
+        case Builtin::aggRemovableStdDevSampFinalize:
+            return builtinAggRemovableStdDevSampFinalize(arity);
+        case Builtin::aggRemovableStdDevPopFinalize:
+            return builtinAggRemovableStdDevPopFinalize(arity);
+        case Builtin::valueBlockExists:
+            return builtinValueBlockExists(arity);
+        case Builtin::valueBlockFillEmpty:
+            return builtinValueBlockFillEmpty(arity);
+        case Builtin::valueBlockMin:
+            return builtinValueBlockMin(arity);
+        case Builtin::valueBlockMax:
+            return builtinValueBlockMax(arity);
+        case Builtin::valueBlockCount:
+            return builtinValueBlockCount(arity);
+        case Builtin::valueBlockGtScalar:
+            return builtinValueBlockGtScalar(arity);
+        case Builtin::valueBlockGteScalar:
+            return builtinValueBlockGteScalar(arity);
+        case Builtin::valueBlockEqScalar:
+            return builtinValueBlockEqScalar(arity);
+        case Builtin::valueBlockLtScalar:
+            return builtinValueBlockLtScalar(arity);
+        case Builtin::valueBlockLteScalar:
+            return builtinValueBlockLteScalar(arity);
+        case Builtin::valueBlockCombine:
+            return builtinValueBlockCombine(arity);
     }
 
     MONGO_UNREACHABLE;
@@ -8621,12 +8829,16 @@ std::string builtinToString(Builtin b) {
             return "aggRemovableSumRemove";
         case Builtin::aggRemovableSumFinalize:
             return "aggRemovableSumFinalize";
+        case Builtin::aggIntegralInit:
+            return "aggIntegralInit";
         case Builtin::aggIntegralAdd:
             return "aggIntegralAdd";
         case Builtin::aggIntegralRemove:
             return "aggIntegralRemove";
         case Builtin::aggIntegralFinalize:
             return "aggIntegralFinalize";
+        case Builtin::aggDerivativeInit:
+            return "aggDerivativeInit";
         case Builtin::aggDerivativeAdd:
             return "aggDerivativeAdd";
         case Builtin::aggDerivativeRemove:
@@ -8641,6 +8853,42 @@ std::string builtinToString(Builtin b) {
             return "aggCovarianceSampFinalize";
         case Builtin::aggCovariancePopFinalize:
             return "aggCovariancePopFinalize";
+        case Builtin::aggRemovablePushAdd:
+            return "aggRemovablePushAdd";
+        case Builtin::aggRemovablePushRemove:
+            return "aggRemovablePushRemove";
+        case Builtin::aggRemovablePushFinalize:
+            return "aggRemovablePushFinalize";
+        case Builtin::aggRemovableStdDevAdd:
+            return "aggRemovableStdDevAdd";
+        case Builtin::aggRemovableStdDevRemove:
+            return "aggRemovableStdDevRemove";
+        case Builtin::aggRemovableStdDevSampFinalize:
+            return "aggRemovableStdDevSampFinalize";
+        case Builtin::aggRemovableStdDevPopFinalize:
+            return "aggRemovableStdDevPopFinalize";
+        case Builtin::valueBlockExists:
+            return "valueBlockExists";
+        case Builtin::valueBlockFillEmpty:
+            return "valueBlockFillEmpty";
+        case Builtin::valueBlockMin:
+            return "valueBlockMin";
+        case Builtin::valueBlockMax:
+            return "valueBlockMax";
+        case Builtin::valueBlockCount:
+            return "valueBlockCount";
+        case Builtin::valueBlockGtScalar:
+            return "valueBlockGtScalar";
+        case Builtin::valueBlockGteScalar:
+            return "valueBlockGteScalar";
+        case Builtin::valueBlockEqScalar:
+            return "valueBlockEqScalar";
+        case Builtin::valueBlockLtScalar:
+            return "valueBlockLtScalar";
+        case Builtin::valueBlockLteScalar:
+            return "valueBlockLteScalar";
+        case Builtin::valueBlockCombine:
+            return "valueBlockCombine";
         default:
             MONGO_UNREACHABLE;
     }
@@ -9632,7 +9880,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                     pcPointer += sizeof(SmallArityType);
                 }
 
-                auto [owned, tag, val] = dispatchBuiltin(f, arity);
+                auto [owned, tag, val] = dispatchBuiltin(f, arity, code);
 
                 for (ArityType cnt = 0; cnt < arity; ++cnt) {
                     popAndReleaseStack();

@@ -59,7 +59,6 @@
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/query/sbe_stage_builder.h"
-#include "mongo/db/query/sbe_stage_builder_eval_frame.h"
 #include "mongo/db/query/sbe_stage_builder_expression.h"
 #include "mongo/db/query/sbe_stage_builder_helpers.h"
 #include "mongo/db/query/stage_types.h"

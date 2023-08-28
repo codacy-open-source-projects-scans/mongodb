@@ -83,7 +83,6 @@ public:
 
     static constexpr TagMask kEmptyTagMask = 0;
     static constexpr TagMask kKeepOpen = 1;
-    static constexpr TagMask kInternalClient = 2;
     static constexpr TagMask kLatestVersionInternalClientKeepOpen = 4;
     static constexpr TagMask kExternalClientKeepOpen = 8;
     static constexpr TagMask kPending = 1 << 31;
@@ -166,9 +165,9 @@ public:
     virtual bool isFromLoadBalancer() const = 0;
 
     /**
-     * Returns true if this session corresponds to a connection accepted from the internal port.
+     * Returns true if this session corresponds to a connection accepted from the router port.
      */
-    virtual bool isFromInternalPort() const {
+    virtual bool isFromRouterPort() const {
         return false;
     }
 

@@ -58,7 +58,6 @@
 #include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/exec/sbe/makeobj_enums.h"
 #include "mongo/db/exec/sbe/match_path.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
@@ -75,7 +74,8 @@
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/projection_ast.h"
-#include "mongo/db/query/sbe_stage_builder_eval_frame.h"
+#include "mongo/db/query/sbe_stage_builder_sbexpr.h"
+#include "mongo/db/query/sbe_stage_builder_state.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/storage/index_entry_comparison.h"
@@ -103,13 +103,12 @@ std::unique_ptr<sbe::EExpression> makeNot(std::unique_ptr<sbe::EExpression> e);
 
 std::unique_ptr<sbe::EExpression> makeBinaryOp(sbe::EPrimBinary::Op binaryOp,
                                                std::unique_ptr<sbe::EExpression> lhs,
-                                               std::unique_ptr<sbe::EExpression> rhs,
-                                               std::unique_ptr<sbe::EExpression> collator = {});
+                                               std::unique_ptr<sbe::EExpression> rhs);
 
-std::unique_ptr<sbe::EExpression> makeBinaryOp(sbe::EPrimBinary::Op binaryOp,
-                                               std::unique_ptr<sbe::EExpression> lhs,
-                                               std::unique_ptr<sbe::EExpression> rhs,
-                                               StageBuilderState& state);
+std::unique_ptr<sbe::EExpression> makeBinaryOpWithCollation(sbe::EPrimBinary::Op binaryOp,
+                                                            std::unique_ptr<sbe::EExpression> lhs,
+                                                            std::unique_ptr<sbe::EExpression> rhs,
+                                                            StageBuilderState& state);
 
 /**
  * Generates an EExpression that checks if the input expression is null or missing.
@@ -120,14 +119,12 @@ std::unique_ptr<sbe::EExpression> generateNullOrMissing(sbe::FrameId frameId,
                                                         sbe::value::SlotId slotId);
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissing(std::unique_ptr<sbe::EExpression> arg);
-std::unique_ptr<sbe::EExpression> generateNullOrMissing(EvalExpr arg, StageBuilderState& state);
 
 /**
  * Generates an EExpression that checks if the input expression is a non-numeric type _assuming
  * that_ it has already been verified to be neither null nor missing.
  */
 std::unique_ptr<sbe::EExpression> generateNonNumericCheck(const sbe::EVariable& var);
-std::unique_ptr<sbe::EExpression> generateNonNumericCheck(EvalExpr expr, StageBuilderState& state);
 
 /**
  * Generates an EExpression that checks if the input expression is the value NumberLong(-2^64).
@@ -139,13 +136,11 @@ std::unique_ptr<sbe::EExpression> generateLongLongMinCheck(const sbe::EVariable&
  * already been verified to be numeric.
  */
 std::unique_ptr<sbe::EExpression> generateNaNCheck(const sbe::EVariable& var);
-std::unique_ptr<sbe::EExpression> generateNaNCheck(EvalExpr expr, StageBuilderState& state);
 
 /**
  * Generates an EExpression that checks if the input expression is a numeric Infinity.
  */
 std::unique_ptr<sbe::EExpression> generateInfinityCheck(const sbe::EVariable& var);
-std::unique_ptr<sbe::EExpression> generateInfinityCheck(EvalExpr expr, StageBuilderState& state);
 
 /**
  * Generates an EExpression that checks if the input expression is a non-positive number (i.e. <= 0)
@@ -157,7 +152,7 @@ std::unique_ptr<sbe::EExpression> generateNonPositiveCheck(const sbe::EVariable&
  * Generates an EExpression that checks if the input expression is a positive number (i.e. > 0)
  * _assuming that_ it has already been verified to be numeric.
  */
-std::unique_ptr<sbe::EExpression> generatePositiveCheck(const sbe::EExpression& expr);
+std::unique_ptr<sbe::EExpression> generatePositiveCheck(const sbe::EVariable& var);
 
 /**
  * Generates an EExpression that checks if the input expression is a negative (i.e., < 0) number
@@ -175,7 +170,7 @@ std::unique_ptr<sbe::EExpression> generateNonObjectCheck(const sbe::EVariable& v
  * Generates an EExpression that checks if the input expression is not a string, _assuming that
  * it has already been verified to be neither null nor missing.
  */
-std::unique_ptr<sbe::EExpression> generateNonStringCheck(const sbe::EExpression& expr);
+std::unique_ptr<sbe::EExpression> generateNonStringCheck(const sbe::EVariable& var);
 
 /**
  * Generates an EExpression that checks whether the input expression is null, missing, or
@@ -231,19 +226,21 @@ std::unique_ptr<sbe::PlanStage> makeLimitTree(std::unique_ptr<sbe::PlanStage> in
 std::unique_ptr<sbe::PlanStage> makeLimitCoScanTree(PlanNodeId planNodeId, long long limit = 1);
 
 /**
- * Same as 'makeLimitCoScanTree()', but returns 'EvalStage' with empty 'outSlots' vector.
- */
-EvalStage makeLimitCoScanStage(PlanNodeId planNodeId, long long limit = 1);
-
-/**
  * Check if expression returns Nothing and return boolean false if so. Otherwise, return the
  * expression.
  */
 std::unique_ptr<sbe::EExpression> makeFillEmptyFalse(std::unique_ptr<sbe::EExpression> e);
 
+std::unique_ptr<sbe::EExpression> makeFillEmptyTrue(std::unique_ptr<sbe::EExpression> e);
+
 /**
  * Creates an EFunction expression with the given name and arguments.
  */
+inline std::unique_ptr<sbe::EExpression> makeFunction(StringData name,
+                                                      sbe::EExpression::Vector args) {
+    return sbe::makeE<sbe::EFunction>(name, std::move(args));
+}
+
 template <typename... Args>
 inline std::unique_ptr<sbe::EExpression> makeFunction(StringData name, Args&&... args) {
     return sbe::makeE<sbe::EFunction>(name, sbe::makeEs(std::forward<Args>(args)...));
@@ -380,119 +377,42 @@ std::unique_ptr<sbe::EExpression> makeShardKeyFunctionForPersistedDocuments(
     const std::vector<bool>& shardKeyHashed,
     const PlanStageSlots& slots);
 
-/**
- * If given 'EvalExpr' already contains a slot, simply returns it. Otherwise, allocates a new slot
- * and creates project stage to assign expression to this new slot. After that, new slot and project
- * stage are returned.
- */
-std::pair<sbe::value::SlotId, EvalStage> projectEvalExpr(
-    EvalExpr expr,
-    EvalStage stage,
-    PlanNodeId planNodeId,
-    sbe::value::SlotIdGenerator* slotIdGenerator,
-    StageBuilderState& state);
-
-template <bool IsConst, bool IsEof = false>
-EvalStage makeFilter(EvalStage stage,
-                     std::unique_ptr<sbe::EExpression> filter,
-                     PlanNodeId planNodeId) {
-    return {sbe::makeS<sbe::FilterStage<IsConst, IsEof>>(
-                stage.extractStage(planNodeId), std::move(filter), planNodeId),
-            stage.extractOutSlots()};
-}
-
-EvalStage makeProject(EvalStage stage, sbe::SlotExprPairVector projects, PlanNodeId planNodeId);
+SbStage makeProject(SbStage stage, sbe::SlotExprPairVector projects, PlanNodeId nodeId);
 
 template <typename... Ts>
-EvalStage makeProject(EvalStage stage, PlanNodeId planNodeId, Ts&&... pack) {
+SbStage makeProject(SbStage stage, PlanNodeId nodeId, Ts&&... pack) {
     return makeProject(
-        std::move(stage), makeSlotExprPairVec(std::forward<Ts>(pack)...), planNodeId);
+        std::move(stage), sbe::makeSlotExprPairVec(std::forward<Ts>(pack)...), nodeId);
 }
 
-/**
- * Creates loop join stage. All 'outSlots' from the 'left' argument along with slots from the
- * 'lexicalEnvironment' argument are passed as correlated.
- * If stage in 'left' or 'right' argument is 'nullptr', it is treated as if it was limit-1/coscan.
- * In this case, loop join stage is not created. 'right' stage is returned if 'left' is 'nullptr'.
- * 'left' stage is returned if 'right' is 'nullptr'.
- */
-EvalStage makeLoopJoin(EvalStage left,
-                       EvalStage right,
-                       PlanNodeId planNodeId,
-                       const sbe::value::SlotVector& lexicalEnvironment = {});
-
-/**
- * Creates an unwind stage and an output slot for it using the first slot in the outSlots vector of
- * the inputEvalStage as the input slot to the new stage. The preserveNullAndEmptyArrays is passed
- * to the UnwindStage constructor to specify the treatment of null or missing inputs.
- */
-EvalStage makeUnwind(EvalStage inputEvalStage,
-                     sbe::value::SlotIdGenerator* slotIdGenerator,
-                     PlanNodeId planNodeId,
-                     bool preserveNullAndEmptyArrays = true);
-
-/**
- * Creates a branch stage with the specified condition ifExpr.
- */
-EvalStage makeBranch(EvalStage thenStage,
-                     EvalStage elseStage,
-                     std::unique_ptr<sbe::EExpression> ifExpr,
-                     sbe::value::SlotVector thenVals,
-                     sbe::value::SlotVector elseVals,
-                     sbe::value::SlotVector outputVals,
-                     PlanNodeId planNodeId);
-
-/**
- * Creates traverse stage. All 'outSlots' from 'outer' argument (except for 'inField') along with
- * slots from the 'lexicalEnvironment' argument are passed as correlated.
- */
-EvalStage makeTraverse(EvalStage outer,
-                       EvalStage inner,
-                       sbe::value::SlotId inField,
-                       sbe::value::SlotId outField,
-                       sbe::value::SlotId outFieldInner,
-                       std::unique_ptr<sbe::EExpression> foldExpr,
-                       std::unique_ptr<sbe::EExpression> finalExpr,
-                       PlanNodeId planNodeId,
-                       boost::optional<size_t> nestedArraysDepth,
-                       const sbe::value::SlotVector& lexicalEnvironment = {});
-
-EvalStage makeLimitSkip(EvalStage input,
-                        PlanNodeId planNodeId,
-                        boost::optional<long long> limit,
-                        boost::optional<long long> skip = boost::none);
-
-EvalStage makeUnion(std::vector<EvalStage> inputStages,
-                    std::vector<sbe::value::SlotVector> inputVals,
-                    sbe::value::SlotVector outputVals,
+SbStage makeHashAgg(SbStage stage,
+                    sbe::value::SlotVector gbs,
+                    sbe::AggExprVector aggs,
+                    boost::optional<sbe::value::SlotId> collatorSlot,
+                    bool allowDiskUse,
+                    sbe::SlotExprPairVector mergingExprs,
                     PlanNodeId planNodeId);
 
-EvalStage makeHashAgg(EvalStage stage,
-                      sbe::value::SlotVector gbs,
-                      sbe::AggExprVector aggs,
-                      boost::optional<sbe::value::SlotId> collatorSlot,
-                      bool allowDiskUse,
-                      sbe::SlotExprPairVector mergingExprs,
-                      PlanNodeId planNodeId);
+std::unique_ptr<sbe::EExpression> makeIf(std::unique_ptr<sbe::EExpression> condExpr,
+                                         std::unique_ptr<sbe::EExpression> thenExpr,
+                                         std::unique_ptr<sbe::EExpression> elseExpr);
 
-EvalStage makeMkBsonObj(EvalStage stage,
-                        sbe::value::SlotId objSlot,
-                        boost::optional<sbe::value::SlotId> rootSlot,
-                        boost::optional<sbe::MakeObjFieldBehavior> fieldBehavior,
-                        std::vector<std::string> fields,
-                        std::vector<std::string> projectFields,
-                        sbe::value::SlotVector projectVars,
-                        bool forceNewObject,
-                        bool returnOldObject,
-                        PlanNodeId planNodeId);
+std::unique_ptr<sbe::EExpression> makeLet(sbe::FrameId frameId,
+                                          sbe::EExpression::Vector bindExprs,
+                                          std::unique_ptr<sbe::EExpression> expr);
+
+std::unique_ptr<sbe::EExpression> makeLocalLambda(sbe::FrameId frameId,
+                                                  std::unique_ptr<sbe::EExpression> expr);
+
+std::unique_ptr<sbe::EExpression> makeNumericConvert(std::unique_ptr<sbe::EExpression> expr,
+                                                     sbe::value::TypeTags tag);
 
 /**
  * Creates a chain of EIf expressions that will inspect each arg in order and return the first
  * arg that is not null or missing.
  */
-std::unique_ptr<sbe::EExpression> makeIfNullExpr(
-    std::vector<std::unique_ptr<sbe::EExpression>> values,
-    sbe::value::FrameIdGenerator* frameIdGenerator);
+std::unique_ptr<sbe::EExpression> makeIfNullExpr(sbe::EExpression::Vector values,
+                                                 sbe::value::FrameIdGenerator* frameIdGenerator);
 
 /** This helper takes an SBE SlotIdGenerator and an SBE Array and returns an output slot and a
  * unwind/project/limit/coscan subtree that streams out the elements of the array one at a time via
@@ -605,106 +525,6 @@ std::pair<sbe::IndexKeysInclusionSet, std::vector<std::string>> makeIndexKeyIncl
 
     return {std::move(indexKeyBitset), std::move(keyFieldNames)};
 }
-
-/**
- * Common parameters to SBE stage builder functions extracted into separate class to simplify
- * argument passing. Also contains a mapping of global variable ids to slot ids.
- */
-struct StageBuilderState {
-    using InListsSet = absl::flat_hash_set<InListData*>;
-    using CollatorsMap = absl::flat_hash_map<const CollatorInterface*, const CollatorInterface*>;
-
-    StageBuilderState(OperationContext* opCtx,
-                      Environment& env,
-                      PlanStageStaticData* data,
-                      const Variables& variables,
-                      sbe::value::SlotIdGenerator* slotIdGenerator,
-                      sbe::value::FrameIdGenerator* frameIdGenerator,
-                      sbe::value::SpoolIdGenerator* spoolIdGenerator,
-                      InListsSet* inListsSet,
-                      CollatorsMap* collatorsMap,
-                      bool needsMerge,
-                      bool allowDiskUse)
-        : slotIdGenerator{slotIdGenerator},
-          frameIdGenerator{frameIdGenerator},
-          spoolIdGenerator{spoolIdGenerator},
-          inListsSet{inListsSet},
-          collatorsMap{collatorsMap},
-          opCtx{opCtx},
-          env{env},
-          data{data},
-          variables{variables},
-          needsMerge{needsMerge},
-          allowDiskUse{allowDiskUse} {}
-
-    StageBuilderState(const StageBuilderState& other) = delete;
-
-    sbe::value::SlotId getGlobalVariableSlot(Variables::Id variableId);
-
-    sbe::value::SlotId slotId() {
-        return slotIdGenerator->generate();
-    }
-
-    sbe::FrameId frameId() {
-        return frameIdGenerator->generate();
-    }
-
-    sbe::SpoolId spoolId() {
-        return spoolIdGenerator->generate();
-    }
-
-    boost::optional<sbe::value::SlotId> getTimeZoneDBSlot();
-    boost::optional<sbe::value::SlotId> getCollatorSlot();
-    boost::optional<sbe::value::SlotId> getOplogTsSlot();
-    boost::optional<sbe::value::SlotId> getBuiltinVarSlot(Variables::Id id);
-
-    /**
-     * Given a CollatorInterface, returns a copy of the CollatorInterface that is owned by the
-     * SBE plan currently being built. If 'coll' is already owned by the SBE plan being built,
-     * then this method will simply return 'coll'.
-     */
-    const CollatorInterface* makeCollatorOwned(const CollatorInterface* coll);
-
-    /**
-     * Given an InListData 'inList', this method makes inList's BSON owned, it makes the inList's
-     * Collator owned, it sorts and de-dups the inList's elements if needed, it initializes the
-     * inList's hash set if needed, and it marks the 'inList' as "prepared".
-     */
-    InListData* prepareOwnedInList(const std::shared_ptr<InListData>& inList);
-
-    /**
-     * Register a Slot in the 'RuntimeEnvironment'. The newly registered Slot should be associated
-     * with 'paramId' and tracked in the 'InputParamToSlotMap' for auto-parameterization use. The
-     * slot is set to 'Nothing' on registration and will be populated with the real value when
-     * preparing the SBE plan for execution.
-     */
-    sbe::value::SlotId registerInputParamSlot(MatchExpression::InputParamId paramId);
-
-    sbe::value::SlotIdGenerator* const slotIdGenerator;
-    sbe::value::FrameIdGenerator* const frameIdGenerator;
-    sbe::value::SpoolIdGenerator* const spoolIdGenerator;
-
-    absl::flat_hash_set<InListData*>* const inListsSet;
-    absl::flat_hash_map<const CollatorInterface*, const CollatorInterface*>* const collatorsMap;
-
-    OperationContext* const opCtx;
-    Environment& env;
-    PlanStageStaticData* const data;
-
-    const Variables& variables;
-    // When the mongos splits $group stage and sends it to shards, it adds 'needsMerge'/'fromMongs'
-    // flags to true so that shards can sends special partial aggregation results to the mongos.
-    bool needsMerge;
-
-    // A flag to indicate the user allows disk use for spilling.
-    bool allowDiskUse;
-
-    // Holds the mapping between the custom ABT variable names and the slot id they are referencing.
-    optimizer::SlotVarMap slotVarMap;
-
-    StringMap<sbe::value::SlotId> stringConstantToSlotMap;
-    SimpleBSONObjMap<sbe::value::SlotId> keyPatternToSlotMap;
-};
 
 /**
  * A tree of nodes arranged based on field path. PathTreeNode can be used to represent index key
@@ -1191,22 +1011,41 @@ public:
     using ExpressionASTNode = projection_ast::ExpressionASTNode;
     using ProjectionSliceASTNode = projection_ast::ProjectionSliceASTNode;
 
-    using SliceInfo = std::pair<int32_t, boost::optional<int32_t>>;
+    enum class Type { kBool, kExpr, kSbExpr, kSlice };
 
-    enum class Type { kBool, kExpr, kSlice };
+    struct Bool {
+        bool value;
+    };
+    struct Expr {
+        Expression* expr;
+    };
+    using Slice = std::pair<int32_t, boost::optional<int32_t>>;
+
+    using VariantType = stdx::variant<Bool, Expr, SbExpr, Slice>;
 
     struct Keep {};
     struct Drop {};
 
     ProjectionNode() = default;
-    ProjectionNode(const BooleanConstantASTNode* n) : _type(Type::kBool), _boolVal(n->value()) {}
-    ProjectionNode(const ExpressionASTNode* n) : _type(Type::kExpr), _node(n) {}
-    ProjectionNode(const ProjectionSliceASTNode* n) : _type(Type::kSlice), _node(n) {}
-    ProjectionNode(Keep) : _type(Type::kBool), _boolVal(true) {}
-    ProjectionNode(Drop) : _type(Type::kBool), _boolVal(false) {}
+
+    ProjectionNode(Keep) : _data(Bool{true}) {}
+    ProjectionNode(Drop) : _data(Bool{false}) {}
+    ProjectionNode(Expression* expr) : _data(Expr{expr}) {}
+    ProjectionNode(SbExpr sbExpr) : _data(std::move(sbExpr)) {}
+    ProjectionNode(Slice slice) : _data(slice) {}
+
+    ProjectionNode(const BooleanConstantASTNode* n) : _data(Bool{n->value()}) {}
+    ProjectionNode(const ExpressionASTNode* n) : _data(Expr{n->expressionRaw()}) {}
+    ProjectionNode(const ProjectionSliceASTNode* n) : _data(Slice{n->limit(), n->skip()}) {}
 
     Type type() const {
-        return _type;
+        return stdx::visit(OverloadedVisitor{[](const Bool&) { return Type::kBool; },
+                                             [](const Expr&) { return Type::kExpr; },
+                                             [](const SbExpr&) { return Type::kSbExpr; },
+                                             [](const Slice&) {
+                                                 return Type::kSlice;
+                                             }},
+                           _data);
     }
 
     bool isBool() const {
@@ -1215,28 +1054,36 @@ public:
     bool isExpr() const {
         return type() == Type::kExpr;
     }
+    bool isSbExpr() const {
+        return type() == Type::kSbExpr;
+    }
     bool isSlice() const {
         return type() == Type::kSlice;
     }
 
     bool getBool() const {
         tassert(7580702, "getBool() expected type() to be kBool", isBool());
-        return _boolVal;
+        return stdx::get<Bool>(_data).value;
     }
     Expression* getExpr() const {
         tassert(7580703, "getExpr() expected type() to be kExpr", isExpr());
-        return static_cast<const ExpressionASTNode*>(_node)->expressionRaw();
+        return stdx::get<Expr>(_data).expr;
     }
-    SliceInfo getSlice() const {
+    SbExpr getSbExpr() const {
+        tassert(7580715, "getSbExpr() expected type() to be kSbExpr", isSbExpr());
+        return stdx::get<SbExpr>(_data).clone();
+    }
+    SbExpr extractSbExpr() {
+        tassert(7580716, "getSbExpr() expected type() to be kSbExpr", isSbExpr());
+        return std::move(stdx::get<SbExpr>(_data));
+    }
+    Slice getSlice() const {
         tassert(7580704, "getSlice() expected type() to be kSlice", isSlice());
-        auto sliceNode = static_cast<const ProjectionSliceASTNode*>(_node);
-        return SliceInfo{sliceNode->limit(), sliceNode->skip()};
+        return stdx::get<Slice>(_data);
     }
 
 private:
-    Type _type{};
-    bool _boolVal{false};
-    const ASTNode* _node{nullptr};
+    VariantType _data{};
 };
 
 /**

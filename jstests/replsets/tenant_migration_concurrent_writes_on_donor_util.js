@@ -266,6 +266,7 @@ export const TenantMigrationConcurrentWriteUtil = {
         _configsvrCommitMergeAllChunksOnShard: {skip: isNotRunOnUserDatabase},
         _configsvrCommitMovePrimary:
             {skip: isNotRunOnUserDatabase},  // Can be removed once 6.0 is last LTS
+        _configsvrCommitRefineCollectionShardKey: {skip: isNotRunOnUserDatabase},
         _configsvrCreateDatabase: {skip: isNotRunOnUserDatabase},
         _configsvrDropIndexCatalogEntry: {skip: isNotRunOnUserDatabase},
         _configsvrEnsureChunkVersionIsGreaterThan: {skip: isNotRunOnUserDatabase},
@@ -526,7 +527,6 @@ export const TenantMigrationConcurrentWriteUtil = {
         getDatabaseVersion: {skip: isNotRunOnUserDatabase},
         getDefaultRWConcern: {skip: isNotRunOnUserDatabase},
         getDiagnosticData: {skip: isNotRunOnUserDatabase},
-        getFreeMonitoringStatus: {skip: isNotRunOnUserDatabase},
         getLog: {skip: isNotRunOnUserDatabase},
         getMore: {skip: isNotWriteCommand},
         getParameter: {skip: isNotRunOnUserDatabase},
@@ -653,7 +653,6 @@ export const TenantMigrationConcurrentWriteUtil = {
         setCommittedSnapshot: {skip: isNotRunOnUserDatabase},
         setDefaultRWConcern: {skip: isNotRunOnUserDatabase},
         setFeatureCompatibilityVersion: {skip: isNotRunOnUserDatabase},
-        setFreeMonitoring: {skip: isNotRunOnUserDatabase},
         setProfilingFilterGlobally: {skip: isNotRunOnUserDatabase},
         setIndexCommitQuorum: {skip: isNotRunOnUserDatabase},
         setParameter: {skip: isNotRunOnUserDatabase},

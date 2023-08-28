@@ -127,6 +127,8 @@ namespace mongo {
 MONGO_FAIL_POINT_DEFINE(skipUnindexingDocumentWhenDeleted);
 MONGO_FAIL_POINT_DEFINE(skipIndexNewRecords);
 
+MONGO_FAIL_POINT_DEFINE(skipUpdatingIndexDocument);
+
 // This failpoint causes the check for TTL indexes on capped collections to be ignored.
 MONGO_FAIL_POINT_DEFINE(ignoreTTLIndexCappedCollectionCheck);
 
@@ -255,12 +257,12 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
         if (spec.hasField(IndexDescriptor::kExpireAfterSecondsFieldName)) {
             // TTL indexes with an invalid 'expireAfterSeconds' field cause problems in multiversion
             // settings.
-            auto hasInvalidExpireAfterSeconds =
-                !index_key_validate::validateExpireAfterSeconds(
-                     spec[IndexDescriptor::kExpireAfterSecondsFieldName],
-                     index_key_validate::ValidateExpireAfterSecondsMode::kSecondaryTTLIndex)
-                     .isOK();
-            if (hasInvalidExpireAfterSeconds) {
+            auto swType = index_key_validate::validateExpireAfterSeconds(
+                spec[IndexDescriptor::kExpireAfterSecondsFieldName],
+                index_key_validate::ValidateExpireAfterSecondsMode::kSecondaryTTLIndex);
+            auto expireAfterSecondsType = index_key_validate::extractExpireAfterSecondsType(swType);
+            if (expireAfterSecondsType ==
+                TTLCollectionCache::Info::ExpireAfterSecondsType::kInvalid) {
                 LOGV2_OPTIONS(
                     6852200,
                     {logv2::LogTag::kStartupWarnings},
@@ -281,17 +283,15 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
                         [svcCtx = opCtx->getServiceContext(),
                          uuid = collection->uuid(),
                          indexName,
-                         hasInvalidExpireAfterSeconds](OperationContext*,
-                                                       boost::optional<Timestamp>) {
+                         expireAfterSecondsType](OperationContext*, boost::optional<Timestamp>) {
                             TTLCollectionCache::get(svcCtx).registerTTLInfo(
-                                uuid,
-                                TTLCollectionCache::Info{indexName, hasInvalidExpireAfterSeconds});
+                                uuid, TTLCollectionCache::Info{indexName, expireAfterSecondsType});
                         });
                 } else {
                     TTLCollectionCache::get(opCtx->getServiceContext())
                         .registerTTLInfo(
                             collection->uuid(),
-                            TTLCollectionCache::Info{indexName, hasInvalidExpireAfterSeconds});
+                            TTLCollectionCache::Info{indexName, expireAfterSecondsType});
                 }
             }
         }
@@ -1777,6 +1777,21 @@ Status IndexCatalogImpl::_updateRecord(OperationContext* const opCtx,
                                        const RecordId& recordId,
                                        int64_t* const keysInsertedOut,
                                        int64_t* const keysDeletedOut) const {
+    // TODO SERVER-80257: This failpoint was added to produce index corruption scenarios where an
+    // index has incorrect keys. Replace this failpoint with a test command instead.
+    if (auto failpoint = skipUpdatingIndexDocument.scoped(); MONGO_unlikely(failpoint.isActive()) &&
+        repl::feature_flags::gSecondaryIndexChecksInDbCheck.isEnabled(
+            serverGlobalParams.featureCompatibility)) {
+        auto indexName = failpoint.getData()["indexName"].valueStringDataSafe();
+        if (indexName == index->descriptor()->indexName()) {
+            LOGV2_DEBUG(
+                7844805,
+                3,
+                "Skipping updating index record because failpoint skipUpdatingIndexDocument is on",
+                "indexName"_attr = indexName);
+            return Status::OK();
+        }
+    }
     SharedBufferFragmentBuilder pooledBuilder(key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
 
     InsertDeleteOptions options;
@@ -1819,6 +1834,12 @@ void IndexCatalogImpl::_unindexRecord(OperationContext* opCtx,
         MONGO_unlikely(failpoint.isActive())) {
         auto indexName = failpoint.getData()["indexName"].valueStringDataSafe();
         if (indexName == entry->descriptor()->indexName()) {
+            LOGV2_DEBUG(
+                7844806,
+                3,
+                "Skipping unindexing document because failpoint skipUnindexingDocumentWhenDeleted "
+                "is on",
+                "indexName"_attr = indexName);
             return;
         }
     }

@@ -101,9 +101,9 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_shape.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_find_key_generator.h"
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/find_key_generator.h"
+#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/serialization_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -563,10 +563,8 @@ public:
                     }
                 }
 
-                auto isInternal = (opCtx->getClient()->session() &&
-                                   (opCtx->getClient()->session()->getTags() &
-                                    transport::Session::kInternalClient));
-
+                auto isInternal =
+                    opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
                 if (MONGO_unlikely(allowExternalReadsForReverseOplogScanRule.shouldFail())) {
                     isInternal = true;
                 }
@@ -594,8 +592,9 @@ public:
                     AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
                     CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nss.dbName()));
             };
-            auto const nssOrUUID = CommandHelpers::parseNsOrUUID(_dbName, _request.body);
+            auto const nssOrUUID = findCommand->getNamespaceOrUUID();
             if (nssOrUUID.isNamespaceString()) {
+                CommandHelpers::ensureNsNotCommand(nssOrUUID.nss());
                 initializeTracker(nssOrUUID.nss());
             }
             const auto acquisitionRequest = [&] {
@@ -909,6 +908,7 @@ public:
                 keyBob.append("min", 1);
                 keyBob.append("max", 1);
                 keyBob.append("shardVersion", 1);
+                keyBob.append("encryptionInformation", 1);
                 return keyBob.obj();
             }();
 
@@ -929,8 +929,7 @@ public:
         std::unique_ptr<FindCommandRequest> _parseCmdObjectToFindCommandRequest(
             OperationContext* opCtx, NamespaceString nss, const OpMsgRequest& request) {
             // check validated tenantId and set the flag on the serialization context object
-            auto reqSc = SerializationContext::stateCommandRequest();
-            reqSc.setTenantIdSource(request.getValidatedTenantId() != boost::none);
+            auto reqSc = request.getSerializationContext();
 
             auto findCommand = query_request_helper::makeFromFindCommand(
                 request.body,
@@ -941,6 +940,10 @@ public:
             // Rewrite any FLE find payloads that exist in the query if this is a FLE 2 query.
             if (shouldDoFLERewrite(findCommand)) {
                 invariant(findCommand->getNamespaceOrUUID().isNamespaceString());
+                LOGV2_DEBUG(7964101,
+                            2,
+                            "Processing Queryable Encryption command",
+                            "cmd"_attr = request.body);
 
                 if (!findCommand->getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     processFLEFindD(
@@ -957,8 +960,8 @@ public:
             return findCommand;
         }
     };
-
-} findCmd;
+};
+MONGO_REGISTER_COMMAND(FindCmd);
 
 }  // namespace
 }  // namespace mongo

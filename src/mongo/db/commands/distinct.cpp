@@ -222,8 +222,7 @@ public:
         auto parsedDistinct = uassertStatusOK(
             ParsedDistinct::parse(opCtx, nss, cmdObj, extensionsCallback, true, defaultCollator));
 
-        SerializationContext sc(SerializationContext::stateCommandRequest());
-        sc.setTenantIdSource(request.getValidatedTenantId() != boost::none);
+        SerializationContext sc = request.getSerializationContext();
 
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
@@ -482,9 +481,8 @@ public:
         // Filter the keys that can be mirrored
         cmdObj.filterFieldsUndotted(bob, kMirrorableKeys, true);
     }
-
-
-} distinctCmd;
+};
+MONGO_REGISTER_COMMAND(DistinctCommand);
 
 }  // namespace
 }  // namespace mongo

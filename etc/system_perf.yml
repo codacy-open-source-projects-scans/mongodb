@@ -6,6 +6,7 @@ stepback: false
 parameters:
   - key: patch_compile_flags
     description: "Additional SCons flags to be applied during scons compile invocations in this patch"
+  # see https://github.com/10gen/performance-tooling-docs/blob/main/patch_testing.md#skipping-compilation-on-sys-perf-projects
   - key: reuse_compile_from
     description: "Version_id of the commit/patch to reuse the compile artifacts from, e.g., sys_perf_ef8504eefef4c9fe2062b8424e85053b3e1ad8d2"
 
@@ -236,6 +237,16 @@ functions:
         permissions: public-read
         content_type: text/html
         display_name: Documentation
+    - command: s3.put
+      params:
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: bootstrap.yml
+        remote_file: ${project_dir}/${build_variant}/${revision}/${task_id}/${version_id}/bootstrap-${task_name}-${build_id}-${execution}.yml
+        bucket: mciuploads
+        permissions: public-read
+        content_type: text/plain
+        display_name: Task Bootstrap Config
   f_dsi_timeout:
     - command: shell.exec
       params:
@@ -887,6 +898,13 @@ tasks:
         vars:
           test_control: "startup"
 
+  - name: dbcheck
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: "dbcheck"
+
   - name: misc_workloads
     priority: 5
     commands:
@@ -1083,6 +1101,76 @@ tasks:
             {scale: 10,
              schema: denormalized,
              columnstore: false}
+  - name: mixed_workloads_genny_rate_limited_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: mixed_workloads_genny_rate_limited
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/MixedWorkloadsGennyRateLimited.yml
+  - name: load_test_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: load_test
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/LoadTest.yml
+  - name: majority_reads10_k_threads_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: majority_reads10_k_threads
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/MajorityReads10KThreads.yml
+  - name: large_indexed_ins_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: large_indexed_ins
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/scale/LargeIndexedIns.yml
+  - name: expressive_queries_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: expressive_queries
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/ExpressiveQueries.yml
+  - name: time_series_sort_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: time_series_sort
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/TimeSeriesSort.yml
+  - name: medical_workload_diagnosis_50_50_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: medical_workload_diagnosis_50_50
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/medical_workload-diagnosis-50-50.yml
+  - name: ycsb_like_queryable_encrypt1_cfdefault_sharded_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: ycsb_like_queryable_encrypt1_cfdefault_sharded
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/YCSBLikeQueryableEncrypt1CfdefaultSharded.yml
+  - name: filter_with_complex_logical_expression_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: filter_with_complex_logical_expression
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/FilterWithComplexLogicalExpression.yml
+  - name: array_traversal_high_value
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: array_traversal
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/query/ArrayTraversal.yml
 
 # TODO PERF-3094: Remove these charts_events tasks.
   - name: column_store_index_charts_events_1G
@@ -1706,7 +1794,6 @@ buildvariants:
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
         --use-diagnostic-latches=off
         --allocator=system
-        --enable-free-mon=off
         --enterprise-features=fle,search,vector_search
         --js-engine=none
         --link-model=dynamic-sdk
@@ -1990,6 +2077,7 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
+        cron: "0 */4 * * 1-5"
       - name: ycsb_60GB
       - name: tpcc
       - name: tpcc_majority
@@ -2088,6 +2176,10 @@ buildvariants:
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
+      - name: array_traversal_high_value
+        cron: "0 */4 * * 1-5"
+      - name: filter_with_complex_logical_expression_high_value
+        cron: "0 */4 * * 1-5"
 
   - name: linux-standalone-all-feature-flags.2022-11
     display_name: Linux Standalone (all feature flags) 2022-11
@@ -2646,6 +2738,10 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+      - name: medical_workload_diagnosis_50_50_high_value
+        cron: "0 */4 * * 1-5"
+      - name: ycsb_like_queryable_encrypt1_cfdefault_sharded_high_value
+        cron: "0 */4 * * 1-5"
 
   - name: linux-1-node-replSet-audit-log-encryption-compression.2022-11
     display_name: Linux Single-node Replica Set Audit w/ At-Rest Log Encryption (With compression) 2022-11
@@ -2828,9 +2924,12 @@ buildvariants:
       - name: map_reduce_workloads
       - name: smoke_test
       - name: mongos_workloads
+        cron: "0 */4 * * 1-5"
       - name: mongos_large_catalog_workloads
       - name: change_streams_latency
+        cron: "0 */4 * * 1-5"
       - name: change_streams_listen_throughput
+        cron: "0 */4 * * 1-5"
       - name: change_streams_multi_mongos
       - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
@@ -2948,6 +3047,7 @@ buildvariants:
       - name: mongos_large_catalog_workloads
       - name: move_chunk_large_chunk_map_workloads
       - name: move_chunk_workloads
+        cron: "0 */4 * * 1-5"
       - name: move_chunk_waiting_workloads
       - name: smoke_test
       - name: tsbs_query_sharded
@@ -3105,9 +3205,11 @@ buildvariants:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
+        cron: "0 */4 * * 1-5"
       - name: industry_benchmarks_w1
       - name: ycsb_60GB
       - name: ycsb_60GB.long
+        cron: "0 */4 * * 1-5"
       - name: industry_benchmarks_secondary_reads
       - name: crud_workloads_majority
       - name: crud_workloads_w1
@@ -3118,6 +3220,7 @@ buildvariants:
       - name: secondary_performance  # Uses a special 2 node mongodb setup
       - name: non_sharded_workloads
       - name: bestbuy_agg
+        cron: "0 */4 * * 1-5"
       - name: bestbuy_agg_merge_different_db
       - name: bestbuy_agg_merge_same_db
       - name: bestbuy_agg_merge_wordcount
@@ -3130,6 +3233,7 @@ buildvariants:
       - name: secondary_reads
       - name: tpcc
       - name: tpcc_majority
+        cron: "0 */4 * * 1-5"
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       # TODO: Enable in SERVER-66572.
@@ -3137,11 +3241,27 @@ buildvariants:
       # - name: tpch_10_denormalized
       - name: linkbench
       - name: linkbench2
+        cron: "0 */4 * * 1-5"
       - name: tsbs_load
+        cron: "0 */4 * * 1-5"
       - name: tsbs_query
+        cron: "0 */4 * * 1-5"
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
       - name: big_update_10k
+      - name: mixed_workloads_genny_rate_limited_high_value
+        cron: "0 */4 * * 1-5"
+      - name: load_test_high_value
+        cron: "0 */4 * * 1-5"
+      - name: majority_reads10_k_threads_high_value
+        cron: "0 */4 * * 1-5"
+      - name: large_indexed_ins_high_value
+        cron: "0 */4 * * 1-5"
+      - name: expressive_queries_high_value
+        cron: "0 */4 * * 1-5"
+      - name: time_series_sort_high_value
+        cron: "0 */4 * * 1-5"
+
 
   - name: linux-3-node-replSet-intel.2022-11
     display_name: Linux 3-Node ReplSet Intel 2022-11
@@ -3169,6 +3289,9 @@ buildvariants:
       - name: smoke_test
       - name: linkbench
       - name: linkbench2
+        cron: "0 */4 * * 1-5"
+      - name: mixed_workloads_genny_rate_limited_high_value
+        cron: "0 */4 * * 1-5"
 
   - name: linux-3-node-replSet-last-continuous-fcv.2022-11
     display_name: Linux 3-Node ReplSet (Last Continuous FCV) 2022-11
@@ -3342,6 +3465,7 @@ buildvariants:
       - name: tsbs_query
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
+      - name: dbcheck
 
   - name: linux-3-node-replSet-notls.2022-11
     display_name: Linux 3-Node ReplSet (No TLS) 2022-11
@@ -3574,35 +3698,6 @@ buildvariants:
       - name: linkbench
       - name: linkbench2
 
-  - name: linux-3-node-replSet-disable-execution-control
-    display_name: Linux 3-Node ReplSet 2022-11 (Execution Control Off)
-    cron: *linux-3-node-cron
-    modules: *modules
-    expansions:
-      mongodb_setup_release: 2022-11
-      mongodb_setup: replica-disable-execution-control
-      infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: replica
-      workload_setup: 2022-11
-      platform: linux
-      project_dir: *project_dir
-      authentication: enabled
-      storageEngine: wiredTiger
-      compile_variant: "-arm64"
-    run_on:
-      - "rhel70-perf-replset"
-    depends_on: *_compile_amazon_linux2_arm64
-    tasks:
-      - name: schedule_patch_auto_tasks
-      - name: schedule_variant_auto_tasks
-      - name: bestbuy_agg_merge_wordcount
-      - name: industry_benchmarks
-      - name: linkbench2
-      - name: misc_workloads
-      - name: snapshot_reads
-      - name: tpcc
-      - name: ycsb_60GB
-
   - name: linux-3-node-replSet-250mbwtcache.2023-05
     display_name: Linux 3-Node ReplSet 250 MB WiredTiger Cache 2023-05
     cron: *linux-3-node-cron
@@ -3654,6 +3749,7 @@ buildvariants:
     - name: aggregation_read_commands
     - name: aggregation_read_commands_large_dataset
     - name: agg-query-comparison_read_commands
+      cron: "0 */4 * * 1-5"
     - name: query_read_commands
     - name: query_read_commands_large_dataset
     - name: views-aggregation

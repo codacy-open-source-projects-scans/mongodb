@@ -14,16 +14,16 @@ import glob
 import textwrap
 import shlex
 import traceback
-from typing import Optional
+from typing import Dict, Optional
 
 import pymongo.uri_parser
 import yaml
-from opentelemetry import trace, context
+from opentelemetry import trace, context, baggage
 from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
-from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+from buildscripts.resmokelib.utils.batched_baggage_span_processor import BatchedBaggageSpanProcessor
+from buildscripts.resmokelib.utils.file_span_exporter import FileSpanExporter
 
 from buildscripts.idl import gen_all_feature_flag_list
 
@@ -164,6 +164,7 @@ def _set_up_tracing(
         otel_collector_file: Optional[str],
         trace_id: Optional[str],
         parent_span_id: Optional[str],
+        extra_context: Optional[Dict[str, object]],
 ) -> bool:
     """Try to set up otel tracing. On success return True. On failure return False."""
 
@@ -172,16 +173,19 @@ def _set_up_tracing(
     resource = Resource(attributes={SERVICE_NAME: "resmoke"})
 
     provider = TracerProvider(resource=resource)
-    if otel_collector_endpoint:
-        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=otel_collector_endpoint))
+    if otel_collector_endpoint and sys.platform != "darwin":
+        # TODO: EVG-20576
+        # We can remove this and export to a file when EVG-20576 is merged
+        # This will remove our dependency on grpc
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        processor = BatchedBaggageSpanProcessor(OTLPSpanExporter(endpoint=otel_collector_endpoint))
         provider.add_span_processor(processor)
 
     if otel_collector_file:
         try:
             otel_collector_file_path = Path(otel_collector_file)
             otel_collector_file_path.parent.mkdir(parents=True, exist_ok=True)
-            processor = BatchSpanProcessor(
-                ConsoleSpanExporter(out=open(otel_collector_file_path, mode='w')))
+            processor = BatchedBaggageSpanProcessor(FileSpanExporter(otel_collector_file_path))
             provider.add_span_processor(processor)
         except OSError:
             traceback.print_exc()
@@ -198,6 +202,11 @@ def _set_up_tracing(
         )
         ctx = trace.set_span_in_context(NonRecordingSpan(span_context))
         context.attach(ctx)
+
+    if extra_context:
+        for key, value in extra_context.items():
+            if value is not None:
+                context.attach(baggage.set_baggage(key, value))
     return success
 
 
@@ -414,27 +423,6 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.USER_FRIENDLY_OUTPUT = config.pop("user_friendly_output")
     _config.SANITY_CHECK = config.pop("sanity_check")
 
-    # otel info
-    _config.OTEL_TRACE_ID = config.pop("otel_trace_id")
-    _config.OTEL_PARENT_ID = config.pop("otel_parent_id")
-    _config.OTEL_COLLECTOR_ENDPOINT = config.pop("otel_collector_endpoint")
-    _config.OTEL_COLLECTOR_FILE = config.pop("otel_collector_file")
-    try:
-        setup_success = _set_up_tracing(
-            _config.OTEL_COLLECTOR_ENDPOINT,
-            _config.OTEL_COLLECTOR_FILE,
-            _config.OTEL_TRACE_ID,
-            _config.OTEL_PARENT_ID,
-        )
-        if not setup_success:
-            print("Failed to create file to send otel metrics to. Continuing.")
-    except:
-        # We want this as a catch all exception
-        # If there is some problem setting up metrics we don't want resmoke to fail
-        # We would rather just swallow the error
-        traceback.print_exc()
-        print("Failed to set up otel metrics. Continuing.")
-
     # Internal testing options.
     _config.INTERNAL_PARAMS = config.pop("internal_params")
 
@@ -452,6 +440,39 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.EVERGREEN_TASK_DOC = config.pop("task_doc")
     _config.EVERGREEN_VARIANT_NAME = config.pop("variant_name")
     _config.EVERGREEN_VERSION_ID = config.pop("version_id")
+
+    # otel info
+    _config.OTEL_TRACE_ID = config.pop("otel_trace_id")
+    _config.OTEL_PARENT_ID = config.pop("otel_parent_id")
+    _config.OTEL_COLLECTOR_ENDPOINT = config.pop("otel_collector_endpoint")
+    _config.OTEL_COLLECTOR_FILE = config.pop("otel_collector_file")
+
+    try:
+        setup_success = _set_up_tracing(
+            _config.OTEL_COLLECTOR_ENDPOINT,
+            _config.OTEL_COLLECTOR_FILE,
+            _config.OTEL_TRACE_ID,
+            _config.OTEL_PARENT_ID,
+            extra_context={
+                "evergreen.build.id": _config.EVERGREEN_BUILD_ID,
+                "evergreen.distro.id": _config.EVERGREEN_DISTRO_ID,
+                "evergreen.project.identifier": _config.EVERGREEN_PROJECT_NAME,
+                "evergreen.task.execution": _config.EVERGREEN_EXECUTION,
+                "evergreen.task.id": _config.EVERGREEN_TASK_ID,
+                "evergreen.task.name": _config.EVERGREEN_TASK_NAME,
+                "evergreen.variant.name": _config.EVERGREEN_VARIANT_NAME,
+                "evergreen.revision": _config.EVERGREEN_REVISION,
+                "evergreen.patch_build": _config.EVERGREEN_PATCH_BUILD,
+            },
+        )
+        if not setup_success:
+            print("Failed to create file to send otel metrics to. Continuing.")
+    except:
+        # We want this as a catch all exception
+        # If there is some problem setting up metrics we don't want resmoke to fail
+        # We would rather just swallow the error
+        traceback.print_exc()
+        print("Failed to set up otel metrics. Continuing.")
 
     # Force invalid suite config
     _config.FORCE_EXCLUDED_TESTS = config.pop("force_excluded_tests")

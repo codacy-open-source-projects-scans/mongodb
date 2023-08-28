@@ -105,7 +105,7 @@ public:
         auto cmdResponseWithStatus = configShard->runCommandWithFixedRetryAttempts(
             opCtx,
             kPrimaryOnlyReadPreference,
-            "admin",
+            DatabaseName::kAdmin,
             CommandHelpers::appendMajorityWriteConcern(
                 CommandHelpers::appendGenericCommandArgs(
                     cmdObj, transitionToDedicatedConfigServer.toBSON({})),
@@ -120,8 +120,8 @@ public:
 
         return true;
     }
-
-} transitionToDedicatedConfigServerCmd;
+};
+MONGO_REGISTER_COMMAND(TransitionToDedicatedConfigServerCmd);
 
 }  // namespace
 }  // namespace mongo

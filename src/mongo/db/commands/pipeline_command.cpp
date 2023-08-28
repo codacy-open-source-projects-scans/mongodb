@@ -110,8 +110,7 @@ public:
         const OpMsgRequest& opMsgRequest,
         boost::optional<ExplainOptions::Verbosity> explainVerbosity) override {
 
-        SerializationContext serializationCtx = SerializationContext::stateCommandRequest();
-        serializationCtx.setTenantIdSource(opMsgRequest.getValidatedTenantId() != boost::none);
+        SerializationContext serializationCtx = opMsgRequest.getSerializationContext();
 
         const auto aggregationRequest = aggregation_request_helper::parseFromBSON(
             opCtx,
@@ -343,8 +342,8 @@ public:
     bool allowedInTransactions() const final {
         return true;
     }
-
-} pipelineCmd;
+};
+MONGO_REGISTER_COMMAND(PipelineCommand);
 
 }  // namespace
 }  // namespace mongo

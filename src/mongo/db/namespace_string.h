@@ -732,7 +732,7 @@ public:
      * valid.
      */
     bool isValid(DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Allow) const {
-        return validDBName(dbName(), behavior) && !coll().empty();
+        return validDBName(db_deprecated(), behavior) && !coll().empty();
     }
 
     static bool isValid(StringData ns,
@@ -780,7 +780,7 @@ public:
 
     static bool validDBName(const DatabaseName& dbName,
                             DollarInDbNameBehavior behavior = DollarInDbNameBehavior::Disallow) {
-        return validDBName(dbName.toStringWithTenantId(), behavior);
+        return validDBName(dbName.db(), behavior);
     }
 
     /**
@@ -821,6 +821,18 @@ public:
 
         return StringData{_data.data() + kDataOffset, _data.size() - kDataOffset}.compare(
             StringData{other._data.data() + kDataOffset, other._data.size() - kDataOffset});
+    }
+
+    /**
+     * Checks if a given tenant prefixes or matches the tenantId from this NamespaceString.
+     * TODO SERVER-63517 Since we are removing tenant migration code we might be able to remove this
+     * method from the codebase.
+     */
+    bool isNamespaceForTenant(StringData tenant) const {
+        if (auto tid = tenantId()) {
+            return tid->toString() == tenant;
+        }
+        return db_deprecated().startsWith(tenant + "_");
     }
 
     /**

@@ -135,6 +135,7 @@
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/projection_policies.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
@@ -595,14 +596,13 @@ bool shouldWaitForOplogVisibility(OperationContext* opCtx,
     // commits before an operation with an earlier optime, and readers should wait so that all data
     // is consistent.
     //
-    // Secondaries can't wait for oplog visibility without the PBWM lock because it can introduce a
-    // hang while a batch application is in progress. The wait is done while holding a global lock,
-    // and the oplog visibility timestamp is updated at the end of every batch on a secondary,
-    // signalling the wait to complete. If a replication worker had a global lock and temporarily
-    // released it, a reader could acquire the lock to read the oplog. If the secondary reader were
-    // to wait for the oplog visibility timestamp to be updated, it would wait for a replication
-    // batch that would never complete because it couldn't reacquire its own lock, the global lock
-    // held by the waiting reader.
+    // On secondaries, the wait is done while holding a global lock, and the oplog visibility
+    // timestamp is updated at the end of every batch on a secondary, signalling the wait to
+    // complete. If a replication worker had a global lock and temporarily released it, a reader
+    // could acquire the lock to read the oplog. If the secondary reader were to wait for the oplog
+    // visibility timestamp to be updated, it would wait for a replication batch that would never
+    // complete because it couldn't reacquire its own lock, the global lock held by the waiting
+    // reader.
     return repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(
         opCtx, DatabaseName::kAdmin);
 }
@@ -1639,12 +1639,11 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
                 return StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>(
                     std::move(exec));
             } else {
-                const auto queryControl =
-                    ServerParameterSet::getNodeParameterSet()->get<QueryFrameworkControl>(
-                        "internalQueryFrameworkControl");
+                auto queryControl = QueryKnobConfiguration::decoration(opCtx)
+                                        .getInternalQueryFrameworkControlForOp();
                 tassert(7319400,
                         "Optimization failed either with forceBonsai set, or without a hint.",
-                        queryControl->_data.get() != QueryFrameworkControlEnum::kForceBonsai &&
+                        queryControl != QueryFrameworkControlEnum::kForceBonsai &&
                             !canonicalQuery->getFindCommandRequest().getHint().isEmpty() &&
                             !fastIndexNullHandling);
             }

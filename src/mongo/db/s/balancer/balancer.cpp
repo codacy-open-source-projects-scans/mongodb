@@ -456,6 +456,7 @@ Status Balancer::moveRange(OperationContext* opCtx,
     shardSvrRequest.setMoveRangeRequestBase(request.getMoveRangeRequestBase());
     shardSvrRequest.setMaxChunkSizeBytes(maxChunkSize);
     shardSvrRequest.setFromShard(fromShardId);
+    shardSvrRequest.setCollectionTimestamp(coll.getTimestamp());
     shardSvrRequest.setEpoch(coll.getEpoch());
     const auto [secondaryThrottle, wc] =
         getSecondaryThrottleAndWriteConcern(request.getSecondaryThrottle());
@@ -989,7 +990,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
         auto result = uassertStatusOK(
             s->runCommandWithFixedRetryAttempts(opCtx,
                                                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                "admin",
+                                                DatabaseName::kAdmin,
                                                 BSON("features" << 1),
                                                 Seconds(30),
                                                 Shard::RetryPolicy::kIdempotent));
@@ -1012,7 +1013,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
                 result = uassertStatusOK(s->runCommandWithFixedRetryAttempts(
                     opCtx,
                     ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                    "admin",
+                    DatabaseName::kAdmin,
                     BSON("features" << 1 << "oidReset" << 1),
                     Seconds(30),
                     Shard::RetryPolicy::kIdempotent));
@@ -1024,7 +1025,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
                         otherShardStatus.getValue()->runCommandWithFixedRetryAttempts(
                             opCtx,
                             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                            "admin",
+                            DatabaseName::kAdmin,
                             BSON("features" << 1 << "oidReset" << 1),
                             Seconds(30),
                             Shard::RetryPolicy::kIdempotent));
@@ -1121,6 +1122,7 @@ int Balancer::_moveChunks(OperationContext* opCtx,
         shardSvrRequest.setMoveRangeRequestBase(requestBase);
         shardSvrRequest.setMaxChunkSizeBytes(maxChunkSizeBytes);
         shardSvrRequest.setFromShard(migrateInfo.from);
+        shardSvrRequest.setCollectionTimestamp(migrateInfo.version.getTimestamp());
         shardSvrRequest.setEpoch(migrateInfo.version.epoch());
         shardSvrRequest.setForceJumbo(migrateInfo.forceJumbo);
         const auto [secondaryThrottle, wc] =

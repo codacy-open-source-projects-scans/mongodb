@@ -49,6 +49,7 @@ const allCommands = {
     _configsvrCommitIndex: {skip: isAnInternalCommand},
     _configsvrCommitMergeAllChunksOnShard: {skip: isAnInternalCommand},
     _configsvrCommitMovePrimary: {skip: isAnInternalCommand},
+    _configsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
@@ -149,6 +150,10 @@ const allCommands = {
     streams_getMetrics: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
+    abortMoveCollection: {
+        // Skipping command because it requires testing through a parallel shell.
+        skip: requiresParallelShell,
+    },
     abortReshardCollection: {
         // Skipping command because it requires testing through a parallel shell.
         skip: requiresParallelShell,
@@ -777,11 +782,6 @@ const allCommands = {
         isAdminCommand: true,
         command: {getDiagnosticData: 1},
     },
-    getFreeMonitoringStatus: {
-        isAdminCommand: true,
-        command: {getFreeMonitoringStatus: 1},
-        doesNotRunOnMongos: true,
-    },
     getLog: {
         isAdminCommand: true,
         command: {getLog: "global"},
@@ -980,7 +980,6 @@ const allCommands = {
     lockInfo: {
         isAdminCommand: true,
         command: {lockInfo: 1},
-        doesNotRunOnMongos: true,
     },
     logApplicationMessage: {
         isAdminCommand: true,
@@ -1079,6 +1078,7 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
     },
+    moveCollection: {skip: cannotRunWhileDowngrading},
     movePrimary: {
         skip: cannotRunWhileDowngrading,
     },
@@ -1402,9 +1402,6 @@ const allCommands = {
     },
     setIndexCommitQuorum: {skip: requiresParallelShell},
     setFeatureCompatibilityVersion: {skip: "is tested through this test"},
-    setFreeMonitoring: {
-        skip: "requires cloudFreeMonitoringEndpointURL setup",
-    },
     setProfilingFilterGlobally: {
         command: {setProfilingFilterGlobally: 1, filter: {nreturned: 0}},
         expectFailure: true,
@@ -1519,6 +1516,7 @@ const allCommands = {
     testReshardCloneCollection: {skip: isAnInternalCommand},
     testVersions1And2: {skip: isAnInternalCommand},
     testVersion2: {skip: isAnInternalCommand},
+    timeseriesCatalogBucketParamsChanged: {skip: isAnInternalCommand},
     top: {
         command: {top: 1},
         isAdminCommand: true,
@@ -1534,6 +1532,7 @@ const allCommands = {
         // dedicated config server, which is not allowed in a transitionary FCV.
         skip: cannotRunWhileDowngrading
     },
+    unshardCollection: {skip: cannotRunWhileDowngrading},
     update: {
         setUp: function(conn) {
             assert.commandWorked(conn.getCollection(fullNs).insert({x: 1}));

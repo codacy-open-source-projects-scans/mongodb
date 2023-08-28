@@ -594,6 +594,15 @@ private:
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
         }
 
+        // TODO SERVER-79064: Remove once 8.0 becomes last LTS.
+        if (isDowngrading &&
+            feature_flags::gAuthoritativeRefineCollectionShardKey
+                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kRefineCollectionShardKey);
+        }
+
         // TODO SERVER-79304 Remove once shardCollection authoritative version becomes LTS
         if (isDowngrading &&
             feature_flags::gAuthoritativeShardCollection
@@ -665,10 +674,6 @@ private:
     // _internalServerCleanupForDowngrade.
     void _upgradeServerMetadata(OperationContext* opCtx,
                                 const multiversion::FeatureCompatibilityVersion requestedVersion) {
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            _dropConfigMigrationsCollection(opCtx);
-        }
-
         if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
             // Delete any possible leftover ShardingStateRecovery document.
             // TODO SERVER-78330 remove this.
@@ -797,22 +802,6 @@ private:
                 uassertStatusOK(sharding_util::createShardCollectionCatalogIndexes(opCtx));
             }
         }
-    }
-
-    // TODO SERVER-75080 get rid of `_dropConfigMigrationsCollection` once v7.0 branches out
-    void _dropConfigMigrationsCollection(OperationContext* opCtx) {
-        // Dropping potential leftover `config.migrations` collection as it is unused since v6.0
-        DropReply dropReply;
-        const auto deletionStatus =
-            dropCollection(opCtx,
-                           NamespaceString::kMigrationsNamespace,
-                           &dropReply,
-                           DropCollectionSystemCollectionMode::kAllowSystemCollectionDrops);
-        uassert(deletionStatus.code(),
-                str::stream() << "Failed to drop "
-                              << NamespaceString::kMigrationsNamespace.toStringForErrorMsg()
-                              << causedBy(deletionStatus.reason()),
-                deletionStatus.isOK() || deletionStatus.code() == ErrorCodes::NamespaceNotFound);
     }
 
     // _prepareToUpgrade performs all actions and checks that need to be done before proceeding to
@@ -1062,6 +1051,42 @@ private:
         invariant(serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading());
         const auto& [originalVersion, _] =
             getTransitionFCVFromAndTo(serverGlobalParams.featureCompatibility.getVersion());
+
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) ||
+            serverGlobalParams.clusterRole.has(ClusterRole::None)) {
+            if (feature_flags::gTSBucketingParametersUnchanged
+                    .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
+                                                                  originalVersion)) {
+                for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                    Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+                    catalog::forEachCollectionFromDb(
+                        opCtx,
+                        dbName,
+                        MODE_X,
+                        [&](const Collection* collection) {
+                            // Only remove the catalog entry flag if it exists. It could've been
+                            // removed if the downgrade process was interrupted and is being run
+                            // again. The downgrade process cannot be aborted at this point.
+                            if (collection->timeseriesBucketingParametersHaveChanged()) {
+                                // To remove timeseries bucketing parameters from persistent
+                                // storage, issue the "collMod" command with none of the parameters
+                                // set.
+                                BSONObjBuilder responseBuilder;
+                                uassertStatusOK(processCollModCommand(opCtx,
+                                                                      collection->ns(),
+                                                                      CollMod{collection->ns()},
+                                                                      &responseBuilder));
+                                return true;
+                            }
+                            return true;
+                        },
+                        [&](const Collection* collection) {
+                            return collection->getTimeseriesOptions() != boost::none;
+                        });
+                }
+            }
+        }
+
         _cleanUpClusterParameters(opCtx, requestedVersion);
         // Note the config server is also considered a shard, so the ConfigServer and ShardServer
         // roles aren't mutually exclusive.
@@ -1445,6 +1470,15 @@ private:
     // back to the user/client. Therefore, these tasks **must** be idempotent/retryable.
     void _finalizeUpgrade(OperationContext* opCtx,
                           const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        // TODO SERVER-79064: Remove once 8.0 becomes last LTS.
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
+            feature_flags::gAuthoritativeRefineCollectionShardKey.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kRefineCollectionShardKeyPre71Compatible);
+        }
+
         // TODO SERVER-79304 Remove once shardCollection authoritative version becomes LTS
         if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer) &&
             feature_flags::gAuthoritativeShardCollection.isEnabledOnVersion(requestedVersion)) {
@@ -1453,9 +1487,14 @@ private:
                     opCtx, DDLCoordinatorTypeEnum::kCreateCollectionPre71Compatible);
         }
         _maybeRemoveOldAuditConfig(opCtx, requestedVersion);
-    }
 
-} setFeatureCompatibilityVersionCommand;
+        // TODO SERVER-80266 remove once 8.0 becomes last lts
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+            ShardingCatalogManager::get(opCtx)->deleteMaxSizeMbFromShardEntries(opCtx);
+        }
+    }
+};
+MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCommand);
 
 }  // namespace
 }  // namespace mongo

@@ -47,12 +47,12 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/commit_quorum_options.h"
-#include "mongo/db/exec/timeseries/bucket_spec.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
@@ -174,6 +174,10 @@ CreateIndexesCommand makeTimeseriesCreateIndexesCommand(OperationContext* opCtx,
                 // planner, this will be true.
                 bool assumeNoMixedSchemaData = true;
 
+                // Fixed buckets is dependent on the time-series collection options not changing,
+                // this can change throughout the lifetime of the index.
+                bool fixedBuckets = false;
+
                 auto [hasMetricPred, bucketPred] =
                     BucketSpec::pushdownPredicate(expCtx,
                                                   options,
@@ -181,7 +185,8 @@ CreateIndexesCommand makeTimeseriesCreateIndexesCommand(OperationContext* opCtx,
                                                   haveComputedMetaField,
                                                   includeMetaField,
                                                   assumeNoMixedSchemaData,
-                                                  BucketSpec::IneligiblePredicatePolicy::kError);
+                                                  BucketSpec::IneligiblePredicatePolicy::kError,
+                                                  fixedBuckets);
 
                 hasPartialFilterOnMetaField = !hasMetricPred;
 

@@ -82,7 +82,7 @@ public:
 
             auto responses = scatterGatherUnversionedTargetConfigServerAndShards(
                 opCtx,
-                DatabaseName::kAdmin.db(),
+                DatabaseName::kAdmin,
                 applyReadWriteConcern(
                     opCtx,
                     this,
@@ -137,7 +137,8 @@ public:
     std::string help() const override {
         return "invoke fsync unlock on all shards belonging to the cluster";
     }
-} fsyncUnlockCmd;
+};
+MONGO_REGISTER_COMMAND(FsyncUnlockCommand);
 
 }  // namespace
 }  // namespace mongo

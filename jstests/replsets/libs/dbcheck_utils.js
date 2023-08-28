@@ -20,6 +20,7 @@ export const forEachNonArbiterNode = (replSet, f) => {
 // Clear local.system.healthlog.
 export const clearHealthLog = (replSet) => {
     forEachNonArbiterNode(replSet, conn => conn.getDB("local").system.healthlog.drop());
+    replSet.awaitReplication();
 };
 
 export const dbCheckCompleted = (db) => {
@@ -59,29 +60,36 @@ export const runDbCheck = (replSet,
                            collName,
                            parameters = {},
                            awaitCompletion = false,
-                           withClearedHealthLog = true) => {
+                           withClearedHealthLog = true,
+                           allowedErrorCodes = []) => {
     let dbCheckCommand = {dbCheck: collName};
     for (let parameter in parameters) {
         dbCheckCommand[parameter] = parameters[parameter];
     }
-    // Disregard the error when the collection is not replicated, for example, 'system.profile'.
-    assert.commandWorkedOrFailedWithCode(db.runCommand(dbCheckCommand),
-                                         40619 /* collection is not replicated error.*/);
+
+    assert.commandWorkedOrFailedWithCode(db.runCommand(dbCheckCommand), allowedErrorCodes);
     if (awaitCompletion) {
         awaitDbCheckCompletion(replSet, db, withClearedHealthLog);
     }
 };
 
-export const checkHealthlog = (healthlog, query, numExpected, timeout = 60 * 1000) => {
+export const checkHealthLog = (healthlog, query, numExpected, timeout = 60 * 1000) => {
     let query_count;
+
     assert.soon(
         function() {
-            query_count = healthlog.find(query).itcount();
+            query_count = healthlog.find(query).count();
+            if (query_count != numExpected) {
+                jsTestLog("dbCheck command didn't complete, health log query returned " +
+                          query_count + " entries, expected " + numExpected +
+                          "  query: " + tojson(query) +
+                          " found: " + JSON.stringify(healthlog.find(query).toArray()));
+            }
             return query_count == numExpected;
         },
-        `dbCheck command didn't complete, health log query returned ${
-            query_count} entries, expected ${numExpected}: ` +
-            query,
+        "dbCheck command didn't complete, health log query returned " + query_count +
+            " entries, expected " + numExpected + "  query: " + tojson(query) +
+            " found: " + JSON.stringify(healthlog.find(query).toArray()),
         timeout);
 };
 
@@ -97,7 +105,20 @@ function listCollectionsWithoutViews(database) {
 export const runDbCheckForDatabase = (replSet, db, awaitCompletion = false) => {
     listCollectionsWithoutViews(db)
         .map(c => c.name)
-        .forEach(collName => runDbCheck(replSet, db, collName, false /*awaitCompletion*/));
+        .forEach(collName => runDbCheck(
+                     replSet,
+                     db,
+                     collName,
+                     {} /* parameters */,
+                     false /* awaitCompletion */,
+                     false /* withClearedHealthLog */,
+                     [
+                         ErrorCodes.NamespaceNotFound /* collection got dropped. */,
+                         ErrorCodes.CommandNotSupportedOnView /* collection got dropped and a view
+                                                                 got created with the same name. */
+                         ,
+                         40619 /* collection is not replicated error. */
+                     ] /* allowedErrorCodes */));
 
     if (awaitCompletion) {
         awaitDbCheckCompletion(replSet, db, false /*withClearedHealthLog*/);
@@ -140,7 +161,7 @@ export const assertForDbCheckErrors = (node,
                     errorsFound.push(err);
                     jsTestLog(tojson(err));
                 }
-                assert(false, err);
+                assert(false, errMsg);
             }
             return true;
         } catch (e) {

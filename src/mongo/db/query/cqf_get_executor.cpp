@@ -106,7 +106,6 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/query/shard_filterer_factory_impl.h"
 #include "mongo/db/query/stats/collection_statistics_impl.h"
 #include "mongo/db/query/yield_policy_callbacks_impl.h"
@@ -188,14 +187,11 @@ static std::pair<IndexDefinitions, MultikeynessTrie> buildIndexSpecsOptimizer(
         }
 
         // If there is a $natural hint, we should not assert here as we will not use the index.
-        // TODO SERVER-78502: Remove the second part of the if statement's guard below regarding the
-        // presence of a hashed index.
         const bool isSpecialIndex =
             descriptor.infoObj().hasField(IndexDescriptor::kExpireAfterSecondsFieldName) ||
             descriptor.isSparse() || descriptor.getIndexType() != IndexType::INDEX_BTREE ||
             !descriptor.collation().isEmpty();
-        if ((!queryHasNaturalHint && isSpecialIndex) ||
-            descriptor.getIndexType() == IndexType::INDEX_HASHED) {
+        if (!queryHasNaturalHint && isSpecialIndex) {
             uasserted(ErrorCodes::InternalErrorNotSupported, "Unsupported index type");
         }
 
@@ -283,7 +279,7 @@ static std::pair<IndexDefinitions, MultikeynessTrie> buildIndexSpecsOptimizer(
             continue;
         }
 
-        PartialSchemaRequirements partialIndexReqMap;
+        PSRExpr::Node partialIndexReqMap = psr::makeNoOp();
         if (descriptor.isPartial() &&
             disableIndexOptions != DisableIndexOptions::DisablePartialOnly) {
             auto expr = MatchExpressionParser::parseAndNormalize(
@@ -319,7 +315,7 @@ static std::pair<IndexDefinitions, MultikeynessTrie> buildIndexSpecsOptimizer(
                                  std::move(partialIndexReqMap));
         // Skip partial indexes. A path could be non-multikey on a partial index (subset of the
         // collection), but still be multikey on the overall collection.
-        if (indexDef.getPartialReqMap().isNoop()) {
+        if (psr::isNoop(indexDef.getPartialReqMap())) {
             for (const auto& component : indexDef.getCollationSpec()) {
                 result.second.add(component._path.ref());
             }
@@ -364,36 +360,19 @@ namespace {
 /*
  * This function initializes the slot in the SBE runtime environment that provides a
  * 'ShardFilterer' and populates it.
- * TODO SERVER-79041: Change how and when the shardFilterer slot is allocated.
  */
 void setupShardFiltering(OperationContext* opCtx,
                          const MultipleCollectionAccessor& collections,
                          mongo::sbe::RuntimeEnvironment& runtimeEnv,
                          sbe::value::SlotIdGenerator& slotIdGenerator) {
-    // Allocate a global slot for shard filtering and register it in 'runtimeEnv'.
-    sbe::value::SlotId shardFiltererSlot = runtimeEnv.registerSlot(
-        kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &slotIdGenerator);
-
-    // TODO SERVER-79007: Merge this method of creating a ShardFilterer with that in
-    // sbe_stage_builders.cpp.
     bool isSharded = collections.isAcquisition()
         ? collections.getMainAcquisition().getShardingDescription().isSharded()
         : collections.getMainCollection().isSharded_DEPRECATED();
     if (isSharded) {
-        auto shardFilterer = [&]() -> std::unique_ptr<ShardFilterer> {
-            if (collections.isAcquisition()) {
-                return std::make_unique<ShardFiltererImpl>(
-                    *collections.getMainAcquisition().getShardingFilter());
-            } else {
-                const auto& collection = collections.getMainCollection();
-                ShardFiltererFactoryImpl shardFiltererFactory(collection);
-                return shardFiltererFactory.makeShardFilterer(opCtx);
-            }
-        }();
-        runtimeEnv.resetSlot(shardFiltererSlot,
-                             sbe::value::TypeTags::shardFilterer,
-                             sbe::value::bitcastFrom<ShardFilterer*>(shardFilterer.release()),
-                             true);
+        // Allocate a global slot for shard filtering and register it in 'runtimeEnv'.
+        sbe::value::SlotId shardFiltererSlot = runtimeEnv.registerSlot(
+            kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &slotIdGenerator);
+        populateShardFiltererSlot(opCtx, runtimeEnv, shardFiltererSlot, collections);
     }
 }
 
@@ -420,14 +399,19 @@ static ExecParams createExecutor(
         yieldable = &(collections.getMainCollection());
     }
 
-    auto sbeYieldPolicy =
-        std::make_unique<PlanYieldPolicySBE>(opCtx,
-                                             yieldPolicy,
-                                             opCtx->getServiceContext()->getFastClockSource(),
-                                             internalQueryExecYieldIterations.load(),
-                                             Milliseconds{internalQueryExecYieldPeriodMS.load()},
-                                             yieldable,
-                                             std::make_unique<YieldPolicyCallbacksImpl>(nss));
+    std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy;
+    if (!phaseManager.getMetadata().isParallelExecution()) {
+        // TODO SERVER-80311: Enable yielding for parallel scan plans.
+
+        sbeYieldPolicy = std::make_unique<PlanYieldPolicySBE>(
+            opCtx,
+            yieldPolicy,
+            opCtx->getServiceContext()->getFastClockSource(),
+            internalQueryExecYieldIterations.load(),
+            Milliseconds{internalQueryExecYieldPeriodMS.load()},
+            yieldable,
+            std::make_unique<YieldPolicyCallbacksImpl>(nss));
+    }
 
     // Construct the ShardFilterer and bind it to the correct slot.
     setupShardFiltering(opCtx, collections, *runtimeEnvironment, ids);

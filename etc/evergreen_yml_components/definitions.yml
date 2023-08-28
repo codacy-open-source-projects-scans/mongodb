@@ -233,8 +233,8 @@ variables:
         src/build/scons/config.log
         src/*.gcda.gcov
         src/gcov-intermediate-files.tgz
-        src/*.core src/*.mdmp
-        mongo-coredumps.tgz
+        src/*.core src/*.mdmp src/*.core.gz src/*.mdmp.gz
+        mongo-coredumps.json
         src/dist-unittests/bin/*
         src/dist-unittests/lib/*
         mongo-unittests.tgz
@@ -319,15 +319,15 @@ variables:
   - enterprise-amazon2
   - enterprise-amazon2-arm64
   - enterprise-amazon2023
+  - enterprise-amazon2023-lto
   - enterprise-amazon2023-arm64
-  - enterprise-debian10-64
+  - enterprise-amazon2023-arm64-lto
   - enterprise-debian11-64
   - enterprise-linux-64-amazon-ami
   - enterprise-macos
   - enterprise-macos-arm64
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-81-ppc64le
-  - enterprise-rhel-72-s390x
   - enterprise-rhel-80-64-bit
   - enterprise-rhel-80-64-bit-coverage
   - enterprise-rhel-80-64-bit-suggested
@@ -337,8 +337,6 @@ variables:
   - enterprise-rhel-90-arm64
   - enterprise-suse12-64
   - enterprise-suse15-64
-  - enterprise-ubuntu1804-64
-  - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2204-arm64
   - enterprise-ubuntu2004-64
@@ -347,10 +345,6 @@ variables:
   - enterprise-windows-debug-unoptimized
   - enterprise-windows-inmem
   - enterprise-windows-wtdevelop
-  - ubuntu1804-debug-asan
-  - ubuntu1804-debug-ubsan
-  - ubuntu1804-debug-aubsan-lite-required
-  - ubuntu1804-debug-aubsan-lite_fuzzer
 
 
 # List of all variants that make mh artifacts.
@@ -366,8 +360,9 @@ variables:
   - enterprise-rhel-90-arm64
   - enterprise-amazon2-arm64
   - enterprise-amazon2023
+  - enterprise-amazon2023-lto
   - enterprise-amazon2023-arm64
-  - enterprise-ubuntu1804-64
+  - enterprise-amazon2023-arm64-lto
   - enterprise-ubuntu2004-64
   - enterprise-ubuntu2204-64
   - enterprise-windows
@@ -383,15 +378,12 @@ variables:
   - enterprise-amazon2-arm64
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
-  - debian10
   - debian11
-  - enterprise-debian10-64
   - enterprise-debian11-64
   - rhel70
   - rhel76_compile_rhel70
   - enterprise-rhel-70-64-bit
   - enterprise-rhel-81-ppc64le
-  - enterprise-rhel-72-s390x
   - ubi8
   - rhel80
   - rhel-82-arm64
@@ -407,14 +399,10 @@ variables:
   - enterprise-suse12-64
   - suse15
   - enterprise-suse15-64
-  - ubuntu1804
-  - ubuntu1804-arm64
   - ubuntu2004-arm64
   - ubuntu2204-arm64
   - ubuntu2004
   - ubuntu2204
-  - enterprise-ubuntu1804-64
-  - enterprise-ubuntu1804-arm64
   - enterprise-ubuntu2004-arm64
   - enterprise-ubuntu2204-arm64
   - enterprise-ubuntu2004-64
@@ -753,6 +741,14 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/functions/shared_scons_directory_umount.sh"
+
+  "umount tmp directory":
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "./src/evergreen/functions/tmp_directory_umount.sh"
 
   "determine resmoke jobs": &determine_resmoke_jobs
     command: subprocess.exec
@@ -1332,6 +1328,30 @@ functions:
       binary: bash
       args:
       - "src/evergreen/scons_compile.sh"
+  - command: expansions.update
+    params:
+      updates:
+      - key: install_dir
+        value: ${install_dir}
+
+# This is only used to simulate local dev compilation. Do NOT use for anything else.
+  "scons raw compile":
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - command: subprocess.exec
+    params:
+      background: true
+      continue_on_err: true
+      binary: bash
+      args:
+      - "./src/evergreen/scons_splunk.sh"
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/scons_raw_compile.sh"
 
   "ninja compile":
   - *f_expansions_write
@@ -2063,25 +2083,35 @@ functions:
       - "./src/evergreen/gather_mongo_coredumps.sh"
 
   "tar mongo coredumps": &tar_mongo_coredumps
-    command: archive.targz_pack
+    command: subprocess.exec
     params:
-      target: "mongo-coredumps.tgz"
-      source_dir: "src"
-      include:
-      - "./**.core"
-      - "./**.mdmp" # Windows: minidumps
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/fast_archive.py"
+      - "-f=mongo-coredumps.json"
+      - "-p=./**.core"
+      - "-p=./**.mdmp" # Windows: minidumps
+      - "-n=Core Dump"
+      - "-t=720" # 12 minutes
 
   "archive mongo coredumps": &archive_mongo_coredumps
+    command: attach.artifacts
+    params:
+      files:
+        - src/mongo-coredumps.json
+
+  "upload mongo-coredumps.json": &upload_coredumps_json
     command: s3.put
     params:
       aws_key: ${aws_key}
       aws_secret: ${aws_secret}
-      local_file: mongo-coredumps.tgz
-      remote_file: ${project}/${build_variant}/${revision}/coredumps/mongo-coredumps-${build_id}-${task_name}-${execution}.tgz
+      local_file: src/mongo-coredumps.json
+      remote_file: ${project}/${build_variant}/${version_id}/${revision}/${task_name}/mongo-coredumps.json
       bucket: mciuploads
       permissions: public-read
-      content_type: application/gzip
-      display_name: Core Dumps - Execution ${execution}
+      content_type: application/json
+      display_name: mongo-coredumps.json
       optional: true
 
   "save mongo coredumps":
@@ -2089,6 +2119,7 @@ functions:
   - *gather_mongo_coredumps
   - *tar_mongo_coredumps
   - *archive_mongo_coredumps
+  - *upload_coredumps_json
 
   ### Process & archive failed unittest artifacts ###
   "gather failed unittests": &gather_failed_unittests
@@ -2521,6 +2552,7 @@ post:
 - func: "save system resource information"
 - func: "save UndoDB recordings"
 - func: "umount shared scons directory"
+- func: "umount tmp directory"
 - func: "cleanup FUSE watchdog"
 - func: "cleanup environment"
 - func: "cleanup jepsen docker test"
@@ -3324,7 +3356,6 @@ tasks:
       targets: install-stitch-support install-stitch-support-debug install-stitch-support-dev
       task_compile_flags: >-
         --link-model=dynamic-sdk
-        --enable-free-mon=off
         --ssl=off
         --enable-http-client=off
         --modules=
@@ -3356,7 +3387,6 @@ tasks:
       targets: install-stitch-support-test
       compiling_for_test: true
       task_compile_flags: >-
-        --enable-free-mon=off
         --ssl=off
         --enable-http-client=off
         --modules=
@@ -3388,7 +3418,6 @@ tasks:
       targets: archive-mongo-crypt-dev
       task_compile_flags: >-
         --allocator=system
-        --enable-free-mon=off
         --enterprise-features=fle,search,vector_search
         --js-engine=none
         --link-model=dynamic-sdk
@@ -3426,7 +3455,6 @@ tasks:
         --dbg=on
         --opt=off
         --allocator=system
-        --enable-free-mon=off
         --enterprise-features=fle,search,vector_search
         --js-engine=none
         --link-model=dynamic-sdk
@@ -3464,7 +3492,6 @@ tasks:
       compiling_for_test: true
       task_compile_flags: >-
         --allocator=system
-        --enable-free-mon=off
         --enterprise-features=fle,search,vector_search
         --js-engine=none
         --link-model=static
@@ -6259,6 +6286,14 @@ tasks:
       use_large_distro: "true"
 
 - <<: *gen_task_template
+  name: multitenancy_jscore_passthrough_gen
+  tags: ["serverless"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
   name: clustered_collection_passthrough_gen
   tags: ["large", "clustered_collections"]
   commands:
@@ -7029,15 +7064,6 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *task_template
-  name: free_monitoring
-  tags: []
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *task_template
   name: client_encrypt
   tags: ["ssl", "encrypt", "patch_build"]
   commands:
@@ -7152,7 +7178,11 @@ tasks:
     vars:
       <<: *powercycle_remote_credentials
   - func: "set up EC2 instance"
+    vars:
+      <<: *powercycle_remote_credentials
   - func: "run powercycle test"
+    vars:
+      <<: *powercycle_remote_credentials
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle
@@ -8647,6 +8677,56 @@ tasks:
     vars:
       resmoke_jobs_max: 1
 
+# Test a compilation without extra args from evergreen to simulate local dev compilation.
+- name: scons_dev_compile_smoke_test
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - func: "scons raw compile"
+    vars:
+      targets: >-
+        install-wiredtiger
+        compiledb
+      task_compile_flags: >-
+        --opt=off
+        --dbg=on
+  - func: "scons raw compile"
+    vars:
+      targets: >-
+        install-wiredtiger
+        compiledb
+      task_compile_flags: >-
+        --opt=on
+        --dbg=off
+
+# Test a ninja compilation without extra args from evergreen to simulate local dev compilation.
+- name: ninja_dev_compile_smoke_test
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - func: "scons raw compile"
+    vars:
+      targets: >-
+        install-wiredtiger
+        compiledb
+      task_compile_flags: >-
+        --ninja build.ninja
+  - *f_expansions_write
+  - func: "ninja compile"
+    vars:
+      ninja_file: "build.ninja"
+      targets: "compiledb"
+
 #######################################
 #             Task Groups             #
 #######################################
@@ -8794,6 +8874,19 @@ task_groups:
   - fetch_and_run_libfuzzertests
 
 - <<: *compile_task_group_template
+  name: compile_test_serial_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_unittests
+  - run_unittests
+  - compile_dbtest
+  - run_dbtest
+  - archive_dbtest
+  - compile_all
+
+- <<: *compile_task_group_template
   name: compile_test_and_package_serial_TG
   tasks:
   - compile_dist_test
@@ -8811,6 +8904,17 @@ task_groups:
 # were the static binaries of the unittests can take up to
 # a terabyte of data.
 - <<: *compile_task_group_template
+  name: compile_test_serial_no_unittests_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_dbtest
+  - run_dbtest
+  - archive_dbtest
+  - compile_all_but_not_unittests
+
+- <<: *compile_task_group_template
   name: compile_test_and_package_serial_no_unittests_TG
   tasks:
   - compile_dist_test
@@ -8821,6 +8925,19 @@ task_groups:
   - archive_dbtest
   - compile_all_but_not_unittests
   - package
+
+# TODO: SERVER-79886 Fix commented out tasks
+- <<: *compile_task_group_template
+  name: compile_test_and_package_serial_lto_no_unittests_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_dbtest
+  # - run_dbtest
+  # - archive_dbtest
+  # - compile_all_but_not_unittests
+  # - package
 
 # SERVER-76006
 # This is a compile stream meant for non-cached and/or underpowered systems.
@@ -8844,6 +8961,20 @@ task_groups:
   - archive_dbtest
   - compile_all_but_not_unittests
   - package
+
+- <<: *compile_task_group_template
+  name: compile_test_benchmark_serial_TG
+  tasks:
+  - compile_dist_test
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_unittests
+  - run_unittests
+  - compile_dbtest
+  - run_dbtest
+  - archive_dbtest
+  - compile_upload_benchmarks
+  - compile_all
 
 - <<: *compile_task_group_template
   name: compile_test_benchmark_and_package_serial_TG
@@ -8896,6 +9027,15 @@ task_groups:
 # groups so that if they do run on the same machine, they can avoid the
 # cost of re-running the setup tasks.
 - <<: *compile_task_group_template
+  name: compile_test_parallel_core_stream_TG
+  tasks:
+  - compile_dist_test
+  - determine_patch_tests
+  - archive_dist_test
+  - archive_dist_test_debug
+  - compile_all
+
+- <<: *compile_task_group_template
   name: compile_test_and_package_parallel_core_stream_TG
   tasks:
   - compile_dist_test
@@ -8906,19 +9046,19 @@ task_groups:
   - package
 
 - <<: *compile_task_group_template
-  name: compile_test_and_package_parallel_unittest_stream_TG
+  name: compile_test_parallel_unittest_stream_TG
   tasks:
   - compile_unittests
   - run_unittests
 
 #- <<: *compile_task_group_template
-#  name: compile_test_and_package_parallel_unittest_stream_with_recording_TG
+#  name: compile_test_parallel_unittest_stream_with_recording_TG
 #  tasks:
 #    - compile_unittests_for_recorded_unittest
 #    - run_unittests_with_recording
 
 - <<: *compile_task_group_template
-  name: compile_test_and_package_parallel_dbtest_stream_TG
+  name: compile_test_parallel_dbtest_stream_TG
   tasks:
   - compile_dbtest
   - run_dbtest
@@ -8947,6 +9087,16 @@ task_groups:
   - integration_tests_replset
   - integration_tests_replset_ssl_auth
   - integration_tests_sharded
+
+- <<: *compile_task_group_template
+  name: scons_compile_smoke_test_TG
+  tasks:
+  - scons_dev_compile_smoke_test
+
+- <<: *compile_task_group_template
+  name: ninja_compile_smoke_test_TG
+  tasks:
+  - ninja_dev_compile_smoke_test
 
 - name: clang_tidy_TG
   setup_group_can_fail_task: true

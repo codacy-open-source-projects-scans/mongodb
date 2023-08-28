@@ -52,7 +52,6 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/exec/timeseries/bucket_spec.h"
 #include "mongo/db/fts/fts_query.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
@@ -73,6 +72,7 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/timeseries/bucket_spec.h"
 #include "mongo/db/record_id.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
@@ -1733,7 +1733,16 @@ struct SentinelNode : public QuerySolutionNode {
 };
 
 struct SearchNode : public QuerySolutionNode {
-    explicit SearchNode(bool isSearchMeta) : isSearchMeta(isSearchMeta) {
+    SearchNode() = default;
+
+    SearchNode(bool isSearchMeta,
+               BSONObj searchQuery,
+               boost::optional<long long> limit,
+               boost::optional<int> intermediateResultsProtocolVersion)
+        : isSearchMeta(isSearchMeta),
+          searchQuery(searchQuery),
+          limit(limit),
+          intermediateResultsProtocolVersion(intermediateResultsProtocolVersion) {
         // TODO SERVER-78565: Support $search in SBE plan cache
         eligibleForPlanCache = false;
     }
@@ -1766,6 +1775,22 @@ struct SearchNode : public QuerySolutionNode {
      * True for $searchMeta, False for $search query.
      */
     bool isSearchMeta;
+
+    const BSONObj searchQuery;
+
+    /**
+     * This will populate the docsRequested field of the cursorOptions document sent as part of the
+     * command to mongot in the case where the query has an extractable limit that can guide the
+     * number of documents that mongot returns to mongod.
+     */
+    boost::optional<long long> limit;
+
+    /**
+     * Protocol version if it must be communicated via the search request.
+     * If we are in a sharded environment but are targeting unsharded collection we may have a
+     * protocol version even though it should not be sent to mongot.
+     */
+    boost::optional<int> intermediateResultsProtocolVersion;
 };
 
 /**
@@ -1838,13 +1863,11 @@ struct WindowNode : public QuerySolutionNode {
     WindowNode(std::unique_ptr<QuerySolutionNode> child,
                boost::optional<boost::intrusive_ptr<Expression>> partitionByArg,
                boost::optional<SortPattern> sortByArg,
-               std::vector<WindowFunctionStatement> outputFieldsArg,
-               bool shouldProduceBson)
+               std::vector<WindowFunctionStatement> outputFieldsArg)
         : QuerySolutionNode(std::move(child)),
           partitionBy(std::move(partitionByArg)),
           sortBy(std::move(sortByArg)),
-          outputFields(std::move(outputFieldsArg)),
-          shouldProduceBson(shouldProduceBson) {
+          outputFields(std::move(outputFieldsArg)) {
         DepsTracker partitionByDeps;
         if (partitionBy) {
             expression::addDependencies(partitionBy->get(), &partitionByDeps);
@@ -1894,7 +1917,5 @@ struct WindowNode : public QuerySolutionNode {
     OrderedPathSet partitionByRequiredFields;
     OrderedPathSet sortByRequiredFields;
     OrderedPathSet outputRequiredFields;
-
-    bool shouldProduceBson;
 };
 }  // namespace mongo

@@ -93,6 +93,7 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(blockCollectionCacheLookup);
+MONGO_FAIL_POINT_DEFINE(blockDatabaseCacheLookup);
 
 // How many times to try refreshing the routing info or the index info of a collection if the
 // information loaded from the config server is found to be inconsistent.
@@ -315,12 +316,12 @@ void CatalogCache::shutDownAndJoin() {
 }
 
 StatusWith<CachedDatabaseInfo> CatalogCache::getDatabase(OperationContext* opCtx,
-                                                         StringData dbName) {
+                                                         const DatabaseName& dbName) {
     return _getDatabase(opCtx, dbName);
 }
 
 StatusWith<CachedDatabaseInfo> CatalogCache::_getDatabase(OperationContext* opCtx,
-                                                          StringData dbName,
+                                                          const DatabaseName& dbName,
                                                           bool allowLocks) {
     tassert(7032313,
             "Do not hold a lock while refreshing the catalog cache. Doing so would potentially "
@@ -333,9 +334,11 @@ StatusWith<CachedDatabaseInfo> CatalogCache::_getDatabase(OperationContext* opCt
         CurOp::get(opCtx)->debug().catalogCacheDatabaseLookupMillis += Milliseconds(t.millis());
     });
 
+    const auto dbNameStr = DatabaseNameUtil::serialize(dbName);
     try {
+        // TODO SERVER-80333 _databaseCache to accept a DatabaseName
         auto dbEntryFuture =
-            _databaseCache.acquireAsync(dbName, CacheCausalConsistency::kLatestKnown);
+            _databaseCache.acquireAsync(dbNameStr, CacheCausalConsistency::kLatestKnown);
 
         if (allowLocks) {
             // When allowLocks is true we may be holding a lock, so we don't want to block the
@@ -347,8 +350,7 @@ StatusWith<CachedDatabaseInfo> CatalogCache::_getDatabase(OperationContext* opCt
                 // _getDatabase with the potential for allowLocks to be true. The caller should
                 // convert this to ErrorCodes::ShardCannotRefreshDueToLocksHeld with the full
                 // namespace.
-                return Status{ShardCannotRefreshDueToLocksHeldInfo(NamespaceString(
-                                  DatabaseNameUtil::deserialize(boost::none, dbName))),
+                return Status{ShardCannotRefreshDueToLocksHeldInfo(NamespaceString(dbName)),
                               "Database info refresh did not complete"};
             }
         }
@@ -356,7 +358,7 @@ StatusWith<CachedDatabaseInfo> CatalogCache::_getDatabase(OperationContext* opCt
         // From this point we can guarantee that allowLocks is false.
         auto dbEntry = dbEntryFuture.get(opCtx);
         uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "database " << dbName << " not found",
+                str::stream() << "database " << dbName.toStringForErrorMsg() << " not found",
                 dbEntry);
 
         return dbEntry;
@@ -377,7 +379,7 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionPlacementInfoAt(
             allowLocks || !opCtx->lockState()->isLocked());
 
     try {
-        const auto swDbInfo = _getDatabase(opCtx, nss.db_forSharding(), allowLocks);
+        const auto swDbInfo = _getDatabase(opCtx, nss.dbName(), allowLocks);
         if (!swDbInfo.isOK()) {
             if (swDbInfo == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
                 // Since collection refreshes always imply database refreshes, it is ok to transform
@@ -539,7 +541,7 @@ boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexIn
                   "SERVER-37398.");
     }
 
-    const auto swDbInfo = _getDatabase(opCtx, nss.db_forSharding(), allowLocks);
+    const auto swDbInfo = _getDatabase(opCtx, nss.dbName(), allowLocks);
     if (!swDbInfo.isOK()) {
         if (swDbInfo == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
             // Since collection refreshes always imply database refreshes, it is ok to transform
@@ -616,9 +618,11 @@ boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexIn
 }
 
 StatusWith<CachedDatabaseInfo> CatalogCache::getDatabaseWithRefresh(OperationContext* opCtx,
-                                                                    StringData dbName) {
+                                                                    const DatabaseName& dbName) {
+    // TODO SERVER-80333 _databaseCache to accept a DatabaseName
     _databaseCache.advanceTimeInStore(
-        dbName, ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh());
+        DatabaseNameUtil::serialize(dbName),
+        ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh());
     return getDatabase(opCtx, dbName);
 }
 
@@ -705,7 +709,7 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getShardedCollectionRoutingInfoW
     }
 }
 
-void CatalogCache::onStaleDatabaseVersion(const StringData dbName,
+void CatalogCache::onStaleDatabaseVersion(const DatabaseName& dbName,
                                           const boost::optional<DatabaseVersion>& databaseVersion) {
     if (databaseVersion) {
         const auto version =
@@ -715,9 +719,10 @@ void CatalogCache::onStaleDatabaseVersion(const StringData dbName,
                                   "Registering new database version",
                                   "db"_attr = dbName,
                                   "version"_attr = version);
-        _databaseCache.advanceTimeInStore(dbName, version);
+        _databaseCache.advanceTimeInStore(DatabaseNameUtil::serialize(dbName), version);
     } else {
-        _databaseCache.invalidateKey(dbName);
+        // TODO SERVER-80333 _databaseCache to accept a DatabaseName
+        _databaseCache.invalidateKey(DatabaseNameUtil::serialize(dbName));
     }
 }
 
@@ -864,6 +869,10 @@ CatalogCache::DatabaseCache::LookupResult CatalogCache::DatabaseCache::_lookupDa
     const std::string& dbName,
     const DatabaseTypeValueHandle& previousDbType,
     const ComparableDatabaseVersion& previousDbVersion) {
+    if (MONGO_unlikely(blockDatabaseCacheLookup.shouldFail())) {
+        LOGV2(8023400, "Hanging before refreshing cached database entry");
+        blockDatabaseCacheLookup.pauseWhileSet();
+    }
     // TODO (SERVER-34164): Track and increment stats for database refreshes
 
     LOGV2_FOR_CATALOG_REFRESH(24102, 2, "Refreshing cached database entry", "db"_attr = dbName);

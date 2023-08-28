@@ -72,7 +72,6 @@
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/sbe_stage_builder.h"
-#include "mongo/db/query/sbe_stage_builder_eval_frame.h"
 #include "mongo/db/query/sbe_stage_builder_filter.h"
 #include "mongo/db/query/sbe_stage_builder_index_scan.h"
 #include "mongo/db/storage/sorted_data_interface.h"

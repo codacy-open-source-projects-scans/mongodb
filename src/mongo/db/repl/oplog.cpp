@@ -792,7 +792,7 @@ NamespaceString extractNs(DatabaseName dbName, const BSONObj& cmdObj) {
             first.canonicalType() == canonicalizeBSONType(mongo::String));
     StringData coll = first.valueStringData();
     uassert(28635, "no collection name specified", !coll.empty());
-    return NamespaceStringUtil::parseNamespaceFromDoc(dbName, coll);
+    return NamespaceStringUtil::deserialize(dbName, coll);
 }
 
 NamespaceString extractNsFromUUID(OperationContext* opCtx, const UUID& uuid) {
@@ -2369,11 +2369,10 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 break;
             }
             case ErrorCodes::BackgroundOperationInProgressForNamespace: {
-                Command* cmd = CommandHelpers::findCommand(o.firstElement().fieldName());
+                Command* cmd = CommandHelpers::findCommand(opCtx, o.firstElement().fieldName());
                 invariant(cmd);
 
-                auto ns =
-                    cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.db_deprecated(), o))->ns();
+                auto ns = cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.dbName(), o))->ns();
 
                 if (mode == OplogApplication::Mode::kInitialSync) {
                     // Aborting an index build involves writing to the catalog. This write needs to

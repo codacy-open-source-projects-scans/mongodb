@@ -107,7 +107,7 @@ handle_message(WT_EVENT_HANDLER *handler, WT_SESSION *session, const char *messa
      * can be generated in the library when we don't have a session. There's a global session we can
      * use, but that requires locking.
      */
-    if ((sap = session->app_private) != NULL && sap->trace != NULL) {
+    if (g.trace_conn != NULL && (sap = session->app_private) != NULL && sap->trace != NULL) {
         testutil_check(sap->trace->log_printf(sap->trace, "%s", message));
         if (!printf_msg)
             return (0);
@@ -751,15 +751,9 @@ wts_stats(void)
     wt_wrap_open_session(conn, &sap, NULL, &session);
     stats_data_print(session, "statistics:", fp);
 
-    /*
-     * Data source statistics.
-     *     FIXME-WT-9785: Statistics cursors on tiered storage objects are not yet supported.
-     */
-    if (!g.tiered_storage_config) {
-        args.fp = fp;
-        args.session = session;
-        tables_apply(stats_data_source, &args);
-    }
+    args.fp = fp;
+    args.session = session;
+    tables_apply(stats_data_source, &args);
 
     wt_wrap_close_session(session);
 

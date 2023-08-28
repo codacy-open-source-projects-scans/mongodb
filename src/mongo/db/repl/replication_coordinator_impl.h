@@ -471,7 +471,7 @@ public:
     void cancelCbkHandle(executor::TaskExecutor::CallbackHandle activeHandle) override;
 
     BSONObj runCmdOnPrimaryAndAwaitResponse(OperationContext* opCtx,
-                                            const std::string& dbName,
+                                            const DatabaseName& dbName,
                                             const BSONObj& cmdObj,
                                             OnRemoteCmdScheduledFn onRemoteCmdScheduled,
                                             OnRemoteCmdCompleteFn onRemoteCmdComplete) override;
@@ -1725,6 +1725,17 @@ private:
      * on the shard is set to w:1 and CWWC is not set.
      */
     void _validateDefaultWriteConcernOnShardStartup(WithLock lk) const;
+
+    /**
+     * Checks whether the node can currently accept replicated writes. This method is unsafe and
+     * is for internal use only as its result is only accurate while holding the RSTL.
+     */
+    bool _canAcceptReplicatedWrites_UNSAFE(OperationContext* opCtx);
+
+    /**
+     * Checks whether the collection indicated by nsOrUUID is replicated.
+     */
+    bool _isCollectionReplicated(OperationContext* opCtx, const NamespaceStringOrUUID& nsOrUUID);
 
     //
     // All member variables are labeled with one of the following codes indicating the

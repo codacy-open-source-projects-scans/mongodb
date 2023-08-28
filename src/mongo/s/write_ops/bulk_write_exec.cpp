@@ -119,14 +119,17 @@ void executeChildBatches(OperationContext* opCtx,
 
             logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &builder);
 
-            auto wc = opCtx->getWriteConcern().toBSON();
-            if (isVerboseWc(wc)) {
-                builder.append(WriteConcernOptions::kWriteConcernField,
-                               opCtx->getWriteConcern().toBSON());
-            } else {
-                // Mongos needs to send to the shard with w > 0 so it will be able to see the
-                // writeErrors
-                builder.append(WriteConcernOptions::kWriteConcernField, upgradeWriteConcern(wc));
+            // Per-operation write concern is not supported in transactions.
+            if (!TransactionRouter::get(opCtx)) {
+                auto wc = opCtx->getWriteConcern().toBSON();
+                if (isVerboseWc(wc)) {
+                    builder.append(WriteConcernOptions::kWriteConcernField, wc);
+                } else {
+                    // Mongos needs to send to the shard with w > 0 so it will be able to see the
+                    // writeErrors
+                    builder.append(WriteConcernOptions::kWriteConcernField,
+                                   upgradeWriteConcern(wc));
+                }
             }
 
             auto obj = builder.obj();
@@ -232,9 +235,9 @@ BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType
                 if (response.isUpsertDetailsSet()) {
                     std::vector<BatchedUpsertDetail*> upsertDetails = response.getUpsertDetails();
                     invariant(upsertDetails.size() == 1);
-                    mongo::write_ops::Upserted upserted(
-                        0, IDLAnyTypeOwned(upsertDetails[0]->getUpsertedID().firstElement()));
-                    reply.setUpserted(upserted);
+                    // BulkWrite needs only _id, not index.
+                    reply.setUpserted(
+                        IDLAnyTypeOwned(upsertDetails[0]->getUpsertedID().firstElement()));
                 }
 
                 reply.setNModified(response.getNModified());
@@ -312,8 +315,8 @@ std::pair<FLEBatchResult, BulkWriteReplyInfo> attemptExecuteFLE(
                     ops.size() == 1);
 
             write_ops::UpdateCommandRequest updateCommand =
-                bulk_write_common::makeUpdateCommandRequestForFLE(
-                    opCtx, firstOp.getUpdate(), clientRequest, clientRequest.getNsInfo()[0]);
+                bulk_write_common::makeUpdateCommandRequestFromUpdateOp(
+                    firstOp.getUpdate(), clientRequest, /*currentOpIdx=*/0);
 
             BatchedCommandRequest fleRequest(updateCommand);
             fleResult = processFLEBatch(
@@ -762,6 +765,33 @@ int BulkWriteOp::getBaseBatchCommandSizeEstimate() const {
 
     return builder.obj().objsize();
 }
+
+void addIdsForInserts(BulkWriteCommandRequest& origCmdRequest) {
+    std::vector<
+        stdx::variant<mongo::BulkWriteInsertOp, mongo::BulkWriteUpdateOp, mongo::BulkWriteDeleteOp>>
+        newOps;
+    newOps.reserve(origCmdRequest.getOps().size());
+
+    for (const auto& op : origCmdRequest.getOps()) {
+        auto crudOp = BulkWriteCRUDOp(op);
+        if (crudOp.getType() == BulkWriteCRUDOp::kInsert &&
+            crudOp.getInsert()->getDocument()["_id"].eoo()) {
+            auto insert = crudOp.getInsert();
+            auto doc = insert->getDocument();
+            BSONObjBuilder idInsertB;
+            idInsertB.append("_id", OID::gen());
+            idInsertB.appendElements(doc);
+            auto newDoc = idInsertB.obj();
+            auto newOp = BulkWriteInsertOp(insert->getInsert(), std::move(newDoc));
+            newOps.push_back(std::move(newOp));
+        } else {
+            newOps.push_back(std::move(op));
+        }
+    }
+
+    origCmdRequest.setOps(newOps);
+}
+
 
 }  // namespace bulk_write_exec
 

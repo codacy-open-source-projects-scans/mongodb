@@ -272,6 +272,7 @@ let testCases = {
     _mergeAuthzCollections: {skip: "always targets the config server"},
     _mongotConnPoolStats: {skip: "not on a user database", conditional: true},
     _dropConnectionsToMongot: {skip: "not on a user database", conditional: true},
+    abortMoveCollection: {skip: "always targets the config server"},
     abortReshardCollection: {skip: "always targets the config server"},
     abortTransaction: {skip: "unversioned and uses special targetting rules"},
     addShard: {skip: "not on a user database"},
@@ -599,6 +600,7 @@ let testCases = {
     },
     listSearchIndexes: {skip: "executes locally on mongos", conditional: true},
     listShards: {skip: "does not forward command to primary shard"},
+    lockInfo: {skip: "not on a user database"},
     logApplicationMessage: {skip: "not on a user database", conditional: true},
     logMessage: {skip: "not on a user database"},
     logRotate: {skip: "executes locally on mongos (not sent to any remote node)"},
@@ -640,6 +642,7 @@ let testCases = {
     mergeAllChunksOnShard: {skip: "does not forward command to primary shard"},
     mergeChunks: {skip: "does not forward command to primary shard"},
     moveChunk: {skip: "does not forward command to primary shard"},
+    moveCollection: {skip: "does not forward command to primary shard"},
     movePrimary: {skip: "reads primary shard from sharding catalog with readConcern: local"},
     moveRange: {skip: "does not forward command to primary shard"},
     multicast: {skip: "does not forward command to primary shard"},
@@ -738,8 +741,6 @@ let testCases = {
         }
     },
     setFeatureCompatibilityVersion: {skip: "not on a user database"},
-    setFreeMonitoring:
-        {skip: "explicitly fails for mongos, primary mongod only", conditional: true},
     setProfilingFilterGlobally: {skip: "executes locally on mongos (not sent to any remote node)"},
     setParameter: {skip: "executes locally on mongos (not sent to any remote node)"},
     setClusterParameter: {skip: "always targets the config server"},
@@ -761,6 +762,7 @@ let testCases = {
     testVersions1And2: {skip: "executes locally on mongos (not sent to any remote node)"},
     transitionFromDedicatedConfigServer: {skip: "not on a user database"},
     transitionToDedicatedConfigServer: {skip: "not on a user database"},
+    unshardCollection: {skip: "does not forward command to primary shard"},
     update: {
         run: {
             sendsDbVersion: true,

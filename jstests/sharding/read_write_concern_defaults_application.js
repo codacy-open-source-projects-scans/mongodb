@@ -100,6 +100,7 @@ let testCases = {
     _configsvrCommitIndex: {skip: "internal command"},
     _configsvrCommitMergeAllChunksOnShard: {skip: "internal command"},
     _configsvrCommitMovePrimary: {skip: "internal command"},  // Can be removed once 6.0 is last LTS
+    _configsvrCommitRefineCollectionShardKey: {skip: "internal command"},
     _configsvrCommitReshardCollection: {skip: "internal command"},
     _configsvrConfigureCollectionBalancing: {skip: "internal command"},
     _configsvrCreateDatabase: {skip: "internal command"},
@@ -205,6 +206,7 @@ let testCases = {
     streams_getMetrics: {skip: "internal command"},
     _transferMods: {skip: "internal command"},
     _vectorClockPersist: {skip: "internal command"},
+    abortMoveCollection: {skip: "does not accept read or write concern"},
     abortReshardCollection: {skip: "does not accept read or write concern"},
     abortTransaction: {
         setUp: function(conn) {
@@ -530,7 +532,6 @@ let testCases = {
     getDatabaseVersion: {skip: "does not accept read or write concern"},
     getDefaultRWConcern: {skip: "does not accept read or write concern"},
     getDiagnosticData: {skip: "does not accept read or write concern"},
-    getFreeMonitoringStatus: {skip: "does not accept read or write concern"},
     getLog: {skip: "does not accept read or write concern"},
     getMore: {skip: "does not accept read or write concern"},
     getParameter: {skip: "does not accept read or write concern"},
@@ -622,6 +623,7 @@ let testCases = {
         skip:
             "does not accept read or write concern (accepts writeConcern, but only explicitly and when _secondaryThrottle is true)"
     },
+    moveCollection: {skip: "does not accept read or write concern"},
     movePrimary: {skip: "does not accept read or write concern"},
     moveRange: {
         skip:
@@ -744,7 +746,6 @@ let testCases = {
     setCommittedSnapshot: {skip: "internal command"},
     setDefaultRWConcern: {skip: "special case (must run after all other commands)"},
     setFeatureCompatibilityVersion: {skip: "does not accept read or write concern"},
-    setFreeMonitoring: {skip: "does not accept read or write concern"},
     setProfilingFilterGlobally: {skip: "does not accept read or write concern"},
     setIndexCommitQuorum: {skip: "does not accept read or write concern"},
     setParameter: {skip: "does not accept read or write concern"},
@@ -772,9 +773,11 @@ let testCases = {
     testReshardCloneCollection: {skip: "internal command"},
     testVersions1And2: {skip: "does not accept read or write concern"},
     testVersion2: {skip: "does not accept read or write concern"},
+    timeseriesCatalogBucketParamsChanged: {skip: "internal command"},
     top: {skip: "does not accept read or write concern"},
     transitionFromDedicatedConfigServer: {skip: "does not accept read or write concern"},
     transitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
+    unshardCollection: {skip: "does not accept read or write concern"},
     update: {
         setUp: function(conn) {
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));
@@ -934,6 +937,11 @@ function createProfileFilterForTestCase(test, targetId, explicitRWC) {
 function runScenario(
     desc, conn, regularCheckConn, configSvrCheckConn, {explicitRWC, explicitProvenance = false}) {
     let runCommandTest = function(cmdName, test) {
+        // These commands were removed but break this test in multiversion
+        if (cmdName === "getFreeMonitoringStatus" || cmdName === "setFreeMonitoring") {
+            return;
+        }
+
         assert(test !== undefined,
                "coverage failure: must define a RWC defaults application test for " + cmdName);
 

@@ -89,6 +89,13 @@ public:
         return _cm && _cm->isSharded();
     }
 
+    /**
+     * Returns whether this metadata object represents an unsplittable collection.
+     */
+    bool isUnsplittable() const {
+        return _cm && _cm->isUnsplittable();
+    }
+
     bool hasRoutingTable() const {
         return _cm && _cm->hasRoutingTable();
     }
@@ -291,6 +298,11 @@ public:
     const boost::optional<TypeCollectionTimeseriesFields>& getTimeseriesFields() const {
         invariant(hasRoutingTable());
         return _cm->getTimeseriesFields();
+    }
+
+    bool isUniqueShardKey() const {
+        invariant(hasRoutingTable());
+        return _cm->isUnique();
     }
 
 private:

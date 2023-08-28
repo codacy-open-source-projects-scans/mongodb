@@ -1153,7 +1153,8 @@ TEST(OpMsgRequestBuilder, CreateDoesNotCopy) {
 TEST(OpMsgRequest, FromDbAndBodyDoesNotCopy) {
     auto body = fromjson("{ping: 1}");
     const void* const bodyPtr = body.objdata();
-    auto msg = OpMsgRequest::fromDBAndBody("db", std::move(body));
+    auto msg = OpMsgRequest::fromDBAndBody(
+        DatabaseName::createDatabaseName_forTest(boost::none, "db"), std::move(body));
 
     ASSERT_BSONOBJ_EQ(msg.body, fromjson("{ping: 1, $db: 'db'}"));
     ASSERT_EQ(static_cast<const void*>(msg.body.objdata()), bodyPtr);
@@ -1197,7 +1198,8 @@ TEST(OpMsgRequest, SetDollarTenantFailWithDiffTenant) {
                                                                    true);
     const TenantId tenantId(OID::gen());
     auto const body = BSON("ping" << 1 << "$tenant" << tenantId);
-    auto request = OpMsgRequest::fromDBAndBody("testDb", body);
+    auto request = OpMsgRequest::fromDBAndBody(
+        DatabaseName::createDatabaseName_forTest(boost::none, "testDb"), body);
     ASSERT_THROWS_CODE(request.setDollarTenant(TenantId(OID::gen())), DBException, 8423373);
 }
 
@@ -1272,22 +1274,35 @@ TEST_F(OpMsgWithAuth, GetDbNameWithVTS) {
     const DatabaseName expectedTenantDbName =
         DatabaseName::createDatabaseName_forTest(kTenantId, "myDb");
     // Test the request which has tenant prefix and $tenant.
+    using SC = SerializationContext;
     OpMsgRequest request = OpMsgRequest(createMsg(true, true));
-    DatabaseName dbName = request.getDbName();
+
+    ASSERT_EQ(request.getSerializationContext(),
+              SerializationContext(
+                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::IncludePrefix, true));
     ASSERT_EQ(request.getDbName(), expectedTenantDbName);
 
     // Test the request which has tenant prefix alone.
     request = OpMsgRequest(createMsg(true, false));
+    ASSERT_EQ(request.getSerializationContext(),
+              SerializationContext(
+                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::Default, false));
     ASSERT_EQ(request.getDbName(), expectedTenantDbName);
 
     // Test the request which has $tenant alone.
     request = OpMsgRequest(createMsg(false, true));
+    ASSERT_EQ(request.getSerializationContext(),
+              SerializationContext(
+                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::Default, true));
     ASSERT_EQ(request.getDbName(), expectedTenantDbName);
 
-    // Test the request which has neither tenant prefix nore $tenant.
+    // Test the request which has neither tenant prefix nor $tenant.
     const DatabaseName expectedDbName =
         DatabaseName::createDatabaseName_forTest(boost::none, "myDb");
     request = OpMsgRequest(createMsg(false, false));
+    ASSERT_EQ(request.getSerializationContext(),
+              SerializationContext(
+                  SC::Source::Command, SC::CallerType::Request, SC::Prefix::Default, false));
     ASSERT_EQ(request.getDbName(), expectedDbName);
 }
 

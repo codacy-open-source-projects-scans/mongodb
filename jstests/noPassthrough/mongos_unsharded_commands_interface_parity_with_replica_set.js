@@ -231,6 +231,7 @@ const tests = [
                 shortDescription:
                     "Runs createIndexes expecting 'createdCollectionAutomatically' : true.",
                 command: {createIndexes: "x", indexes: [{key: {a: 1}, name: "a_1"}]},
+                testCaseDoesNotSupportWriteConcern: true,
             },
 
             {
@@ -291,6 +292,16 @@ const tests = [
             {
                 shortDescription: "Runs cpuload.",
                 command: {cpuload: 1, cpuFactor: 1},
+            },
+        ]
+    },
+    {
+        name: "lockInfo",
+        database: "admin",
+        testCases: [
+            {
+                shortDescription: "Runs lockInfo.",
+                command: {lockInfo: 1},
             },
         ]
     },

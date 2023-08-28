@@ -108,6 +108,10 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
         case DDLCoordinatorTypeEnum::kCreateCollection:
             return std::make_shared<CreateCollectionCoordinator>(service, std::move(initialState));
             break;
+        case DDLCoordinatorTypeEnum::kRefineCollectionShardKeyPre71Compatible:
+            return std::make_shared<RefineCollectionShardKeyCoordinatorPre71Compatible>(
+                service, std::move(initialState));
+            break;
         case DDLCoordinatorTypeEnum::kCreateCollectionPre71Compatible:
             return std::make_shared<CreateCollectionCoordinatorLegacy>(service,
                                                                        std::move(initialState));
@@ -170,13 +174,14 @@ ShardingDDLCoordinatorService::constructInstance(BSONObj initialState) {
     coord->getConstructionCompletionFuture()
         .thenRunOn(getInstanceCleanupExecutor())
         .getAsync([this](auto status) {
+            AllowOpCtxWhenServiceRebuildingBlock allowOpCtxBlock(Client::getCurrent());
+            auto opCtx = cc().makeOperationContext();
             stdx::lock_guard lg(_mutex);
             if (_state != State::kRecovering) {
                 return;
             }
             invariant(_numCoordinatorsToWait > 0);
             if (--_numCoordinatorsToWait == 0) {
-                auto opCtx = cc().makeOperationContext();
                 _transitionToRecovered(lg, opCtx.get());
             }
         });

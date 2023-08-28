@@ -11,6 +11,8 @@
  *     # Refusing to run a test that issues an aggregation command with explain because it may
  *     # return incomplete results if interrupted by a stepdown.
  *     does_not_support_stepdowns,
+ *     # The `simulate_atlas_proxy` override cannot deep copy very large or small dates.
+ *     simulate_atlas_proxy_incompatible,
  * ]
  */
 
@@ -341,7 +343,8 @@ function checkRandomTestResult(pipeline, shouldCheckExplain = true) {
 function generateRandomTimestamp() {
     const startTime = ISODate("2012-01-01T00:01:00.000Z");
     const maxTime = ISODate("2015-12-31T23:59:59.000Z");
-    return new Date(Math.floor(Random.rand() * (maxTime - startTime) + startTime));
+    return new Date(Math.floor(Random.rand() * (maxTime.getTime() - startTime.getTime()) +
+                               startTime.getTime()));
 }
 
 (function testRandomizedInput() {

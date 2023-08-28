@@ -223,8 +223,6 @@ last-continuous:
     ticket: SERVER-65947
   - test_file: jstests/aggregation/match_no_swap_rand.js
     ticket: SERVER-66072
-  - test_file: jstests/sharding/data_size_aware_balancing_sessions_collection.js
-    ticket: SERVER-66078
   - test_file: jstests/replsets/initial_sync_with_partial_transaction.js
     ticket: SERVER-66089
   - test_file: jstests/core/query/or/or_to_in.js
@@ -437,8 +435,24 @@ last-continuous:
     ticket: SERVER-78855
   - test_file: jstests/sharding/reset_placement_history_snapshot_read.js
     ticket: SERVER-79357
+  - test_file: jstests/sharding/query/sharded_graph_lookup_execution.js
+    ticket: SERVER-77427
+  - test_file: jstests/sharding/query/sharded_lookup_execution.js
+    ticket: SERVER-77427
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
     ticket: SERVER-77506
+  - test_file: jstests/sharding/fsync_deadlock.js
+    ticket: SERVER-78793
+  - test_file: jstests/sharding/fsync_lock_ddl_lock.js
+    ticket: SERVER-78157
+  - test_file: jstests/sharding/fsync_lock_fails_with_in_progress_ddl_op.js
+    ticket: SERVER-78157
+  - test_file: jstests/sharding/fsync_lock_unlock.js
+    ticket: SERVER-78149
+  - test_file: jstests/core/query/elemmatch/elemmatch_ne.js
+    ticket: SERVER-78260
+  - test_file: jstests/replsets/tenant_migration_recreate_timeseries_collection.js
+    ticket: SERVER-80301
   suites: null
 
 last-lts:
@@ -739,8 +753,6 @@ last-lts:
     ticket: SERVER-65947
   - test_file: jstests/aggregation/match_no_swap_rand.js
     ticket: SERVER-66072
-  - test_file: jstests/sharding/data_size_aware_balancing_sessions_collection.js
-    ticket: SERVER-66078
   - test_file: jstests/replsets/initial_sync_with_partial_transaction.js
     ticket: SERVER-66089
   - test_file: jstests/core/query/or/or_to_in.js
@@ -969,6 +981,24 @@ last-lts:
     ticket: SERVER-61475
   - test_file: jstests/change_streams/oplog_rewrite/change_stream_nor_rewrite.js
     ticket: SERVER-78650
+  - test_file: jstests/replsets/dbcheck_dropped_collection.js
+    ticket: SERVER-79490
+  - test_file: jstests/sharding/query/sharded_graph_lookup_execution.js
+    ticket: SERVER-77427
+  - test_file: jstests/sharding/query/sharded_lookup_execution.js
+    ticket: SERVER-77427
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
     ticket: SERVER-77506
+  - test_file: jstests/sharding/fsync_deadlock.js
+    ticket: SERVER-78793
+  - test_file: jstests/sharding/fsync_lock_ddl_lock.js
+    ticket: SERVER-78157
+  - test_file: jstests/sharding/fsync_lock_fails_with_in_progress_ddl_op.js
+    ticket: SERVER-78157
+  - test_file: jstests/sharding/fsync_lock_unlock.js
+    ticket: SERVER-78149
+  - test_file: jstests/core/query/elemmatch/elemmatch_ne.js
+    ticket: SERVER-78260
+  - test_file: jstests/replsets/tenant_migration_recreate_timeseries_collection.js
+    ticket: SERVER-80301
   suites: null

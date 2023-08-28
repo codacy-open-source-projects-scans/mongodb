@@ -138,8 +138,10 @@ roles:
               actions:
                 - analyzeShardKey
                 - enableSharding
+                - moveCollection
                 - refineCollectionShardKey
                 - reshardCollection
+                - unshardCollection
 
     readAnyDatabase:
         adminOnly: true
@@ -244,7 +246,6 @@ roles:
         privileges:
             - matchType: cluster
               actions: &clusterMonitorRoleClusterActions
-                  - checkFreeMonitoringStatus
                   - connPoolStats
                   - getCmdLineOpts
                   - getDefaultRWConcern # clusterManager gets this also
@@ -356,11 +357,11 @@ roles:
                   - runTenantMigration
                   - setDefaultRWConcern
                   - setFeatureCompatibilityVersion
-                  - setFreeMonitoring
                   - setClusterParameter
                   - getClusterParameter
                   - setChangeStreamState
                   - getChangeStreamState
+                  - querySettings
                   - queryStatsRead
                   - queryStatsReadTransformed
                   - checkMetadataConsistency
@@ -374,10 +375,12 @@ roles:
                   - clearJumboFlag
                   - splitChunk
                   - moveChunk
+                  - moveCollection
                   - enableSharding
                   - splitVector
                   - refineCollectionShardKey
                   - reshardCollection
+                  - unshardCollection
 
             - matchType: any_system_buckets
               actions: *clusterManagerRoleDatabaseActions

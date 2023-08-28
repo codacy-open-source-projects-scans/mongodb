@@ -1,8 +1,9 @@
 /**
  * Test to verify that the 'comment' field set while running a command gets populated in $currentOp
  * and profiler.
- * The test runs commands that are not allowed with security token: setProfilingLevel.
+ *
  * @tags: [
+ *   # The test runs commands that are not allowed with security token: setProfilingLevel.
  *   not_allowed_with_security_token,
  *   assumes_against_mongod_not_mongos,
  *   assumes_read_concern_unchanged,
@@ -13,7 +14,7 @@
  *   uses_parallel_shell,
  *   no_selinux,
  *   # This test uses legacy read mode which does not use runCommand (required by the
- *   # inject_tenant_prefix.js override).
+ *   # simulate_atlas_proxy.js override).
  *   tenant_migration_incompatible,
  * ]
  */

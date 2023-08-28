@@ -303,7 +303,8 @@ public:
 private:
     // Update related command execution metrics.
     static UpdateMetrics _updateMetrics;
-} cmdFindAndModify;
+};
+MONGO_REGISTER_COMMAND(CmdFindAndModify);
 
 UpdateMetrics CmdFindAndModify::_updateMetrics{"findAndModify"};
 
@@ -635,6 +636,10 @@ void CmdFindAndModify::Invocation::appendMirrorableRequest(BSONObjBuilder* bob) 
     if (req.getCollation()) {
         bob->append(write_ops::FindAndModifyCommandRequest::kCollationFieldName,
                     *req.getCollation());
+    }
+    if (req.getEncryptionInformation()) {
+        bob->append(write_ops::FindAndModifyCommandRequest::kEncryptionInformationFieldName,
+                    req.getEncryptionInformation()->toBSON());
     }
 
     const auto& rawCmd = unparsedRequest().body;

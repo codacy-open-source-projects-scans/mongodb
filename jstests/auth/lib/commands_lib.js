@@ -99,7 +99,6 @@ TestData.skipCheckShardFilteringMetadata = true;
 
 import {
     isShardMergeEnabled,
-    makeMigrationCertificatesForTest
 } from "jstests/replsets/libs/tenant_migration_util.js";
 import {storageEngineIsWiredTigerOrInMemory} from "jstests/libs/storage_engine_utils.js";
 
@@ -115,7 +114,6 @@ export const adminDbName = "admin";
 export const authErrCode = 13;
 export const commandNotSupportedCode = 115;
 let shard0name = "shard0000";
-const migrationCertificates = makeMigrationCertificatesForTest();
 
 function buildTenantMigrationCmd(cmd, state) {
     const {isShardMergeEnabled} = state;
@@ -217,6 +215,23 @@ export const authCommandsLib = {
     /************* TEST CASES ****************/
 
     tests: [
+        {
+          testname: "abortMoveCollection",
+          command: {abortMoveCollection: "test.x"},
+          skipUnlessSharded: true,
+          skipTest: (conn) => {
+            return !TestData.setParameters.featureFlagMoveCollection;
+          },
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: Object.extend({enableSharding: 1}, roles_clusterManager),
+                privileges:
+                [{resource: {db: "test", collection: "x"}, actions: ["moveCollection"]}],
+                  expectFail: true
+              },
+          ]
+        },
         {
           testname: "abortReshardCollection",
           command: {abortReshardCollection: "test.x"},
@@ -2532,7 +2547,7 @@ export const authCommandsLib = {
               {runOnDb: firstDbName, roles: {}},
               {runOnDb: secondDbName, roles: {}}
           ]
-        },
+       },
         {
           testname: "cloneCollectionAsCapped",
           command: {cloneCollectionAsCapped: "x", toCollection: "y", size: 1000},
@@ -4225,8 +4240,6 @@ export const authCommandsLib = {
                   migrationId: UUID(),
                   recipientConnectionString: "recipient-rs/localhost:1234",
                   readPreference: {mode: "primary"},
-                  donorCertificateForRecipient: migrationCertificates.donorCertificateForRecipient,
-                  recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
             }, state);
           },
           skipSharded: true,
@@ -4254,7 +4267,6 @@ export const authCommandsLib = {
                   donorConnectionString: "donor-rs/localhost:1234",
                   readPreference: {mode: "primary"},
                   startMigrationDonorTimestamp: Timestamp(1, 1),
-                  recipientCertificateForDonor: migrationCertificates.recipientCertificateForDonor,
               }, state);
           },
           skipSharded: true,
@@ -4822,9 +4834,7 @@ export const authCommandsLib = {
           testname: "getClusterParameter",
           command: {getClusterParameter: "testIntClusterParameter"},
           skipTest: (conn) => {
-              const hello = assert.commandWorked(conn.getDB("admin").runCommand({hello: 1}));
-              const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
-              return isStandalone;
+            return isStandalone(conn);
           },
           testcases: [
             {
@@ -4897,16 +4907,6 @@ export const authCommandsLib = {
               {runOnDb: firstDbName, roles: {}},
               {runOnDb: secondDbName, roles: {}}
           ]
-        },
-        {
-          testname: "getFreeMonitoringStatus",
-          skipSharded: true,
-          command: {getFreeMonitoringStatus: 1},
-          testcases: [{
-              runOnDb: adminDbName,
-              roles: {clusterMonitor: 1, clusterAdmin: 1, root: 1, __system: 1},
-              privileges: [{resource: {cluster: true}, actions: ["checkFreeMonitoringStatus"]}]
-          }]
         },
         {
           testname: "getLog",
@@ -5771,6 +5771,25 @@ export const authCommandsLib = {
           ]
         },
         {
+          testname: "moveCollection",
+          command: {moveCollection: "test.x", toShard: "move_collection-rs"},
+          skipUnlessSharded: true,
+          skipTest: (conn) => {
+            return !TestData.setParameters.featureFlagMoveCollection;
+          },
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: Object.extend({enableSharding: 1}, roles_clusterManager),
+                privileges:
+                    [{resource: {db: "test", collection: "x"}, actions: ["moveCollection"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
           testname: "s_moveRange",
           command: {moveRange: "test.x", min: {x:1}, toShard:"a"},
           skipUnlessSharded: true,
@@ -6094,6 +6113,27 @@ export const authCommandsLib = {
               },
               {runOnDb: firstDbName, roles: {}},
               {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "_configsvrCommitRefineCollectionShardKey",
+          command: {
+            _configsvrCommitRefineCollectionShardKey: "test.x",
+            key: {aKey: 1},
+            newEpoch: new ObjectId(),
+            newTimestamp: Timestamp(),
+            oldTimestamp: Timestamp()
+          },
+          skipSharded: true,
+          testcases: [
+            {
+              runOnDb: adminDbName,
+              roles: {__system: 1},
+              privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+              expectFail: true
+            },
+            {runOnDb: firstDbName, roles: {}},
+            {runOnDb: secondDbName, roles: {}}
           ]
         },
         {
@@ -6466,9 +6506,7 @@ export const authCommandsLib = {
           testname: "setClusterParameter",
           command: {setClusterParameter: {testIntClusterParameter: {intData: 17}}},
           skipTest: (conn) => {
-              const hello = assert.commandWorked(conn.getDB("admin").runCommand({hello: 1}));
-              const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
-              return isStandalone;
+            return isStandalone(conn);
           },
           testcases: [
               {
@@ -6563,9 +6601,7 @@ export const authCommandsLib = {
           testname: "setUserWriteBlockMode",
           command: {setUserWriteBlockMode: 1, global: false},
           skipTest: (conn) => {
-              const hello = assert.commandWorked(conn.getDB("admin").runCommand({hello: 1}));
-              const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
-              return isStandalone;
+              return isStandalone(conn);
           },
           testcases: [
               {
@@ -6680,7 +6716,7 @@ export const authCommandsLib = {
         {
           // Test that only clusterManager has permission to run $queryStats with transformation
           testname: "testQueryStatsReadTransformedPrivilege",
-          command: {aggregate: 1, pipeline: [{$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256"}}}], cursor: {}},
+          command: {aggregate: 1, pipeline: [{$queryStats: {transformIdentifiers: {algorithm: "hmac-sha-256", hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=")}}}], cursor: {}},
           skipSharded: false,
           skipTest: (conn) => {
               return !TestData.setParameters.featureFlagQueryStats && !TestData.setParameters.featureFlagQueryStatsFindCommand;
@@ -6696,6 +6732,25 @@ export const authCommandsLib = {
                 runOnDb: adminDbName,
                 roles: roles_monitoring,
                 privileges: [{resource: {cluster: true}, actions: ["top"]}]
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
+          testname: "unshardCollection",
+          command: {unshardCollection: "test.x", toShard: "unshard_collection-rs"},
+          skipUnlessSharded: true,
+          skipTest: (conn) => {
+              return !TestData.setParameters.featureFlagMoveCollection;
+          },
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: Object.extend({enableSharding: 1}, roles_clusterManager),
+                privileges:
+                    [{resource: {db: "test", collection: "x"}, actions: ["unshardCollection"]}],
+                expectFail: true
               },
               {runOnDb: firstDbName, roles: {}},
               {runOnDb: secondDbName, roles: {}}
@@ -7266,6 +7321,82 @@ export const authCommandsLib = {
               },
           ]
       },
+      {
+        testname: "query_settings_agg_command",
+        command: {
+          aggregate: 1,
+          pipeline: [{$querySettings: {}}],
+          cursor: {}
+        },
+        // TODO: SERVER-71537 Remove Feature Flag for PM-412.
+        skipTest: (conn) => {
+          return isStandalone(conn) || !TestData.setParameters.featureFlagQuerySettings;
+        },
+        testcases: [
+          // Tests that a cluster admin can successfully run the `$querySettings` stage as part of
+          // the aggregation pipeline.
+          {
+            runOnDb: adminDbName,
+            roles: roles_clusterManager,
+            privileges: [{resource: {cluster: true}, actions: ["querySettings"]}]
+          },
+      ]
+      },
+      {
+        testname: "set_query_settings_commands",
+        command: {
+          setQuerySettings: {
+            find: "foo",
+            $db: firstDbName,
+          },
+          settings: {
+            "indexHints": {
+              "allowedIndexes": [{ "sku": 1 }]
+            }
+          }
+        },
+        // TODO: SERVER-71537 Remove Feature Flag for PM-412.
+        skipTest: (conn) => {
+          return isStandalone(conn) || !TestData.setParameters.featureFlagQuerySettings;
+        },
+        teardown: function(db) {
+          db.adminCommand({removeQuerySettings: {
+            find: "foo",
+            $db: firstDbName,
+          }});
+        },
+        testcases: [
+          // Tests that an admin cluster can successfully run the `setQuerySettings` command.
+          {
+            runOnDb: adminDbName,
+            roles: roles_clusterManager,
+            privileges: [{resource: {cluster: true}, actions: ["querySettings"]}]
+          },
+      ]
+      },
+      {
+        testname: "remove_query_settings_commands",
+        command: {
+          removeQuerySettings: {
+            find: "foo",
+            $db: firstDbName,
+          }
+        },
+        // TODO: SERVER-71537 Remove Feature Flag for PM-412.
+        skipTest: (conn) => {
+          return isStandalone(conn) || !TestData.setParameters.featureFlagQuerySettings;
+        },
+        testcases: [
+          // Tests that an admin cluster can successfully run the `removeQuerySettings` command.
+          {
+            runOnDb: adminDbName,
+            roles: roles_clusterManager,
+            privileges: [{resource: {cluster: true}, actions: ["querySettings"]}],
+            expectAuthzFailure: false, // We expect the request to be authorized.
+            expectFail: true // We expect to receive 7746701 because there are no matching query settings .
+          },
+      ]
+      },
     ],
 
     /************* SHARED TEST LOGIC ****************/
@@ -7374,3 +7505,12 @@ export const authCommandsLib = {
         assert.eq(0, failures.length);
     }
 };
+
+/**
+ * Returns true iff the test is ran in a standalone environment.
+ */
+function isStandalone(conn) {
+    const hello = assert.commandWorked(conn.getDB("admin").runCommand({hello: 1}));
+    const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
+    return isStandalone;
+}

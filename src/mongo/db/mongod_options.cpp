@@ -166,7 +166,8 @@ StatusWith<repl::ReplSettings> populateReplSettings(const moe::Environment& para
         // "replSetName" is previously removed if "replSet" and "replSetName" are both found to be
         // set by the user. Therefore, we only need to check for it if "replSet" in not found.
         replSettings.setReplSetString(params["replication.replSetName"].as<std::string>().c_str());
-    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+               serverGlobalParams.maintenanceMode != ServerGlobalParams::StandaloneMode) {
         replSettings.setShouldAutoInitiate();
         // When autobootstrapping, we generate a UUID for the replica set name.
         replSettings.setReplSetString(UUID::gen().toString());
@@ -253,15 +254,21 @@ Status validateMongodOptions(const moe::Environment& params) {
         setShardRole = setShardRole || clusterRole == "shardsvr";
     }
 
-    bool setRouterRole = params.count("router");
-    if (params.count("sharding.routerEnabled")) {
-        setRouterRole = setRouterRole || params["sharding.routerEnabled"].as<bool>();
-    }
+    bool setRouterPort = params.count("routerPort") || params.count("net.routerPort");
 
     // TODO (SERVER-79008): Make `--configdb` mandatory when the embedded router is enabled.
-    if (setRouterRole && !setConfigRole && !setShardRole) {
+    if (setRouterPort && !setConfigRole && !setShardRole) {
         return Status(ErrorCodes::BadValue,
                       "The embedded router requires the node to act as a shard or config server");
+    }
+
+    if (params.count("maintenanceMode")) {
+        auto maintenanceMode = params["maintenanceMode"].as<std::string>();
+        if (maintenanceMode == "standalone" &&
+            (params.count("replSet") || params.count("replication.replSetName"))) {
+            return Status(ErrorCodes::BadValue,
+                          "Cannot specify both standalone maintenance mode and replica set name");
+        }
     }
 
     if (params.count("storage.queryableBackupMode")) {
@@ -342,15 +349,14 @@ Status canonicalizeMongodOptions(moe::Environment* params) {
         }
     }
 
-    // If the "--router" option is passed from the command line, override "sharding.routerEnabled"
+    // If the "--routerPort" option is passed from the command line, override "net.routerPort"
     // (config file option) as it will be used later.
-    if (params->count("router")) {
-        Status ret =
-            params->set("sharding.routerEnabled", moe::Value((*params)["router"].as<bool>()));
+    if (params->count("routerPort")) {
+        Status ret = params->set("net.routerPort", moe::Value((*params)["routerPort"].as<int>()));
         if (!ret.isOK()) {
             return ret;
         }
-        ret = params->remove("router");
+        ret = params->remove("routerPort");
         if (!ret.isOK()) {
             return ret;
         }
@@ -567,6 +573,17 @@ Status storeMongodOptions(const moe::Environment& params) {
         storageGlobalParams.magicRestore = 1;
     }
 
+    if (params.count("maintenanceMode") &&
+        gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+        // Setting maintenanceMode will disable sharding by setting 'clusterRole' to
+        // 'ClusterRole::None'. If maintenanceMode is set to 'standalone', replication will be
+        // disabled as well.
+        std::string value = params["maintenanceMode"].as<std::string>();
+        serverGlobalParams.maintenanceMode = (value == "replicaSet")
+            ? ServerGlobalParams::ReplicaSetMode
+            : ServerGlobalParams::StandaloneMode;
+    }
+
     const auto replSettingsWithStatus = populateReplSettings(params);
     if (!replSettingsWithStatus.isOK())
         return replSettingsWithStatus.getStatus();
@@ -666,28 +683,22 @@ Status storeMongodOptions(const moe::Environment& params) {
                                       clusterRoleParam));
         }
 
-        if (feature_flags::gEmbeddedRouter.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
-            params.count("sharding.routerEnabled") && params["sharding.routerEnabled"].as<bool>()) {
-            serverGlobalParams.clusterRole += ClusterRole::RouterServer;
+        if (params.count("net.routerPort")) {
+            if (feature_flags::gEmbeddedRouter.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+                serverGlobalParams.routerPort = params["net.routerPort"].as<int>();
+                serverGlobalParams.clusterRole += ClusterRole::RouterServer;
+            }
         }
-    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+    } else if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup() &&
+               serverGlobalParams.maintenanceMode == ServerGlobalParams::MaintenanceMode::None) {
         serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     }
 
-    if (params.count("maintenanceMode") &&
-        gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
-        std::string value = params["maintenanceMode"].as<std::string>();
-        serverGlobalParams.maintenanceMode = (value == "replicaSet")
-            ? ServerGlobalParams::ReplicaSetMode
-            : ServerGlobalParams::StandaloneMode;
-        serverGlobalParams.clusterRole = ClusterRole::None;
-    }
-
     if (!params.count("net.port")) {
-        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
-            serverGlobalParams.port = ServerGlobalParams::ShardServerPort;
-        } else if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ConfigServer)) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             serverGlobalParams.port = ServerGlobalParams::ConfigServerPort;
+        } else if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+            serverGlobalParams.port = ServerGlobalParams::ShardServerPort;
         }
     }
 

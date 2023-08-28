@@ -362,10 +362,9 @@ bool killExhaust(const Message& in, ServiceEntryPoint* sep, Client* client) {
         const auto& [cmd, firstElement] = body.firstElement();
         if (cmd != "getMore"_sd)
             return false;
-        StringData db = inRequest.getDatabase();
         sep->handleRequest(client->makeOperationContext().get(),
                            OpMsgRequest::fromDBAndBody(
-                               db,
+                               inRequest.getDbName(),
                                KillCursorsCommandRequest(
                                    NamespaceStringUtil::deserialize(inRequest.getDbName(),
                                                                     body["collection"].String()),
@@ -867,7 +866,7 @@ void SessionWorkflow::Impl::_cleanupExhaustResources() {
 
 void SessionWorkflow::Impl::_cleanupSession(const Status& status) {
     LOGV2_DEBUG(5127900, 2, "Ending session", "error"_attr = status);
-    if (_work && _work->opCtx() && _work->opCtx()->getKillStatus() == ErrorCodes::OK) {
+    if (_work && _work->opCtx()) {
         // Make sure we clean up and delist the operation in the case we error between creating
         // the opCtx and getting a response back for the work item. This is required in the case
         // that we need to create a new opCtx to kill existing exhaust resources.

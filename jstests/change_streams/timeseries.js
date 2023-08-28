@@ -7,6 +7,7 @@
  *     requires_fcv_61,
  * ]
  */
+import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {ChangeStreamTest} from "jstests/libs/change_stream_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
@@ -289,6 +290,45 @@ let expectedChanges = [
 if (!FeatureFlagUtil.isEnabled(db, "TimeseriesScalabilityImprovements")) {
     // Remove implicitly create index
     expectedChanges = [expectedChanges[0], ...expectedChanges.slice(2)];
+}
+
+if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
+    // Check for compressed bucket changes when using always compressed buckets.
+    expectedChanges[4] = {
+        "operationType": "insert",
+        "fullDocument": {
+            "control": {
+                "count": 1,
+                "max": {"_id": 1, "ts": ISODate("1970-01-01T00:00:01Z")},
+                "min": {
+                    "_id": 1,
+                    "ts": ISODate("1970-01-01T00:00:00Z"),
+                },
+                "version": 2,
+            },
+            "data": {"ts": BinData(7, "CQDoAwAAAAAAAAA="), "_id": BinData(7, "AQAAAAAAAADwPwA=")},
+            "meta": {"a": 1},
+        },
+        "ns": {"db": dbName, "coll": bucketsCollName}
+
+    };
+    expectedChanges[5] = {
+        "operationType": "replace",
+        "fullDocument": {
+            "control": {
+                "version": 2,
+                "min": {"_id": 1, "ts": ISODate("1970-01-01T00:00:00Z")},
+                "max": {"_id": 1, "ts": ISODate("1970-01-01T00:00:01Z")},
+                "count": 2
+            },
+            "meta": {"a": 1},
+            "data": {
+                "ts": BinData(7, "CQDoAwAAAAAAAIAOAAAAAAAAAAA="),
+                "_id": BinData(7, "AQAAAAAAAADwP5AOAAAAAAAAAAA=")
+            }
+        },
+        "ns": {"db": "timeseries", "coll": "system.buckets.timeseries"}
+    };
 }
 
 cst.assertNextChangesEqual({cursor: curWithEvents, expectedChanges});

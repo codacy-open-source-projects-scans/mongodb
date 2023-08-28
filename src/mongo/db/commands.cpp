@@ -69,6 +69,7 @@
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
+#include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
@@ -82,13 +83,14 @@ using namespace fmt::literals;
 
 namespace mongo {
 
-using logv2::LogComponent;
 const std::set<std::string> kNoApiVersions = {};
 const std::set<std::string> kApiVersions1 = {"1"};
 
 namespace {
 
 const char kWriteConcernField[] = "writeConcern";
+
+CounterMetric unknowns{"commands.<UNKNOWN>"};
 
 // Returns true if found to be authorized, false if undecided. Throws if unauthorized.
 bool checkAuthorizationImplPreParse(OperationContext* opCtx,
@@ -323,18 +325,17 @@ NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(const DatabaseName& dbName,
     if (first.type() == BinData && first.binDataType() == BinDataType::newUUID) {
         return {dbName, uassertStatusOK(UUID::parse(first))};
     } else {
-        // Ensure collection identifier is not a Command
         const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
-        uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Invalid collection name specified '" << nss.toStringForErrorMsg(),
-                !(NamespaceStringUtil::serialize(nss).find('$') != std::string::npos &&
-                  nss != NamespaceString::kLocalOplogDollarMain));
+        ensureNsNotCommand(nss);
         return nss;
     }
 }
 
-NamespaceString CommandHelpers::parseNsFromCommand(StringData dbname, const BSONObj& cmdObj) {
-    return parseNsFromCommand(DatabaseNameUtil::deserialize(boost::none, dbname), cmdObj);
+void CommandHelpers::ensureNsNotCommand(const NamespaceString& nss) {
+    uassert(ErrorCodes::InvalidNamespace,
+            str::stream() << "Invalid collection name specified '" << nss.toStringForErrorMsg(),
+            !(NamespaceStringUtil::serialize(nss).find('$') != std::string::npos &&
+              nss != NamespaceString::kLocalOplogDollarMain));
 }
 
 NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
@@ -353,8 +354,8 @@ ResourcePattern CommandHelpers::resourcePatternForNamespace(const NamespaceStrin
     return ResourcePattern::forExactNamespace(ns);
 }
 
-Command* CommandHelpers::findCommand(StringData name) {
-    return globalCommandRegistry()->findCommand(name);
+Command* CommandHelpers::findCommand(OperationContext* opCtx, StringData name) {
+    return getCommandRegistry(opCtx)->findCommand(name);
 }
 
 bool CommandHelpers::appendCommandStatusNoThrow(BSONObjBuilder& result, const Status& status) {
@@ -611,8 +612,12 @@ MONGO_FAIL_POINT_DEFINE(waitInCommandMarkKillOnClientDisconnect);
 
 // A decoration representing error labels specified in a failCommand failpoint that has affected a
 // command in this OperationContext.
-const OperationContext::Decoration<boost::optional<BSONArray>> errorLabelsOverride =
+const auto errorLabelsOverrideDecoration =
     OperationContext::declareDecoration<boost::optional<BSONArray>>();
+
+boost::optional<BSONArray>& errorLabelsOverride(OperationContext* opCtx) {
+    return (*opCtx)[errorLabelsOverrideDecoration];
+}
 
 bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
                                                         const CommandInvocation* invocation,
@@ -644,8 +649,8 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
     if (auto clientMetadata = ClientMetadata::get(client)) {
         appName = clientMetadata->getApplicationName();
     }
-    auto isInternalClient =
-        !client->session() || (client->session()->getTags() & transport::Session::kInternalClient);
+
+    auto isInternalThreadOrClient = !client->session() || client->isInternalClient();
 
     if (data.hasField("threadName") && (threadName != data.getStringField("threadName"))) {
         return false;  // only activate failpoint on thread from certain client
@@ -663,7 +668,7 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
     }
 
     if (!(data.hasField("failInternalCommands") && data.getBoolField("failInternalCommands")) &&
-        isInternalClient) {
+        isInternalThreadOrClient) {
         return false;
     }
 
@@ -674,7 +679,7 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
               "threadName"_attr = threadName,
               "appName"_attr = appName,
               logAttrs(nss),
-              "isInternalClient"_attr = isInternalClient,
+              "isInternalClient"_attr = isInternalThreadOrClient,
               "command"_attr = cmd->getName());
         return true;
     }
@@ -687,7 +692,7 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
                   "threadName"_attr = threadName,
                   "appName"_attr = appName,
                   logAttrs(nss),
-                  "isInternalClient"_attr = isInternalClient,
+                  "isInternalClient"_attr = isInternalThreadOrClient,
                   "command"_attr = cmd->getName());
 
             return true;
@@ -902,7 +907,7 @@ void CommandInvocation::checkAuthorization(OperationContext* opCtx,
         }
     } catch (const DBException& e) {
         LOGV2_OPTIONS(20436,
-                      {LogComponent::kAccessControl},
+                      {logv2::LogComponent::kAccessControl},
                       "Checking authorization failed: {error}",
                       "Checking authorization failed",
                       "error"_attr = e.toStatus());
@@ -968,9 +973,9 @@ private:
         return _command->supportsReadMirroring(cmdObj());
     }
 
-    std::string getDBForReadMirroring() const override {
+    DatabaseName getDBForReadMirroring() const override {
         invariant(cmdObj().isOwned());
-        return _command->getDBForReadMirroring(cmdObj());
+        return _dbName;
     }
 
     void appendMirrorableRequest(BSONObjBuilder* bob) const override {
@@ -1026,9 +1031,7 @@ Command::Command(StringData name, std::vector<StringData> aliases)
     : _name(name.toString()),
       _aliases(std::move(aliases)),
       _commandsExecuted("commands." + _name + ".total"),
-      _commandsFailed("commands." + _name + ".failed") {
-    globalCommandRegistry()->registerCommand(this, _name, _aliases);
-}
+      _commandsFailed("commands." + _name + ".failed") {}
 
 const std::set<std::string>& Command::apiVersions() const {
     return kNoApiVersions;
@@ -1063,7 +1066,7 @@ bool ErrmsgCommandDeprecated::run(OperationContext* opCtx,
                                   const BSONObj& cmdObj,
                                   BSONObjBuilder& result) {
     std::string errmsg;
-    auto ok = errmsgRun(opCtx, DatabaseNameUtil::serialize(dbName), cmdObj, errmsg, result);
+    auto ok = errmsgRun(opCtx, dbName, cmdObj, errmsg, result);
     if (!errmsg.empty()) {
         CommandHelpers::appendSimpleCommandStatus(result, ok, errmsg);
     }
@@ -1073,31 +1076,79 @@ bool ErrmsgCommandDeprecated::run(OperationContext* opCtx,
 //////////////////////////////////////////////////////////////
 // CommandRegistry
 
-void CommandRegistry::registerCommand(Command* command,
-                                      StringData name,
-                                      std::vector<StringData> aliases) {
+void CommandRegistry::registerCommand(Command* command) {
+    StringData name = command->getName();
+    std::vector<StringData> aliases = command->getAliases();
+    auto ep = std::make_unique<Entry>();
+    ep->command = command;
+    auto [cIt, cOk] = _commands.emplace(command, std::move(ep));
+    invariant(cOk, "Command identity collision: {}"_format(name));
+
+    // When a `Command*` is introduced to `_commands`, its names are introduced
+    // to `_commandNames`.
     aliases.push_back(name);
-
-    for (auto key : aliases) {
-        if (key.empty()) {
+    for (StringData key : aliases) {
+        if (key.empty())
             continue;
-        }
-
-        auto result = _commands.try_emplace(key, command);
-        invariant(result.second, str::stream() << "command name collision: " << key);
+        auto [nIt, nOk] = _commandNames.try_emplace(key, command);
+        invariant(nOk, "Command name collision: {}"_format(key));
     }
 }
 
 Command* CommandRegistry::findCommand(StringData name) const {
-    auto it = _commands.find(name);
-    if (it == _commands.end())
+    auto it = _commandNames.find(name);
+    if (it == _commandNames.end())
         return nullptr;
     return it->second;
 }
 
-CommandRegistry* globalCommandRegistry() {
-    static auto reg = new CommandRegistry();
-    return reg;
+void CommandRegistry::incrementUnknownCommands() {
+    unknowns.increment();
+}
+
+CommandRegistry* getCommandRegistry(OperationContext* opCtx) {
+    // For now there's one service for everything.
+    static StaticImmortal<CommandRegistry> obj{};
+    return &*obj;
+}
+
+CommandConstructionPlan& globalCommandConstructionPlan() {
+    static StaticImmortal<CommandConstructionPlan> obj{};
+    return *obj;
+}
+
+void CommandConstructionPlan::execute(CommandRegistry* registry) const {
+    LOGV2_DEBUG(7897601, 3, "Constructing Command objects from specs");
+    for (auto&& entry : entries()) {
+        auto type = demangleName(*entry->typeInfo);
+        if (entry->testOnly && !getTestCommandsEnabled()) {
+            LOGV2_DEBUG(7897603, 3, "Skipping test-only command", "type"_attr = type);
+            continue;
+        }
+        if (entry->featureFlag && !entry->featureFlag->isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+            LOGV2_DEBUG(7897604, 3, "Skipping FeatureFlag gated command", "type"_attr = type);
+            continue;
+        }
+        auto c = entry->construct();
+        LOGV2_DEBUG(7897602, 3, "Created", "command"_attr = c->getName(), "type"_attr = type);
+        registry->registerCommand(&*c);
+
+        // In the future, we should get to the point where the registry owns the
+        // command object. But we aren't there yet and they have to be leaked,
+        // So we at least do it as an explicit choice here.
+        // After selfRegister is removed, a CommandRegistry can own its commands.
+        static StaticImmortal leakedCommands = std::vector<std::unique_ptr<Command>>{};
+        leakedCommands->push_back(std::move(c));
+    }
+}
+
+/**
+ * Activates the command construction plan, constructing Commands as
+ * appropriate.  In the near future, this will be part of the setup of each
+ * CommandRegistry object instead of a MONGO_INITIALIZER.
+ */
+MONGO_INITIALIZER(CreateAllSpecifiedCommands)(InitializerContext*) {
+    globalCommandConstructionPlan().execute(globalCommandRegistry());
 }
 
 }  // namespace mongo

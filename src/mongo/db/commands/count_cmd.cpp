@@ -308,6 +308,7 @@ public:
         auto curOp = CurOp::get(opCtx);
         curOp->beginQueryPlanningTimer();
         if (shouldDoFLERewrite(request)) {
+            LOGV2_DEBUG(7964102, 2, "Processing Queryable Encryption command", "cmd"_attr = cmdObj);
             if (!request.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 processFLECountD(opCtx, nss, &request);
             }
@@ -419,6 +420,7 @@ public:
             keyBob.append("hint", 1);
             keyBob.append("collation", 1);
             keyBob.append("shardVersion", 1);
+            keyBob.append("encryptionInformation", 1);
 
             return keyBob.obj();
         }();
@@ -426,8 +428,8 @@ public:
         // Filter the keys that can be mirrored
         cmdObj.filterFieldsUndotted(bob, kMirrorableKeys, true);
     }
-
-} cmdCount;
+};
+MONGO_REGISTER_COMMAND(CmdCount);
 
 }  // namespace
 }  // namespace mongo

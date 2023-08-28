@@ -378,8 +378,8 @@ public:
         Invocation(Command* cmd, const OpMsgRequest& request)
             : CommandInvocation(cmd),
               _cmd(GetMoreCommandRequest::parse(IDLParserContext{"getMore"}, request)) {
-            NamespaceString nss(NamespaceStringUtil::parseNamespaceFromRequest(
-                _cmd.getDbName(), _cmd.getCollection()));
+            NamespaceString nss(
+                NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection()));
             uassert(ErrorCodes::InvalidNamespace,
                     str::stream() << "Invalid namespace for getMore: " << nss.toStringForErrorMsg(),
                     nss.isValid());
@@ -404,8 +404,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceStringUtil::parseNamespaceFromRequest(_cmd.getDbName(),
-                                                                  _cmd.getCollection());
+            return NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection());
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -538,8 +537,8 @@ public:
             // the stats twice.
             boost::optional<AutoGetCollectionForReadMaybeLockFree> readLock;
             boost::optional<AutoStatsTracker> statsTracker;
-            NamespaceString nss(NamespaceStringUtil::parseNamespaceFromRequest(
-                _cmd.getDbName(), _cmd.getCollection()));
+            NamespaceString nss(
+                NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection()));
 
             const bool disableAwaitDataFailpointActive =
                 MONGO_unlikely(disableAwaitDataForGetMoreCmd.shouldFail());
@@ -683,7 +682,7 @@ public:
                 [&opCtx, &cursorPin](const BSONObj& data) {
                     auto dataForFailCommand =
                         data.addField(BSON("failCommands" << BSON_ARRAY("getMore")).firstElement());
-                    auto* getMoreCommand = CommandHelpers::findCommand("getMore");
+                    auto* getMoreCommand = CommandHelpers::findCommand(opCtx, "getMore");
                     return CommandHelpers::shouldActivateFailCommandFailPoint(
                         dataForFailCommand, cursorPin->nss(), getMoreCommand, opCtx->getClient());
                 });
@@ -929,7 +928,8 @@ public:
     bool adminOnly() const override {
         return false;
     }
-} getMoreCmd;
+};
+MONGO_REGISTER_COMMAND(GetMoreCmd);
 
 }  // namespace
 }  // namespace mongo

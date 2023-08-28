@@ -4,9 +4,9 @@
  * These tests are incompatible with the transaction overrides since any failure
  * will cause a transaction abortion which will make the overrides infinite loop.
  *
- * The test runs commands that are not allowed with security token: bulkWrite.
  * @tags: [
  *   not_allowed_with_security_token,
+ *   # The test runs commands that are not allowed with security token: bulkWrite.
  *   command_not_supported_in_serverless,
  *   # Contains commands that fail which will fail the entire transaction
  *   does_not_support_transactions,
@@ -186,7 +186,7 @@ cursorEntryValidator(res.cursor.firstBatch[0],
                      {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.DuplicateKey});
 cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 0});
 
-assert.docEq(res.cursor.firstBatch[1].upserted, {index: 0, _id: 1});
+assert.docEq(res.cursor.firstBatch[1].upserted, {_id: 1});
 assert(!res.cursor.firstBatch[2]);
 coll.drop();
 coll2.drop();
@@ -496,6 +496,32 @@ assert.eq(res.numErrors, 1);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 51198});
 assert.eq(res.cursor.firstBatch[0].errmsg,
           "Constant values may only be specified for pipeline updates");
+assert(!res.cursor.firstBatch[1]);
+
+coll.drop();
+
+// Test Upsert = True with UpsertSupplied = True (no match and constants.new is missing)
+res = db.adminCommand({
+    bulkWrite: 1,
+    ops: [
+        {
+            update: 0,
+            filter: {_id: 1},
+            updateMods: [{$set: {skey: "MongoDB2"}}],
+            upsert: true,
+            upsertSupplied: true,
+            constants: {},
+        },
+    ],
+    nsInfo: [{ns: "test.coll"}]
+});
+
+assert.commandWorked(res);
+assert.eq(res.numErrors, 1);
+
+cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 9});
+assert.eq(res.cursor.firstBatch[0].errmsg,
+          "the parameter 'upsertSupplied' is set to 'true', but no document was supplied");
 assert(!res.cursor.firstBatch[1]);
 
 coll.drop();

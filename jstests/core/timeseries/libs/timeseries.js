@@ -1,6 +1,4 @@
 // Helper functions for testing time-series collections.
-// The test runs commands that are not allowed with security token: movechunk, split.
-// @tags: [not_allowed_with_security_token]
 
 import {documentEq} from "jstests/aggregation/extras/utils.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
@@ -39,6 +37,19 @@ export var TimeseriesTest = class {
      */
     static timeseriesScalabilityImprovementsEnabled(conn) {
         return FeatureFlagUtil.isPresentAndEnabled(conn, "TimeseriesScalabilityImprovements");
+    }
+
+    /**
+     * Returns whether time-series always use compressed buckets are enabled.
+     * TODO SERVER-70605 remove this helper.
+     */
+    static timeseriesAlwaysUseCompressedBucketsEnabled(conn) {
+        // TODO SERVER-79460: Clean this up so the ignoreFCV option does not need to be explicitly
+        // specified.
+        return FeatureFlagUtil.isPresentAndEnabled(conn,
+                                                   "TimeseriesAlwaysUseCompressedBuckets",
+                                                   /*user=*/ undefined,
+                                                   /*ignoreFCV=*/ true);
     }
 
     // TODO SERVER-68058 remove this helper.

@@ -71,9 +71,9 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/query_stats.h"
-#include "mongo/db/query/query_stats_aggregate_key_generator.h"
-#include "mongo/db/query/query_stats_key_generator.h"
+#include "mongo/db/query/query_stats/aggregate_key_generator.h"
+#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/shard_id.h"
@@ -514,7 +514,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
 
     if (request.getExplain()) {
         explain_common::generateServerInfo(result);
-        explain_common::generateServerParameters(result);
+        explain_common::generateServerParameters(opCtx, result);
     }
 
     auto status = [&]() {
