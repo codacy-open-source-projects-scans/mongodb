@@ -32,14 +32,6 @@ export var TimeseriesTest = class {
     }
 
     /**
-     * Returns whether time-series scalability improvements (like bucket reopening) are enabled.
-     * TODO SERVER-66438 remove this helper.
-     */
-    static timeseriesScalabilityImprovementsEnabled(conn) {
-        return FeatureFlagUtil.isPresentAndEnabled(conn, "TimeseriesScalabilityImprovements");
-    }
-
-    /**
      * Returns whether time-series always use compressed buckets are enabled.
      * TODO SERVER-70605 remove this helper.
      */
@@ -78,7 +70,7 @@ export var TimeseriesTest = class {
             ["control"],
             "TimeseriesTest.decompressBucket() should only be called on a bucket document");
         assert.eq(
-            2,
+            TimeseriesTest.BucketVersion.kCompressed,
             compressedBucket.control.version,
             "TimeseriesTest.decompressBucket() should only be called on a compressed bucket document");
 
@@ -87,7 +79,7 @@ export var TimeseriesTest = class {
         }
 
         // The control object should reflect that the data is uncompressed.
-        compressedBucket.control.version = 1;
+        compressedBucket.control.version = TimeseriesTest.BucketVersion.kUncompressed;
         delete compressedBucket.control.count;
     }
 
@@ -274,4 +266,9 @@ export var TimeseriesTest = class {
     static getBucketsCollName(collName) {
         return `system.buckets.${collName}`;
     }
+};
+
+TimeseriesTest.BucketVersion = {
+    kUncompressed: 1,
+    kCompressed: 2,
 };

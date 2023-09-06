@@ -81,11 +81,16 @@ struct DeblockedTagVals {
         tassert(7888701, "Values must exist", count > 0 && tags != nullptr && vals != nullptr);
     }
 
+    std::pair<TypeTags, Value> operator[](size_t idx) const {
+        return {tags[idx], vals[idx]};
+    }
+
     size_t count;
     const TypeTags* tags;
     const Value* vals;
 };
 std::ostream& operator<<(std::ostream& s, const DeblockedTagVals& deblocked);
+str::stream& operator<<(str::stream& str, const DeblockedTagVals& deblocked);
 
 /**
  * A block that is a run of repeated values.
@@ -131,18 +136,19 @@ private:
     TypeTags _tag;
     Value _val;
 
-    // To lazily extract the values, we need to remember the number of values which is supposed to
-    // exist in this block.
+    // To lazily extract the values, we need to remember the number of values which is supposed
+    // to exist in this block.
     size_t _count;
 
-    // These are always a view onto '_tag' and '_val', materialized lazily if the caller requests
-    // it.
+    // These are always a view onto '_tag' and '_val', materialized lazily if the caller
+    // requests it.
     std::vector<TypeTags> _deblockedTags;
     std::vector<Value> _deblockedVals;
 };
 
 /**
- * The most general type of block that can hold any assortment of tags/values with no commonality.
+ * The most general type of block that can hold any assortment of tags/values with no
+ * commonality.
  */
 struct HeterogeneousBlock : public ValueBlock {
     HeterogeneousBlock() = default;
@@ -177,6 +183,10 @@ struct HeterogeneousBlock : public ValueBlock {
         _tags.push_back(t);
         _vals.push_back(v);
         guard.reset();
+    }
+
+    void push_back(std::pair<TypeTags, Value> tv) {
+        push_back(tv.first, tv.second);
     }
 
     boost::optional<size_t> tryCount() const override {

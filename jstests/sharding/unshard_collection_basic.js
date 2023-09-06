@@ -2,7 +2,7 @@
  * Tests for basic functionality of the unshard collection feature.
  *
  * @tags: [
- *  require_fcv_71,
+ *  requires_fcv_71,
  *  featureFlagReshardingImprovements,
  *  featureFlagMoveCollection
  * ]
@@ -28,15 +28,16 @@ const coll = st.s.getDB(dbName)["collName"];
 assert.commandWorked(coll.insert({oldKey: 1}));
 
 // Fail if collection is unsharded.
-assert.commandFailedWithCode(mongos.adminCommand(cmdObj), ErrorCodes.NamespaceNotSharded);
+let result = mongos.adminCommand(cmdObj);
+assert.commandFailedWithCode(result, ErrorCodes.NamespaceNotSharded);
+assert.eq(result.errmsg, "Namespace must be sharded to perform an unshardCollection command");
 
 assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
 assert.commandWorked(coll.createIndex({oldKey: 1}));
 assert.commandWorked(mongos.adminCommand({shardCollection: ns, key: {oldKey: 1}}));
 
 // Unshard collection should succeed with and without toShard option.
-// TODO (SERVER-80265): Update once we support not passing in toShard.
-assert.commandFailedWithCode(mongos.adminCommand({unshardCollection: ns}), 8018401);
+assert.commandWorked(mongos.adminCommand({unshardCollection: ns}));
 assert.commandWorked(mongos.adminCommand(cmdObj));
 
 // Fail if command called on shard.

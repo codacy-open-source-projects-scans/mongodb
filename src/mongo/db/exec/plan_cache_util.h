@@ -202,9 +202,8 @@ void updatePlanCacheFromCandidates(
     // Store the choice we just made in the cache, if the query is of a type that is safe to
     // cache.
     QuerySolution* solution = winningPlan.solution.get();
-    // TODO SERVER-78817 remove isUncacheableSbe() call when binding is implemented.
-    if (canCache && shouldCacheQuery(query) && solution->isEligibleForPlanCache() &&
-        !query.isUncacheableSbe()) {
+    if (canCache && !query.isUncacheableSbe() && shouldCacheQuery(query) &&
+        solution->isEligibleForPlanCache()) {
         const CollectionPtr& collection = collections.getMainCollection();
         auto rankingDecision = ranking.get();
         auto cacheClassicPlan = [&]() {
@@ -217,7 +216,7 @@ void updatePlanCacheFromCandidates(
                 callbacks{query, buildDebugInfoFn};
             winningPlan.solution->cacheData->indexFilterApplied =
                 winningPlan.solution->indexFilterApplied;
-            auto isSensitive = CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation;
+            auto isSensitive = CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
             uassertStatusOK(CollectionQueryInfo::get(collection)
                                 .getPlanCache()
                                 ->set(plan_cache_key_factory::make<PlanCacheKey>(query, collection),
@@ -251,7 +250,7 @@ void updatePlanCacheFromCandidates(
                                        plan_cache_debug_info::DebugInfoSBE>
                     callbacks{query, buildDebugInfoFn};
 
-                auto isSensitive = CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation;
+                auto isSensitive = CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
                 uassertStatusOK(sbe::getPlanCache(opCtx).set(
                     plan_cache_key_factory::make(query, collections),
                     std::move(cachedPlan),

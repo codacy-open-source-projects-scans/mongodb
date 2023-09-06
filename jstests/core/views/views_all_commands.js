@@ -221,6 +221,7 @@ let viewsCommandTests = {
     abortMoveCollection: {skip: isUnrelated},
     abortReshardCollection: {skip: isUnrelated},
     abortTransaction: {skip: isUnrelated},
+    abortUnshardCollection: {skip: isUnrelated},
     addShard: {skip: isUnrelated},
     addShardToZone: {skip: isUnrelated},
     aggregate: {command: {aggregate: "view", pipeline: [{$match: {}}], cursor: {}}},
@@ -777,7 +778,6 @@ let viewsCommandTests = {
     validate: {command: {validate: "view"}, expectFailure: true},
     validateDBMetadata:
         {command: {validateDBMetadata: 1, apiParameters: {version: "1", strict: true}}},
-    waitForOngoingChunkSplits: {skip: isUnrelated},
     voteAbortIndexBuild: {skip: isUnrelated},
     voteCommitImportCollection: {skip: isUnrelated},
     voteCommitIndexBuild: {skip: isUnrelated},

@@ -114,9 +114,8 @@ protected:
         auto db = databaseHolder->openDb(operationContext(), kTestNss.dbName(), &justCreated);
         auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(
             operationContext(), kTestNss.dbName());
-        scopedDss->setDbInfo(
-            operationContext(),
-            DatabaseType{kTestNss.dbName().toString_forTest(), ShardId("this"), dbVersion1});
+        scopedDss->setDbInfo(operationContext(),
+                             DatabaseType{kTestNss.dbName(), ShardId("this"), dbVersion1});
         ASSERT_TRUE(db);
         ASSERT_TRUE(justCreated);
 
@@ -186,7 +185,6 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateUnsharded) {
     ASSERT_BSONOBJ_EQ(getDocumentKey(*autoColl, doc).getShardKeyAndId(),
                       BSON("_id"
                            << "hello"));
-    ASSERT_FALSE(MigrationSourceManager::isMigrating(operationContext(), kTestNss, doc));
 }
 
 TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithoutIdInShardKey) {
@@ -215,7 +213,6 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithoutIdInShardKey) {
                                  << "abc"
                                  << "_id"
                                  << "hello"));
-    ASSERT_FALSE(MigrationSourceManager::isMigrating(operationContext(), kTestNss, doc));
 }
 
 TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithIdInShardKey) {
@@ -243,7 +240,6 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithIdInShardKey) {
                       BSON("key" << 100 << "_id"
                                  << "hello"
                                  << "key2" << true));
-    ASSERT_FALSE(MigrationSourceManager::isMigrating(operationContext(), kTestNss, doc));
 }
 
 TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithIdHashInShardKey) {
@@ -268,7 +264,6 @@ TEST_F(DocumentKeyStateTest, MakeDocumentKeyStateShardedWithIdHashInShardKey) {
     ASSERT_BSONOBJ_EQ(getDocumentKey(*autoColl, doc).getShardKeyAndId(),
                       BSON("_id"
                            << "hello"));
-    ASSERT_FALSE(MigrationSourceManager::isMigrating(operationContext(), kTestNss, doc));
 }
 
 TEST_F(DocumentKeyStateTest, CheckDBVersion) {

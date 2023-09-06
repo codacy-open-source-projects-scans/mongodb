@@ -1642,6 +1642,7 @@ execEnv.Library(
         '$BUILD_DIR/mongo/db/query/ce/query_ce_histogram',
         '$BUILD_DIR/mongo/db/query/ce/query_ce_sampling',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
+        '$BUILD_DIR/mongo/db/query/query_settings',
         '$BUILD_DIR/mongo/db/repl/wait_for_majority_service',
         '$BUILD_DIR/mongo/db/session/kill_sessions',
         '$BUILD_DIR/mongo/db/sorter/sorter_idl',
@@ -1782,8 +1783,8 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'query/query_knobs',
+        'query_shape_common',
         'sbe_values',
-        'serialization_options',
         'stats/counters',
         'update/pattern_cmp',
     ],
@@ -1796,17 +1797,17 @@ env.Library(
 )
 
 env.Library(
-    target='serialization_options',
-    source=[
+    target='query_shape_common', source=[
+        'query/query_shape.idl',
+        'query/shape_helpers.cpp',
         'query/serialization_options.cpp',
-    ],
-    LIBDEPS=[
+    ], LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/exec/document_value/document_value',
         '$BUILD_DIR/mongo/db/pipeline/field_path',
-    ],
-    LIBDEPS_PRIVATE=[],
-)
+    ], LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+    ])
 
 env.Library(
     target='startup_recovery',

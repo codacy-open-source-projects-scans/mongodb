@@ -10,6 +10,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: linux-x86-dynamic-compile
 
 - &linux_x86_generic_expansions
   multiversion_platform: rhel80
@@ -93,7 +95,7 @@ buildvariants:
   - name: .jstestfuzz !.flow_control
   - name: .misc_js
   - name: .multi_shard
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .random_multiversion_ds
   - name: .read_only
   - name: .read_write_concern !.large
@@ -113,13 +115,6 @@ buildvariants:
   - name: .updatefuzzer
   - name: aggregation_repeat_queries
   - name: audit
-  - name: burn_in_tags_gen
-    depends_on:
-    - name: version_burn_in_gen
-      variant: generate-tasks-for-version
-      omit_generated_tasks: true
-    - name: archive_dist_test_debug
-      variant: *linux_x86_dynamic_compile_variant_name
   - name: burn_in_tests_gen
     depends_on:
     - name: version_burn_in_gen
@@ -229,9 +224,8 @@ buildvariants:
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
-  - name: .logical_session_cache
   - name: .multi_shard .common
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
@@ -307,7 +301,6 @@ buildvariants:
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
-  - name: .logical_session_cache .one_sec
   - name: .multi_shard .common
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough

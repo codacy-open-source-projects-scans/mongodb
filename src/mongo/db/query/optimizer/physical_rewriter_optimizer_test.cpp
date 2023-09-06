@@ -139,7 +139,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
 
     // Plan output with properties.
     ASSERT_EXPLAIN_PROPS_V2_AUTO(
-        "Properties [cost: 0.438321, localCost: 0, adjustedCE: 10]\n"
+        "Properties [cost: 0.438752, localCost: 0, adjustedCE: 10.01]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 10\n"
@@ -161,7 +161,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|       removeOrphans: \n"
         "|           false\n"
         "Root [{p2}]\n"
-        "Properties [cost: 0.438321, localCost: 0.00983406, adjustedCE: 10]\n"
+        "Properties [cost: 0.438752, localCost: 0.00984243, adjustedCE: 10.01]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 10\n"
@@ -192,7 +192,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|   PathGet [a]\n"
         "|   PathCompare [Eq]\n"
         "|   Const [1]\n"
-        "Properties [cost: 0.428487, localCost: 0, adjustedCE: 100]\n"
+        "Properties [cost: 0.428909, localCost: 0, adjustedCE: 100.1]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 100\n"
@@ -216,7 +216,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|       removeOrphans: \n"
         "|           false\n"
         "Evaluation [{p2} = Variable [p1]]\n"
-        "Properties [cost: 0.428487, localCost: 0, adjustedCE: 100]\n"
+        "Properties [cost: 0.428909, localCost: 0, adjustedCE: 100.1]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 100\n"
@@ -242,7 +242,7 @@ TEST(PhysRewriter, PhysicalRewriterBasic) {
         "|   EvalFilter []\n"
         "|   |   Variable [p1]\n"
         "|   PathIdentity []\n"
-        "Properties [cost: 0.428487, localCost: 0.428487, adjustedCE: 1000]\n"
+        "Properties [cost: 0.428909, localCost: 0.428909, adjustedCE: 1001]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 1000\n"
@@ -3249,7 +3249,7 @@ TEST(PhysRewriter, IndexResidualReq) {
 
     // Make sure we can use the index to cover "b" while testing "b.c" with a separate filter.
     ASSERT_EXPLAIN_PROPS_V2_AUTO(
-        "Properties [cost: 0.176361, localCost: 0, adjustedCE: 189.571]\n"
+        "Properties [cost: 0.176522, localCost: 0, adjustedCE: 189.76]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 189.571\n"
@@ -3271,7 +3271,7 @@ TEST(PhysRewriter, IndexResidualReq) {
         "|       removeOrphans: \n"
         "|           false\n"
         "Root [{pa}]\n"
-        "Properties [cost: 0.176361, localCost: 0.176361, adjustedCE: 189.571]\n"
+        "Properties [cost: 0.176522, localCost: 0.176522, adjustedCE: 189.76]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 189.571\n"
@@ -3799,6 +3799,7 @@ TEST(PhysRewriter, NestedElemMatch) {
         prefixId,
         {{{"coll1",
            createScanDef(
+
                {},
                {{"index1",
                  makeIndexDefinition("a", CollationOp::Ascending, true /*isMultiKey*/)}})}}},
@@ -4077,7 +4078,7 @@ TEST(PhysRewriter, CollationLimit) {
     // We have a collation node with limit-skip physical properties. It will be lowered to a
     // sort node with limit.
     ASSERT_EXPLAIN_PROPS_V2_AUTO(
-        "Properties [cost: 4.75042, localCost: 0, adjustedCE: 20]\n"
+        "Properties [cost: 4.75516, localCost: 0, adjustedCE: 20]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 20\n"
@@ -4093,7 +4094,7 @@ TEST(PhysRewriter, CollationLimit) {
         "|       distribution: \n"
         "|           type: Centralized\n"
         "Root [{root}]\n"
-        "Properties [cost: 4.75042, localCost: 4.32193, adjustedCE: 20]\n"
+        "Properties [cost: 4.75516, localCost: 4.32625, adjustedCE: 20.02]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 1000\n"
@@ -4124,7 +4125,7 @@ TEST(PhysRewriter, CollationLimit) {
         "|       removeOrphans: \n"
         "|           false\n"
         "Collation [{pa: Ascending}]\n"
-        "Properties [cost: 0.428487, localCost: 0.428487, adjustedCE: 1000]\n"
+        "Properties [cost: 0.428909, localCost: 0.428909, adjustedCE: 1001]\n"
         "|   |   Logical:\n"
         "|   |       cardinalityEstimate: \n"
         "|   |           ce: 1000\n"
@@ -4836,7 +4837,7 @@ TEST(PhysRewriter, EqMemberSargable) {
 
         // Test sargable filter is satisfied with an index scan.
         ASSERT_EXPLAIN_PROPS_V2_AUTO(
-            "Properties [cost: 0.163045, localCost: 0, adjustedCE: 54.6819]\n"
+            "Properties [cost: 0.163158, localCost: 0, adjustedCE: 54.7365]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
             "|   |           ce: 54.6819\n"
@@ -4858,7 +4859,7 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|       removeOrphans: \n"
             "|           false\n"
             "Root [{root}]\n"
-            "Properties [cost: 0.163045, localCost: 0.0180785, adjustedCE: 54.6819]\n"
+            "Properties [cost: 0.163158, localCost: 0.0180962, adjustedCE: 54.7365]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
             "|   |           ce: 54.6819\n"
@@ -4886,7 +4887,7 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|           false\n"
             "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
             "|   |   Const [true]\n"
-            "|   Properties [cost: 0.0757996, localCost: 0.0757996, adjustedCE: 54.6819]\n"
+            "|   Properties [cost: 0.0758673, localCost: 0.0758673, adjustedCE: 54.7365]\n"
             "|   |   |   Logical:\n"
             "|   |   |       cardinalityEstimate: \n"
             "|   |   |           ce: 1000\n"
@@ -4912,7 +4913,7 @@ TEST(PhysRewriter, EqMemberSargable) {
             "|   |           false\n"
             "|   LimitSkip [limit: 1, skip: 0]\n"
             "|   Seek [ridProjection: rid_0, {'<root>': root}, c1]\n"
-            "Properties [cost: 0.0691671, localCost: 0.0691671, adjustedCE: 54.6819]\n"
+            "Properties [cost: 0.0691941, localCost: 0.0691941, adjustedCE: 54.7365]\n"
             "|   |   Logical:\n"
             "|   |       cardinalityEstimate: \n"
             "|   |           ce: 54.6819\n"
@@ -5380,7 +5381,7 @@ TEST(PhysRewriter, ExplainMemoDisplayRulesForRejectedPlans) {
         "                    31.6228\n"
         "                removeOrphans: \n"
         "                    false\n"
-        "            cost: 0.0472695, localCost: 0.0472695, adjustedCE: 31.6228, rule: Seek, "
+        "            cost: 0.0473086, localCost: 0.0473086, adjustedCE: 31.6544, rule: Seek, "
         "node: \n"
         "                LimitSkip [limit: 1, skip: 0]\n"
         "                    ce: 1\n"
@@ -5433,18 +5434,18 @@ TEST(PhysRewriter, ExplainMemoDisplayRulesForRejectedPlans) {
         "                    Complete, dedupRID\n"
         "                removeOrphans: \n"
         "                    false\n"
-        "            cost: 0.0847147, localCost: 0.0106248, adjustedCE: 31.6228, rule: "
-        "IndexFetch, node: \n"
+        "            cost: 0.0847769, localCost: 0.010635, adjustedCE: 31.6544, rule: IndexFetch, "
+        "node: \n"
         "                NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "                    ce: 31.6228\n"
         "                |   |   Const [true]\n"
         "                |   MemoPhysicalDelegator [groupId: 0, index: 0]\n"
         "                MemoPhysicalDelegator [groupId: 3, index: 1]\n"
         "            rejectedPlans: \n"
-        "                cost: {Infinite cost}, localCost: 0, adjustedCE: 31.6228, rule: "
+        "                cost: {Infinite cost}, localCost: 0, adjustedCE: 31.6544, rule: "
         "AttemptCoveringQuery, node: \n"
         "                    MemoLogicalDelegator [groupId: 3]\n"
-        "                cost: 0.513676, localCost: 0.513676, adjustedCE: 31.6228, rule: "
+        "                cost: 0.514182, localCost: 0.514182, adjustedCE: 31.6544, rule: "
         "SargableToPhysicalScan, node: \n"
         "                    Filter []\n"
         "                        ce: 31.6228\n"
@@ -5482,7 +5483,7 @@ TEST(PhysRewriter, ExplainMemoDisplayRulesForRejectedPlans) {
         "                    Complete, dedupRID\n"
         "                removeOrphans: \n"
         "                    false\n"
-        "            cost: 0.0847147, localCost: 0, adjustedCE: 31.6228, rule: Root, node: \n"
+        "            cost: 0.0847769, localCost: 0, adjustedCE: 31.6544, rule: Root, node: \n"
         "                Root [{root}]\n"
         "                    ce: 31.6228\n"
         "                MemoPhysicalDelegator [groupId: 1, index: 0]\n"
@@ -5534,7 +5535,7 @@ TEST(PhysRewriter, ExplainMemoDisplayRulesForRejectedPlans) {
         "                    Index, dedupRID\n"
         "                removeOrphans: \n"
         "                    false\n"
-        "            cost: 0.0268205, localCost: 0.0268205, adjustedCE: 31.6228, rule: "
+        "            cost: 0.0268333, localCost: 0.0268333, adjustedCE: 31.6544, rule: "
         "SargableToIndex, node: \n"
         "                IndexScan [{'<rid>': rid_0}, scanDefName: c1, indexDefName: index1, "
         "interval: {=Const [1]}]\n"
@@ -5586,7 +5587,7 @@ TEST(PhysRewriter, ExtractAllPlans) {
 
     // Display the 3 best plans.
     ASSERT_STR_EQ_AUTO(  // NOLINT
-        "Cost: 0.0641986\n"
+        "Cost: 0.0642388\n"
         "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
@@ -5604,7 +5605,7 @@ TEST(PhysRewriter, ExtractAllPlans) {
         getExplainForPlan(0));
 
     ASSERT_STR_EQ_AUTO(  // NOLINT
-        "Cost: 0.0641986\n"
+        "Cost: 0.0642388\n"
         "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
@@ -5622,7 +5623,7 @@ TEST(PhysRewriter, ExtractAllPlans) {
         getExplainForPlan(1));
 
     ASSERT_STR_EQ_AUTO(  // NOLINT
-        "Cost: 0.0955468\n"
+        "Cost: 0.0956168\n"
         "Root [{root}]\n"
         "NestedLoopJoin [joinType: Inner, {rid_0}]\n"
         "|   |   Const [true]\n"
@@ -5728,7 +5729,9 @@ TEST(PhysRewriter, RemoveOrphansEnforcerMultipleCollections) {
     auto prefixId = PrefixId::createForTests();
 
     auto scanDef1 =
-        createScanDef(ScanDefOptions{},
+        createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                      UUID::gen(),
+                      ScanDefOptions{},
                       IndexDefinitions{},
                       MultikeynessTrie{},
                       ConstEval::constFold,
@@ -5739,7 +5742,9 @@ TEST(PhysRewriter, RemoveOrphansEnforcerMultipleCollections) {
                       ShardingMetadata({{_get("a", _id())._n, CollationOp::Ascending}}, true));
 
     auto scanDef2 =
-        createScanDef(ScanDefOptions{},
+        createScanDef(DatabaseNameUtil::deserialize(boost::none, "test2"),
+                      UUID::gen(),
+                      ScanDefOptions{},
                       IndexDefinitions{},
                       MultikeynessTrie{},
                       ConstEval::constFold,
@@ -5781,7 +5786,9 @@ TEST(PhysRewriter, RemoveOrphansEnforcerMultipleCollections) {
 ABT optimizeABTWithShardingMetadataNoIndexes(ABT& rootNode, ShardingMetadata shardingMetadata) {
     auto prefixId = PrefixId::createForTests();
 
-    auto scanDef = createScanDef(ScanDefOptions{},
+    auto scanDef = createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                                 UUID::gen(),
+                                 ScanDefOptions{},
                                  IndexDefinitions{},
                                  MultikeynessTrie{},
                                  ConstEval::constFold,
@@ -5926,7 +5933,9 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetBasic) {
 
     ShardingMetadata sm({{_get("b", _id())._n, CollationOp::Ascending}}, true);
 
-    auto scanDef = createScanDef({},
+    auto scanDef = createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                                 UUID::gen(),
+                                 {},
                                  {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}},
                                  MultikeynessTrie{},
                                  ConstEval::constFold,
@@ -5985,7 +5994,9 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetDottedSharedPrefix)
                          {_get("a", _get("b", _get("d", _id())))._n, CollationOp::Ascending}},
                         true);
     auto shardScanDef =
-        createScanDef(ScanDefOptions{},
+        createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                      UUID::gen(),
+                      ScanDefOptions{},
                       {{"index1", makeIndexDefinition("e", CollationOp::Ascending)}},
                       MultikeynessTrie{},
                       ConstEval::constFold,
@@ -6087,6 +6098,259 @@ TEST(PhysRewriter, RemoveOrphansSargableNodeCompleteDottedShardKey) {
         optimized);
 }
 
+TEST(PhysRewriter, RemoveOrphansSargableNodeIndex) {
+    ABT root = NodeBuilder{}
+                   .root("root")
+                   .filter(_evalf(_get("a", _cmp("Gt", "1"_cint64)), "root"_var))
+                   .finish(_scan("root", "c1"));
+    ShardingMetadata sm({{_get("a", _id())._n, CollationOp::Ascending}}, true);
+
+    // Make predicates on PathGet[a] very selective to prefer IndexScan plan over collection scan.
+    ce::PartialSchemaSelHints ceHints;
+    ceHints.emplace(PartialSchemaKey{"root", _get("a", _id())._n}, SelectivityType{0.01});
+
+    auto prefixId = PrefixId::createForTests();
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                         UUID::gen(),
+                         {},
+                         {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)}},
+                         MultikeynessTrie{},
+                         ConstEval::constFold,
+                         DistributionAndPaths{DistributionType::Centralized},
+                         true /*exists*/,
+                         boost::none /*ce*/,
+                         sm)}}},
+        makeHintedCE(std::move(ceHints)),
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = root;
+    phaseManager.optimize(optimized);
+
+    ASSERT_BETWEEN(10, 16, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // The shard filter is performed on the index side of the NLJ and pushed the projection into the
+    // index scan.
+    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
+    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
+    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.leftChild.nodeType");
+    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.leftChild.filter.nodeType");
+    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.leftChild.filter.name");
+    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.child.nodeType");
+    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.child.indexDefName");
+}
+
+TEST(PhysRewriter, RemoveOrphansCovered) {
+    ABT root = NodeBuilder{}
+                   .root("pa")
+                   .eval("pa", _evalp(_get("a", _id()), "root"_var))
+                   .filter(_evalf(_get("a", _cmp("Gt", "1"_cint64)), "root"_var))
+                   .finish(_scan("root", "c1"));
+    ShardingMetadata sm({{_get("a", _id())._n, CollationOp::Ascending}}, true);
+
+    auto prefixId = PrefixId::createForTests();
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                         UUID::gen(),
+                         {},
+                         {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)}},
+                         MultikeynessTrie::fromIndexPath(_get("a", _id())._n),
+                         ConstEval::constFold,
+                         DistributionAndPaths{DistributionType::Centralized},
+                         true /*exists*/,
+                         boost::none /*ce*/,
+                         sm)}}},
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = root;
+    phaseManager.optimize(optimized);
+
+    ASSERT_BETWEEN(5, 11, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // No seek required.
+    ASSERT_EXPLAIN_V2_AUTO(
+        "Root [{pa}]\n"
+        "Filter []\n"
+        "|   FunctionCall [shardFilter]\n"
+        "|   Variable [pa]\n"
+        "IndexScan [{'<indexKey> 0': pa}, scanDefName: c1, indexDefName: index1, interval: "
+        "{>Const [1]}]\n",
+        optimized);
+}
+
+TEST(PhysRewriter, RemoveOrphansIndexDoesntCoverShardKey) {
+    ABT root = NodeBuilder{}
+                   .root("root")
+                   .filter(_evalf(_get("a", _cmp("Gt", "1"_cint64)), "root"_var))
+                   .finish(_scan("root", "c1"));
+    ShardingMetadata sm({{_get("a", _id())._n, CollationOp::Ascending},
+                         {_get("b", _id())._n, CollationOp::Ascending}},
+                        true);
+
+    // Make predicates on PathGet[a] very selective to prefer IndexScan plan over collection scan.
+    ce::PartialSchemaSelHints ceHints;
+    ceHints.emplace(PartialSchemaKey{"root", _get("a", _id())._n}, SelectivityType{0.01});
+
+    auto prefixId = PrefixId::createForTests();
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                         UUID::gen(),
+                         {},
+                         {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)}},
+                         MultikeynessTrie{},
+                         ConstEval::constFold,
+                         DistributionAndPaths{DistributionType::Centralized},
+                         true /*exists*/,
+                         boost::none /*ce*/,
+                         sm)}}},
+        makeHintedCE(std::move(ceHints)),
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = root;
+    phaseManager.optimize(optimized);
+
+    ASSERT_BETWEEN(8, 14, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // Shard key {a: 1, b: 1} and index on {a: 1} means that shard filtering must occur on the seek
+    // side.
+    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
+    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
+    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.nodeType");
+    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.rightChild.nodeType");
+    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.rightChild.filter.nodeType");
+    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.rightChild.filter.name");
+    ASSERT_BSON_PATH("\"LimitSkip\"", explainRoot, "child.rightChild.child.nodeType");
+    ASSERT_BSON_PATH("\"Seek\"", explainRoot, "child.rightChild.child.child.nodeType");
+}
+
+TEST(PhysRewriter, RemoveOrphansDottedPathIndex) {
+    ABT root = NodeBuilder{}
+                   .root("root")
+                   .filter(_evalf(_get("a", _get("b", _cmp("Gt", "1"_cint64))), "root"_var))
+                   .finish(_scan("root", "c1"));
+    ShardingMetadata sm({{_get("a", _get("b", _id()))._n, CollationOp::Ascending}}, true);
+
+    // Make predicates on PathGet[a] PathGet [b] very selective to prefer IndexScan plan over
+    // collection scan.
+    ce::PartialSchemaSelHints ceHints;
+    ceHints.emplace(PartialSchemaKey{"root", _get("a", _get("b", _id()))._n},
+                    SelectivityType{0.01});
+
+    auto prefixId = PrefixId::createForTests();
+    IndexCollationSpec indexSpec{
+        IndexCollationEntry(_get("a", _get("b", _id()))._n, CollationOp::Ascending),
+        IndexCollationEntry(_get("a", _get("c", _id()))._n, CollationOp::Ascending)};
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                         UUID::gen(),
+                         {},
+                         {{"index1", {indexSpec, false}}},
+                         MultikeynessTrie{},
+                         ConstEval::constFold,
+                         DistributionAndPaths{DistributionType::Centralized},
+                         true /*exists*/,
+                         boost::none /*ce*/,
+                         sm)}}},
+        makeHintedCE(std::move(ceHints)),
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = root;
+    phaseManager.optimize(optimized);
+
+    ASSERT_BETWEEN(10, 16, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // Shard key {"a.b": 1} and index on {"a.b": 1, "a.c": 1}
+    // The index scan produces the projections for "a.b" to perform shard filtering.
+    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
+    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
+    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.leftChild.nodeType");
+    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.leftChild.filter.nodeType");
+    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.leftChild.filter.name");
+    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.child.nodeType");
+    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.child.indexDefName");
+}
+
+TEST(PhysRewriter, RemoveOrphanedMultikeyIndex) {
+    // Shard key: {a: 1}
+    // Index: {a: 1, b: 1} -> multikey on b
+    // Query: {$match: {a: {$gt: 2}, b: {$gt: 3}}}
+    ABT root = NodeBuilder{}
+                   .root("root")
+                   .filter(_evalf(_get("a", _cmp("Gt", "2"_cint64)), "root"_var))
+                   .filter(_evalf(_get("b", _cmp("Gt", "3"_cint64)), "root"_var))
+                   .finish(_scan("root", "c1"));
+    ShardingMetadata sm({{_get("a", _id())._n, CollationOp::Ascending}}, true);
+
+    ce::PartialSchemaSelHints ceHints;
+    ceHints.emplace(PartialSchemaKey{"root", _get("a", _id())._n}, SelectivityType{0.01});
+    ceHints.emplace(PartialSchemaKey{"root", _get("b", _id())._n}, SelectivityType{0.01});
+
+    auto prefixId = PrefixId::createForTests();
+    ABT indexPath0 = _get("a", _id())._n;
+    ABT indexPath1 = _get("b", _id())._n;
+    IndexCollationSpec indexSpec{IndexCollationEntry(indexPath0, CollationOp::Ascending),
+                                 IndexCollationEntry(indexPath1, CollationOp::Ascending)};
+    auto multikeyTrie = MultikeynessTrie::fromIndexPath(indexPath0);
+    multikeyTrie.add(indexPath1);
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                         UUID::gen(),
+                         {},
+                         {{"index1", {indexSpec, false}}},
+                         std::move(multikeyTrie),
+                         ConstEval::constFold,
+                         DistributionAndPaths{DistributionType::Centralized},
+                         true /*exists*/,
+                         boost::none /*ce*/,
+                         sm)}}},
+        makeHintedCE(std::move(ceHints)),
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 2 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
+
+    ABT optimized = root;
+    phaseManager.optimize(optimized);
+
+    ASSERT_BETWEEN(24, 30, phaseManager.getMemo().getStats()._physPlanExplorationCount);
+
+    // Ensure that we perform the shard filter using a projection from the index scan.
+    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
+    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
+    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.leftChild.nodeType");
+    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.leftChild.filter.nodeType");
+    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.leftChild.filter.name");
+    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.child.child.nodeType");
+    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.child.child.indexDefName");
+}
+
 // TODO SERVER-78507: Examine the physical alternatives in the memo, rather than the logical nodes,
 // to check that the children of the RIDIntersect have physical alternatives with both combinations
 // of RemoveOrphansRequirement.
@@ -6115,7 +6379,9 @@ TEST(PhysRewriter, RIDIntersectRemoveOrphansImplementer) {
              OptPhase::MemoImplementationPhase},
             prefixId,
             {{{"c1",
-               createScanDef({},
+               createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+                             UUID::gen(),
+                             {},
                              {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}},
                              MultikeynessTrie{},
                              ConstEval::constFold,

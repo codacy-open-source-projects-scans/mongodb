@@ -238,6 +238,12 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
     return sbe::makeE<sbe::EIf>(std::move(cond), std::move(thenBranch), std::move(elseBranch));
 }
 
+std::unique_ptr<sbe::EExpression> makeFillEmptyNull(std::unique_ptr<sbe::EExpression> e) {
+    return sbe::makeE<sbe::EPrimBinary>(sbe::EPrimBinary::fillEmpty,
+                                        std::move(e),
+                                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Null, 0));
+}
+
 /*
  * In the ABT, the shard filtering operation is represented by a FunctionCall node with n
  * arguments, in which each argument is a projection of the value of one field of the
@@ -280,18 +286,14 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::handleShardFilterFuncti
         ++argIdx;
     }
 
-    // Fill out the values with SlotId variables. The specified slot will supply the values
-    // corresponding to the shard key.
+    // Each argument corresponds to one component of the shard key. This loop lowers an expression
+    // for each component. The ShardFilterer expects the BSONObj of the shard key to have values for
+    // each component of the shard key; since shard components may be missing, we must wrap the
+    // expression in a fillEmpty to coerce a missing shard key component to an explicit null. For
+    // example, if the shard key is {a: 1, b: 1} and the document is {b: 123}, the object we will
+    // generate is {a: null, b: 123}.
     for (const ABT& node : fn.nodes()) {
-        // If the child of FunctionCall['shardFilter'] is a Variable, look up the variable in the
-        // slot map.
-        if (node.is<Variable>()) {
-            projectValues.push_back(_varResolver(node.cast<Variable>()->name()));
-        } else {
-            // Otherwise, lower the expression to be referenced by the 'shardFilter' function call.
-            SBEExpressionLowering exprLower{_env, _varResolver, _namedSlots};
-            projectValues.push_back(exprLower.optimize(node));
-        }
+        projectValues.push_back(makeFillEmptyNull(this->optimize(node)));
     }
 
     auto fieldBehavior = sbe::MakeObjSpec::FieldBehavior::kOpen;
@@ -1125,14 +1127,6 @@ void SBENodeLowering::generateSlots(SlotVarMap& slotMap,
     }
 }
 
-static NamespaceStringOrUUID parseFromScanDef(const ScanDefinition& def) {
-    const auto& dbName = def.getOptionsMap().at("database");
-    const auto& uuidStr = def.getOptionsMap().at("uuid");
-    // TODO SERVER-79427 we should no longer deserialize in this method since NamespaceStringOrUUID
-    // should be part of the ScanDefinition.
-    return {DatabaseNameUtil::deserialize(boost::none, dbName), UUID::parse(uuidStr).getValue()};
-}
-
 
 std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
                                                       SlotVarMap& slotMap,
@@ -1150,14 +1144,15 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
 
     const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     if (typeSpec == "mongod") {
-        NamespaceStringOrUUID nss = parseFromScanDef(def);
+        tassert(8423400, "ScanDefinition must have a UUID", def.getUUID().has_value());
+        const UUID& uuid = def.getUUID().get();
 
         // Unused.
         boost::optional<sbe::value::SlotId> seekRecordIdSlot;
 
         sbe::ScanCallbacks callbacks({}, {}, {});
         if (n.useParallelScan()) {
-            return sbe::makeS<sbe::ParallelScanStage>(nss.uuid(),
+            return sbe::makeS<sbe::ParallelScanStage>(uuid,
                                                       rootSlot,
                                                       scanRidSlot,
                                                       boost::none,
@@ -1182,7 +1177,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const PhysicalScanNode& n,
             MONGO_UNREACHABLE;
         }();
         return sbe::makeS<sbe::ScanStage>(
-            nss.uuid(),
+            uuid,
             rootSlot,
             scanRidSlot,
             boost::none,
@@ -1264,7 +1259,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n,
     tassert(6624232, "Collection must exist to lower IndexScan", scanDef.exists());
     const IndexDefinition& indexDef = scanDef.getIndexDefs().at(indexDefName);
 
-    NamespaceStringOrUUID nss = parseFromScanDef(scanDef);
+    tassert(8423399, "ScanDefinition must have a UUID", scanDef.getUUID().has_value());
+    const UUID& uuid = scanDef.getUUID().get();
 
     boost::optional<sbe::value::SlotId> scanRidSlot;
     boost::optional<sbe::value::SlotId> rootSlot;
@@ -1311,7 +1307,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const IndexScanNode& n,
     // Unused.
     boost::optional<sbe::value::SlotId> resultSlot;
 
-    return sbe::makeS<sbe::SimpleIndexScanStage>(nss.uuid(),
+    return sbe::makeS<sbe::SimpleIndexScanStage>(uuid,
                                                  indexDefName,
                                                  !reverse,
                                                  resultSlot,
@@ -1336,7 +1332,9 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
 
     auto& typeSpec = def.getOptionsMap().at("type");
     tassert(6624236, "SeekNode only supports mongod collections", typeSpec == "mongod");
-    NamespaceStringOrUUID nss = parseFromScanDef(def);
+
+    tassert(8423398, "ScanDefinition must have a UUID", def.getUUID().has_value());
+    const UUID& uuid = def.getUUID().get();
 
     boost::optional<sbe::value::SlotId> seekRidSlot;
     boost::optional<sbe::value::SlotId> rootSlot;
@@ -1348,7 +1346,7 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
 
     sbe::ScanCallbacks callbacks({}, {}, {});
     const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
-    return sbe::makeS<sbe::ScanStage>(nss.uuid(),
+    return sbe::makeS<sbe::ScanStage>(uuid,
                                       rootSlot,
                                       seekRidSlot,
                                       boost::none,

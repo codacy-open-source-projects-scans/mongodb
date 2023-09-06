@@ -111,6 +111,7 @@ let testCases = {
     abortMoveCollection: {skip: "primary only"},
     abortReshardCollection: {skip: "primary only"},
     abortTransaction: {skip: "primary only"},
+    abortUnshardCollection: {skip: "primary only"},
     addShard: {skip: "primary only"},
     addShardToZone: {skip: "primary only"},
     aggregate: {
@@ -456,7 +457,6 @@ let testCases = {
     validate: {skip: "does not return user data"},
     validateDBMetadata: {skip: "does not return user data"},
     waitForFailPoint: {skip: "does not return user data"},
-    waitForOngoingChunkSplits: {skip: "does not return user data"},
     whatsmyuri: {skip: "does not return user data"}
 };
 

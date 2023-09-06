@@ -215,6 +215,20 @@ buildvariants:
   - name: server_discovery_and_monitoring_json_test_TG
   - name: server_selection_json_test_TG
   - name: .crypt
+  - name: generate_buildid_to_debug_symbols_mapping
+
+# Note that this task is currently optional;
+# This will eventually become suggested, then required.
+- name: &ubuntu2204-arm64-bazel-compile ubuntu2204-arm64-bazel-compile
+  display_name: "Ubuntu 22.04 arm64 Bazel Compile"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - ubuntu2204-arm64-small
+  stepback: false
+  expansions:
+    compile_variant: *ubuntu2204-arm64-bazel-compile
+  tasks:
+    - name: compile_bazel_dist_test_TG
 
 - <<: *linux-arm64-dynamic-compile-params
   name: &amazon-linux2-arm64-compile amazon-linux2-arm64-compile
@@ -276,6 +290,7 @@ buildvariants:
       ENABLE_GRPC_BUILD=1
     compile_variant: *linux-x86-dynamic-grpc-suggested
     clang_tidy_toolchain: v4
+    large_distro_name: rhel80-xlarge
     test_flags: >-
       --mongosSetParameters="{featureFlagGRPC: true}"
       --mongodSetParameters="{featureFlagGRPC: true}"
@@ -286,6 +301,7 @@ buildvariants:
     - name: compile_test_parallel_dbtest_stream_TG
     - name: generate_buildid_to_debug_symbols_mapping
     - name: .jscore .common
+    - name: noPassthrough_gen
     - name: .lint
     - name: libdeps_graph_linting_TG
       distros:

@@ -74,6 +74,7 @@ struct ServerGlobalParams {
         ShardServerPort = 27018,
         ConfigServerPort = 27019,
         CryptDServerPort = 27020,
+// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
         DefaultGRPCServerPort = 27021,
 #endif
@@ -155,6 +156,7 @@ struct ServerGlobalParams {
     // True if the current binary version is an LTS Version.
     static constexpr bool kIsLTSBinaryVersion = false;
 
+// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
     int grpcPort = DefaultGRPCServerPort;
     int grpcServerMaxThreads = 1000;
@@ -213,11 +215,11 @@ struct ServerGlobalParams {
         }
 
         // This function is to be used for generic FCV references only, and not for FCV-gating.
-        bool isUpgradingOrDowngrading(boost::optional<FCV> version = boost::none) const {
-            if (version == boost::none) {
-                version = getVersion();
-            }
+        bool isUpgradingOrDowngrading() const {
+            return isUpgradingOrDowngrading(getVersion());
+        }
 
+        static bool isUpgradingOrDowngrading(FCV version) {
             // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
             return version != multiversion::GenericFCV::kLatest &&
                 version != multiversion::GenericFCV::kLastContinuous &&

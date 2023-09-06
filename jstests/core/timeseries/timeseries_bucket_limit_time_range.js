@@ -1,9 +1,10 @@
 /**
  * Tests maximum time-range of measurements held in each bucket in a time-series buckets collection.
  * @tags: [
- *   # This test depends on certain writes ending up in the same bucket. Stepdowns may result in
- *   # writes splitting between two primaries, and thus different buckets.
+ *   # This test depends on certain writes ending up in the same bucket. Stepdowns/tenant migration
+ *   # may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   tenant_migration_incompatible,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   # We assume that all nodes in a mixed-mode replica set are using compressed inserts to a
@@ -84,8 +85,7 @@ TimeseriesTest.run((insert) => {
         assert.eq(docTimes[2],
                   bucketDocs[0].control.max[timeFieldName],
                   'invalid control.max for time in first bucket: ' + tojson(bucketDocs[0].control));
-        // Version 2 indicates the bucket is compressed.
-        assert.eq(2,
+        assert.eq(TimeseriesTest.BucketVersion.kCompressed,
                   bucketDocs[0].control.version,
                   'unexpected control.version in first bucket: ' + tojson(bucketDocs));
 
@@ -111,13 +111,11 @@ TimeseriesTest.run((insert) => {
             bucketDocs[1].control.max[timeFieldName],
             'invalid control.max for time in second bucket: ' + tojson(bucketDocs[1].control));
         if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
-            // Version 2 indicates the bucket is compressed.
-            assert.eq(2,
+            assert.eq(TimeseriesTest.BucketVersion.kCompressed,
                       bucketDocs[1].control.version,
                       'unexpected control.version in second bucket: ' + tojson(bucketDocs));
         } else {
-            // Version 1 indicates the bucket is uncompressed.
-            assert.eq(1,
+            assert.eq(TimeseriesTest.BucketVersion.kUncompressed,
                       bucketDocs[1].control.version,
                       'unexpected control.version in second bucket: ' + tojson(bucketDocs));
         }

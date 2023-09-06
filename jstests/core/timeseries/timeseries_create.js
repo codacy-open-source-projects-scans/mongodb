@@ -9,7 +9,6 @@
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
 const testDB = db.getSiblingDB(jsTestName());
 let collCount = 0;
@@ -138,59 +137,33 @@ testValidTimeseriesOptions({timeField: "time", metaField: "meta"});
 testValidTimeseriesOptions({timeField: "time", granularity: "minutes"});
 testValidTimeseriesOptions({timeField: "time", metaField: "meta", granularity: "minutes"});
 
-if (!TimeseriesTest.timeseriesScalabilityImprovementsEnabled(testDB)) {
-    // A bucketMaxSpanSeconds may be provided, but only if they are the default for the granularity.
-    testValidTimeseriesOptions({
-        timeField: "time",
-        metaField: "meta",
-        granularity: "seconds",
-        bucketMaxSpanSeconds: 60 * 60
-    });
-    testValidTimeseriesOptions({
-        timeField: "time",
-        metaField: "meta",
-        granularity: "minutes",
-        bucketMaxSpanSeconds: 60 * 60 * 24
-    });
-    testValidTimeseriesOptions({
-        timeField: "time",
-        metaField: "meta",
-        granularity: "hours",
-        bucketMaxSpanSeconds: 60 * 60 * 24 * 30
-    });
-} else {
-    // Granularity can include a corresponding bucketMaxSpanSeconds value, but not a
-    // bucketRoundingSeconds value (even if the value corresponds to the granularity).
-    testInvalidTimeseriesOptions({
-        timeField: "time",
-        metaField: "meta",
-        granularity: "seconds",
-        bucketMaxSpanSeconds: 60 * 60,
-        bucketRoundingSeconds: 60
-    },
-                                 ErrorCodes.InvalidOptions);
+// Granularity can include a corresponding bucketMaxSpanSeconds value, but not a
+// bucketRoundingSeconds value (even if the value corresponds to the granularity).
+testInvalidTimeseriesOptions({
+    timeField: "time",
+    metaField: "meta",
+    granularity: "seconds",
+    bucketMaxSpanSeconds: 60 * 60,
+    bucketRoundingSeconds: 60
+},
+                             ErrorCodes.InvalidOptions);
 
-    // Granularity may be provided with bucketMaxSpanSeconds as long as it corresponds to the
-    // granularity.
-    testValidTimeseriesOptions({
-        timeField: "time",
-        metaField: "meta",
-        granularity: "seconds",
-        bucketMaxSpanSeconds: 60 * 60
-    });
-    testValidTimeseriesOptions({
-        timeField: "time",
-        metaField: "meta",
-        granularity: "minutes",
-        bucketMaxSpanSeconds: 60 * 60 * 24
-    });
-    testValidTimeseriesOptions({
-        timeField: "time",
-        metaField: "meta",
-        granularity: "hours",
-        bucketMaxSpanSeconds: 60 * 60 * 24 * 30
-    });
-}
+// Granularity may be provided with bucketMaxSpanSeconds as long as it corresponds to the
+// granularity.
+testValidTimeseriesOptions(
+    {timeField: "time", metaField: "meta", granularity: "seconds", bucketMaxSpanSeconds: 60 * 60});
+testValidTimeseriesOptions({
+    timeField: "time",
+    metaField: "meta",
+    granularity: "minutes",
+    bucketMaxSpanSeconds: 60 * 60 * 24
+});
+testValidTimeseriesOptions({
+    timeField: "time",
+    metaField: "meta",
+    granularity: "hours",
+    bucketMaxSpanSeconds: 60 * 60 * 24 * 30
+});
 
 testValidTimeseriesOptions({timeField: "time", metaField: "meta", granularity: "minutes"});
 testValidTimeseriesOptions({timeField: "time", metaField: "meta", granularity: "hours"});
@@ -249,23 +222,43 @@ testTimeseriesNamespaceExists((testDB, collName) => {
     assert.commandWorked(
         testDB.createCollection(coll.getName(), {timeseries: {timeField: "time"}}));
     const bucketsColl = testDB.getCollection('system.buckets.' + coll.getName());
-    assert.commandWorked(bucketsColl.insert(
-        {control: {version: 1, min: {time: ISODate()}, max: {time: ISODate()}}, data: {}}));
+    assert.commandWorked(bucketsColl.insert({
+        control: {
+            version: TimeseriesTest.BucketVersion.kUncompressed,
+            min: {time: ISODate()},
+            max: {time: ISODate()}
+        },
+        data: {}
+    }));
     assert.commandFailedWithCode(bucketsColl.insert({
         control: {version: 'not a number', min: {time: ISODate()}, max: {time: ISODate()}},
         data: {}
     }),
                                  ErrorCodes.DocumentValidationFailure);
-    assert.commandFailedWithCode(
-        bucketsColl.insert(
-            {control: {version: 1, min: {time: 'not a date'}, max: {time: ISODate()}}, data: {}}),
-        ErrorCodes.DocumentValidationFailure);
-    assert.commandFailedWithCode(
-        bucketsColl.insert(
-            {control: {version: 1, min: {time: ISODate()}, max: {time: 'not a date'}}, data: {}}),
-        ErrorCodes.DocumentValidationFailure);
     assert.commandFailedWithCode(bucketsColl.insert({
-        control: {version: 1, min: {time: ISODate()}, max: {time: ISODate()}},
+        control: {
+            version: TimeseriesTest.BucketVersion.kUncompressed,
+            min: {time: 'not a date'},
+            max: {time: ISODate()}
+        },
+        data: {}
+    }),
+                                 ErrorCodes.DocumentValidationFailure);
+    assert.commandFailedWithCode(bucketsColl.insert({
+        control: {
+            version: TimeseriesTest.BucketVersion.kUncompressed,
+            min: {time: ISODate()},
+            max: {time: 'not a date'}
+        },
+        data: {}
+    }),
+                                 ErrorCodes.DocumentValidationFailure);
+    assert.commandFailedWithCode(bucketsColl.insert({
+        control: {
+            version: TimeseriesTest.BucketVersion.kUncompressed,
+            min: {time: ISODate()},
+            max: {time: ISODate()}
+        },
         data: 'not an object'
     }),
                                  ErrorCodes.DocumentValidationFailure);

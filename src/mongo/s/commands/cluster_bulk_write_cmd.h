@@ -127,6 +127,10 @@ public:
         return false;
     }
 
+    LogicalOp getLogicalOp() const final {
+        return LogicalOp::opBulkWrite;
+    }
+
     std::string help() const override {
         return "command to apply inserts, updates and deletes in bulk";
     }
@@ -202,7 +206,7 @@ public:
                                              [&] {
                                                  if (!opCtx->getLogicalSessionId())
                                                      return OperationSessionInfoFromClient();
-                                                 // TODO (SERVER-77506): This code path does not
+                                                 // TODO (SERVER-80525): This code path does not
                                                  // clear the setAutocommit field on the presence of
                                                  // TransactionRouter::get
                                                  return OperationSessionInfoFromClient(

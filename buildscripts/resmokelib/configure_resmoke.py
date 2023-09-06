@@ -5,7 +5,6 @@ import configparser
 import datetime
 import os
 import os.path
-import distutils.spawn
 from pathlib import Path
 import sys
 import platform
@@ -13,6 +12,7 @@ import random
 import glob
 import textwrap
 import shlex
+import shutil
 import traceback
 from typing import Dict, Optional
 
@@ -135,7 +135,7 @@ def _validate_config(parser):
             parser.error("--recordWith is only supported on x86 and x86_64 Linux distributions")
             return
 
-        resolved_path = distutils.spawn.find_executable(_config.UNDO_RECORDER_PATH)
+        resolved_path = shutil.which(_config.UNDO_RECORDER_PATH)
         if resolved_path is None:
             parser.error(
                 f"Cannot find the UndoDB live-record binary '{_config.UNDO_RECORDER_PATH}'. Check that it exists and is executable"
@@ -166,7 +166,14 @@ def _set_up_tracing(
         parent_span_id: Optional[str],
         extra_context: Optional[Dict[str, object]],
 ) -> bool:
-    """Try to set up otel tracing. On success return True. On failure return False."""
+    """Try to set up otel tracing. On success return True. On failure return False.
+
+    This method does 4 things.
+    1. If a user has passed in a grpc OTel endpoint then we set up an OTLPSpanExporter to send OTEL metrics to that endpoint.
+    2. If a user passes in a filename to store OTel metrics in then we are going to export metrics to that file. It is perfectly valid to have an OTel metrics endpoint and a OTel metrics file. We use a custom exporter `FileSpanExporter` to write data to the passed in file.
+    3. If a user passes in a parent trace id and a child trace id we assume both of those. This allows us to tie resmoke metrics to a parent metric.
+    4. If a user passes in extra_baggage, we add these "global" values to our baggage. This allows us to propagate these values to all child spans in resmoke using our custom span processor `BatchedBaggageSpanProcessor`.
+    """
 
     success = True
     # Service name is required for most backends
@@ -422,6 +429,14 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.TRANSPORT_LAYER = config.pop("transport_layer")
     _config.USER_FRIENDLY_OUTPUT = config.pop("user_friendly_output")
     _config.SANITY_CHECK = config.pop("sanity_check")
+    _config.DOCKER_COMPOSE_BUILD_IMAGES = config.pop("docker_compose_build_images")
+    if _config.DOCKER_COMPOSE_BUILD_IMAGES is not None:
+        _config.DOCKER_COMPOSE_BUILD_IMAGES = _config.DOCKER_COMPOSE_BUILD_IMAGES.split(",")
+    _config.DOCKER_COMPOSE_BUILD_ENV = config.pop("docker_compose_build_env")
+    _config.DOCKER_COMPOSE_TAG = config.pop("docker_compose_tag")
+    # Always set this to True if we are building images for docker compose
+    _config.EXTERNAL_SUT = config.pop(
+        "external_sut") or _config.DOCKER_COMPOSE_BUILD_IMAGES is not None
 
     # Internal testing options.
     _config.INTERNAL_PARAMS = config.pop("internal_params")

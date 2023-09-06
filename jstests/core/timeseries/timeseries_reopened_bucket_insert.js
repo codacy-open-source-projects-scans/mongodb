@@ -5,6 +5,10 @@
  *   # This test depends on certain writes ending up in the same bucket. Stepdowns may result in
  *   # writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
+ *   # This test inserts uncompressed buckets directly into the buckets collection. This may cause
+ *   # intermittent failures on tenant migration passthroughs when validation checks that all
+ *   # buckets are compressed.
+ *   tenant_migration_incompatible,
  *   # We need a timeseries collection.
  *   requires_timeseries,
  *   # This test depends on stats read from the primary node in replica sets.
@@ -13,12 +17,6 @@
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-
-if (!TimeseriesTest.timeseriesScalabilityImprovementsEnabled(db)) {
-    jsTestLog(
-        "Skipped test as the featureFlagTimeseriesScalabilityImprovements feature flag is not enabled.");
-    quit();
-}
 
 const testDB = db.getSiblingDB(jsTestName());
 const coll = testDB.timeseries_reopened_bucket_insert;
@@ -92,7 +90,7 @@ const checkIfBucketReopened = function(
     const bucketDoc = {
         "_id": ObjectId("01091c2c050b7495eaef4580"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -112,7 +110,7 @@ const checkIfBucketReopened = function(
     const missingClosedFlagBucketDoc = {
         "_id": ObjectId("02091c2c050b7495eaef4581"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -158,7 +156,7 @@ const checkIfBucketReopened = function(
     const bucketDoc = {
         "_id": ObjectId("03091c2c050b7495eaef4580"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -244,8 +242,10 @@ const checkIfBucketReopened = function(
     }
     // Time forwards will open a new bucket, and close and compress the old one.
     checkIfBucketReopened(forward, /* willCreateBucket */ true, /* willReopenBucket */ false);
-    // Version 2 indicates the bucket is compressed.
-    assert.eq(2, bucketsColl.find({"control.version": 2}).toArray().length);
+    assert.eq(2,
+              bucketsColl.find({"control.version": TimeseriesTest.BucketVersion.kCompressed})
+                  .toArray()
+                  .length);
 
     // We expect to reopen the compressed bucket with time backwards.
     checkIfBucketReopened(backward, /* willCreateBucket= */ false, /* willReopenBucket= */ true);
@@ -281,7 +281,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc = {
         "_id": ObjectId("04091c2c050b7495eaef4582"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -301,7 +301,7 @@ const checkIfBucketReopened = function(
     const compressedBucketDoc = {
         "_id": ObjectId("05091c2c050b7495eaef4583"),
         "control": {
-            "version": 2,
+            "version": TimeseriesTest.BucketVersion.kCompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -313,15 +313,12 @@ const checkIfBucketReopened = function(
             "closed": false
         },
         "meta": "NonSuitableBucket2",
-        "data": {
-            "_id": {"0": ObjectId("63091c30138e9261fd70a903")},
-            "time": {"0": ISODate("2022-08-26T19:19:30Z")}
-        }
+        "data": {"_id": BinData(7, "BwBjCRwwE46SYf1wqQMA"), "time": BinData(7, "CQDQVZjbggEAAAA=")}
     };
     const closedAndCompressedBucketDoc = {
         "_id": ObjectId("06091c2c050b7495eaef4584"),
         "control": {
-            "version": 2,
+            "version": TimeseriesTest.BucketVersion.kCompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -333,15 +330,12 @@ const checkIfBucketReopened = function(
             "closed": true
         },
         "meta": "NonSuitableBucket3",
-        "data": {
-            "_id": {"0": ObjectId("63091c30138e9261fd70a903")},
-            "time": {"0": ISODate("2022-08-26T19:19:30Z")}
-        }
+        "data": {"_id": BinData(7, "BwBjCRwwE46SYf1wqQMA"), "time": BinData(7, "CQDQVZjbggEAAAA=")}
     };
     const year2000BucketDoc = {
         "_id": ObjectId("07091c2c050b7495eaef4585"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2000-08-26T19:19:00Z")
@@ -361,7 +355,7 @@ const checkIfBucketReopened = function(
     const metaMismatchFieldBucketDoc = {
         "_id": ObjectId("08091c2c050b7495eaef4586"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -423,7 +417,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc1 = {
         "_id": ObjectId("09091c2c050b7495eaef4581"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -443,7 +437,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc2 = {
         "_id": ObjectId("10091c2c050b7495eaef4582"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -463,7 +457,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc3 = {
         "_id": ObjectId("11091c2c050b7495eaef4583"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -538,7 +532,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc1 = {
         "_id": ObjectId("12091c2c050b7495eaef4584"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -558,7 +552,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc2 = {
         "_id": ObjectId("13091c2c050b7495eaef4585"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -578,7 +572,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc3 = {
         "_id": ObjectId("14091c2c050b7495eaef4586"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -598,7 +592,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc4 = {
         "_id": ObjectId("15091c2c050b7495eaef4587"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -675,7 +669,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc1 = {
         "_id": ObjectId("16091c2c050b7495eaef4584"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-09-26T19:19:00Z")
@@ -694,7 +688,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc2 = {
         "_id": ObjectId("17091c2c050b7495eaef4585"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-08-26T19:19:00Z")
@@ -713,7 +707,7 @@ const checkIfBucketReopened = function(
     const closedBucketDoc3 = {
         "_id": ObjectId("18091c2c050b7495eaef4586"),
         "control": {
-            "version": 1,
+            "version": TimeseriesTest.BucketVersion.kUncompressed,
             "min": {
                 "_id": ObjectId("63091c30138e9261fd70a903"),
                 "time": ISODate("2022-07-26T19:19:00Z")

@@ -66,7 +66,7 @@ bool isQuerableEncryptionOperation(OperationContext* opCtx) {
     auto curop = CurOp::get(opCtx);
 
     while (curop != nullptr) {
-        if (curop->debug().shouldOmitDiagnosticInformation) {
+        if (curop->getShouldOmitDiagnosticInformation()) {
             return true;
         }
 
@@ -137,7 +137,7 @@ void Top::_record(OperationContext* opCtx,
                   long long micros,
                   Command::ReadWriteType readWriteType) {
     if (c.isStatsRecordingAllowed) {
-        c.isStatsRecordingAllowed = !CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation;
+        c.isStatsRecordingAllowed = !CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
     }
 
     _incrementHistogram(opCtx, micros, &c.opLatencyHistogram, readWriteType);
@@ -152,6 +152,8 @@ void Top::_record(OperationContext* opCtx,
     switch (logicalOp) {
         case LogicalOp::opInvalid:
             // use 0 for unknown, non-specific
+            break;
+        case LogicalOp::opBulkWrite:
             break;
         case LogicalOp::opUpdate:
             c.update.inc(micros);

@@ -719,7 +719,7 @@ TEST_F(QueryPlannerColumnarTest, GroupTest) {
         }
     })");
 
-    ASSERT(!cq->pipeline().empty());
+    ASSERT(!cq->cqPipeline().empty());
     auto solution =
         QueryPlanner::extendWithAggPipeline(*cq, std::move(solns[0]), {} /* secondaryCollInfos */);
     ASSERT_OK(QueryPlannerTestLib::solutionMatches(R"({
@@ -758,7 +758,7 @@ TEST_F(QueryPlannerColumnarTest, MatchGroupTest) {
         }
     })");
 
-    ASSERT(!cq->pipeline().empty());
+    ASSERT(!cq->cqPipeline().empty());
     auto solution =
         QueryPlanner::extendWithAggPipeline(*cq, std::move(solns[0]), {} /* secondaryCollInfos */);
     ASSERT_OK(QueryPlannerTestLib::solutionMatches(R"({
@@ -798,7 +798,7 @@ TEST_F(QueryPlannerColumnarTest, MatchGroupWithOverlappingFieldsTest) {
         }
     })");
 
-    ASSERT(!cq->pipeline().empty());
+    ASSERT(!cq->cqPipeline().empty());
     auto solution =
         QueryPlanner::extendWithAggPipeline(*cq, std::move(solns[0]), {} /* secondaryCollInfos */);
     ASSERT_OK(QueryPlannerTestLib::solutionMatches(R"({
@@ -871,7 +871,7 @@ TEST_F(QueryPlannerColumnarTest, DottedFieldsWithGroupStageDoesNotRequireProject
         }
     })");
 
-    ASSERT(!cq->pipeline().empty());
+    ASSERT(!cq->cqPipeline().empty());
     auto solution =
         QueryPlanner::extendWithAggPipeline(*cq, std::move(solns[0]), {} /* secondaryCollInfos */);
     ASSERT_OK(QueryPlannerTestLib::solutionMatches(R"({
@@ -887,6 +887,46 @@ TEST_F(QueryPlannerColumnarTest, DottedFieldsWithGroupStageDoesNotRequireProject
                 }
             }
         })",
+                                                   solution->root()))
+        << solution->root()->toString();
+}
+
+TEST_F(QueryPlannerColumnarTest, ExtraFieldsNotPermittedWhenApplyingExclusionProjectionAfter) {
+    addColumnStoreIndexAndEnableFilterSplitting();
+
+    auto pipeline = Pipeline::parse(
+        {fromjson(
+            "{$_internalProjection: {spec: {newfield: {$const: 999}}, policies: 'addFields'}}")},
+        expCtx);
+
+    runQueryWithPipeline(BSONObj(), BSON("a" << 1), makeInnerPipelineStages(*pipeline));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(R"({
+        column_scan: {
+            filtersByPath: {},
+            outputFields: ['_id', 'a'],
+            matchFields: []
+        }
+    })");
+
+    ASSERT(!cq->cqPipeline().empty());
+    auto solution =
+        QueryPlanner::extendWithAggPipeline(*cq, std::move(solns[0]), {} /* secondaryCollInfos */);
+    ASSERT_OK(QueryPlannerTestLib::solutionMatches(R"({
+        proj: {
+            spec: {newfield: { $const: 999 }},
+            isAddition: true,
+            node: {
+                 column_scan: {
+                     filtersByPath: {},
+                     outputFields: ['_id', 'a'],
+                     matchFields: [],
+                     extraFieldsPermitted: false
+                 }
+            }
+        }
+    })",
                                                    solution->root()))
         << solution->root()->toString();
 }
@@ -1097,7 +1137,7 @@ TEST_F(QueryPlannerColumnarTest, UseColumnStoreWithAncestorField) {
         }
     })");
 
-    ASSERT(!cq->pipeline().empty());
+    ASSERT(!cq->cqPipeline().empty());
     auto solution =
         QueryPlanner::extendWithAggPipeline(*cq, std::move(solns[0]), {} /* secondaryCollInfos
         */);

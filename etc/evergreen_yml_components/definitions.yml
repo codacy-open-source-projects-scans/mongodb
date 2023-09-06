@@ -200,6 +200,25 @@ variables:
   private_key_file: src/powercycle.pem
   private_key_remote: ${__project_aws_ssh_key_value}
 
+- &compile_bazel_task_group_template
+  name: compile_bazel_task_group_template
+  max_hosts: 1
+  tasks: []
+  setup_group_can_fail_task: true
+  setup_group:
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - func: "set task expansion macros"
+  - func: "f_expansions_write"
+  - func: "set up venv"
+  - func: "upload pip requirements"
+  - func: "configure evergreen api credentials"
+  - func: "get buildnumber"
+  - func: "f_expansions_write"
+  - func: "set up credentials"
+  - func: "f_expansions_write"
+
+
 - &compile_task_group_template
   name: compile_task_group_template
   max_hosts: 1
@@ -820,8 +839,16 @@ functions:
       binary: bash
       args:
       - "src/evergreen/functions/venv_setup.sh"
-      env:
-        pip_dir: ${pip_dir}
+
+  # This needs to be run after "set up venv"
+  # This depends on having a venv already setup
+  # This just installs the extra deps needed for libdeps
+  "set up libdeps venv": &set_up_libdeps_venv
+    command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/libdeps_setup.sh"
 
   "upload pip requirements": &upload_pip_requirements
     command: s3.put
@@ -1352,6 +1379,36 @@ functions:
       binary: bash
       args:
       - "src/evergreen/scons_raw_compile.sh"
+
+  "fetch bazel":
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/get_bazelisk.sh"
+
+  "bazel compile (gcc)":
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/bazel_compile.sh"
+
+  "bazel compile (clang)":
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/bazel_compile.sh"
 
   "ninja compile":
   - *f_expansions_write
@@ -2490,6 +2547,26 @@ functions:
       files:
       - wiki_page_location.json
 
+  ### Helps with debugging docker compose generation failures ###
+  "upload docker compose":
+  - command: archive.targz_pack
+    params:
+      target: "docker_compose.tgz"
+      source_dir: "src"
+      include:
+      - "docker_compose/**"
+  - command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/docker_compose.tgz
+      remote_file: ${project}/${build_variant}/${revision}/docker-compose-${task_id}-${execution}.tgz
+      bucket: mciuploads
+      permissions: public-read
+      content_type: application/gzip
+      display_name: Docker Compose
+
   "attach local resmoke invocation":
     command: s3.put
     params:
@@ -2539,6 +2616,7 @@ post:
 - func: "attach artifacts"
 - func: "save ec2 task artifacts"
 - func: "attach wiki page"
+- func: "upload docker compose"
 - func: "upload jstestfuzz minimized output"
 - func: "kill processes"
 - func: "save local client logs"
@@ -2583,6 +2661,26 @@ tasks:
         ${additional_compile_targets|}
       task_compile_flags: >-
         PREFIX=dist-test
+
+## compile - build bazel targets ##
+## The bazel migration is in progress & this
+## task ensures we can build with bazel.
+- name: compile_bazel_dist_test
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  # TODO SERVER-80380: Remove "fetch bazel" once bazelisk is added to the toolchain
+  - func: "fetch bazel"
+  - func: "bazel compile (gcc)"
+    vars:
+      targets: src/mongo/db/commands:fsync_locked
+      compiler: gcc
+  - func: "bazel compile (clang)"
+    vars:
+      targets: src/mongo/db/commands:fsync_locked
+      compiler: clang
 
 ## compile - build all scons targets except unittests ##
 - name: compile_dist_test_half
@@ -2629,21 +2727,6 @@ tasks:
       permissions: public-read
       content_type: application/tar
       display_name: Benchmarks
-
-- name: compile_venv_deps_check
-  commands:
-  - *f_expansions_write
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - *f_expansions_write
-  - *kill_processes
-  - *cleanup_environment
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/compile_venv_dependency_check.sh"
 
 - name: determine_patch_tests
   commands:
@@ -2707,14 +2790,13 @@ tasks:
       - "./etc/evergreen_nightly.yml"
       - "./etc/evergreen.yml"
       - "./etc/evergreen_yml_components/**"
-      - "./etc/pip/**"
       - "./etc/repo_config.yaml"
       - "./etc/scons/**"
+      - "docker_compose/**"
       - "buildscripts/**"
       - "jstests/**"
       - "patch_files.txt"
       - "evergreen/**"
-      - "antithesis/**"
       - "src/**.idl"
       - "src/mongo/client/sdam/json_tests/sdam_tests/**"
       - "src/mongo/client/sdam/json_tests/server_selection_tests/**"
@@ -2725,6 +2807,8 @@ tasks:
       - "src/third_party/JSON-Schema-Test-Suite/tests/draft4/**"
       - "src/third_party/mock_ocsp_responder/**"
       - "src/third_party/schemastore.org/**"
+      - "poetry.lock"
+      - "pyproject.toml"
       exclude_files:
       - "*_test.pdb"
 
@@ -4218,6 +4302,36 @@ tasks:
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
+## Standalone fuzzer comparing find query results of Bonsai optimizations vs SBE stage-builders ##
+- <<: *jstestfuzz_template
+  name: query_fuzzer_bonsai_m2_vs_sbe_stagebuilders_gen
+  tags: ["query_fuzzer", "require_npm", "random_name", "feature_flag_guarded", "cqf_only"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      num_files: 5
+      num_tasks: 5
+      jstestfuzz_vars: --diffTestingMode bonsai_m2_vs_sbe_stagebuilders
+      npm_command: query-fuzzer
+      suite: generational_fuzzer
+      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+
+## Standalone fuzzer comparing find query results of Bonsai optimizations vs Classic ##
+- <<: *jstestfuzz_template
+  name: query_fuzzer_bonsai_m2_vs_classic_gen
+  tags: ["query_fuzzer", "require_npm", "random_name", "feature_flag_guarded", "cqf_only"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      num_files: 5
+      num_tasks: 5
+      jstestfuzz_vars: --diffTestingMode bonsai_m2_vs_classic
+      npm_command: query-fuzzer
+      suite: generational_fuzzer
+      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+
 ## Standalone generational fuzzer for checking optimized and unoptimized change stream pipelines ##
 - <<: *jstestfuzz_template
   name: change_stream_optimization_fuzzer_gen
@@ -5403,11 +5517,6 @@ tasks:
   - *f_expansions_write
   - func: "do setup"
   - func: "f_expansions_write"
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/external_auth_pip.sh"
   - func: "run tests"
     vars:
       resmoke_jobs_max: ${external_auth_jobs_max|4}
@@ -5426,11 +5535,6 @@ tasks:
       silent: true
       args:
       - "src/evergreen/external_auth_aws_setup.sh"
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/external_auth_aws_pip.sh"
   - func: "run tests"
 
 - <<: *task_template
@@ -5440,11 +5544,6 @@ tasks:
   - *f_expansions_write
   - func: "do setup"
   - func: "f_expansions_write"
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/external_auth_pip.sh"
   - command: subprocess.exec
     params:
       binary: bash
@@ -5968,7 +6067,7 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
-  name: sharded_collections_jscore_passthrough_with_config_shard_gen
+  name: sharded_collections_jscore_passthrough_with_auto_bootstrap_gen
   tags: ["sharding", "jscore"]
   commands:
   - func: "generate resmoke tasks"
@@ -5994,7 +6093,7 @@ tasks:
   - func: "run tests"
 
 - <<: *gen_task_template
-  name: sharding_jscore_passthrough_with_config_shard_gen
+  name: sharding_jscore_passthrough_with_auto_bootstrap_gen
   tags: ["sharding", "jscore", "common"]
   commands:
   - func: "generate resmoke tasks"
@@ -6156,10 +6255,9 @@ tasks:
       use_large_distro: "true"
       fallback_num_sub_suites: 10
 
-# TODO(SERVER-57896): Add "serverless" tag to shard merge passthrough when no longer feature flagged
 - <<: *gen_task_template
   name: shard_merge_jscore_passthrough_gen
-  tags: ["shard_merge"]
+  tags: ["serverless"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6167,7 +6265,7 @@ tasks:
 
 - <<: *gen_task_template
   name: shard_merge_causally_consistent_jscore_passthrough_gen
-  tags: ["shard_merge"]
+  tags: ["serverless"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6218,10 +6316,9 @@ tasks:
     vars:
       use_large_distro: "true"
 
-# TODO(SERVER-68643): Add "serverless" tag to shard merge passthrough when no longer feature flagged
 - <<: *gen_task_template
   name: shard_merge_multi_stmt_txn_jscore_passthrough_gen
-  tags: ["shard_merge"]
+  tags: ["serverless", "txn"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6287,6 +6384,14 @@ tasks:
 
 - <<: *gen_task_template
   name: multitenancy_jscore_passthrough_gen
+  tags: ["serverless"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: multitenancy_dollar_tenant_with_expect_prefix_jscore_passthrough_gen
   tags: ["serverless"]
   commands:
   - func: "generate resmoke tasks"
@@ -6437,7 +6542,7 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *gen_task_template
-  name: concurrency_sharded_with_config_shard_gen
+  name: concurrency_sharded_with_auto_bootstrap_gen
   tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
@@ -6468,7 +6573,7 @@ tasks:
       resmoke_jobs_max: 1
 
 - <<: *gen_task_template
-  name: concurrency_sharded_with_balancer_and_config_shard_gen
+  name: concurrency_sharded_with_balancer_and_auto_bootstrap_gen
   tags: ["concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
@@ -7550,8 +7655,9 @@ tasks:
       content_type: ${content_type|application/gzip}
       display_name: Source tarball
       # We only need to upload the source tarball from one of the build variants
-      # because it should be the same everywhere, so just use rhel80/windows.
-      build_variants: [rhel80, windows]
+      # because it should be the same everywhere, so just use rhel70/rhel80/windows.
+      # TODO(SERVER-80479): remove rhel70 when support for it has been dropped.
+      build_variants: [rhel70, rhel80, windows]
   - command: s3.put
     params:
       optional: true
@@ -7754,7 +7860,10 @@ tasks:
       remote_file: ${project}/${build_variant}/${revision}/sources/mongo-src-${build_id}.${ext|tgz}
       bucket: mciuploads
       local_file: src/distsrc.${ext|tgz}
-      build_variants: [rhel70, windows]
+      # We only need to upload the source tarball from one of the build variants
+      # because it should be the same everywhere, so just use rhel70/rhel80/windows.
+      # TODO(SERVER-80479): remove rhel70 when support for it has been dropped.
+      build_variants: [rhel70, rhel80, windows]
   - func: "generate compile expansions"
   - func: "apply compile expansions"
   - func: "fetch dist debugsymbols"
@@ -7828,7 +7937,10 @@ tasks:
       permissions: public-read
       content_type: ${content_type|application/gzip}
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}
-      build_variants: [rhel70, windows]
+      # We only need to upload the source tarball from one of the build variants
+      # because it should be the same everywhere, so just use rhel70/rhel80/windows.
+      # TODO(SERVER-80479): remove rhel70 when support for it has been dropped.
+      build_variants: [rhel70, rhel80, windows]
 
   # Put the debug symbols
   # push directly to repo due to limitations in file size SERVER-63432
@@ -7876,7 +7988,10 @@ tasks:
       permissions: public-read
       content_type: ${content_type|application/gzip}
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sig
-      build_variants: [rhel70, windows]
+      # We only need to upload the source tarball from one of the build variants
+      # because it should be the same everywhere, so just use rhel70/rhel80/windows.
+      # TODO(SERVER-80479): remove rhel70 when support for it has been dropped.
+      build_variants: [rhel70, rhel80, windows]
 
   # Put the debug symbols signature
   - command: s3.put
@@ -7935,7 +8050,10 @@ tasks:
       bucket: build-push-testing
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha1
-      build_variants: [rhel70, windows]
+      # We only need to upload the source tarball from one of the build variants
+      # because it should be the same everywhere, so just use rhel70/rhel80/windows.
+      # TODO(SERVER-80479): remove rhel70 when support for it has been dropped.
+      build_variants: [rhel70, rhel80, windows]
 
   # Put the debug symbols sha1
   - command: s3.put
@@ -7994,7 +8112,10 @@ tasks:
       bucket: build-push-testing
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.sha256
-      build_variants: [rhel70, windows]
+      # We only need to upload the source tarball from one of the build variants
+      # because it should be the same everywhere, so just use rhel70/rhel80/windows.
+      # TODO(SERVER-80479): remove rhel70 when support for it has been dropped.
+      build_variants: [rhel70, rhel80, windows]
 
   # Put the debug symbols sha256
   - command: s3.put
@@ -8053,7 +8174,10 @@ tasks:
       permissions: public-read
       content_type: text/plain
       remote_file: ${push_path}-STAGE/${push_name}/mongodb-src-${src_suffix}-${task_id}.${ext|tar.gz}.md5
-      build_variants: [rhel70, windows]
+      # We only need to upload the source tarball from one of the build variants
+      # because it should be the same everywhere, so just use rhel70/rhel80/windows.
+      # TODO(SERVER-80479): remove rhel70 when support for it has been dropped.
+      build_variants: [rhel70, rhel80, windows]
 
   # Put the debug symbols md5
   - command: s3.put
@@ -8644,7 +8768,34 @@ tasks:
   - func: "do setup for antithesis"
   - func: "antithesis image build and push"
     vars:
-      suite: antithesis_concurrency_sharded_with_stepdowns_and_balancer
+      suite: concurrency_sharded_with_stepdowns_and_balancer
+
+- <<: *antithesis_task_template
+  name: antithesis_concurrency_sharded_multi_stmt_txn_kill_primary
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: concurrency_sharded_multi_stmt_txn_kill_primary
+
+- <<: *antithesis_task_template
+  name: antithesis_replica_sets_jscore_passthrough
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: replica_sets_jscore_passthrough
+
+- <<: *antithesis_task_template
+  name: antithesis_core
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: core
 
 - <<: *task_template
   name: query_golden_classic
@@ -8735,6 +8886,11 @@ task_groups:
   name: compile_dist_test_TG
   tasks:
   - compile_dist_test
+
+- <<: *compile_bazel_task_group_template
+  name: compile_bazel_dist_test_TG
+  tasks:
+  - compile_bazel_dist_test
 
 - <<: *compile_task_group_template
   name: compile_upload_benchmarks_TG

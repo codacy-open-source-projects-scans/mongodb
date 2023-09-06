@@ -234,6 +234,7 @@ let testCases = {
         checkWriteConcern: true,
         useLogs: true,
     },
+    abortUnshardCollection: {skip: "does not accept read or write concern"},
     addShard: {skip: "does not accept read or write concern"},
     addShardToZone: {skip: "does not accept read or write concern"},
     aggregate: {
@@ -276,8 +277,8 @@ let testCases = {
         // },
         // checkReadConcern: false,
         // checkWriteConcern: true,
-        // // TODO SERVER-78258: Depending on what profiling behavior we implement we may be able to
-        // // use profiler output here instead rather than logs.
+        // // TODO SERVER-23266: If the overall batch command if profiled, then it would be better
+        // // to use profiling.  In the meantime, use logs.
         // useLogs: true,
         skip: "requires feature flag"
     },
@@ -820,7 +821,6 @@ let testCases = {
     voteCommitImportCollection: {skip: "internal command"},
     voteCommitIndexBuild: {skip: "internal command"},
     waitForFailPoint: {skip: "does not accept read or write concern"},
-    waitForOngoingChunkSplits: {skip: "does not accept read or write concern"},
     whatsmysni: {skip: "does not accept read or write concern"},
     whatsmyuri: {skip: "internal command"},
 };

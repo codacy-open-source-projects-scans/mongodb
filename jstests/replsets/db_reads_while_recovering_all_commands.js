@@ -146,6 +146,7 @@ const allCommands = {
     abortMoveCollection: {skip: isPrimaryOnly},
     abortReshardCollection: {skip: isPrimaryOnly},
     abortTransaction: {skip: isPrimaryOnly},
+    abortUnshardCollection: {skip: isPrimaryOnly},
     aggregate: {
         command: {aggregate: collName, pipeline: [{$match: {}}], cursor: {}},
         expectFailure: true,
@@ -438,7 +439,6 @@ const allCommands = {
     voteCommitImportCollection: {skip: isNotAUserDataRead},
     voteCommitIndexBuild: {skip: isNotAUserDataRead},
     waitForFailPoint: {skip: isNotAUserDataRead},
-    waitForOngoingChunkSplits: {skip: isNotAUserDataRead},
     whatsmysni: {skip: isNotAUserDataRead},
     whatsmyuri: {skip: isNotAUserDataRead}
 };

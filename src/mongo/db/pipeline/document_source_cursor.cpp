@@ -49,6 +49,7 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/logv2/log.h"
@@ -295,6 +296,8 @@ Value DocumentSourceCursor::serialize(const SerializationOptions& opts) const {
                                BSONObj(),
                                SerializationContext::stateCommandReply(pExpCtx->serializationCtxt),
                                BSONObj(),
+                               // TODO: SERVER-79231 Apply QuerySettings for aggregate commands.
+                               query_settings::QuerySettings(),
                                &explainStatsBuilder);
     }
 
@@ -373,8 +376,10 @@ DocumentSourceCursor::DocumentSourceCursor(
       _queryFramework(_exec->getQueryFramework()) {
     // It is illegal for both 'kEmptyDocuments' to be set and _resumeTrackingType to be other than
     // 'kNone'.
-    invariant(cursorType != CursorType::kEmptyDocuments ||
-              resumeTrackingType == ResumeTrackingType::kNone);
+    uassert(ErrorCodes::InvalidOptions,
+            "The resumeToken is not compatible with this query",
+            cursorType != CursorType::kEmptyDocuments ||
+                resumeTrackingType == ResumeTrackingType::kNone);
 
     // Later code in the DocumentSourceCursor lifecycle expects that '_exec' is in a saved state.
     _exec->saveState();

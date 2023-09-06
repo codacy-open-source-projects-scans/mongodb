@@ -140,7 +140,7 @@ let expectedChanges = [
         "operationType": "insert",
         "fullDocument": {
             "control": {
-                "version": 1,
+                "version": TimeseriesTest.BucketVersion.kUncompressed,
                 "min": {"_id": 1, "ts": ISODate("1970-01-01T00:00:00Z")},
                 "max": {"_id": 1, "ts": ISODate("1970-01-01T00:00:01Z")}
             },
@@ -287,11 +287,6 @@ let expectedChanges = [
     {"operationType": "drop", "ns": {"db": dbName, "coll": bucketsCollName}}
 ];
 
-if (!FeatureFlagUtil.isEnabled(db, "TimeseriesScalabilityImprovements")) {
-    // Remove implicitly create index
-    expectedChanges = [expectedChanges[0], ...expectedChanges.slice(2)];
-}
-
 if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
     // Check for compressed bucket changes when using always compressed buckets.
     expectedChanges[4] = {
@@ -304,7 +299,7 @@ if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
                     "_id": 1,
                     "ts": ISODate("1970-01-01T00:00:00Z"),
                 },
-                "version": 2,
+                "version": TimeseriesTest.BucketVersion.kCompressed,
             },
             "data": {"ts": BinData(7, "CQDoAwAAAAAAAAA="), "_id": BinData(7, "AQAAAAAAAADwPwA=")},
             "meta": {"a": 1},
@@ -316,7 +311,7 @@ if (TimeseriesTest.timeseriesAlwaysUseCompressedBucketsEnabled(db)) {
         "operationType": "replace",
         "fullDocument": {
             "control": {
-                "version": 2,
+                "version": TimeseriesTest.BucketVersion.kCompressed,
                 "min": {"_id": 1, "ts": ISODate("1970-01-01T00:00:00Z")},
                 "max": {"_id": 1, "ts": ISODate("1970-01-01T00:00:01Z")},
                 "count": 2

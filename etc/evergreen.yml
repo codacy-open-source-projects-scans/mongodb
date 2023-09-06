@@ -74,6 +74,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: linux-x86-dynamic-compile
 
 - &amazon_linux2_arm64_compile_variant_dependency
   depends_on:
@@ -84,6 +86,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: amazon-linux2-arm64-compile
 
 - &linux_x86_dynamic_debug_compile_variant_dependency
   depends_on:
@@ -94,6 +98,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: linux-x86-dynamic-debug-compile-required
 
 - &linux_debug_aubsan_compile_variant_dependency
   depends_on:
@@ -104,6 +110,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: linux-debug-aubsan-compile-required
 
 - &windows_compile_variant_dependency
   depends_on:
@@ -114,6 +122,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
+  - name: generate_buildid_to_debug_symbols_mapping
+    variant: windows-compile-required
 
 # THIS WAS COPIED TO config_shard.yml - ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THAT FILE.
 - &linux_x86_generic_expansions
@@ -984,7 +994,7 @@ buildvariants:
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1109,7 +1119,7 @@ buildvariants:
   - name: .multi_shard !.no_debug_mode
   - name: multiversion_gen
   - name: .ocsp
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern .large
     distros:
     - rhel80-medium
@@ -1256,7 +1266,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1303,7 +1313,6 @@ buildvariants:
   - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: .shard_split
-  - name: .shard_merge
   - name: streams
   - name: streams_auth
   - name: vector_search
@@ -1356,7 +1365,7 @@ buildvariants:
   - name: .jstestfuzz !.flow_control
   - name: .misc_js
   - name: .multi_shard
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: query_golden_classic
   - name: .random_multiversion_ds
   - name: .read_only
@@ -1466,7 +1475,7 @@ buildvariants:
   #     variant: *linux_x86_dynamic_compile_variant_name
   - name: check_feature_flag_tags
   - name: check_for_todos
-  - name: .aggfuzzer
+  - name: .aggfuzzer .cqf_only
   - name: .aggregation
   - name: aggregation_repeat_queries
   - name: audit
@@ -1476,7 +1485,6 @@ buildvariants:
   - name: unittest_shell_hang_analyzer_gen
   - name: .causally_consistent !.sharding
   - name: .change_streams
-  - name: .change_stream_fuzzer
   # TODO SERVER-57866: Remove the explicit mentions of change stream multitenant suites.
   - name: change_streams_multitenant_passthrough
   - name: change_streams_multitenant_sharded_collections_passthrough
@@ -1512,7 +1520,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer .cqf_only
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
     distros:
@@ -1550,10 +1558,8 @@ buildvariants:
   - name: sharded_multi_stmt_txn_jscore_passthrough
   - name: .serverless
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
-  - name: .updatefuzzer
   - name: secondary_reads_passthrough_gen
   - name: .shard_split
-  - name: .shard_merge
   - name: streams
   - name: streams_auth
   - name: query_stats_passthrough
@@ -1970,7 +1976,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
   - name: .read_write_concern !.large
@@ -1997,7 +2003,6 @@ buildvariants:
     - amazon2-arm64-large
   - name: session_jscore_passthrough
   - name: .shard_split
-  - name: .shard_merge
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
   - name: sharding_api_version_jscore_passthrough_gen
   - name: sharding_api_strict_passthrough_gen
@@ -2121,7 +2126,7 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: json_schema
   - name: .multi_shard .common
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
@@ -2203,7 +2208,7 @@ buildvariants:
   - name: .misc_js
   - name: .multi_shard .common
   - name: query_golden_classic
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.cqf_only
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough
   - name: .replica_sets !.multi_oplog
@@ -2221,7 +2226,6 @@ buildvariants:
   - name: .sharding .common !.csrs
   - name: .serverless
   - name: .shard_split
-  - name: .shard_merge
   - name: query_stats_passthrough
   - name: query_stats_passthrough_writeonly
   - name: query_stats_mongos_passthrough
@@ -2319,7 +2323,7 @@ buildvariants:
   # - name: .multi_shard # Not passing
   # - name: multi_stmt_txn_jscore_passthrough_with_migration_gen # Not passing
   # - name: multiversion_gen # Multiversion does not pass yet, also making this work is going to be pretty tricky
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: query_golden_classic
   # - name: .random_multiversion_ds # Multiversion does not pass yet, also making this work is going to be pretty tricky
   # - name: .read_write_concern .large # Not passing
@@ -2832,7 +2836,6 @@ buildvariants:
   - name: validate_commit_message
   - name: lint_large_files_check
   - name: check_feature_flag_tags
-  - name: compile_venv_deps_check
   - name: resmoke_validation_tests
   - name: version_gen_validation
     distros:
@@ -2931,7 +2934,7 @@ buildvariants:
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: powercycle_smoke
-  - name: .query_fuzzer
+  - name: .query_fuzzer !.feature_flag_guarded
   - name: .random_multiversion_ds
   - name: .read_write_concern .large
   - name: .read_write_concern !.large
@@ -3040,28 +3043,28 @@ buildvariants:
   - name: external_auth_aws
   - name: external_auth_oidc
 
-- name: &enterprise-ubuntu1804-64-libvoidstar enterprise-ubuntu1804-64-libvoidstar
-  display_name: "~ Enterprise Ubuntu 18.04 w/ libvoidstar"
+- name: &enterprise-ubuntu2204-64-libvoidstar enterprise-ubuntu2204-64-libvoidstar
+  display_name: "~ Enterprise Ubuntu 22.04 w/ libvoidstar"
   modules:
   - enterprise
   run_on:
-  - ubuntu1804-large
+  - ubuntu2204-large
   stepback: false
   expansions:
-    compile_variant: *enterprise-ubuntu1804-64-libvoidstar
+    compile_variant: *enterprise-ubuntu2204-64-libvoidstar
     # Do not set link-model=dynamic on this build. The antithesis image builder
     # scripts cannot handle the shared library build
     compile_flags: >-
       --ssl
-      --ocsp-stapling=off MONGO_DISTMOD=ubuntu1804
+      --ocsp-stapling=off MONGO_DISTMOD=ubuntu2204
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_clang.vars
       CCFLAGS="-fsanitize-coverage=trace-pc-guard"
       LIBS="voidstar"
-    multiversion_platform: ubuntu1804
+    multiversion_platform: ubuntu2204
     multiversion_edition: enterprise
     repo_edition: enterprise
-    large_distro_name: ubuntu1804-build
+    large_distro_name: ubuntu2204-large
     scons_cache_scope: shared
   tasks:
   - name: compile_and_archive_dist_test_TG

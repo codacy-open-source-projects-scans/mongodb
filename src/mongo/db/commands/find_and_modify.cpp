@@ -84,6 +84,7 @@
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/collection_sharding_state.h"
@@ -348,7 +349,10 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
 
     auto requestAndMsg = [&]() {
         if (request().getEncryptionInformation()) {
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+            {
+                stdx::lock_guard<Client> lk(*opCtx->getClient());
+                CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+            }
 
             if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 return processFLEFindAndModifyExplainMongod(opCtx, request());
@@ -401,6 +405,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
             BSONObj(),
             SerializationContext::stateCommandReply(request.getSerializationContext()),
             cmdObj,
+            query_settings::QuerySettings(),
             &bodyBuilder);
     } else {
         auto updateRequest = UpdateRequest();
@@ -442,6 +447,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
             BSONObj(),
             SerializationContext::stateCommandReply(request.getSerializationContext()),
             cmdObj,
+            query_settings::QuerySettings(),
             &bodyBuilder);
     }
 }
@@ -452,8 +458,13 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
 
     validate(req);
 
+    auto& curOp = *CurOp::get(opCtx);
+
     if (req.getEncryptionInformation().has_value()) {
-        CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+        {
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            curOp.setShouldOmitDiagnosticInformation_inlock(lk, true);
+        }
         if (!req.getEncryptionInformation()->getCrudProcessed().get_value_or(false)) {
             return processFLEFindAndModify(opCtx, req);
         }
@@ -461,8 +472,6 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
 
     const NamespaceString& nsString = req.getNamespace();
     uassertStatusOK(userAllowedWriteNS(opCtx, nsString));
-    auto const curOp = CurOp::get(opCtx);
-    OpDebug* const opDebug = &curOp->debug();
 
     // Collect metrics.
     CmdFindAndModify::collectMetrics(req);
@@ -504,6 +513,13 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
         }
     }
 
+    // Initialize curOp information.
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        curOp.setNS_inlock(nsString);
+        curOp.ensureStarted();
+    }
+
     auto sampleId = analyze_shard_key::getOrGenerateSampleId(
         opCtx, ns(), analyze_shard_key::SampledCommandNameEnum::kFindAndModify, req);
     if (sampleId) {
@@ -530,14 +546,8 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 deleteRequest.setStmtId(stmtId);
             }
             boost::optional<BSONObj> docFound;
-            write_ops_exec::performDelete(opCtx,
-                                          nsString,
-                                          deleteRequest,
-                                          curOp,
-                                          opDebug,
-                                          inTransaction,
-                                          boost::none,
-                                          docFound);
+            write_ops_exec::performDelete(
+                opCtx, nsString, deleteRequest, &curOp, inTransaction, boost::none, docFound);
             recordStatsForTopCommand(opCtx);
             return buildResponse(boost::none, true /* isRemove */, docFound);
         } else {
@@ -570,8 +580,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                     auto updateResult =
                         write_ops_exec::performUpdate(opCtx,
                                                       nsString,
-                                                      curOp,
-                                                      opDebug,
+                                                      &curOp,
                                                       inTransaction,
                                                       req.getRemove().value_or(false),
                                                       req.getUpsert().value_or(false),

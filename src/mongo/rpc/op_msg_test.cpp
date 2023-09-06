@@ -59,7 +59,6 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/role_name.h"
-#include "mongo/db/auth/security_token_gen.h"
 #include "mongo/db/auth/user.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
@@ -836,24 +835,21 @@ protected:
         client = getServiceContext()->makeClient("test");
     }
 
-    BSONObj makeSecurityToken(const UserName& userName) {
-        constexpr auto authUserFieldName = auth::SecurityToken::kAuthenticatedUserFieldName;
-        auto authUser = userName.toBSON(true /* serialize token */);
-        ASSERT_EQ(authUser["tenant"_sd].type(), jstOID);
-        using VTS = auth::ValidatedTenancyScope;
-        return VTS(BSON(authUserFieldName << authUser), VTS::TokenForTestingTag{})
-            .getOriginalToken();
-    }
-
     ServiceContext::UniqueClient client;
 };
 
 TEST_F(OpMsgWithAuth, ParseValidatedTenancyScopeFromSecurityToken) {
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest securityTokenController("featureFlagSecurityToken", true);
+    RAIIServerParameterControllerForTest secretController("testOnlyValidatedTenancyScopeKey",
+                                                          "secret");
 
+    using VTS = auth::ValidatedTenancyScope;
     const auto kTenantId = TenantId(OID::gen());
-    const auto token = makeSecurityToken(UserName("user", "admin", kTenantId));
+    const auto token =
+        VTS(UserName("user", "admin", kTenantId), "secret"_sd, VTS::TokenForTestingTag{})
+            .getOriginalToken()
+            .toString();
     auto msg =
         OpMsgBytes{
             kNoFlags,  //
@@ -1031,7 +1027,7 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixDefault) {
         sc.setTenantIdSource(nonPrefixedTenantId);
 
         OpMsgRequest msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body, {}, sc);
+            DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body, sc);
         ASSERT(msg.validatedTenancyScope);
         ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
         // Verify $tenant is added to the msg body, as the vts does not come from security token.
@@ -1066,7 +1062,7 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixFalse) {
         sc.setTenantIdSource(nonPrefixedTenantId);
 
         OpMsgRequest msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body, {}, sc);
+            DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body, sc);
         ASSERT(msg.validatedTenancyScope);
         ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
         // Verify $tenant is added to the msg body, as the vts does not come from security token.
@@ -1103,7 +1099,7 @@ TEST(OpMsgRequestBuilder, WithVTSAndSerializationContextExpPrefixTrue) {
         sc.setTenantIdSource(nonPrefixedTenantId);
 
         OpMsgRequest msg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body, {}, sc);
+            DatabaseName::createDatabaseName_forTest(tenantId, dbString), vts, body, sc);
         ASSERT(msg.validatedTenancyScope);
         ASSERT_EQ(msg.validatedTenancyScope->tenantId(), tenantId);
         // Verify $tenant is added to the msg body, as the vts does not come from security token.

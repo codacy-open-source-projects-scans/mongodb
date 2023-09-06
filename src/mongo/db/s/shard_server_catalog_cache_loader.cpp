@@ -159,7 +159,8 @@ Status persistCollectionAndChangedChunks(OperationContext* opCtx,
 
     Status status = updateShardCollectionsEntry(
         opCtx,
-        BSON(ShardCollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
+        BSON(ShardCollectionType::kNssFieldName
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateCommandRequest())),
         update.toBSON(),
         true /*upsert*/);
     if (!status.isOK()) {
@@ -195,12 +196,12 @@ Status persistCollectionAndChangedChunks(OperationContext* opCtx,
  */
 Status persistDbVersion(OperationContext* opCtx, const DatabaseType& dbt) {
     // Update the databases collection entry for 'dbName' in case there are any new updates.
-    Status status =
-        updateShardDatabasesEntry(opCtx,
-                                  BSON(ShardDatabaseType::kNameFieldName << dbt.getName()),
-                                  dbt.toBSON(),
-                                  BSONObj(),
-                                  true /*upsert*/);
+    Status status = updateShardDatabasesEntry(
+        opCtx,
+        BSON(ShardDatabaseType::kDbNameFieldName << DatabaseNameUtil::serialize(dbt.getDbName())),
+        dbt.toBSON(),
+        BSONObj(),
+        true /*upsert*/);
     if (!status.isOK()) {
         return status;
     }
@@ -359,7 +360,8 @@ ShardId getSelfShardId(OperationContext* opCtx) {
  * Sends _flushDatabaseCacheUpdates to the primary to force it to refresh its routing table for
  * database 'dbName' and then waits for the refresh to replicate to this node.
  */
-void forcePrimaryDatabaseRefreshAndWaitForReplication(OperationContext* opCtx, StringData dbName) {
+void forcePrimaryDatabaseRefreshAndWaitForReplication(OperationContext* opCtx,
+                                                      const DatabaseName& dbName) {
     auto selfShard =
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, getSelfShardId(opCtx)));
 
@@ -367,7 +369,8 @@ void forcePrimaryDatabaseRefreshAndWaitForReplication(OperationContext* opCtx, S
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         DatabaseName::kAdmin,
-        BSON("_flushDatabaseCacheUpdates" << dbName.toString()),
+        BSON("_flushDatabaseCacheUpdates"
+             << DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest())),
         Seconds{30},
         Shard::RetryPolicy::kIdempotent));
 
@@ -537,11 +540,10 @@ SemiFuture<CollectionAndChangedChunks> ShardServerCatalogCacheLoader::getChunksS
         .semi();
 }
 
-SemiFuture<DatabaseType> ShardServerCatalogCacheLoader::getDatabase(StringData dbName) {
+SemiFuture<DatabaseType> ShardServerCatalogCacheLoader::getDatabase(const DatabaseName& dbName) {
     // The admin and config database have fixed metadata that does not need to be refreshed.
-    if (dbName == DatabaseName::kAdmin.db() || dbName == DatabaseName::kConfig.db()) {
-        return DatabaseType(
-            dbName.toString(), ShardId::kConfigServerId, DatabaseVersion::makeFixed());
+    if (dbName.isAdminDB() || dbName.isConfigDB()) {
+        return DatabaseType(dbName, ShardId::kConfigServerId, DatabaseVersion::makeFixed());
     }
 
     const auto [isPrimary, term] = [&] {
@@ -550,10 +552,7 @@ SemiFuture<DatabaseType> ShardServerCatalogCacheLoader::getDatabase(StringData d
     }();
 
     return ExecutorFuture<void>(_executor)
-        .then([this,
-               dbName = dbName.toString(),
-               isPrimary = std::move(isPrimary),
-               term = std::move(term)]() {
+        .then([this, dbName, isPrimary = std::move(isPrimary), term = std::move(term)]() {
             ThreadClient tc("ShardServerCatalogCacheLoader::getDatabase",
                             getGlobalServiceContext());
             auto context = _contexts.makeOperationContext(*tc);
@@ -665,8 +664,7 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
                               << " because the node's replication role changed.",
                 _role == ReplicaSetRole::Primary && _term == initialTerm);
 
-        // TODO SERVER-80342 _dbTaskLists to pass a DatabaseName
-        auto it = _dbTaskLists.find(DatabaseNameUtil::serialize(dbName));
+        auto it = _dbTaskLists.find(dbName);
 
         // If there are no tasks for the specified namespace, everything must have been completed
         if (it == _dbTaskLists.end())
@@ -711,7 +709,7 @@ void ShardServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx
             // It is only correct to wait again on condVar if the taskNum has not changed, meaning
             // that it must still be the same task list.
             opCtx->waitForConditionOrInterrupt(*condVar, lg, [&]() {
-                const auto it = _dbTaskLists.find(DatabaseNameUtil::serialize(dbName));
+                const auto it = _dbTaskLists.find(dbName);
                 return it == _dbTaskLists.end() || it->second.empty() ||
                     it->second.front().taskNum != activeTaskNum;
             });
@@ -855,7 +853,7 @@ ShardServerCatalogCacheLoader::_schedulePrimaryGetChunksSince(
 
 
 StatusWith<DatabaseType> ShardServerCatalogCacheLoader::_runSecondaryGetDatabase(
-    OperationContext* opCtx, StringData dbName) {
+    OperationContext* opCtx, const DatabaseName& dbName) {
     Timer t;
     forcePrimaryDatabaseRefreshAndWaitForReplication(opCtx, dbName);
     LOGV2_FOR_CATALOG_REFRESH(5965801,
@@ -870,7 +868,7 @@ StatusWith<DatabaseType> ShardServerCatalogCacheLoader::_runSecondaryGetDatabase
 
     const auto& shardDatabase = swShardDatabase.getValue();
     DatabaseType dbt;
-    dbt.setName(shardDatabase.getName());
+    dbt.setDbName(shardDatabase.getDbName());
     dbt.setPrimary(shardDatabase.getPrimary());
     dbt.setVersion(shardDatabase.getVersion());
 
@@ -878,7 +876,7 @@ StatusWith<DatabaseType> ShardServerCatalogCacheLoader::_runSecondaryGetDatabase
 }
 
 StatusWith<DatabaseType> ShardServerCatalogCacheLoader::_schedulePrimaryGetDatabase(
-    OperationContext* opCtx, StringData dbName, long long termScheduled) {
+    OperationContext* opCtx, const DatabaseName& dbName, long long termScheduled) {
     auto swDatabaseType = _configServerLoader->getDatabase(dbName).getNoThrow();
     if (swDatabaseType == ErrorCodes::NamespaceNotFound) {
         _ensureMajorityPrimaryAndScheduleDbTask(
@@ -1067,18 +1065,16 @@ void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleCollAndChun
     });
 }
 
-void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleDbTask(OperationContext* opCtx,
-                                                                            StringData dbName,
-                                                                            DBTask task) {
+void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleDbTask(
+    OperationContext* opCtx, const DatabaseName& dbName, DBTask task) {
 
     // Ensure that this node is primary before using or persisting the information fetched from the
     // config server. This prevents using incorrect filtering information in split brain scenarios.
     performNoopMajorityWriteLocally(opCtx, "ensureMajorityPrimaryAndScheduleDbTask");
-
     {
         stdx::lock_guard<Latch> lock(_mutex);
 
-        auto& list = _dbTaskLists[dbName.toString()];
+        auto& list = _dbTaskLists[dbName];
         auto wasEmpty = list.empty();
         list.addTask(std::move(task));
 
@@ -1086,7 +1082,7 @@ void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleDbTask(Oper
             return;
     }
 
-    _executor->schedule([this, name = dbName.toString()](auto status) {
+    _executor->schedule([this, dbName](auto status) {
         if (!status.isOK()) {
             if (ErrorCodes::isCancellationError(status)) {
                 return;
@@ -1095,7 +1091,7 @@ void ShardServerCatalogCacheLoader::_ensureMajorityPrimaryAndScheduleDbTask(Oper
             fassertFailedWithStatus(4826401, status);
         }
 
-        _runDbTasks(name);
+        _runDbTasks(dbName);
     });
 }
 
@@ -1185,7 +1181,7 @@ void ShardServerCatalogCacheLoader::_runCollAndChunksTasks(const NamespaceString
     });
 }
 
-void ShardServerCatalogCacheLoader::_runDbTasks(StringData dbName) {
+void ShardServerCatalogCacheLoader::_runDbTasks(const DatabaseName& dbName) {
     ThreadClient tc("ShardServerCatalogCacheLoader::runDbTasks", getGlobalServiceContext());
     auto context = _contexts.makeOperationContext(*tc);
 
@@ -1218,33 +1214,34 @@ void ShardServerCatalogCacheLoader::_runDbTasks(StringData dbName) {
               "error"_attr = redact(ex));
     }
 
+    const auto db = DatabaseNameUtil::serialize(dbName);
     {
         stdx::lock_guard<Latch> lock(_mutex);
 
         // If task completed successfully, remove it from work queue.
         if (taskFinished) {
-            _dbTaskLists[dbName.toString()].pop_front();
+            _dbTaskLists[dbName].pop_front();
         }
 
         // Return if have no more work
-        if (_dbTaskLists[dbName.toString()].empty()) {
-            _dbTaskLists.erase(dbName.toString());
+        if (_dbTaskLists[dbName].empty()) {
+            _dbTaskLists.erase(dbName);
             return;
         }
 
         // If shutting down need to remove tasks to end waiting on its completion.
         if (inShutdown) {
-            while (!_dbTaskLists[dbName.toString()].empty()) {
-                _dbTaskLists[dbName.toString()].pop_front();
+            while (!_dbTaskLists[dbName].empty()) {
+                _dbTaskLists[dbName].pop_front();
             }
-            _dbTaskLists.erase(dbName.toString());
+            _dbTaskLists.erase(dbName);
             return;
         }
     }
 
-    _executor->schedule([this, name = dbName.toString()](auto status) {
+    _executor->schedule([this, dbName](auto status) {
         if (status.isOK()) {
-            _runDbTasks(name);
+            _runDbTasks(dbName);
             return;
         }
 
@@ -1256,12 +1253,12 @@ void ShardServerCatalogCacheLoader::_runDbTasks(StringData dbName) {
                   "Cache loader failed to schedule a persisted metadata update task. Clearing task "
                   "list so that scheduling will be attempted by the next caller to refresh this "
                   "database",
-                  "database"_attr = name,
+                  "database"_attr = dbName,
                   "error"_attr = redact(status));
 
             {
                 stdx::lock_guard<Latch> lock(_mutex);
-                _dbTaskLists.erase(name);
+                _dbTaskLists.erase(dbName);
             }
         } else {
             fassertFailedWithStatus(4826403, status);
@@ -1316,10 +1313,10 @@ void ShardServerCatalogCacheLoader::_updatePersistedCollAndChunksMetadata(
 }
 
 void ShardServerCatalogCacheLoader::_updatePersistedDbMetadata(OperationContext* opCtx,
-                                                               StringData dbName) {
+                                                               const DatabaseName& dbName) {
     stdx::unique_lock<Latch> lock(_mutex);
 
-    const DBTask& task = _dbTaskLists[dbName.toString()].front();
+    const DBTask& task = _dbTaskLists[dbName].front();
 
     // If this task is from an old term and no longer valid, do not execute and return true so that
     // the task gets removed from the task list
@@ -1333,20 +1330,22 @@ void ShardServerCatalogCacheLoader::_updatePersistedDbMetadata(OperationContext*
     if (!task.dbType) {
         // The database was dropped. The persisted metadata for the collection must be cleared.
         uassertStatusOKWithContext(deleteDatabasesEntry(opCtx, dbName),
-                                   str::stream() << "Failed to clear persisted metadata for db '"
-                                                 << dbName.toString() << "'. Will be retried.");
+                                   str::stream()
+                                       << "Failed to clear persisted metadata for db '"
+                                       << dbName.toStringForErrorMsg() << "'. Will be retried.");
         return;
     }
 
     uassertStatusOKWithContext(persistDbVersion(opCtx, *task.dbType),
-                               str::stream() << "Failed to update the persisted metadata for db '"
-                                             << dbName.toString() << "'. Will be retried.");
+                               str::stream()
+                                   << "Failed to update the persisted metadata for db '"
+                                   << dbName.toStringForErrorMsg() << "'. Will be retried.");
 
     LOGV2_FOR_CATALOG_REFRESH(24113,
                               1,
                               "Successfully updated persisted metadata for db {db}",
                               "Successfully updated persisted metadata for db",
-                              "db"_attr = dbName.toString());
+                              "db"_attr = dbName.toStringForErrorMsg());
 }
 
 NamespaceMetadataChangeNotifications::ScopedNotification
@@ -1361,7 +1360,8 @@ ShardServerCatalogCacheLoader::_forcePrimaryCollectionRefreshAndWaitForReplicati
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         DatabaseName::kAdmin,
-        BSON("_flushRoutingTableCacheUpdates" << NamespaceStringUtil::serialize(nss)),
+        BSON("_flushRoutingTableCacheUpdates"
+             << NamespaceStringUtil::serialize(nss, SerializationContext::stateCommandRequest())),
         Seconds{30},
         Shard::RetryPolicy::kIdempotent));
 

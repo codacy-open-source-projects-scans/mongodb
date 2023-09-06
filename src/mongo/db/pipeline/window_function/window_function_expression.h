@@ -426,8 +426,13 @@ public:
                         boost::intrusive_ptr<::mongo::Expression> input,
                         WindowBounds bounds)
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)) {
-        StringDataSet compatibleAccumulators{
-            "$sum", "$covarianceSamp", "$covariancePop", "$push", "$stdDevSamp", "$stdDevPop"};
+        StringDataSet compatibleAccumulators{"$sum",
+                                             "$covarianceSamp",
+                                             "$covariancePop",
+                                             "$push",
+                                             "$stdDevSamp",
+                                             "$stdDevPop",
+                                             "$avg"};
         if (compatibleAccumulators.count(_accumulatorName)) {
             expCtx->sbeWindowCompatibility =
                 std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
@@ -460,10 +465,10 @@ public:
         auto arg = obj.firstElement();
         auto argName = arg.fieldNameStringData();
         if (isFunction(argName)) {
+            accumulatorName = argName;
             uassert(5371603,
                     str::stream() << accumulatorName << " must be specified with '{}' as the value",
                     arg.type() == BSONType::Object && arg.embeddedObject().nFields() == 0);
-            accumulatorName = argName;
         } else {
             tasserted(ErrorCodes::FailedToParse,
                       str::stream() << "Window function found an unknown argument: " << argName);

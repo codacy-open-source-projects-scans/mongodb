@@ -481,7 +481,7 @@ static constexpr size_t appendMaxElementSize = 50 * 1024;
 
 bool shouldOmitDiagnosticInformation(CurOp* curop) {
     do {
-        if (curop->debug().shouldOmitDiagnosticInformation) {
+        if (curop->getShouldOmitDiagnosticInformation()) {
             return true;
         }
 
@@ -656,6 +656,7 @@ Command::ReadWriteType CurOp::getReadWriteType() const {
         case LogicalOp::opGetMore:
         case LogicalOp::opQuery:
             return Command::ReadWriteType::kRead;
+        case LogicalOp::opBulkWrite:
         case LogicalOp::opUpdate:
         case LogicalOp::opInsert:
         case LogicalOp::opDelete:
@@ -767,7 +768,7 @@ void CurOp::reportState(BSONObjBuilder* builder,
     builder->append("op", logicalOpToString(_logicalOp));
     builder->append("ns", NamespaceStringUtil::serialize(_nss, serializationContext));
 
-    bool omitAndRedactInformation = CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation;
+    bool omitAndRedactInformation = getShouldOmitDiagnosticInformation();
     builder->append("redacted", omitAndRedactInformation);
 
     // When the currentOp command is run, it returns a single response object containing all current
@@ -800,7 +801,7 @@ void CurOp::reportState(BSONObjBuilder* builder,
     }
 
 
-    // Omit information for for QE user collections, QE state collections and QE user operations.
+    // Omit information for QE user collections, QE state collections and QE user operations.
     if (omitAndRedactInformation) {
         return;
     }

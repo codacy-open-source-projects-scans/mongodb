@@ -301,7 +301,8 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
 
             if (canonicalQuery) {
                 RelevantFieldIndexMap fieldIndexProps;
-                QueryPlannerIXSelect::getFields(canonicalQuery->root(), &fieldIndexProps);
+                QueryPlannerIXSelect::getFields(canonicalQuery->getPrimaryMatchExpression(),
+                                                &fieldIndexProps);
                 stdx::unordered_set<std::string> projectedFields;
                 for (auto&& [fieldName, _] : fieldIndexProps) {
                     if (projection_executor_utils::applyProjectionToOneField(
@@ -451,7 +452,8 @@ void fillOutPlannerParams(OperationContext* opCtx,
 
     // _id queries can skip checking the catalog for indices since they will always use the _id
     // index.
-    if (!isIdHackEligibleQuery(collection, *canonicalQuery)) {
+    if (!isIdHackEligibleQuery(
+            collection, canonicalQuery->getFindCommandRequest(), canonicalQuery->getCollator())) {
         // If it's not NULL, we may have indices. Access the catalog and fill out IndexEntry(s)
         fillOutIndexEntries(opCtx,
                             apiStrict,
@@ -1046,7 +1048,8 @@ protected:
 
     std::unique_ptr<ClassicPrepareExecutionResult> buildIdHackPlan() final {
         initializePlannerParamsIfNeeded();
-        if (!isIdHackEligibleQuery(getMainCollection(), *_cq))
+        if (!isIdHackEligibleQuery(
+                getMainCollection(), _cq->getFindCommandRequest(), _cq->getCollator()))
             return nullptr;
 
         const IndexDescriptor* descriptor =
@@ -1467,7 +1470,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
     auto&& [root, data] = roots[0];
 
     if (!planningResult->recoveredPinnedCacheEntry()) {
-        if (!cq->pipeline().empty()) {
+        if (!cq->cqPipeline().empty()) {
             // Need to extend the solution with the agg pipeline and rebuild the execution tree.
             solutions[0] = QueryPlanner::extendWithAggPipeline(
                 *cq,
@@ -1513,7 +1516,7 @@ bool shouldUseRegularSbe(const CanonicalQuery& cq) {
     if (cq.getExpCtx()->sbeCompatibility != SbeCompatibility::fullyCompatible) {
         return false;
     }
-    for (const auto& stage : cq.pipeline()) {
+    for (const auto& stage : cq.cqPipeline()) {
         if (auto groupStage = dynamic_cast<DocumentSourceGroup*>(stage->documentSource())) {
             // Group stage wouldn't be pushed down if it's not supported in SBE.
             tassert(7548611,
@@ -1609,7 +1612,7 @@ attemptToGetSlotBasedExecutor(
     // Either we did not meet the criteria for attempting SBE, or we attempted query planning and
     // determined that SBE should not be used. Reset any fields that may have been modified, and
     // fall back to classic engine.
-    canonicalQuery->setPipeline({});
+    canonicalQuery->setCqPipeline({});
     canonicalQuery->setSbeCompatible(false);
     return std::move(canonicalQuery);
 }
@@ -1787,7 +1790,7 @@ StatusWith<std::unique_ptr<projection_ast::Projection>> makeProjection(const BSO
     projection_ast::Projection proj =
         projection_ast::parseAndAnalyze(cq->getExpCtx(),
                                         projObj.getOwned(),
-                                        cq->root(),
+                                        cq->getPrimaryMatchExpression(),
                                         cq->getQueryObj(),
                                         ProjectionPolicies::findProjectionPolicies());
 
@@ -2543,7 +2546,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
     //
     // If there is a hint, then we can't use a trival count plan as described above.
     const bool isEmptyQueryPredicate =
-        cq->root()->matchType() == MatchExpression::AND && cq->root()->numChildren() == 0;
+        cq->getPrimaryMatchExpression()->matchType() == MatchExpression::AND &&
+        cq->getPrimaryMatchExpression()->numChildren() == 0;
     const bool useRecordStoreCount = isEmptyQueryPredicate && request.getHint().isEmpty();
 
     if (useRecordStoreCount) {

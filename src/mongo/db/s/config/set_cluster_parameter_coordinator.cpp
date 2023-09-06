@@ -140,7 +140,7 @@ void SetClusterParameterCoordinator::_enterPhase(Phase newPhase) {
             const auto replCoord = repl::ReplicationCoordinator::get(opCtx.get());
             const auto lastLocalOpTime = replCoord->getMyLastAppliedOpTime();
             WaitForMajorityService::get(opCtx->getServiceContext())
-                .waitUntilMajority(lastLocalOpTime, opCtx.get()->getCancellationToken())
+                .waitUntilMajorityForWrite(lastLocalOpTime, opCtx.get()->getCancellationToken())
                 .get(opCtx.get());
         }
     } else {
@@ -202,6 +202,7 @@ void SetClusterParameterCoordinator::_commit(OperationContext* opCtx) {
     invocation.invoke(opCtx,
                       setClusterParameterRequest,
                       _doc.getClusterParameterTime(),
+                      boost::none /* previousTime */,
                       kMajorityWriteConcern,
                       true /* skipValidation */);
 }
@@ -234,14 +235,13 @@ ExecutorFuture<void> SetClusterParameterCoordinator::_runImpl(
                 auto* opCtx = opCtxHolder.get();
 
                 auto catalogManager = ShardingCatalogManager::get(opCtx);
-                ShardingLogging::get(opCtx)->logChange(
-                    opCtx,
-                    "setClusterParameter.start",
-                    toStringForLogging(NamespaceString::kClusterParametersNamespace),
-                    _doc.getParameter(),
-                    kMajorityWriteConcern,
-                    catalogManager->localConfigShard(),
-                    catalogManager->localCatalogClient());
+                ShardingLogging::get(opCtx)->logChange(opCtx,
+                                                       "setClusterParameter.start",
+                                                       NamespaceString::kClusterParametersNamespace,
+                                                       _doc.getParameter(),
+                                                       kMajorityWriteConcern,
+                                                       catalogManager->localConfigShard(),
+                                                       catalogManager->localCatalogClient());
 
                 // If the parameter was already set on the config server, there is
                 // nothing else to do.
@@ -265,14 +265,13 @@ ExecutorFuture<void> SetClusterParameterCoordinator::_runImpl(
                     _commit(opCtx);
                 }
 
-                ShardingLogging::get(opCtx)->logChange(
-                    opCtx,
-                    "setClusterParameter.end",
-                    toStringForLogging(NamespaceString::kClusterParametersNamespace),
-                    _doc.getParameter(),
-                    kMajorityWriteConcern,
-                    catalogManager->localConfigShard(),
-                    catalogManager->localCatalogClient());
+                ShardingLogging::get(opCtx)->logChange(opCtx,
+                                                       "setClusterParameter.end",
+                                                       NamespaceString::kClusterParametersNamespace,
+                                                       _doc.getParameter(),
+                                                       kMajorityWriteConcern,
+                                                       catalogManager->localConfigShard(),
+                                                       catalogManager->localCatalogClient());
             }));
 }
 

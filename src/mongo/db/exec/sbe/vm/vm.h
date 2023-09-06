@@ -382,6 +382,9 @@ struct Instruction {
 
         dateTruncImm,
 
+        valueBlockApplyLambda,  // Applies a lambda to each element in a block, returning a new
+                                // block.
+
         lastInstruction  // this is just a marker used to calculate number of instructions
     };
 
@@ -832,6 +835,7 @@ enum class Builtin : uint8_t {
     aggRemovableStdDevRemove,
     aggRemovableStdDevSampFinalize,
     aggRemovableStdDevPopFinalize,
+    aggRemovableAvgFinalize,
 
     valueBlockExists,
     valueBlockFillEmpty,
@@ -1149,6 +1153,7 @@ public:
     void appendSetField();
     void appendGetArraySize(Instruction::Parameter input);
     void appendDateTrunc(TimeUnit unit, int64_t binSize, TimeZone timezone, DayOfWeek startOfWeek);
+    void appendValueBlockApplyLambda();
 
     void appendSum();
     void appendMin();
@@ -1423,6 +1428,7 @@ private:
     bool runLambdaPredicate(const CodeFragment* code, int64_t position);
     void traverseCsiCellValues(const CodeFragment* code, int64_t position);
     void traverseCsiCellTypes(const CodeFragment* code, int64_t position);
+    void valueBlockApplyLambda(const CodeFragment* code);
 
     FastTuple<bool, value::TypeTags, value::Value> setField();
 
@@ -1937,6 +1943,7 @@ private:
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevPopFinalize(
         ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAvgFinalize(ArityType arity);
 
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);

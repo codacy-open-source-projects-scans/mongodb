@@ -97,15 +97,14 @@ void updatePlanCache(OperationContext* opCtx,
                      const sbe::PlanStage& root,
                      stage_builder::PlanStageData& stageData) {
     const CollectionPtr& collection = collections.getMainCollection();
-    // TODO SERVER-78817 remove isUncacheableSbe() call when binding is implemented.
-    if (collection && shouldCacheQuery(query) && solution.isEligibleForPlanCache() &&
-        !query.isUncacheableSbe()) {
+    if (collection && !query.isUncacheableSbe() && shouldCacheQuery(query) &&
+        solution.isEligibleForPlanCache()) {
         sbe::PlanCacheKey key = plan_cache_key_factory::make(query, collections);
         auto plan = std::make_unique<sbe::CachedSbePlan>(root.clone(), stageData);
         plan->indexFilterApplied = solution.indexFilterApplied;
 
         bool shouldOmitDiagnosticInformation =
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation;
+            CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
         sbe::getPlanCache(opCtx).setPinned(
             std::move(key),
             canonical_query_encoder::computeHash(

@@ -244,7 +244,7 @@ public:
         }
 
         std::vector<CollectionType> getCollections(OperationContext* opCtx,
-                                                   StringData dbName,
+                                                   const DatabaseName& dbName,
                                                    repl::ReadConcernLevel readConcernLevel,
                                                    const BSONObj& sort) override {
             return _colls;
@@ -315,7 +315,7 @@ public:
 
     void loadCatalogCacheValues() {
         _mockCatalogCacheLoader->setDatabaseRefreshReturnValue(
-            DatabaseType(kAppliedToNs.db_forTest().toString(), _cm->dbPrimary(), _cm->dbVersion()));
+            DatabaseType(kAppliedToNs.dbName(), _cm->dbPrimary(), _cm->dbVersion()));
         std::vector<ChunkType> chunks;
         _cm->forEachChunk([&](const auto& chunk) {
             chunks.emplace_back(
@@ -353,6 +353,7 @@ public:
                                         kCrudNs,
                                         kCrudUUID,
                                         false /* fromMigrate */,
+                                        boost::none,  // checkExistenceForDiffInsert
                                         0 /* version */,
                                         obj1,
                                         obj2,

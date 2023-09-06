@@ -83,6 +83,7 @@
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_process.h"
@@ -258,6 +259,7 @@ Status RollbackImpl::runRollback(OperationContext* opCtx) {
         return status;
     }
     _listener->onTransitionToRollback();
+    ReplicaSetAwareServiceRegistry::get(getGlobalServiceContext()).onRollback();
 
     if (MONGO_unlikely(rollbackHangAfterTransitionToRollback.shouldFail())) {
         LOGV2(21591,
@@ -490,7 +492,7 @@ StatusWith<std::set<NamespaceString>> RollbackImpl::_namespacesForOp(const Oplog
             case OplogEntry::CommandType::kEmptyCapped: {
                 // These commands do not need to be supported by rollback. 'convertToCapped' should
                 // always be converted to lower level DDL operations, and 'emptycapped' is a
-                // testing-only command.
+                // test-only command.
                 std::string message = str::stream()
                     << "Encountered unsupported command type '" << firstElem.fieldName()
                     << "' during rollback.";

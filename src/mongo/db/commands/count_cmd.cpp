@@ -76,6 +76,7 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/query/view_response_formatter.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -203,10 +204,7 @@ public:
 
         CountCommandRequest request(NamespaceStringOrUUID(NamespaceString{}));
         try {
-            request = CountCommandRequest::parse(
-                IDLParserContext(
-                    "count", false /* apiStrict */, opMsgRequest.getValidatedTenantId()),
-                opMsgRequest);
+            request = CountCommandRequest::parse(IDLParserContext("count"), opMsgRequest);
         } catch (...) {
             return exceptionToStatus();
         }
@@ -215,8 +213,8 @@ public:
             if (!request.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 processFLECountD(opCtx, nss, &request);
             }
-
-            CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
         }
 
         if (ctx->getView()) {
@@ -228,10 +226,12 @@ public:
                 return viewAggregation.getStatus();
             }
 
-            auto viewAggCmd =
-                OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                    nss.dbName(), opMsgRequest.validatedTenancyScope, viewAggregation.getValue())
-                    .body;
+            auto viewAggCmd = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                                  nss.dbName(),
+                                  opMsgRequest.validatedTenancyScope,
+                                  viewAggregation.getValue(),
+                                  request.getSerializationContext())
+                                  .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
                 nss,
@@ -282,6 +282,7 @@ public:
             BSONObj(),
             SerializationContext::stateCommandReply(request.getSerializationContext()),
             cmdObj,
+            query_settings::QuerySettings(),
             &bodyBuilder);
         return Status::OK();
     }
@@ -312,8 +313,8 @@ public:
             if (!request.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                 processFLECountD(opCtx, nss, &request);
             }
-
-            curOp->debug().shouldOmitDiagnosticInformation = true;
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
         }
         if (request.getMirrored().value_or(false)) {
             const auto& invocation = CommandInvocation::get(opCtx);
@@ -334,6 +335,9 @@ public:
 
         if (ctx->getView()) {
             auto viewAggregation = countCommandAsAggregationCommand(request, nss);
+            const auto& requestSC = request.getSerializationContext();
+            SerializationContext aggRequestSC(
+                requestSC.getSource(), requestSC.getCallerType(), requestSC.getPrefix());
 
             // Relinquish locks. The aggregation command will re-acquire them.
             ctx.reset();
@@ -343,14 +347,17 @@ public:
             boost::optional<VTS> vts = boost::none;
             if (dbName.tenantId()) {
                 vts = VTS(dbName.tenantId().value(), VTS::TrustedForInnerOpMsgRequestTag{});
+                aggRequestSC.setTenantIdSource(true);
             }
-            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                dbName, vts, std::move(viewAggregation.getValue()));
 
+            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                dbName, vts, std::move(viewAggregation.getValue()), aggRequestSC);
             BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
 
-            uassertStatusOK(
-                ViewResponseFormatter(aggResult).appendAsCountResponse(&result, dbName.tenantId()));
+            uassertStatusOK(ViewResponseFormatter(aggResult).appendAsCountResponse(
+                &result,
+                dbName.tenantId(),
+                SerializationContext::stateCommandReply(request.getSerializationContext())));
             return true;
         }
 

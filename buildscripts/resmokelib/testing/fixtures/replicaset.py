@@ -37,7 +37,7 @@ def compare_optime(optime1, optime2):
         return compare_timestamp(optime1["ts"], optime2["ts"])
 
 
-class ReplicaSetFixture(interface.ReplFixture):
+class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface):
     """Fixture which provides JSTests with a replica set to run against."""
 
     def __init__(self, logger, job_num, fixturelib, mongod_executable=None, mongod_options=None,
@@ -124,15 +124,20 @@ class ReplicaSetFixture(interface.ReplFixture):
             # get the auto generated replSet name and update the replSet name of the other mongods with it.
             self.nodes[0].setup()
             self.nodes[0].await_ready()
+            self._await_primary(
+            )  # Wait for writeable primary (this indicates replSet auto-intiiate finished).
+
             client = interface.build_client(self.nodes[0], self.auth_options)
             res = client.admin.command("hello")
 
             self.logger.info(
                 f"ReplicaSetFixture using auto generated replSet name {res['setName']} instead of {self.replset_name}"
             )
+
             self.replset_name = res["setName"]
             self.mongod_options.setdefault("replSet", self.replset_name)
-            for i in range(self.num_nodes):
+            # The first node should not have the --replSet option because it is auto-bootstrapped.
+            for i in range(1, self.num_nodes):
                 self.nodes[i].mongod_options["replSet"] = self.replset_name
 
             start_node = 1
@@ -213,7 +218,6 @@ class ReplicaSetFixture(interface.ReplFixture):
         # contains more than 1 node), so the primary is elected more quickly.
         repl_config["members"] = [members[0]]
         if self.use_auto_bootstrap_procedure:
-            self._await_primary()
             # Auto-bootstrap already initiates automatically on the first node, but we still need
             # to apply the requested repl_config settings using reconfig.
             self._reconfig_repl_set(client, repl_config)
@@ -245,6 +249,10 @@ class ReplicaSetFixture(interface.ReplFixture):
 
         self._await_secondaries()
         self._await_newly_added_removals()
+
+    def _all_mongo_d_s(self):
+        """Return a list of all `mongo{d,s}` `Process` instances in this fixture."""
+        return sum([node._all_mongo_d_s() for node in self.nodes], [])
 
     def pids(self):
         """:return: all pids owned by this fixture if any."""

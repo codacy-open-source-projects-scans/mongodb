@@ -882,6 +882,8 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
          [](size_t n) { return n == 1; }, vm::Builtin::aggRemovableStdDevSampFinalize, false}},
     {"aggRemovableStdDevPopFinalize",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableStdDevPopFinalize, false}},
+    {"aggRemovableAvgFinalize",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggRemovableAvgFinalize, false}},
     {"valueBlockExists",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockExists, false}},
     {"valueBlockFillEmpty",
@@ -1149,6 +1151,8 @@ static stdx::unordered_map<std::string, InstrFn> kInstrFunctions = {
     {"isMinKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMinKey>, false}},
     {"isMaxKey", InstrFn{1, generator<1, &vm::CodeFragment::appendIsMaxKey>, false}},
     {"isTimestamp", InstrFn{1, generator<1, &vm::CodeFragment::appendIsTimestamp>, false}},
+    {"valueBlockApplyLambda",
+     InstrFn{2, generatorLegacy<&vm::CodeFragment::appendValueBlockApplyLambda>, false}},
 };
 }  // namespace
 

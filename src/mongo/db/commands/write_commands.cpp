@@ -83,6 +83,7 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
@@ -287,8 +288,11 @@ public:
 
             doTransactionValidationForWrites(opCtx, ns());
             if (request().getEncryptionInformation().has_value()) {
-                // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     write_ops::InsertCommandReply insertReply;
@@ -471,8 +475,11 @@ public:
             doTransactionValidationForWrites(opCtx, ns());
             write_ops::UpdateCommandReply updateReply;
             if (request().getEncryptionInformation().has_value()) {
-                // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
                 if (!request().getEncryptionInformation().value().getCrudProcessed()) {
                     return processFLEUpdate(opCtx, request());
                 }
@@ -582,7 +589,10 @@ public:
             UpdateRequest updateRequest(request().getUpdates()[0]);
             updateRequest.setNamespaceString(nss);
             if (shouldDoFLERewrite(request())) {
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     updateRequest.setQuery(
@@ -636,6 +646,7 @@ public:
                 BSONObj(),
                 SerializationContext::stateCommandReply(request().getSerializationContext()),
                 _commandObj,
+                query_settings::QuerySettings(),
                 &bodyBuilder);
         }
 
@@ -718,8 +729,11 @@ public:
             OperationSource source = OperationSource::kStandard;
 
             if (request().getEncryptionInformation().has_value()) {
-                // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     return processFLEDelete(opCtx, request());
@@ -771,7 +785,10 @@ public:
             const auto& firstDelete = request().getDeletes()[0];
             BSONObj query = firstDelete.getQ();
             if (shouldDoFLERewrite(request())) {
-                CurOp::get(opCtx)->debug().shouldOmitDiagnosticInformation = true;
+                {
+                    stdx::lock_guard<Client> lk(*opCtx->getClient());
+                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+                }
 
                 if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
                     query = processFLEWriteExplainD(
@@ -819,6 +836,7 @@ public:
                 BSONObj(),
                 SerializationContext::stateCommandReply(request().getSerializationContext()),
                 _commandObj,
+                query_settings::QuerySettings(),
                 &bodyBuilder);
         }
 

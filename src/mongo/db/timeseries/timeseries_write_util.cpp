@@ -549,11 +549,10 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds) {
     // Generate the diff and apply it against the previously decompressed bucket document.
-    const bool mustCheckExistenceForInsertOperations =
-        static_cast<bool>(repl::tenantMigrationInfo(opCtx));
-    auto diff = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU().getDiff();
+    auto updateMod = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU();
+    auto diff = updateMod.getDiff();
     auto updated = doc_diff::applyDiff(
-        batch->decompressed.value().after, diff, mustCheckExistenceForInsertOperations);
+        batch->decompressed.value().after, diff, updateMod.mustCheckExistenceForInsertOperations());
 
     // Holds the compressed bucket document that's currently on-disk prior to this write batch
     // running.
@@ -602,9 +601,7 @@ StatusWith<bucket_catalog::InsertResult> attemptInsertIntoBucket(
     do {
         // Avoids reopening existing buckets for the inserts of the updated measurements from
         // time-series user updates.
-        if (!fromUpdates &&
-            feature_flags::gTimeseriesScalabilityImprovements.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+        if (!fromUpdates) {
             swResult = bucket_catalog::tryInsert(opCtx,
                                                  bucketCatalog,
                                                  viewNs,
