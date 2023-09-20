@@ -61,12 +61,8 @@ void invariantNoCurrentClient() {
 }
 }  // namespace
 
-void Client::initThread(StringData desc, std::shared_ptr<transport::Session> session) {
-    initThread(desc, getGlobalServiceContext(), std::move(session));
-}
-
 void Client::initThread(StringData desc,
-                        ServiceContext* service,
+                        Service* service,
                         std::shared_ptr<transport::Session> session) {
     invariantNoCurrentClient();
 
@@ -92,15 +88,14 @@ int64_t generateSeed(const std::string& desc) {
 }
 }  // namespace
 
-Client::Client(std::string desc,
-               ServiceContext* serviceContext,
-               std::shared_ptr<transport::Session> session)
-    : _serviceContext(serviceContext),
+Client::Client(std::string desc, Service* service, std::shared_ptr<transport::Session> session)
+    : _service(service),
       _session(std::move(session)),
       _desc(std::move(desc)),
       _connectionId(_session ? _session->id() : 0),
       _prng(generateSeed(_desc)),
-      _uuid(UUID::gen()) {}
+      _uuid(UUID::gen()),
+      _tags(kPending) {}
 
 void Client::reportState(BSONObjBuilder& builder) {
     builder.append("desc", desc());
@@ -179,19 +174,16 @@ void Client::setKilled() noexcept {
     stdx::lock_guard<Client> lk(*this);
     _killed.store(true);
     if (_opCtx) {
-        _serviceContext->killOperation(lk, _opCtx, ErrorCodes::ClientMarkedKilled);
+        getServiceContext()->killOperation(lk, _opCtx, ErrorCodes::ClientMarkedKilled);
     }
 }
 
-ThreadClient::ThreadClient(ServiceContext* serviceContext)
-    : ThreadClient(getThreadName(), serviceContext, nullptr) {}
-
 ThreadClient::ThreadClient(StringData desc,
-                           ServiceContext* serviceContext,
+                           Service* service,
                            std::shared_ptr<transport::Session> session) {
     invariantNoCurrentClient();
     _originalThreadName = getThreadNameRef();
-    Client::initThread(desc, serviceContext, std::move(session));
+    Client::initThread(desc, service, std::move(session));
 }
 
 ThreadClient::~ThreadClient() {
@@ -202,6 +194,29 @@ ThreadClient::~ThreadClient() {
 
 Client* ThreadClient::get() const {
     return &cc();
+}
+
+void Client::setTags(TagMask tagsToSet) {
+    mutateTags([tagsToSet](TagMask originalTags) { return (originalTags | tagsToSet); });
+}
+
+void Client::unsetTags(TagMask tagsToUnset) {
+    mutateTags([tagsToUnset](TagMask originalTags) { return (originalTags & ~tagsToUnset); });
+}
+
+void Client::mutateTags(const std::function<TagMask(TagMask)>& mutateFunc) {
+    TagMask oldValue, newValue;
+    do {
+        oldValue = _tags.load();
+        newValue = mutateFunc(oldValue);
+
+        // Any change to the Client tags automatically clears kPending status.
+        newValue &= ~kPending;
+    } while (!_tags.compareAndSwap(&oldValue, newValue));
+}
+
+Client::TagMask Client::getTags() const {
+    return _tags.load();
 }
 
 }  // namespace mongo

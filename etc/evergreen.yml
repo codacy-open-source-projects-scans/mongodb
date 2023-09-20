@@ -660,7 +660,6 @@ buildvariants:
   - name: jsCore_ese
   - name: jsCore_txns_large_txns_format
   - name: .jstestfuzz .common
-  - name: mqlrun
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
   - name: .replica_sets .common !.ignore_non_generated_replica_sets_jscore_passthrough
@@ -695,7 +694,6 @@ buildvariants:
     test_flags: >-
       --runAllFeatureFlagTests
       --excludeWithAnyTags=incompatible_with_windows_tls
-      --excludeWithAnyTags=incompatible_with_shard_merge
     external_auth_jobs_max: 1
     # Uncomment expansion and `burn_in_tasks_gen` task below and add resmoke task name to burn-in.
     # WARNING! Task splitting is not supported for burn-in tasks. Large unsplitted `_gen` tasks may
@@ -730,7 +728,6 @@ buildvariants:
   - name: jsCore_txns_large_txns_format
   - name: jsCore_wildcard_indexes
   - name: .jstestfuzz .common
-  - name: mqlrun
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
   - name: .replica_sets .common !.ignore_non_generated_replica_sets_jscore_passthrough
@@ -853,7 +850,6 @@ buildvariants:
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore !.ssl
   - name: .jscore .common !.decimal !.sharding
-  - name: mqlrun
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough_gen
   - name: sasl
@@ -883,7 +879,6 @@ buildvariants:
   - name: causally_consistent_jscore_txns_passthrough
   - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore
   - name: .jscore .common !.decimal !.sharding
-  - name: mqlrun
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough
   - name: sasl
@@ -990,7 +985,6 @@ buildvariants:
   - name: json_schema
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
@@ -1115,7 +1109,6 @@ buildvariants:
   # - name: .jstestfuzz !.flow_control
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard !.no_debug_mode
   - name: multiversion_gen
   - name: .ocsp
@@ -1169,6 +1162,7 @@ buildvariants:
     - rhel80-xlarge
   - name: streams
   - name: streams_auth
+  - name: streams_kafka
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
@@ -1190,7 +1184,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --runAllFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_shard_merge
     # Uncomment expansion and `burn_in_tasks_gen` task below and add resmoke task name to burn-in.
     # WARNING! Task splitting is not supported for burn-in tasks. Large unsplitted `_gen` tasks may
     # run too long and hit execution timeouts.
@@ -1261,7 +1254,6 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
@@ -1315,6 +1307,7 @@ buildvariants:
   - name: .shard_split
   - name: streams
   - name: streams_auth
+  - name: streams_kafka
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
@@ -1406,7 +1399,6 @@ buildvariants:
   - name: jsCore_min_batch_repeat_queries_ese_gsm
   - name: jsCore_txns_large_txns_format
   - name: json_schema
-  - name: mqlrun
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
   - name: .multiversion_sanity_check
@@ -1457,7 +1449,6 @@ buildvariants:
     <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-expansions
     test_flags: >-
       --runAllFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --excludeWithAnyTags=cqf_incompatible
       --mongosSetParameters="{featureFlagCommonQueryFramework: true, internalQueryFrameworkControl: 'tryBonsai'}"
       --mongodSetParameters="{featureFlagCommonQueryFramework: true, internalQueryFrameworkControl: 'tryBonsai'}"
@@ -1515,7 +1506,6 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
@@ -1654,7 +1644,6 @@ buildvariants:
     # No feature flag tests since they aren't compatible with the older binaries.
     test_flags: >-
       --runNoFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_shard_merge,
 
 # This variant exists becuase this is the only way to test future multiversion tags
 # version_expansions_gen will pretend we are upgrading to "bv_future_git_tag"
@@ -1922,7 +1911,7 @@ buildvariants:
     exec_timeout_factor: 1.5
     test_flags: >-
       --runAllFeatureFlagTests
-      --excludeWithAnyTags=incompatible_with_amazon_linux,incompatible_with_shard_merge,requires_external_data_source
+      --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source
   tasks:
   - name: analyze_shard_key_jscore_passthrough_gen
   - name: query_golden_classic
@@ -1971,7 +1960,6 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
@@ -2054,7 +2042,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --runAllFeatureFlagTests
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -2156,7 +2143,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --runAllFeatureFlagTests
   tasks:
   - name: jsCore
@@ -2174,7 +2160,6 @@ buildvariants:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
       --excludeWithAnyTags=requires_ocsp_stapling
-      --excludeWithAnyTags=incompatible_with_shard_merge
       --runAllFeatureFlagTests
   tasks:
   - name: audit
@@ -2319,7 +2304,6 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   # - name: libunwind_tests # Cant be used because tsan does not use libunwind
   # - name: .multiversion_sanity_check # Multiversion does not pass yet, also making this work is going to be pretty tricky
-  - name: mqlrun
   # - name: .multi_shard # Not passing
   # - name: multi_stmt_txn_jscore_passthrough_with_migration_gen # Not passing
   # - name: multiversion_gen # Multiversion does not pass yet, also making this work is going to be pretty tricky
@@ -2876,7 +2860,7 @@ buildvariants:
     <<: *linux_arm64_generic_expansions
     test_flags: >-
       --mongodSetParameters="{storageEngineConcurrencyAdjustmentAlgorithm: fixedConcurrentTransactions}"
-      --excludeWithAnyTags=incompatible_with_amazon_linux,incompatible_with_shard_merge,requires_external_data_source
+      --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source
     scons_cache_scope: shared
     scons_cache_mode: all
     commit_queue_alternate_cache: amazon-linux2-arm64-compile
@@ -2929,7 +2913,6 @@ buildvariants:
   - name: .jstestfuzz !.flow_control  # Flow control jstestfuzz take longer.
   - name: libunwind_tests
   - name: .multiversion_sanity_check
-  - name: mqlrun
   - name: .multi_shard
   - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
   - name: multiversion_gen
@@ -3003,7 +2986,6 @@ buildvariants:
     test_flags: >-
       --runAllFeatureFlagTests
       --excludeWithAnyTags=resource_intensive
-      --excludeWithAnyTags=incompatible_with_shard_merge
 
 ### Security Patch-Specific Build Variants ###
 - <<: *enterprise-rhel-80-64-bit-dynamic-all-feature-flags-template
@@ -3045,6 +3027,7 @@ buildvariants:
 
 - name: &enterprise-ubuntu2204-64-libvoidstar enterprise-ubuntu2204-64-libvoidstar
   display_name: "~ Enterprise Ubuntu 22.04 w/ libvoidstar"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   modules:
   - enterprise
   run_on:

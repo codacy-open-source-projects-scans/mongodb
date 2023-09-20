@@ -334,7 +334,6 @@ StatusWith<CachedDatabaseInfo> CatalogCache::_getDatabase(OperationContext* opCt
         CurOp::get(opCtx)->debug().catalogCacheDatabaseLookupMillis += Milliseconds(t.millis());
     });
 
-    const auto dbNameStr = DatabaseNameUtil::serialize(dbName);
     try {
         auto dbEntryFuture =
             _databaseCache.acquireAsync(dbName, CacheCausalConsistency::kLatestKnown);
@@ -700,6 +699,44 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getShardedCollectionRoutingInfoW
                 str::stream() << "Expected collection " << nss.toStringForErrorMsg()
                               << " to be sharded",
                 cri.cm.isSharded());
+        return cri;
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
+}
+
+CollectionRoutingInfo CatalogCache::getTrackedCollectionRoutingInfo(OperationContext* opCtx,
+                                                                    const NamespaceString& nss) {
+    auto cri = uassertStatusOK(getCollectionRoutingInfo(opCtx, nss));
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                          << " to be tracked",
+            cri.cm.hasRoutingTable());
+    return cri;
+}
+
+StatusWith<CollectionRoutingInfo> CatalogCache::getTrackedCollectionRoutingInfoWithRefresh(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    try {
+        auto cri = uassertStatusOK(getCollectionRoutingInfoWithRefresh(opCtx, nss));
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                              << " to be tracked",
+                cri.cm.hasRoutingTable());
+        return cri;
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
+}
+
+StatusWith<CollectionRoutingInfo> CatalogCache::getTrackedCollectionRoutingInfoWithPlacementRefresh(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    try {
+        auto cri = uassertStatusOK(getCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                              << " to be tracked",
+                cri.cm.hasRoutingTable());
         return cri;
     } catch (const DBException& ex) {
         return ex.toStatus();

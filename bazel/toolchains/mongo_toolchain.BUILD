@@ -38,14 +38,16 @@ filegroup(
             "--verbose",
             "-std=c++20",
             "-nostdinc++",
-            # These flags are necessary to get system includes properly available for compilation:
+            # These isystems make sure that toolchain includes are used in place of any remote system
             "-isystem",
             "external/mongo_toolchain/stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0/include",
+            "-isystem",
+            "external/mongo_toolchain/stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0/include-fixed",
             "-isystem",
             "external/mongo_toolchain/stow/gcc-v4/include/c++/11.3.0",
             "-isystem",
             "external/mongo_toolchain/stow/gcc-v4/include/c++/11.3.0/aarch64-mongodb-linux",
-            # These flags are necessary for the link step to work remotely:
+            # Make sure that the toolchain binaries are available
             "-Bexternal/mongo_toolchain/v4/bin",
             "-Bexternal/mongo_toolchain/v4/lib",
             "-Bexternal/mongo_toolchain/stow/gcc-v4/libexec/gcc/aarch64-mongodb-linux/11.3.0",
@@ -54,11 +56,27 @@ filegroup(
         cpu = "arm64",
         cxx_builtin_include_directories = [
             "/usr/include",
+            # See undocumented %package() syntax: https://cs.opensource.google/bazel/bazel/+/6d448136d13ddab92da8bb29ea6e8387821369d9:src/main/java/com/google/devtools/build/lib/rules/cpp/CcToolchainProviderHelper.java;l=309-329
+            "%package(@mongo_toolchain//stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0/include)%",
+            "%package(@mongo_toolchain//stow/gcc-v4/include/c++/11.3.0)%",
+            "%package(@mongo_toolchain//stow/gcc-v4/include/c++/11.3.0/aarch64-mongodb-linux)%",
+            "%package(@mongo_toolchain//stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0/include-fixed)%",
+        ],
+        unfiltered_compile_flags = [
+            # Do not resolve our symlinked resource prefixes to real paths. This is required to
+            # make includes resolve correctly.
+            "-no-canonical-prefixes",
+            # Replace compile timestamp-related macros for reproducible binaries with consistent hashes.
+            "-Wno-builtin-macro-redefined",
+            "-D__DATE__=\"OMITTED_FOR_HASH_CONSISTENCY\"",
+            "-D__TIMESTAMP__=\"OMITTED_FOR_HASH_CONSISTENCY\"",
+            "-D__TIME__=\"OMITTED_FOR_HASH_CONSISTENCY\"",
         ],
         host_system_name = "local",
         link_flags = [
-            # These flags are necessary for the link step to work remotely:
+            # Don't use remote system includes, only our toolchain includes
             "-nostdinc++",
+            # Make sure that our toolchain libraries are used for linking
             "-Lexternal/mongo_toolchain/v4/lib",
             "-Lexternal/mongo_toolchain/stow/gcc-v4/lib/gcc/aarch64-mongodb-linux/11.3.0",
             "-Bexternal/mongo_toolchain/stow/gcc-v4/libexec/gcc/aarch64-mongodb-linux/11.3.0",

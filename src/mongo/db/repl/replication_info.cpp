@@ -399,6 +399,10 @@ public:
                              const DatabaseName& dbName,
                              const BSONObj& cmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) final {
+        // Critical to monitoring and observability, categorize the command as immediate priority.
+        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
+
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
         auto cmd = HelloCommand::parse({"hello", apiStrict}, cmdObj);
@@ -413,13 +417,13 @@ public:
             NotPrimaryErrorTracker::get(opCtx->getClient()).disable();
         }
 
-        transport::Session::TagMask sessionTagsToSet = 0;
-        transport::Session::TagMask sessionTagsToUnset = 0;
+        Client::TagMask connectionTagsToSet = 0;
+        Client::TagMask connectionTagsToUnset = 0;
         bool isInternalClient = false;
 
         // Tag connections to avoid closing them on stepdown.
         if (!cmd.getHangUpOnStepDown()) {
-            sessionTagsToSet |= transport::Session::kKeepOpen;
+            connectionTagsToSet |= Client::kKeepOpen;
         }
 
         auto client = opCtx->getClient();
@@ -434,37 +438,38 @@ public:
         // Parse the optional 'internalClient' field. This is provided by incoming connections from
         // mongod and mongos.
         if (auto internalClient = cmd.getInternalClient()) {
-            sessionTagsToUnset |= transport::Session::kExternalClientKeepOpen;
+            connectionTagsToUnset |= Client::kExternalClientKeepOpen;
             isInternalClient = true;
 
             // All incoming connections from mongod/mongos of earlier versions should be
             // closed if the featureCompatibilityVersion is bumped to 3.6.
             if (internalClient->getMaxWireVersion() >=
-                WireSpec::instance().get()->incomingInternalClient.maxWireVersion) {
-                sessionTagsToSet |= transport::Session::kLatestVersionInternalClientKeepOpen;
+                WireSpec::getWireSpec(opCtx->getServiceContext())
+                    .get()
+                    ->incomingExternalClient.maxWireVersion) {
+                connectionTagsToSet |= Client::kLatestVersionInternalClientKeepOpen;
             } else {
-                sessionTagsToUnset |= transport::Session::kLatestVersionInternalClientKeepOpen;
+                connectionTagsToUnset |= Client::kLatestVersionInternalClientKeepOpen;
             }
         } else {
-            sessionTagsToUnset |= transport::Session::kLatestVersionInternalClientKeepOpen;
-            sessionTagsToSet |= transport::Session::kExternalClientKeepOpen;
+            connectionTagsToUnset |= Client::kLatestVersionInternalClientKeepOpen;
+            connectionTagsToSet |= Client::kExternalClientKeepOpen;
         }
 
-        auto session = opCtx->getClient()->session();
-        if (session) {
-            session->mutateTags([sessionTagsToSet, sessionTagsToUnset, opCtx, isInternalClient](
-                                    transport::Session::TagMask originalTags) {
-                // After a mongos sends the initial "isMaster" command with its mongos client
-                // information, it sometimes sends another "isMaster" command that is forwarded
-                // from its client. Once kInternalClient has been set, we assume that any future
-                // "isMaster" commands are forwarded in this manner, and we do not update the
-                // session tags.
-                if (!opCtx->getClient()->isInternalClient()) {
-                    return (originalTags | sessionTagsToSet) & ~sessionTagsToUnset;
-                } else {
-                    return originalTags;
-                }
-            });
+        if (opCtx->getClient()->session()) {
+            opCtx->getClient()->mutateTags(
+                [connectionTagsToSet, connectionTagsToUnset, opCtx](Client::TagMask originalTags) {
+                    // After a mongos sends the initial "isMaster" command with its mongos client
+                    // information, it sometimes sends another "isMaster" command that is forwarded
+                    // from its client. Once kInternalClient has been set, we assume that any future
+                    // "isMaster" commands are forwarded in this manner, and we do not update the
+                    // session tags.
+                    if (!opCtx->getClient()->isInternalClient()) {
+                        return (originalTags | connectionTagsToSet) & ~connectionTagsToUnset;
+                    } else {
+                        return originalTags;
+                    }
+                });
             if (!opCtx->getClient()->isInternalClient()) {
                 opCtx->getClient()->setIsInternalClient(isInternalClient);
             }
@@ -538,7 +543,8 @@ public:
                             opCtx->getClient()->getConnectionId());
 
 
-        if (auto wireSpec = WireSpec::instance().get(); cmd.getInternalClient()) {
+        if (auto wireSpec = WireSpec::getWireSpec(opCtx->getServiceContext()).get();
+            cmd.getInternalClient()) {
             result.append(HelloCommandReply::kMinWireVersionFieldName,
                           wireSpec->incomingInternalClient.minWireVersion);
             result.append(HelloCommandReply::kMaxWireVersionFieldName,

@@ -112,7 +112,7 @@ void assertCanExtractShardKeyFromDocs(OperationContext* opCtx,
     uassert(ErrorCodes::NamespaceNotSharded,
             str::stream() << "Temporary resharding collection " << nss.toStringForErrorMsg()
                           << " is not sharded",
-            collDesc.isSharded());
+            collDesc.hasRoutingTable());
 
     const ShardKeyPattern shardKeyPattern(collDesc.getKeyPattern());
     for (auto it = begin; it != end; ++it) {
@@ -291,6 +291,7 @@ void ReshardingOpObserver::onUpdate(OperationContext* opCtx,
 void ReshardingOpObserver::onDelete(OperationContext* opCtx,
                                     const CollectionPtr& coll,
                                     StmtId stmtId,
+                                    const BSONObj& doc,
                                     const OplogDeleteEntryArgs& args,
                                     OpStateAccumulator* opAccumulator) {
     if (coll->ns() == NamespaceString::kDonorReshardingOperationsNamespace) {

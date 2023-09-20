@@ -82,6 +82,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeFileImporterThreadExit);
 MONGO_FAIL_POINT_DEFINE(skipCloneFiles);
 MONGO_FAIL_POINT_DEFINE(hangBeforeVoteImportedFiles);
 MONGO_FAIL_POINT_DEFINE(skipImportFiles);
+MONGO_FAIL_POINT_DEFINE(hangBeforeImportingFiles);
 
 namespace mongo::repl {
 
@@ -108,7 +109,7 @@ void setPromiseOkifNotReady(WithLock lk, Promise& promise) {
  * Connect to the donor source and uses the default authentication mode.
  */
 void connectAndAuth(const HostAndPort& source, DBClientConnection* client) {
-    uassertStatusOK(client->connect(source, "TenantFileImporterService", boost::none));
+    client->connect(source, "TenantFileImporterService", boost::none);
     uassertStatusOK(replAuthenticate(client).withContext(
         str::stream() << "TenantFileImporterService failed to authenticate to " << source));
 }
@@ -259,7 +260,7 @@ void importCollectionAndItsIndexesInMainWTInstance(OperationContext* opCtx,
         if (metadata.numRecords > 0 &&
             nss == NamespaceString::makeClusterParametersNSS(nss.tenantId())) {
             cluster_parameters::initializeAllTenantParametersFromCollection(opCtx,
-                                                                            &*ownedCollection);
+                                                                            *ownedCollection);
         }
 
         LOGV2(6114300,
@@ -504,6 +505,11 @@ void TenantFileImporterService::_handleEvents(const UUID& migrationId) {
                 continue;
             }
             case eventType::kLearnedAllFilenames: {
+                if (MONGO_unlikely(hangBeforeImportingFiles.shouldFail())) {
+                    LOGV2(8101400, "'hangBeforeImportingFiles' failpoint enabled");
+                    hangBeforeImportingFiles.pauseWhileSet();
+                }
+
                 // This step prevents accidental deletion of committed donor data during startup and
                 // rollback recovery.
                 //

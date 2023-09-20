@@ -189,11 +189,8 @@ struct CommandHelpers {
      */
     static ResourcePattern resourcePatternForNamespace(const NamespaceString& ns);
 
+    static Command* findCommand(Service* service, StringData name);
     static Command* findCommand(OperationContext* opCtx, StringData name);
-
-    static Command* findCommand(StringData name) {
-        return findCommand(nullptr, name);
-    }
 
     /**
      * Helper for setting errmsg and ok field in command result object.
@@ -356,7 +353,8 @@ struct CommandHelpers {
      * Verifies that command is allowed to run under a transaction in the given database or
      * namespaces, and throws if that verification doesn't pass.
      */
-    static void canUseTransactions(const std::vector<NamespaceString>& namespaces,
+    static void canUseTransactions(Service* service,
+                                   const std::vector<NamespaceString>& namespaces,
                                    StringData cmdName,
                                    bool allowTransactionsOnConfigDatabase);
 
@@ -525,10 +523,11 @@ public:
     }
 
     /**
-     * Override and return true if the readConcernCounters in serverStatus should not be incremented
-     * on behalf of this command.
+     * Override and return true if the readConcernCounters and readPreferenceCounters in
+     * serverStatus should be incremented on behalf of this command. This should be true for
+     * read operations.
      */
-    virtual bool shouldAffectReadConcernCounter() const {
+    virtual bool shouldAffectReadOptionCounters() const {
         return false;
     }
 
@@ -1385,15 +1384,8 @@ std::unique_ptr<CommandInvocation> TypedCommand<Derived>::parse(OperationContext
 }
 
 
-/**
- * See the 'globalCommandRegistry()' singleton accessor.
- */
 class CommandRegistry {
 public:
-    CommandRegistry() = default;
-    CommandRegistry(const CommandRegistry&) = delete;
-    CommandRegistry& operator=(const CommandRegistry&) = delete;
-
     /**
      * Invokes a callable `f` for each distinct `Command* c` in the registry, as `f(c)`.
      * A `Command*` may be mapped to multiple aliases, but these are omitted
@@ -1423,6 +1415,21 @@ private:
     StringMap<Command*> _commandNames;
 };
 
+CommandRegistry* getCommandRegistry(Service* service);
+
+/** Convenience overload. */
+inline CommandRegistry* getCommandRegistry(OperationContext* opCtx) {
+    return getCommandRegistry(opCtx->getService());
+}
+
+inline Command* CommandHelpers::findCommand(Service* service, StringData name) {
+    return getCommandRegistry(service)->findCommand(name);
+}
+
+inline Command* CommandHelpers::findCommand(OperationContext* opCtx, StringData name) {
+    return getCommandRegistry(opCtx)->findCommand(name);
+}
+
 /**
  * When CommandRegistry objects are initialized, they look into the global
  * CommandConstructionPlan to find the list of Command objects that need to
@@ -1436,6 +1443,7 @@ public:
         std::function<std::unique_ptr<Command>()> construct;
         const FeatureFlag* featureFlag = nullptr;
         bool testOnly = false;
+        boost::optional<ClusterRole> roles;
         const std::type_info* typeInfo = nullptr;
     };
 
@@ -1449,24 +1457,30 @@ public:
         return _entries;
     }
 
-    void execute(CommandRegistry* registry) const;
+    /**
+     * Adds to the specified `registry` an instance of all apppriate Command types in this plan.
+     * Appropriate is determined by the Entry data members, and by the specified `pred`.
+     *
+     * There are some server-wide criteria applied automatically:
+     *
+     *   - FeatureFlag-enabled commands are filtered out according to flag settings.
+     *
+     *   - testOnly registrations are only created if the server is in testOnly mode.
+     *
+     * Other criteria can be applied via the caller-supplied `pred`. A `Command`
+     * will only be created for an `entry` if the `pred(entry)` passes.
+     */
+    void execute(CommandRegistry* registry, const std::function<bool(const Entry&)>& pred) const;
+
+    /**
+     * Calls `execute` with a predicate that enables Commands appropriate for
+     * the specified `service`.
+     */
+    void execute(CommandRegistry* registry, Service* service) const;
 
 private:
     std::vector<std::unique_ptr<Entry>> _entries;
 };
-
-/**
- * Returns the command registry for the service relevant to `opCtx`.
- */
-CommandRegistry* getCommandRegistry(OperationContext* opCtx);
-
-/**
- * Accessor to the command registry, an always-valid singleton.
- * Legacy compatibility. Prefer `getCommandRegistry(opCtx)`.
- */
-inline CommandRegistry* globalCommandRegistry() {
-    return getCommandRegistry(nullptr);
-}
 
 /**
  * CommandRegisterer objects attach entries to this instance at static-init
@@ -1500,6 +1514,22 @@ public:
     }
 
     EntryBuilder() = default;
+
+    /**
+     * Chooses the ClusterRoles (i.e. services) for which the command will be
+     * created. Can be shard, router, or a combined role mask specifying both.
+     *
+     * This is an assignment rather than an append, so it should be specified
+     * only once.
+     *
+     * As a transitional technique, a Command registration that chooses no roles
+     * will exist in all services. This will be a mandatory call for all
+     * EntryBuilders.
+     */
+    EntryBuilder roles(ClusterRole roles) && {
+        _entry->roles = roles;
+        return std::move(*this);
+    }
 
     /**
      * Denotes a test-only command. See docs/test_commands.md.

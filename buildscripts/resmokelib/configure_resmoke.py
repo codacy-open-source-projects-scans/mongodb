@@ -180,13 +180,19 @@ def _set_up_tracing(
     resource = Resource(attributes={SERVICE_NAME: "resmoke"})
 
     provider = TracerProvider(resource=resource)
-    if otel_collector_endpoint and sys.platform != "darwin":
+    if otel_collector_endpoint:
         # TODO: EVG-20576
         # We can remove this and export to a file when EVG-20576 is merged
         # This will remove our dependency on grpc
-        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
-        processor = BatchedBaggageSpanProcessor(OTLPSpanExporter(endpoint=otel_collector_endpoint))
-        provider.add_span_processor(processor)
+        # TODO: SERVER-80336 grpc has problems on macosx, ppc, and s390x.
+        # Rather than hardcode the environments where grpc fails to install we just try to use it and bail out if it fails
+        try:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+            processor = BatchedBaggageSpanProcessor(
+                OTLPSpanExporter(endpoint=otel_collector_endpoint))
+            provider.add_span_processor(processor)
+        except ModuleNotFoundError:
+            print("Failed to set up a remote grpc otel endpoint. Continuing.")
 
     if otel_collector_file:
         try:
@@ -426,7 +432,6 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     if _config.SUITE_FILES is not None:
         _config.SUITE_FILES = _config.SUITE_FILES.split(",")
     _config.TAG_FILES = config.pop("tag_files")
-    _config.TRANSPORT_LAYER = config.pop("transport_layer")
     _config.USER_FRIENDLY_OUTPUT = config.pop("user_friendly_output")
     _config.SANITY_CHECK = config.pop("sanity_check")
     _config.DOCKER_COMPOSE_BUILD_IMAGES = config.pop("docker_compose_build_images")
@@ -434,9 +439,16 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
         _config.DOCKER_COMPOSE_BUILD_IMAGES = _config.DOCKER_COMPOSE_BUILD_IMAGES.split(",")
     _config.DOCKER_COMPOSE_BUILD_ENV = config.pop("docker_compose_build_env")
     _config.DOCKER_COMPOSE_TAG = config.pop("docker_compose_tag")
-    # Always set this to True if we are building images for docker compose
-    _config.EXTERNAL_SUT = config.pop(
-        "external_sut") or _config.DOCKER_COMPOSE_BUILD_IMAGES is not None
+    _config.EXTERNAL_SUT = config.pop("external_sut")
+
+    # This is set to True when:
+    # (1) We are building images for an External SUT, OR ...
+    # (2) We are running resmoke against an External SUT
+    _config.NOOP_MONGO_D_S_PROCESSES = _config.DOCKER_COMPOSE_BUILD_IMAGES is not None or _config.EXTERNAL_SUT
+
+    # When running resmoke against an External SUT, we are expected to be in
+    # the workload container -- which may require additional setup before running tests.
+    _config.REQUIRES_WORKLOAD_CONTAINER_SETUP = _config.EXTERNAL_SUT
 
     # Internal testing options.
     _config.INTERNAL_PARAMS = config.pop("internal_params")

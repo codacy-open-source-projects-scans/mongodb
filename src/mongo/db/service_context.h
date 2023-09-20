@@ -74,6 +74,7 @@ class OpObserver;
 class ServiceEntryPoint;
 
 namespace transport {
+class SessionManager;
 class TransportLayer;
 }  // namespace transport
 
@@ -141,6 +142,8 @@ private:
  * tracking or speculative executing its command.
  */
 using OperationKey = UUID;
+
+class Service;
 
 /**
  * Class representing the context of a service, such as a MongoD database service or
@@ -383,6 +386,11 @@ public:
     UniqueClient makeClient(std::string desc,
                             std::shared_ptr<transport::Session> session = nullptr);
 
+    /** Internal: Called by Service->makeClient. */
+    UniqueClient makeClientForService(std::string desc,
+                                      std::shared_ptr<transport::Session> session,
+                                      Service* service);
+
     /**
      * Creates a new OperationContext on "client".
      *
@@ -518,6 +526,11 @@ public:
     ServiceEntryPoint* getServiceEntryPoint() const;
 
     /**
+     * Get the SessionManager.
+     */
+    transport::SessionManager* getSessionManager() const;
+
+    /**
      * Waits for the ServiceContext to be fully initialized and for all TransportLayers to have been
      * added/started.
      *
@@ -595,6 +608,11 @@ public:
     void setPreciseClockSource(std::unique_ptr<ClockSource> newSource);
 
     /**
+     * Binds the session manager implementation to the service context.
+     */
+    void setSessionManager(std::unique_ptr<transport::SessionManager> sm);
+
+    /**
      * Binds the service entry point implementation to the service context.
      */
     void setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep);
@@ -639,6 +657,19 @@ public:
     }
 
     LockedClient getLockedClient(OperationId id);
+
+    /** The `role` must be ShardServer or RouterServer exactly. */
+    Service* getService(ClusterRole role) const;
+
+    /**
+     * Returns the shard service if it exists.
+     * Otherwise, returns the router service.
+     *
+     * Gets the "main service" of this ServiceContext. Used when a caller needs
+     * some Service (e.g. to call `makeClient`), but it doesn't matter which
+     * Service they get.
+     */
+    Service* getService() const;
 
 private:
     /**
@@ -710,6 +741,8 @@ private:
         std::unique_ptr<ClientObserver> _observer;
     };
 
+    struct ServiceSet;
+
     /**
      * Removes the operation from its client and the `_clientByOperationId` of its service context.
      * It will acquire both client and service context locks, and should only be used internally by
@@ -724,6 +757,11 @@ private:
      * The periodic runner.
      */
     SyncUnique<PeriodicRunner> _runner;
+
+    /**
+     * The SessionManager.
+     */
+    SyncUnique<transport::SessionManager> _sessionManager;
 
     /**
      * The TransportLayer.
@@ -791,6 +829,42 @@ private:
 
     bool _startupComplete = false;
     stdx::condition_variable _startupCompleteCondVar;
+
+    std::unique_ptr<ServiceSet> _serviceSet;
+};
+
+/**
+ * A Service is a grouping of Clients, and is a creator of Client objects.
+ * It determines the ClusterRole of the Clients and the CommandRegistry
+ * available to them. Each service tracks some metrics separately.
+ *
+ * A Service is logically on a level below the ServiceContext, which holds state
+ * for the whole process, and above Client, which holds state for each
+ * connection. A ServiceContext owns one or more Service objects.
+ *
+ * A Service will be the handler for either the "shard" or "router" service, as
+ * both services can now exist in the same server process (ServiceContext).
+ */
+class Service : public Decorable<Service> {
+public:
+    Service(ServiceContext* sc, ClusterRole role) : _sc{sc}, _role{role} {}
+
+    ServiceContext::UniqueClient makeClient(std::string desc,
+                                            std::shared_ptr<transport::Session> session = nullptr) {
+        return _sc->makeClientForService(std::move(desc), std::move(session), this);
+    }
+
+    ClusterRole role() const {
+        return _role;
+    }
+
+    ServiceContext* getServiceContext() const {
+        return _sc;
+    }
+
+private:
+    ServiceContext* _sc;
+    ClusterRole _role;
 };
 
 /**

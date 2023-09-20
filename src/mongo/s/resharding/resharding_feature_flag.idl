@@ -40,10 +40,15 @@ feature_flags:
         support same-key resharding."
         cpp_varname: gFeatureFlagReshardingImprovements
         default: true
-        version: 7.1
+        version: 7.2
         shouldBeFCVGated: true
     featureFlagMoveCollection:
         description: "Feature flag for implementing online move collection."
         cpp_varname: gFeatureFlagMoveCollection
+        default: false
+        shouldBeFCVGated: true
+    featureFlagUnshardCollection:
+        description: "Feature flag for implementing unshard collection."
+        cpp_varname: gFeatureFlagUnshardCollection
         default: false
         shouldBeFCVGated: true

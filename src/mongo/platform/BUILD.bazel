@@ -1,0 +1,15 @@
+load("//bazel:mongo_src_rules.bzl", "mongo_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+mongo_cc_library(
+    name="visibility_test_libcommon",
+    hdrs=[
+        "visibility_test_libcommon.h",
+        "visibility.h",
+        "basic.h",
+    ],
+    srcs=[
+        "visibility_test_libcommon.cpp",
+    ],
+)

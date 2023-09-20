@@ -108,6 +108,7 @@
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
+#include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/classic_plan_cache.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"

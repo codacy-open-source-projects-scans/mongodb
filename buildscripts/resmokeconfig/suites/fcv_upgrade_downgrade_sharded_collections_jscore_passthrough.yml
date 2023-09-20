@@ -117,6 +117,9 @@ selector:
   - jstests/core/roles_info.js
   - jstests/core/views/views_all_commands.js
 
+  # The following test timesout due to fcv downgrade interfering with index build (see BF-29538)
+  - jstests/aggregation/sources/indexStats/verify_index_stats_output.js
+
   # Sharding specific failed:
   #
   # $unionWith explain output does not check whether the collection is sharded in a sharded
@@ -163,10 +166,13 @@ selector:
   - featureFlagFLE2CleanupCommand
   # TODO SERVER-71537: Remove Feature Flag for PM-412.
   - featureFlagQuerySettings
+  # TODO: SERVER-66393 Remove Feature Flag for PM-2919.
+  - featureFlagTimeseriesUpdatesSupport
   # Transactions are aborted upon fcv upgrade or downgrade.
   - uses_transactions
-  # Exclude tests with the latest fcv.
+  # Exclude tests that require a specific fcv.
   - requires_fcv_71
+  - requires_fcv_72
   # Exclude tests that are not compatible with upgrade/downgrade.
   - cannot_run_during_upgrade_downgrade
 

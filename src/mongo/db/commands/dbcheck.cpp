@@ -154,6 +154,8 @@ struct DbCheckCollectionInfo {
     int64_t maxRate;
     int64_t maxDocsPerBatch;
     int64_t maxBytesPerBatch;
+    int64_t maxDocsPerSec;
+    int64_t maxBytesPerSec;
     int64_t maxBatchTimeMillis;
     WriteConcernOptions writeConcern;
     boost::optional<SecondaryIndexCheckParameters> secondaryIndexCheckParameters;
@@ -295,6 +297,8 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
     const auto maxRate = invocation.getMaxCountPerSecond();
     const auto maxDocsPerBatch = invocation.getMaxDocsPerBatch();
     const auto maxBytesPerBatch = invocation.getMaxBytesPerBatch();
+    const auto maxDocsPerSec = invocation.getMaxDocsPerSec();
+    const auto maxBytesPerSec = invocation.getMaxBytesPerSec();
     const auto maxBatchTimeMillis = invocation.getMaxBatchTimeMillis();
     boost::optional<SecondaryIndexCheckParameters> secondaryIndexCheckParameters = boost::none;
     if (gSecondaryIndexChecksInDbCheck) {
@@ -318,6 +322,8 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
                                             maxRate,
                                             maxDocsPerBatch,
                                             maxBytesPerBatch,
+                                            maxDocsPerSec,
+                                            maxBytesPerSec,
                                             maxBatchTimeMillis,
                                             invocation.getBatchWriteConcern(),
                                             secondaryIndexCheckParameters};
@@ -344,6 +350,8 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
     const auto maxDocsPerBatch = invocation.getMaxDocsPerBatch();
     const auto maxBytesPerBatch = invocation.getMaxBytesPerBatch();
     const auto maxBatchTimeMillis = invocation.getMaxBatchTimeMillis();
+    const auto maxDocsPerSec = invocation.getMaxDocsPerSec();
+    const auto maxBytesPerSec = invocation.getMaxBytesPerSec();
     auto result = std::make_unique<DbCheckRun>();
     auto perCollectionWork = [&](const Collection* coll) {
         if (!coll->ns().isReplicated()) {
@@ -358,6 +366,8 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
                                    rate,
                                    maxDocsPerBatch,
                                    maxBytesPerBatch,
+                                   maxDocsPerSec,
+                                   maxBytesPerSec,
                                    maxBatchTimeMillis,
                                    invocation.getBatchWriteConcern(),
                                    boost::none};
@@ -423,17 +433,17 @@ std::shared_ptr<const CollectionCatalog> getConsistentCatalogAndSnapshot(Operati
  */
 class DbCheckJob : public BackgroundJob {
 public:
-    DbCheckJob(const DatabaseName& dbName, std::unique_ptr<DbCheckRun> run)
-        : BackgroundJob(true), _done(false), _run(std::move(run)) {}
+    DbCheckJob(Service* service, std::unique_ptr<DbCheckRun> run)
+        : BackgroundJob(true), _service(service), _done(false), _run(std::move(run)) {}
 
 protected:
-    virtual std::string name() const override {
+    std::string name() const override {
         return "dbCheck";
     }
 
-    virtual void run() override {
+    void run() override {
         // Every dbCheck runs in its own client.
-        ThreadClient tc(name(), getGlobalServiceContext());
+        ThreadClient tc(name(), _service);
         auto uniqueOpCtx = tc->makeOperationContext();
         auto opCtx = uniqueOpCtx.get();
 
@@ -1193,10 +1203,6 @@ private:
         }
     }
 
-    // Set if the job cannot proceed.
-    bool _done;
-    std::unique_ptr<DbCheckRun> _run;
-
     StatusWith<DbCheckCollectionBatchStats> _runBatch(OperationContext* opCtx,
                                                       const DbCheckCollectionInfo& info,
                                                       const BSONKey& first,
@@ -1301,6 +1307,10 @@ private:
         return false;
     }
 
+    Service* _service;
+    bool _done;  // Set if the job cannot proceed.
+    std::unique_ptr<DbCheckRun> _run;
+
     // Cumulative number of batches processed. Can wrap around; it's not guaranteed to be in
     // lockstep with other replica set members.
     unsigned int _batchesProcessed = 0;
@@ -1360,7 +1370,7 @@ public:
                      const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         auto job = getRun(opCtx, dbName, cmdObj);
-        (new DbCheckJob(dbName, std::move(job)))->go();
+        (new DbCheckJob(opCtx->getService(), std::move(job)))->go();
         return true;
     }
 };

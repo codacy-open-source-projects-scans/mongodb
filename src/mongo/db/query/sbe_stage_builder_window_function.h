@@ -45,6 +45,14 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
     std::unique_ptr<sbe::EExpression> arg);
 
 /**
+ * Similar to above but takes multiple arguments.
+ */
+std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInit(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args);
+
+/**
  * Build a list of window function add functions.
  */
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAdd(
@@ -82,6 +90,15 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildWindowRemove(
 std::unique_ptr<sbe::EExpression> buildWindowFinalize(StageBuilderState& state,
                                                       const WindowFunctionStatement& stmt,
                                                       sbe::value::SlotVector values);
+
+/**
+ * Similar to above but takes multiple arguments.
+ */
+std::unique_ptr<sbe::EExpression> buildWindowFinalize(
+    StageBuilderState& state,
+    const WindowFunctionStatement& stmt,
+    sbe::value::SlotVector values,
+    StringDataMap<std::unique_ptr<sbe::EExpression>> args);
 
 /**
  * Create a fake AccumulationStatement from the WindowFunctionStatement in order to invoke

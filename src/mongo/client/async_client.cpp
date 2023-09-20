@@ -59,7 +59,7 @@
 #include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/wire_version.h"
-#include "mongo/executor/egress_tag_closer_manager.h"
+#include "mongo/executor/egress_connection_closer_manager.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -130,9 +130,7 @@ BSONObj AsyncDBClient::_buildHelloRequest(const std::string& appName,
 
     _compressorManager.clientBegin(&bob);
 
-    if (auto wireSpec = WireSpec::instance().get(); wireSpec->isInternalClient) {
-        WireSpec::appendInternalClientWireVersion(wireSpec->outgoing, &bob);
-    }
+    WireSpec::getWireSpec(_svcCtx).appendInternalClientWireVersionIfNeeded(&bob);
 
     if (hook) {
         return hook->augmentHelloRequest(remote(), bob.obj());
@@ -146,7 +144,7 @@ void AsyncDBClient::_parseHelloResponse(BSONObj request,
     uassert(50786,
             "Expected OP_MSG response to 'hello'",
             response->getProtocol() == rpc::Protocol::kOpMsg);
-    auto wireSpec = WireSpec::instance().get();
+    auto wireSpec = WireSpec::getWireSpec(_svcCtx).get();
     auto responseBody = response->getCommandReply();
     uassertStatusOK(getStatusFromCommandResult(responseBody));
 
@@ -163,19 +161,16 @@ void AsyncDBClient::_parseHelloResponse(BSONObj request,
                                 << validateStatus.reason());
     }
 
-    auto& egressTagManager = executor::EgressTagCloserManager::get(_svcCtx);
-    // Tag outgoing connection so it can be kept open on FCV upgrade if it is not to a
-    // server with a lower binary version.
+    auto& egressConnectionCloserManager = executor::EgressConnectionCloserManager::get(_svcCtx);
+    // Mark outgoing connection to keep open so it can be kept open on FCV upgrade if it is
+    // not to a server with a lower binary version.
     if (replyWireVersion.maxWireVersion >= wireSpec->outgoing.maxWireVersion) {
         pauseBeforeMarkKeepOpen.pauseWhileSet();
-        egressTagManager.mutateTags(
-            _peer, [](transport::Session::TagMask tags) { return transport::Session::kKeepOpen; });
+        egressConnectionCloserManager.setKeepOpen(_peer, true);
     } else {
-        // The outgoing connection is to a server with a lower binary version, unset the pending
-        // flag if it's set to ensure that connections will be dropped.
-        egressTagManager.mutateTags(_peer, [](transport::Session::TagMask tags) {
-            return tags & ~transport::Session::kPending;
-        });
+        // The outgoing connection is to a server with a lower binary version, unmark keep open
+        // if it's set in order to ensure that connections will be dropped.
+        egressConnectionCloserManager.setKeepOpen(_peer, false);
     }
 
     _compressorManager.clientFinish(responseBody);

@@ -8,7 +8,7 @@
  *
  * @tags: [
  *   uses_atclustertime,
- *   requires_fcv_71,
+ *   requires_fcv_72,
  *   featureFlagReshardingImprovements,
  * ]
  */

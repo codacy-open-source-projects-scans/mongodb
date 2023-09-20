@@ -2,7 +2,7 @@
  * Tests $_requestResumeToken in aggregate command.
  *
  * @tags: [
- *  requires_fcv_71,
+ *  requires_fcv_72,
  *  featureFlagReshardingImprovements
  * ]
  */

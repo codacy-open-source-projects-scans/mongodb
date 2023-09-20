@@ -73,6 +73,7 @@ std::vector<AsyncRequestsSender::Request> buildUnshardedRequestsForAllShards(
     appendShardVersion(cmdToSend, ShardVersion::UNSHARDED());
 
     std::vector<AsyncRequestsSender::Request> requests;
+    requests.reserve(shardIds.size());
     for (auto&& shardId : shardIds)
         requests.emplace_back(std::move(shardId), cmdToSend);
 
@@ -116,7 +117,8 @@ CachedDatabaseInfo createDatabase(OperationContext* opCtx,
     auto dbStatus = catalogCache->getDatabase(opCtx, dbName);
 
     if (dbStatus == ErrorCodes::NamespaceNotFound) {
-        ConfigsvrCreateDatabase request(DatabaseNameUtil::serialize(dbName));
+        ConfigsvrCreateDatabase request(
+            DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest()));
         request.setDbName(DatabaseName::kAdmin);
         if (suggestedPrimaryId)
             request.setPrimaryShardId(*suggestedPrimaryId);

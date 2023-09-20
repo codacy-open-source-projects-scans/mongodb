@@ -139,8 +139,8 @@ public:
                 !from.empty());
 
         auto const catalogClient = Grid::get(opCtx)->catalogClient();
-        const auto shardedColls = catalogClient->getAllShardedCollectionsForDb(
-            opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern);
+        const auto shardedColls = catalogClient->getShardedCollectionNamespacesForDb(
+            opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
 
         DisableDocumentValidation disableValidation(opCtx);
 

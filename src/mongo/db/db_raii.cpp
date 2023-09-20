@@ -85,6 +85,8 @@
 namespace mongo {
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(hangAfterEstablishCappedSnapshot);
+
 const boost::optional<int> kDoNotChangeProfilingLevel = boost::none;
 
 /**
@@ -193,6 +195,10 @@ void establishCappedSnapshotIfNeeded(OperationContext* opCtx,
     auto coll = catalog->lookupCollectionByNamespaceOrUUID(opCtx, nsOrUUID);
     if (coll && coll->usesCappedSnapshots()) {
         CappedSnapshots::get(opCtx).establish(opCtx, coll);
+        if (MONGO_unlikely(hangAfterEstablishCappedSnapshot.shouldFail())) {
+            LOGV2(7996000, "Hanging after establishing capped snapshot");
+            hangAfterEstablishCappedSnapshot.pauseWhileSet(opCtx);
+        }
     }
 }
 
@@ -1029,7 +1035,8 @@ OldClientContext::OldClientContext(OperationContext* opCtx,
     }
 
     stdx::lock_guard<Client> lk(*_opCtx->getClient());
-    currentOp->enter_inlock(nss,
+    currentOp->enter_inlock(nss.isTimeseriesBucketsCollection() ? nss.getTimeseriesViewNamespace()
+                                                                : nss,
                             CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(_db->name()));
 }
 

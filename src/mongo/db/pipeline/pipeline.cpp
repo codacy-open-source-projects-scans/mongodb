@@ -104,7 +104,8 @@ Value appendCommonExecStats(Value docSource, const CommonStats& stats) {
  */
 void validateTopLevelPipeline(const Pipeline& pipeline) {
     // Verify that the specified namespace is valid for the initial stage of this pipeline.
-    const NamespaceString& nss = pipeline.getContext()->ns;
+    auto expCtx = pipeline.getContext();
+    const NamespaceString& nss = expCtx->ns;
 
     const auto& sources = pipeline.getSources();
 
@@ -152,7 +153,6 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
                 hasChangeStreamSplitLargeEventStage = true;
             }
         }
-        auto expCtx = pipeline.getContext();
         auto spec = isChangeStream ? expCtx->changeStreamSpec : boost::none;
         auto hasSplitEventResumeToken = spec &&
             change_stream::resolveResumeTokenFromSpec(expCtx, *spec).fragmentNum.has_value();
@@ -162,10 +162,11 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
                 !(hasSplitEventResumeToken && !hasChangeStreamSplitLargeEventStage));
     }
 
-    // Verify that usage of $searchMeta and $search is legal.
-    if (pipeline.getContext()->opCtx->getServiceContext()) {
-        getSearchHelpers(pipeline.getContext()->opCtx->getServiceContext())
-            ->assertSearchMetaAccessValid(sources, pipeline.getContext().get());
+    // Verify that usage of $searchMeta and $search is legal. Note that on mongos, we defer this
+    // check until after we've established cursors on the shards to resolve any views.
+    if (expCtx->opCtx->getServiceContext() && !expCtx->inMongos) {
+        getSearchHelpers(expCtx->opCtx->getServiceContext())
+            ->assertSearchMetaAccessValid(sources, expCtx.get());
     }
 }
 
@@ -819,7 +820,7 @@ boost::intrusive_ptr<DocumentSource> Pipeline::popFrontWithNameAndCriteria(
 std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
     const std::vector<BSONObj>& rawPipeline,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const MakePipelineOptions opts) {
+    MakePipelineOptions opts) {
     auto pipeline = Pipeline::parse(rawPipeline, expCtx, opts.validator);
 
     if (opts.optimize) {
@@ -833,6 +834,10 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
         pipeline = expCtx->mongoProcessInterface->attachCursorSourceToPipeline(
             pipeline.release(), opts.shardTargetingPolicy, std::move(opts.readConcern));
     }
+
+    // After parsing the pipeline to detect if $$USER_ROLES is referenced, set the value of
+    // $$USER_ROLES for the pipeline.
+    expCtx->setUserRoles();
 
     return pipeline;
 }
@@ -912,7 +917,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipelineFromViewDefinit
     subPipelineExpCtx->ns = resolvedNs.ns;
 
     if (resolvedNs.pipeline.empty()) {
-        return Pipeline::makePipeline(std::move(currentPipeline), subPipelineExpCtx, opts);
+        return Pipeline::makePipeline(currentPipeline, subPipelineExpCtx, opts);
     }
     auto resolvedPipeline = std::move(resolvedNs.pipeline);
 
@@ -926,7 +931,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipelineFromViewDefinit
                             std::make_move_iterator(currentPipeline.begin()),
                             std::make_move_iterator(currentPipeline.end()));
 
-    return Pipeline::makePipeline(std::move(resolvedPipeline), subPipelineExpCtx, opts);
+    return Pipeline::makePipeline(resolvedPipeline, subPipelineExpCtx, opts);
 }
 
 }  // namespace mongo

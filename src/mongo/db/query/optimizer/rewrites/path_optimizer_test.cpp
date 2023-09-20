@@ -909,8 +909,10 @@ TEST(Path, LowerPathCompare) {
     ASSERT_EXPLAIN(
         "BinaryOp [FillEmpty]\n"
         "  BinaryOp [Eq]\n"
-        "    Variable [root]\n"
-        "    Const [1]\n"
+        "    BinaryOp [Cmp3w]\n"
+        "      Variable [root]\n"
+        "      Const [1]\n"
+        "    Const [0]\n"
         "  Const [false]\n",
         tree);
 }
@@ -999,15 +1001,8 @@ TEST(Path, LowerPathComposeA) {
 
     runPathLowering(env, prefixId, tree);
 
-    ASSERT_EXPLAIN(
-        "BinaryOp [FillEmpty]\n"
-        "  If []\n"
-        "    BinaryOp [FillEmpty]\n"
-        "      Const [false]\n"
-        "      Const [false]\n"
-        "    Const [true]\n"
-        "    Const [true]\n"
-        "  Const [false]\n",
+    ASSERT_EXPLAIN_AUTO(  // NOLINT
+        "Const [true]\n",
         tree);
 }
 

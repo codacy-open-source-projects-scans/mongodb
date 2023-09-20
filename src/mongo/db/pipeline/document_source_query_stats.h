@@ -99,11 +99,6 @@ public:
             return _privileges;
         }
 
-        bool allowedToPassthroughFromMongos() const final {
-            // $queryStats must be run locally on a mongod.
-            return false;
-        }
-
         bool isInitialSource() const final {
             return true;
         }
@@ -162,6 +157,8 @@ private:
           _transformIdentifiers(algorithm != TransformAlgorithmEnum::kNone),
           _algorithm(algorithm),
           _hmacKey(hmacKey) {}
+
+    BSONObj computeQueryStatsKey(std::shared_ptr<const KeyGenerator> keyGenerator) const;
 
     GetNextResult doGetNext() final;
 

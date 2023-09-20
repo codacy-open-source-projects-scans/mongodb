@@ -111,7 +111,6 @@ selector:
   - jstests/sharding/txn_two_phase_commit_coordinator_shutdown_and_restart.js
   - jstests/sharding/txn_two_phase_commit_failover.js
   - jstests/sharding/txn_two_phase_commit_wait_for_majority_commit_after_stepup.js
-  - jstests/sharding/config_shards_on_repl_set_changes.js
   # Runs setShardVersion/getShardVersion against the config server and we don't support retries
   # for this command
   - jstests/sharding/major_version_check.js
@@ -225,6 +224,10 @@ selector:
   # TODO SERVER-51495: Re-enable these tests after reshardCollection is resilient to config server
   # primary failovers.
   - jstests/sharding/*reshard*.js
+  - jstests/sharding/move_collection_basic.js
+  - jstests/sharding/abort_move_collection_basic.js
+  - jstests/sharding/unshard_collection_basic.js
+  - jstests/sharding/abort_unshard_collection_basic.js
 
   # SERVER-51805 splitChunk op is not idempotent
   - jstests/sharding/mongos_get_shard_version.js
@@ -248,6 +251,9 @@ selector:
 
   # Test runs command on a config shard and does not shutdown safely upon transitioning to a dedicated config server.
   - jstests/sharding/fsync_lock_unlock.js
+
+  # Expect the configureQueryAnalyzer command to execute without config server stepdown.
+  - jstests/sharding/analyze_shard_key/configure_query_analyzer_persistence.js
 
   exclude_with_any_tags:
   - does_not_support_stepdowns

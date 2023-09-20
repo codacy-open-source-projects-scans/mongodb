@@ -2,8 +2,7 @@
  * Tests 'updateOne' command on sharded collections.
  *
  * @tags: [
- *   # To avoid multiversion tests
- *   requires_fcv_71,
+ *   featureFlagTimeseriesUpdatesSupport,
  *   # To avoid burn-in tests in in-memory build variants
  *   requires_persistence,
  * ]

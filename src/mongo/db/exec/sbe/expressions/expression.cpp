@@ -62,7 +62,7 @@ namespace sbe {
  */
 EVariable* getFrameVariable(EExpression* e) {
     auto var = e->as<EVariable>();
-    if (var && var->getFrameId() && !var->isMoveFrom()) {
+    if (var && var->getFrameId()) {
         return var;
     }
     return nullptr;
@@ -73,7 +73,7 @@ EVariable* getFrameVariable(EExpression* e) {
  */
 vm::Instruction::Parameter getParam(EVariable* var) {
     if (var) {
-        return {(int)var->getSlotId(), var->getFrameId()};
+        return {(int)var->getSlotId(), var->isMoveFrom(), var->getFrameId()};
     } else {
         return {};
     }
@@ -851,14 +851,8 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggIntegralRemove, true}},
     {"aggIntegralFinalize",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggIntegralFinalize, false}},
-    {"aggDerivativeInit",
-     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggDerivativeInit, false}},
-    {"aggDerivativeAdd",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggDerivativeAdd, true}},
-    {"aggDerivativeRemove",
-     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggDerivativeRemove, true}},
     {"aggDerivativeFinalize",
-     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggDerivativeFinalize, false}},
+     BuiltinFn{[](size_t n) { return n == 5; }, vm::Builtin::aggDerivativeFinalize, false}},
     {"aggCovarianceAdd",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggCovarianceAdd, true}},
     {"aggCovarianceRemove",
@@ -884,6 +878,28 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableStdDevPopFinalize, false}},
     {"aggRemovableAvgFinalize",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggRemovableAvgFinalize, false}},
+    {"aggLinearFillCanAdd",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggLinearFillCanAdd, false}},
+    {"aggLinearFillAdd",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggLinearFillAdd, true}},
+    {"aggLinearFillFinalize",
+     BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggLinearFillFinalize, false}},
+    {"aggRemovableFirstNInit",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNInit, false}},
+    {"aggRemovableFirstNAdd",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNAdd, true}},
+    {"aggRemovableFirstNRemove",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNRemove, true}},
+    {"aggRemovableFirstNFinalize",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableFirstNFinalize, false}},
+    {"aggRemovableLastNInit",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNInit, false}},
+    {"aggRemovableLastNAdd",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNAdd, true}},
+    {"aggRemovableLastNRemove",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNRemove, true}},
+    {"aggRemovableLastNFinalize",
+     BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::aggRemovableLastNFinalize, false}},
     {"valueBlockExists",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::valueBlockExists, false}},
     {"valueBlockFillEmpty",

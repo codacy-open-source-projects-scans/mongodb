@@ -59,6 +59,13 @@ public:
      */
     virtual void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
                                              ExpressionContext* expCtx);
+    /**
+     * Overload used to check that $$SEARCH_META is being referenced correctly in a pipeline split
+     * for execution on a sharded cluster.
+     */
+    virtual void assertSearchMetaAccessValid(const Pipeline::SourceContainer& shardsPipeline,
+                                             const Pipeline::SourceContainer& mergePipeline,
+                                             ExpressionContext* expCtx);
 
     /**
      * This method works on preparation for $search in top level pipeline, or inner pipeline that is
@@ -159,6 +166,14 @@ public:
     virtual std::pair<CursorResponse, CursorResponse> establishSearchQueryCursors(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, const SearchNode* searchNode) {
         return {CursorResponse(), CursorResponse()};
+    }
+
+    /**
+     * Encode $search/$searchMeta to SBE plan cache.
+     * Returns true if $search/$searchMeta is at the front of the 'pipeline' and encoding is done.
+     */
+    virtual bool encodeSearchForSbeCache(DocumentSource* ds, BufBuilder* bufBuilder) {
+        return false;
     }
 };
 

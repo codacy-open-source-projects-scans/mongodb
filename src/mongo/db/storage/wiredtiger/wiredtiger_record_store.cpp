@@ -405,7 +405,11 @@ StatusWith<std::string> WiredTigerRecordStore::parseOptionsField(const BSONObj o
 class WiredTigerRecordStore::RandomCursor final : public RecordCursor {
 public:
     RandomCursor(OperationContext* opCtx, const WiredTigerRecordStore& rs, StringData config)
-        : _cursor(nullptr), _rs(&rs), _opCtx(opCtx), _config(config.toString() + ",next_random") {
+        : _cursor(nullptr),
+          _keyFormat(rs._keyFormat),
+          _uri(rs._uri),
+          _opCtx(opCtx),
+          _config(config.toString() + ",next_random") {
         restore();
     }
 
@@ -435,7 +439,7 @@ public:
         invariantWTOK(advanceRet, _cursor->session);
 
         RecordId id;
-        if (_rs->keyFormat() == KeyFormat::String) {
+        if (_keyFormat == KeyFormat::String) {
             WT_ITEM item;
             invariantWTOK(_cursor->get_key(_cursor, &item), _cursor->session);
             id = RecordId(static_cast<const char*>(item.data), item.size);
@@ -451,7 +455,7 @@ public:
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
 
         auto keyLength = computeRecordIdSize(id);
-        metricsCollector.incrementOneDocRead(_rs->getURI(), value.size + keyLength);
+        metricsCollector.incrementOneDocRead(_uri, value.size + keyLength);
 
 
         return {
@@ -474,10 +478,9 @@ public:
         WT_SESSION* session = WiredTigerRecoveryUnit::get(_opCtx)->getSession()->getSession();
 
         if (!_cursor) {
-            auto status =
-                wtRCToStatus(session->open_cursor(
-                                 session, _rs->_uri.c_str(), nullptr, _config.c_str(), &_cursor),
-                             session);
+            auto status = wtRCToStatus(
+                session->open_cursor(session, _uri.c_str(), nullptr, _config.c_str(), &_cursor),
+                session);
             if (status == ErrorCodes::ObjectIsBusy) {
                 // This can happen if you try to open a cursor on the oplog table and a verify is
                 // currently running on it.
@@ -511,7 +514,8 @@ public:
 
 private:
     WT_CURSOR* _cursor;
-    const WiredTigerRecordStore* _rs;
+    KeyFormat _keyFormat;
+    const std::string _uri;
     OperationContext* _opCtx;
     const std::string _config;
     bool _saveStorageCursorOnDetachFromOperationContext = false;
@@ -1753,27 +1757,33 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
         checkSize(opCtx);
     }
 
-    // Need to start at 1 so we are always higher than RecordId::minLong()
-    int64_t nextId = 1;
-
-    // Initialize the highest seen RecordId in a session without a read timestamp because that is
-    // required by the largest_key API.
-    WiredTigerSession sessRaii(_kvEngine->getConnection());
-
-    // We must limit the amount of time spent blocked on cache eviction to avoid a deadlock with
-    // ourselves. The calling operation may have a session open that has written a large amount of
-    // data, and by creating a new session, we are preventing WT from being able to roll back that
-    // transaction to free up cache space. If we do block on cache eviction here, we must consider
-    // that the other session owned by this thread may be the one that needs to be rolled back. If
-    // this does time out, we will receive a WT_ROLLBACK and throw an error.
-    auto wtSession = sessRaii.getSession();
-    invariantWTOK(wtSession->reconfigure(wtSession, "cache_max_wait_ms=1000"), wtSession);
-
-    auto cursor = sessRaii.getNewCursor(_uri);
-
     // Find the largest RecordId in the table and add 1 to generate our next RecordId. The
     // largest_key API returns the largest key in the table regardless of visibility. This ensures
     // we don't re-use RecordIds that are not visible.
+
+    // Need to start at 1 so we are always higher than RecordId::minLong(). This will be the case if
+    // the table is empty, and returned RecordId is null.
+    int64_t nextId = getLargestKey(opCtx).getLong() + 1;
+    _nextIdNum.store(nextId);
+}
+
+RecordId WiredTigerRecordStore::getLargestKey(OperationContext* opCtx) const {
+    // Initialize the highest seen RecordId in a session without a read timestamp because that is
+    // required by the largest_key API.
+    WiredTigerSession sessRaii(_kvEngine->getConnection());
+    auto wtSession = sessRaii.getSession();
+
+    if (opCtx->lockState()->inAWriteUnitOfWork()) {
+        // We must limit the amount of time spent blocked on cache eviction to avoid a deadlock with
+        // ourselves. The calling operation may have a session open that has written a large amount
+        // of data, and by creating a new session, we are preventing WT from being able to roll back
+        // that transaction to free up cache space. If we do block on cache eviction here, we must
+        // consider that the other session owned by this thread may be the one that needs to be
+        // rolled back. If this does time out, we will receive a WT_ROLLBACK and throw an error.
+        invariantWTOK(wtSession->reconfigure(wtSession, "cache_max_wait_ms=1000"), wtSession);
+    }
+
+    auto cursor = sessRaii.getNewCursor(_uri);
     int ret = cursor->largest_key(cursor);
     if (ret == WT_ROLLBACK) {
         // Force the caller to rollback its transaction if we can't make progess with eviction.
@@ -1798,11 +1808,10 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
             }
         }
         invariantWTOK(ret, wtSession);
-        auto recordId = getKey(cursor);
-        nextId = recordId.getLong() + 1;
+        return getKey(cursor);
     }
-
-    _nextIdNum.store(nextId);
+    // Empty table.
+    return RecordId();
 }
 
 void WiredTigerRecordStore::reserveRecordIds(OperationContext* opCtx,

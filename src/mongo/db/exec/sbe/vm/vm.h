@@ -57,6 +57,7 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
 #include "mongo/db/exec/sbe/vm/label.h"
+#include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/platform/compiler.h"
@@ -408,6 +409,7 @@ struct Instruction {
      */
     struct Parameter {
         int variable{0};
+        bool moveFrom{false};
         boost::optional<FrameId> frameId;
 
         // Get the size in bytes of an instruction parameter encoded in byte code.
@@ -416,8 +418,10 @@ struct Instruction {
         }
 
         MONGO_COMPILER_ALWAYS_INLINE_OPT
-        static std::pair<bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
-            auto pop = readFromMemory<bool>(pcPointer);
+        static FastTuple<bool, bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
+            auto flags = readFromMemory<uint8_t>(pcPointer);
+            bool pop = flags & 1u;
+            bool moveFrom = flags & 2u;
             pcPointer += sizeof(pop);
             int offset = 0;
             if (!pop) {
@@ -425,7 +429,7 @@ struct Instruction {
                 pcPointer += sizeof(offset);
             }
 
-            return {pop, offset};
+            return {pop, moveFrom, offset};
         }
     };
 
@@ -622,7 +626,10 @@ struct Instruction {
 };
 static_assert(sizeof(Instruction) == sizeof(uint8_t));
 
-enum class Builtin : uint8_t {
+// Builtins which can fit into one byte and have small arity are encoded using a special instruction
+// tag, functionSmall.
+using SmallBuiltinType = uint8_t;
+enum class Builtin : uint16_t {
     split,
     regexMatch,
     replaceOne,
@@ -820,9 +827,6 @@ enum class Builtin : uint8_t {
     aggIntegralAdd,
     aggIntegralRemove,
     aggIntegralFinalize,
-    aggDerivativeInit,
-    aggDerivativeAdd,
-    aggDerivativeRemove,
     aggDerivativeFinalize,
     aggCovarianceAdd,
     aggCovarianceRemove,
@@ -836,8 +840,22 @@ enum class Builtin : uint8_t {
     aggRemovableStdDevSampFinalize,
     aggRemovableStdDevPopFinalize,
     aggRemovableAvgFinalize,
+    aggLinearFillCanAdd,
+    aggLinearFillAdd,
+    aggLinearFillFinalize,
+    aggRemovableFirstNInit,
+    aggRemovableFirstNAdd,
+    aggRemovableFirstNRemove,
+    aggRemovableFirstNFinalize,
+    aggRemovableLastNInit,
+    aggRemovableLastNAdd,
+    aggRemovableLastNRemove,
+    aggRemovableLastNFinalize,
 
-    valueBlockExists,
+    // Additional one-byte builtins go here.
+
+    // Start of 2 byte builtins.
+    valueBlockExists = 256,
     valueBlockFillEmpty,
     valueBlockMin,
     valueBlockMax,
@@ -862,8 +880,17 @@ std::string builtinToString(Builtin b);
  * - The element at index `kMaxSize` is the maximum number entries the data structure holds.
  * - The element at index `kMemUsage` holds the current memory usage
  * - The element at index `kMemLimit` holds the max memory limit allowed
+ * - The element at index `kIsGroupAccum` specifices if the accumulator belongs to group-by stage
  */
-enum class AggMultiElems { kInternalArr, kStartIdx, kMaxSize, kMemUsage, kMemLimit, kSizeOfArray };
+enum class AggMultiElems {
+    kInternalArr,
+    kStartIdx,
+    kMaxSize,
+    kMemUsage,
+    kMemLimit,
+    kIsGroupAccum,
+    kSizeOfArray
+};
 
 /**
  * Less than comparison based on a sort pattern.
@@ -1059,6 +1086,24 @@ enum class AggCovarianceElems { kSumX, kSumY, kCXY, kCount, kSizeOfArray };
  * $stdDevSamp/$stdDevPop expressions.
  */
 enum class AggRemovableStdDevElems { kSum, kM2, kCount, kNonFiniteCount, kSizeOfArray };
+
+/**
+ * This enum defines indices into an `Array` that store state for $linearFill
+ * X, Y refers to sortby field and input field respectively
+ * At any time, (X1, Y1) and (X2, Y2) defines two end-points with non-null input values
+ * with zero or more null input values in between. Count stores the number of values left
+ * till (X2, Y2). Initially it is equal to number of values between (X1, Y1) and (X2, Y2),
+ * exclusive of first and inclusive of latter. It is decremented after each finalize call,
+ * till this segment is exhausted and after which we find next segement(new (X2, Y2)
+ * while (X1, Y1) is set to previous (X2, Y2))
+ */
+enum class AggLinearFillElems { kX1, kY1, kX2, kY2, kPrevX, kCount, kSizeOfArray };
+
+/**
+ * This enum defines indices into an 'Array' that store state for $firstN/$lastN
+ * window functions
+ */
+enum class AggFirstLastNElems { kQueue, kN, kSizeOfArray };
 
 using SmallArityType = uint8_t;
 using ArityType = uint32_t;
@@ -1343,7 +1388,7 @@ private:
     void runTagCheck(const uint8_t*& pcPointer, value::TypeTags tagRhs);
 
     MONGO_COMPILER_ALWAYS_INLINE
-    static std::pair<bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
+    static FastTuple<bool, bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
         return Instruction::Parameter::decodeParam(pcPointer);
     }
 
@@ -1914,9 +1959,6 @@ private:
         std::pair<value::TypeTags, value::Value> prevSortByVal,
         std::pair<value::TypeTags, value::Value> newInput,
         std::pair<value::TypeTags, value::Value> newSortByVal);
-    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeInit(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeAdd(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeRemove(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggDerivativeFinalize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> aggRemovableAvgFinalizeImpl(
         value::Array* sumState, int64_t count);
@@ -1944,6 +1986,11 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableStdDevPopFinalize(
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAvgFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNInit(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNRemove(ArityType arity);
+    template <AccumulatorFirstLastN::Sense S>
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNFinalize(ArityType arity);
 
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
@@ -1956,6 +2003,15 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLtScalar(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLteScalar(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCombine(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillCanAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> linearFillInterpolate(
+        std::pair<value::TypeTags, value::Value> x1,
+        std::pair<value::TypeTags, value::Value> y1,
+        std::pair<value::TypeTags, value::Value> x2,
+        std::pair<value::TypeTags, value::Value> y2,
+        std::pair<value::TypeTags, value::Value> x);
 
     FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f,
                                                                    ArityType arity,
@@ -2014,6 +2070,16 @@ private:
         }
 
         return {tag, val};
+    }
+
+    MONGO_COMPILER_ALWAYS_INLINE_OPT
+    void setTagToNothing(size_t offset) noexcept {
+        if (MONGO_likely(offset == 0)) {
+            writeToMemory(_argStackTop + offsetTag, value::TypeTags::Nothing);
+        } else {
+            auto ptr = _argStackTop - offset * sizeOfElement;
+            writeToMemory(ptr + offsetTag, value::TypeTags::Nothing);
+        }
     }
 
     MONGO_COMPILER_ALWAYS_INLINE_OPT

@@ -24,7 +24,7 @@ def build_images(suite_name, fixture_instance):
         Built image(s): {config.DOCKER_COMPOSE_BUILD_IMAGES}
 
         SUCCESS - Run this suite against an External System Under Test (SUT) with the following command:
-        `docker compose -f docker_compose/{suite_name}/docker-compose.yml run --rm workload buildscripts/resmoke.py run --suite {suite_name} --externalSUT`
+        `docker compose -f docker_compose/{suite_name}/docker-compose.yml run --rm workload {image_builder.get_resmoke_run_command()}`
 
         DISCLAIMER - Make sure you have built all images with the following command first:
         `buildscripts/resmoke.py run --suite {suite_name} --dockerComposeBuildImages workload,mongo-binaries,config`
@@ -65,9 +65,23 @@ class DockerComposeImageBuilder:
         self.LIBVOIDSTAR_PATH = "/usr/lib/libvoidstar.so"
         self.MONGODB_DEBUGSYMBOLS = "mongo-debugsymbols.tgz"
 
+        # MongoDB Enterprise Modules constants
+        self.MODULES_RELATIVE_PATH = "src/mongo/db/modules"
+        self.MONGO_ENTERPRISE_MODULES_RELATIVE_PATH = f"{self.MODULES_RELATIVE_PATH}/enterprise"
+
         # Port suffix ranging from 1-24 is subject to fault injection while ports 130+ are safe.
         self.next_available_fault_enabled_ip = 2
         self.next_available_fault_disabled_ip = 130
+
+    @staticmethod
+    def get_resmoke_run_command() -> str:
+        """Construct the supported resmoke `run` command to test against an external system under test."""
+        # The supported `run` command should keep all of the same args except:
+        # (1) it should remove the `--dockerComposeBuildImages` option and value
+        # (2) it should add the `--externalSUT` flag
+        command = sys.argv
+        rm_index = command.index("--dockerComposeBuildImages")
+        return ' '.join(command[0:rm_index] + command[rm_index + 2:] + ["--externalSUT"])
 
     def _add_docker_compose_configuration_to_build_context(self, build_context) -> None:
         """
@@ -119,6 +133,10 @@ class DockerComposeImageBuilder:
         print("Writing workload init script...")
         with open(os.path.join(build_context, "scripts", "workload.sh"), "w") as workload_init:
             workload_init.write("tail -f /dev/null\n")
+
+        print("Writing resmoke run script for convenience...")
+        with open(os.path.join(build_context, "scripts", "run_resmoke.sh"), "w") as run_resmoke:
+            run_resmoke.write(f'{self.get_resmoke_run_command()} "$@"\n')
 
         print("Writing mongo{d,s} init scripts...")
         for process in self.suite_fixture.all_processes():
@@ -202,12 +220,17 @@ class DockerComposeImageBuilder:
         :param tag: Tag to use for the image.
         :return: None.
         """
+        assert os.path.exists(
+            self.MONGO_ENTERPRISE_MODULES_RELATIVE_PATH
+        ), f"Please set up `mongo_enterprise_modules` and try again. No `mongo_enterprise_modules` repo available at: {self.MONGO_ENTERPRISE_MODULES_RELATIVE_PATH}"
 
         print("Prepping `workload` image build context...")
         # Set up build context
         self._fetch_mongodb_binaries()
         self._copy_mongo_binary_to_build_context(self.WORKLOAD_BUILD_CONTEXT)
         self._clone_mongo_repo_to_build_context(self.WORKLOAD_BUILD_CONTEXT)
+        self._clone_qa_repo_to_build_context(self.WORKLOAD_BUILD_CONTEXT)
+        self._clone_jstestfuzz_to_build_context(self.WORKLOAD_BUILD_CONTEXT)
         self._add_libvoidstar_to_build_context(self.WORKLOAD_BUILD_CONTEXT)
 
         # Build docker image
@@ -241,17 +264,19 @@ class DockerComposeImageBuilder:
 
     def _fetch_mongodb_binaries(self):
         """
-        Get MongoDB binaries -- if running locally -- and verify existence/validity.
+        Get MongoDB binaries and verify existence/validity.
 
-        In CI the binaries should already exist. In that case, we want to verify binary existence and
-        that they are linked with `libvoidstar`.
+        In CI the binaries from the `master` branch should already exist from the compile task.
+        In that case, we just want to fetch the `last-continuous` and `last-lts` binaries.
 
         :return: None.
         """
         mongodb_binaries_destination = os.path.join(self.MONGODB_BINARIES_RELATIVE_DIR, "bin")
 
-        if os.path.exists(mongodb_binaries_destination):
-            print(f"\n\tFound existing MongoDB binaries at: {mongodb_binaries_destination}\n")
+        if not self.in_evergreen and os.path.exists(mongodb_binaries_destination):
+            print(
+                f"\n\tRunning Locally - Found existing MongoDB binaries at: {mongodb_binaries_destination}\n"
+            )
         # If local, fetch the binaries.
         elif not self.in_evergreen:
             # Ensure that `db-contrib-tool` is installed locally
@@ -267,10 +292,33 @@ class DockerComposeImageBuilder:
                                    "db-contrib-tool"]).returncode == 0, db_contrib_tool_error
 
             # Use `db-contrib-tool` to get MongoDB binaries for this image
-            print("Fetching MongoDB binaries for image build...")
+            print("Running Locally - Fetching All MongoDB binaries for image build...")
             subprocess.run([
-                "db-contrib-tool", "setup-repro-env", "--variant", "ubuntu2204", "--linkDir",
-                mongodb_binaries_destination, "master"
+                "db-contrib-tool",
+                "setup-repro-env",
+                "--variant",
+                "ubuntu2204",
+                "--linkDir",
+                mongodb_binaries_destination,
+                "--installLastContinuous",
+                "--installLastLTS",
+                "master",
+            ], stdout=sys.stdout, stderr=sys.stderr, check=True)
+        elif self.in_evergreen:
+            print(
+                "Running in Evergreen - Fetching `last-continuous` and `last-lts` MongoDB binaries for image build..."
+            )
+            subprocess.run([
+                "db-contrib-tool",
+                "setup-repro-env",
+                "--variant",
+                "ubuntu2204",
+                "--linkDir",
+                mongodb_binaries_destination,
+                "--installLastContinuous",
+                "--installLastLTS",
+                "--evergreenConfig",
+                "./.evergreen.yml",
             ], stdout=sys.stdout, stderr=sys.stderr, check=True)
 
         # Verify the binaries were downloaded successfully
@@ -339,6 +387,56 @@ class DockerComposeImageBuilder:
         active_branch = git.Repo("./").active_branch.name
         git.Repo.clone_from("./", mongo_repo_destination, branch=active_branch)
         print("Done cloning MongoDB repo to build context.")
+
+        print("Cloning current MongoDB Enterprise Modules repo to build context...")
+        print(clone_repo_warning_message)
+
+        # Create the modules directory in the mongo repo at the build context
+        modules_directory_at_build_context = os.path.join(mongo_repo_destination,
+                                                          self.MODULES_RELATIVE_PATH)
+        os.mkdir(modules_directory_at_build_context)
+
+        mongo_enterprise_modules_destination = os.path.join(
+            mongo_repo_destination, self.MONGO_ENTERPRISE_MODULES_RELATIVE_PATH)
+
+        # Copy the mongo enterprise modules repo to the build context.
+        # If this fails to clone, the `git` library will raise an exception.
+        active_branch = git.Repo(self.MONGO_ENTERPRISE_MODULES_RELATIVE_PATH).active_branch.name
+        git.Repo.clone_from(self.MONGO_ENTERPRISE_MODULES_RELATIVE_PATH,
+                            mongo_enterprise_modules_destination, branch=active_branch)
+        print("Done cloning MongoDB Enterprise Modules repo to build context.")
+
+    def _clone_qa_repo_to_build_context(self, dir_path):
+        """
+        Clone the QA repo to the build context.
+
+        :param dir_path: Directory path to clone QA repo to.
+        """
+        qa_repo_destination = os.path.join(dir_path, "QA")
+
+        # Clone QA repo if it does not already exist
+        if os.path.exists(qa_repo_destination):
+            print(f"\n\tFound existing QA repo at: {qa_repo_destination}\n")
+        else:
+            print("Cloning QA repo to build context...")
+            git.Repo.clone_from("git@github.com:10gen/QA.git", qa_repo_destination)
+            print("Done cloning QA repo to build context.")
+
+    def _clone_jstestfuzz_to_build_context(self, dir_path):
+        """
+        Clone the jstestfuzz repo to the build context.
+
+        :param dir_path: Directory path to clone jstestfuzz repo to.
+        """
+        jstestfuzz_repo_destination = os.path.join(dir_path, "jstestfuzz")
+
+        # Clone jstestfuzz repo if it does not already exist
+        if os.path.exists(jstestfuzz_repo_destination):
+            print(f"\n\tFound existing jstestfuzz repo at: {jstestfuzz_repo_destination}\n")
+        else:
+            print("Cloning jstestfuzz repo to build context...")
+            git.Repo.clone_from("git@github.com:10gen/jstestfuzz.git", jstestfuzz_repo_destination)
+            print("Done cloning jstestfuzz repo to build context.")
 
     def _copy_mongodb_binaries_to_build_context(self, dir_path):
         """

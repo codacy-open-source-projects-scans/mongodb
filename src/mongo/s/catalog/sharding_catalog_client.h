@@ -167,6 +167,18 @@ public:
         repl::ReadConcernLevel readConcernLevel = repl::ReadConcernLevel::kMajorityReadConcern) = 0;
 
     /**
+     * Retrieves all collections under a specified database (or in the system) which are sharded. If
+     * the dbName parameter is empty, returns all sharded collections.
+     *
+     * @param sort Fields to use for sorting the results. If empty, no sorting is performed.
+     */
+    virtual std::vector<CollectionType> getShardedCollections(
+        OperationContext* opCtx,
+        const DatabaseName& db,
+        repl::ReadConcernLevel readConcernLevel = repl::ReadConcernLevel::kMajorityReadConcern,
+        const BSONObj& sort = BSONObj()) = 0;
+
+    /**
      * Retrieves all collections under a specified database (or in the system). If the dbName
      * parameter is empty, returns all collections.
      *
@@ -185,7 +197,33 @@ public:
      *
      * Throws exception on errors.
      */
-    virtual std::vector<NamespaceString> getAllShardedCollectionsForDb(
+    virtual std::vector<NamespaceString> getShardedCollectionNamespacesForDb(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        repl::ReadConcernLevel readConcern,
+        const BSONObj& sort = BSONObj()) = 0;
+
+    /**
+     * Returns the set of collections tracked for the specified database, regardless of being
+     * sharded or not. Goes directly to the config server's metadata, without checking the local
+     * cache so it should not be used in frequently called code paths.
+     *
+     * Throws exception on errors.
+     */
+    virtual std::vector<NamespaceString> getCollectionNamespacesForDb(
+        OperationContext* opCtx,
+        const DatabaseName& dbName,
+        repl::ReadConcernLevel readConcern,
+        const BSONObj& sort = BSONObj()) = 0;
+
+    /**
+     * Returns the set of collections for the specified database, which have been marked as
+     * unsplittable. Goes directly to the config server's metadata, without checking the local cache
+     * so it should not be used in frequently called code paths.
+     *
+     * Throws exception on errors.
+     */
+    virtual std::vector<NamespaceString> getUnsplittableCollectionNamespacesForDb(
         OperationContext* opCtx,
         const DatabaseName& dbName,
         repl::ReadConcernLevel readConcern,

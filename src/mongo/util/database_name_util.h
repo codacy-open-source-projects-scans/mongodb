@@ -109,6 +109,12 @@ public:
         StringData db, const SerializationContext& context = SerializationContext::stateDefault());
 
     /**
+     * To be used with Failpoints since they can be database specific. Parses the `data` BSONObj to
+     * find an existing `dbFieldName` and returns a DatabaseName object from it.
+     */
+    static DatabaseName parseFailPointData(const BSONObj& data, StringData dbFieldName);
+
+    /**
      * To be used only for deserializing a DatabaseName object from a db string in error messages.
      */
     static DatabaseName deserializeForErrorMsg(StringData dbInErrMsg);
@@ -116,23 +122,26 @@ public:
 private:
     static DatabaseName parseFromStringExpectTenantIdInMultitenancyMode(StringData dbName);
 
-    static std::string serializeForStorage(
-        const DatabaseName& dbName,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static std::string serializeForStorage(const DatabaseName& dbName,
+                                           const SerializationContext& context);
 
-    static std::string serializeForCommands(
-        const DatabaseName& dbName,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static std::string serializeForCommands(const DatabaseName& dbName,
+                                            const SerializationContext& context);
 
-    static DatabaseName deserializeForStorage(
-        boost::optional<TenantId> tenantId,
-        StringData db,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static std::string serializeForAuthPrevalidated(const DatabaseName& dbName,
+                                                    const SerializationContext& context);
 
-    static DatabaseName deserializeForCommands(
-        boost::optional<TenantId> tenantId,
-        StringData db,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static DatabaseName deserializeForStorage(boost::optional<TenantId> tenantId,
+                                              StringData db,
+                                              const SerializationContext& context);
+
+    static DatabaseName deserializeForCommands(boost::optional<TenantId> tenantId,
+                                               StringData db,
+                                               const SerializationContext& context);
+
+    static DatabaseName deserializeForAuthPrevalidated(boost::optional<TenantId> tenantId,
+                                                       StringData db,
+                                                       const SerializationContext& context);
 };
 
 }  // namespace mongo

@@ -207,6 +207,7 @@ clientDriverEnv.Library(
         'connpool.cpp',
         'dbclient_connection.cpp',
         'dbclient_rs.cpp',
+        'dbclient_session.cpp',
         'global_conn_pool.cpp',
         'global_conn_pool.idl',
         'replica_set_change_notifier.cpp',
@@ -273,7 +274,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/connection_health_metrics_parameter',
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/stats/counters',
-        '$BUILD_DIR/mongo/executor/egress_tag_closer_manager',
+        '$BUILD_DIR/mongo/executor/egress_connection_closer_manager',
         '$BUILD_DIR/mongo/transport/message_compressor',
     ],
 )

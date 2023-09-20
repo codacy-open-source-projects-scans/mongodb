@@ -3,6 +3,8 @@
  *
  * @tags: [
  *   requires_fcv_71,
+ *   # TODO (SERVER-80521): Re-enable this test once redness is resolve in multiversion suites.
+ *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
  * ]
  */
 
@@ -72,13 +74,13 @@ function runTest(getShardKey, insert) {
         documents: [{[timeField]: ISODate()}],
         isTimeseriesNamespace: true
     }),
-                                 5916401);
+                                 [5916401, 7934201]);
 
     // On a mongod node, 'isTimeseriesNamespace' can only be used on time-series buckets namespace.
     assert.commandFailedWithCode(
         st.shard0.getDB(dbName).runCommand(
             {insert: collName, documents: [{[timeField]: ISODate()}], isTimeseriesNamespace: true}),
-        5916400);
+        [5916400, 7934201]);
 
     // Shard timeseries collection.
     const shardKey = getShardKey(1, 1);

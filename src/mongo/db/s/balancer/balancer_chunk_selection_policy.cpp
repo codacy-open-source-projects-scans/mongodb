@@ -324,8 +324,6 @@ void getSplitCandidatesToEnforceZoneRanges(const ChunkManager& cm,
 BalancerChunkSelectionPolicy::BalancerChunkSelectionPolicy(ClusterStatistics* clusterStats)
     : _clusterStats(clusterStats) {}
 
-BalancerChunkSelectionPolicy::~BalancerChunkSelectionPolicy() = default;
-
 StatusWith<SplitInfoVector> BalancerChunkSelectionPolicy::selectChunksToSplit(
     OperationContext* opCtx) {
     auto shardStatsStatus = _clusterStats->getStats(opCtx);
@@ -336,7 +334,9 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicy::selectChunksToSplit(
     const auto& shardStats = shardStatsStatus.getValue();
 
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-    auto collections = catalogClient->getCollections(opCtx, DatabaseName::kEmpty);
+
+    auto collections = catalogClient->getShardedCollections(
+        opCtx, DatabaseName::kEmpty, repl::ReadConcernLevel::kMajorityReadConcern, {});
     if (collections.empty()) {
         return SplitInfoVector{};
     }
@@ -399,10 +399,11 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicy::selectChunksToMove(
     Timer chunksSelectionTimer;
 
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-    auto collections = catalogClient->getCollections(opCtx,
-                                                     DatabaseName::kEmpty,
-                                                     repl::ReadConcernLevel::kMajorityReadConcern,
-                                                     BSON(CollectionType::kNssFieldName << 1));
+    auto collections =
+        catalogClient->getShardedCollections(opCtx,
+                                             DatabaseName::kEmpty,
+                                             repl::ReadConcernLevel::kMajorityReadConcern,
+                                             BSON(CollectionType::kNssFieldName << 1));
     if (collections.empty()) {
         return MigrateInfoVector{};
     }

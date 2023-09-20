@@ -188,6 +188,12 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                         AutoGetCollection::Options{}
                             .viewMode(auto_get_collection::ViewMode::kViewsPermitted)
                             .expectedUUID(_request.getCollectionUUID())};
+
+                    uassert(ErrorCodes::NamespaceNotFound,
+                            str::stream() << "RefineCollectionShardKey: collection "
+                                          << nss().toStringForErrorMsg() << " does not exists",
+                            coll);
+
                     _doc.setUuid(coll->uuid());
 
                     const auto scopedCsr =
@@ -234,6 +240,9 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                         opCtx, nss(), getNewSession(opCtx), **executor);
                 }
 
+                // Stop migrations before checking indexes considering any concurrent index
+                // creation/drop with migrations could leave the cluster with inconsistent indexes,
+                // PM-2077 should address that.
                 sharding_ddl_util::stopMigrations(
                     opCtx, nss(), _request.getCollectionUUID(), getNewSession(opCtx));
 
@@ -286,7 +295,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-                    blockCRUDOperationsRequest, **executor, token, args);
+                    **executor, token, blockCRUDOperationsRequest, args);
                 sharding_ddl_util::sendAuthenticatedCommandToShards(
                     opCtx, opts, getShardsWithDataForCollection(opCtx, nss()));
 
@@ -368,7 +377,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                 async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
                 async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
                 auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-                    unblockCRUDOperationsRequest, **executor, token, args);
+                    **executor, token, unblockCRUDOperationsRequest, args);
                 sharding_ddl_util::sendAuthenticatedCommandToShards(
                     opCtx, opts, getShardsWithDataForCollection(opCtx, nss()));
             }))
@@ -408,9 +417,11 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                     opCtx, nss(), _doc.getNewShardKey(), _doc.getOldKey().get(), *_doc.getUuid());
             }
 
-            // On error, we only need to resume migrations after the verification phase.
+            // If a non retriable error during index validation occurs we will end the coordinator,
+            // so we need to resume migrations just in case we managed to stop them in the first
+            // phase.
             if (!finalStatus.isOK() && _doc.getPhase() >= Phase::kRemoteIndexValidation &&
-                !_isRetriableErrorForDDLCoordinator(finalStatus)) {
+                !_mustAlwaysMakeProgress() && !_isRetriableErrorForDDLCoordinator(finalStatus)) {
                 sharding_ddl_util::resumeMigrations(
                     opCtx, nss(), boost::none, getNewSession(opCtx));
             }

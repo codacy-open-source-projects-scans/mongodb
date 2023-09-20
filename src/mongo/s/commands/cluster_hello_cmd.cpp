@@ -160,6 +160,10 @@ public:
                              const DatabaseName& dbName,
                              const BSONObj& cmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) final {
+        // Critical to observability and diagnosability, categorize as immediate priority.
+        ScopedAdmissionPriorityForLock skipAdmissionControl(opCtx->lockState(),
+                                                            AdmissionContext::Priority::kImmediate);
+
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
         auto cmd = HelloCommand::parse({"hello", apiStrict}, cmdObj);
@@ -264,7 +268,7 @@ public:
 
         // Mongos tries to keep exactly the same version range of the server for which
         // it is compiled.
-        auto wireSpec = WireSpec::instance().get();
+        auto wireSpec = WireSpec::getWireSpec(opCtx->getServiceContext()).get();
         result.append(HelloCommandReply::kMaxWireVersionFieldName,
                       wireSpec->incomingExternalClient.maxWireVersion);
         result.append(HelloCommandReply::kMinWireVersionFieldName,

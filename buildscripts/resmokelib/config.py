@@ -111,7 +111,6 @@ DEFAULTS = {
     "suite_files": "with_server",
     "tag_files": [],
     "test_files": [],
-    "transport_layer": None,
     "user_friendly_output": None,
     "mixed_bin_versions": None,
     "old_bin_version": None,
@@ -547,9 +546,6 @@ TAG_FILES = None
 # The test files to execute.
 TEST_FILES = None
 
-# If set, then mongod/mongos's started by resmoke.py will use the specified transport layer.
-TRANSPORT_LAYER = None
-
 # Metrics for open telemetry
 OTEL_TRACE_ID = None
 OTEL_PARENT_ID = None
@@ -653,3 +649,12 @@ DOCKER_COMPOSE_TAG = "development"
 
 # Whether or not this resmoke suite is running against an External System Under Test
 EXTERNAL_SUT = False
+
+# This will be set to True when:
+# (1) We are building images for an External SUT
+# (2) Running against an External SUT
+NOOP_MONGO_D_S_PROCESSES = False
+
+# If resmoke is running from within a `workload` container,
+# we may need to do additional setup to run the suite successfully.
+REQUIRES_WORKLOAD_CONTAINER_SETUP = False

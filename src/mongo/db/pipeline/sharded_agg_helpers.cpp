@@ -236,7 +236,7 @@ BSONObj genericTransformForShards(MutableDocument&& cmdForShards,
     }
 
     if (readConcern) {
-        cmdForShards["readConcern"] = Value(std::move(*readConcern));
+        cmdForShards["readConcern"] = Value(*readConcern);
     }
 
     return cmdForShards.freeze().toBson();
@@ -291,9 +291,9 @@ std::vector<RemoteCursor> establishShardCursors(
         for (const auto& shardId : shardIds) {
             requests.emplace_back(shardId, cmdObj);
         }
-    } else if (cri->cm.isSharded()) {
-        // The collection is sharded. Use the routing table to decide which shards to target
-        // based on the query and collation, and build versioned requests for them.
+    } else if (cri->cm.hasRoutingTable()) {
+        // The collection has a routing table. Use it to decide which shards to target based on the
+        // query and collation, and build versioned requests for them.
         for (const auto& shardId : shardIds) {
             auto versionedCmdObj = appendShardVersion(cmdObj, cri->getShardVersion(shardId));
 
@@ -305,8 +305,8 @@ std::vector<RemoteCursor> establishShardCursors(
             requests.emplace_back(shardId, std::move(versionedCmdObj));
         }
     } else {
-        // The collection is unsharded. Target only the primary shard for the database.
-        // Don't append shard version info when contacting a fixed db collection.
+        // The collection does not have a routing table. Target only the primary shard for the
+        // database. Don't append shard version info when contacting a fixed db collection.
         auto versionedCmdObj = !cri->cm.dbVersion().isFixed()
             ? appendShardVersion(cmdObj, ShardVersion::UNSHARDED())
             : cmdObj;
@@ -742,7 +742,7 @@ bool anyStageModifiesShardKeyOrNeedsMerge(OrderedPathSet shardKeyPaths,
     for (auto it = stages.crbegin(); it != stages.crend(); ++it) {
         const auto& stage = *it;
         auto renames = semantic_analysis::renamedPaths(
-            std::move(shardKeyPaths), *stage, semantic_analysis::Direction::kBackward);
+            shardKeyPaths, *stage, semantic_analysis::Direction::kBackward);
         if (!renames) {
             return true;
         }
@@ -877,17 +877,17 @@ std::unique_ptr<Pipeline, PipelineDeleter> runPipelineDirectlyOnSingleShard(
         uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, request.getNamespace()));
 
     auto versionedCmdObj = [&] {
-        if (cri.cm.isSharded()) {
+        if (cri.cm.hasRoutingTable()) {
             return appendShardVersion(aggregation_request_helper::serializeToCommandObj(request),
                                       cri.getShardVersion(shardId));
         } else {
-            // The collection is unsharded. Don't append shard version info when contacting a fixed
-            // db collection.
-            const auto cmdObjWithShardVersion = !cri.cm.dbVersion().isFixed()
+            // The collection does not have a routing table. Don't append shard version info when
+            // contacting a fixed db collection.
+            auto cmdObjWithShardVersion = !cri.cm.dbVersion().isFixed()
                 ? appendShardVersion(aggregation_request_helper::serializeToCommandObj(request),
                                      ShardVersion::UNSHARDED())
                 : aggregation_request_helper::serializeToCommandObj(request);
-            return appendDbVersionIfPresent(std::move(cmdObjWithShardVersion), cri.cm.dbVersion());
+            return appendDbVersionIfPresent(cmdObjWithShardVersion, cri.cm.dbVersion());
         }
     }();
 
@@ -1079,7 +1079,7 @@ TargetingResults targetPipeline(const boost::intrusive_ptr<ExpressionContext>& e
 
     const bool needsMongosMerge = pipeline->needsMongosMerger();
 
-    const auto shardQuery = pipeline->getInitialQuery();
+    auto shardQuery = pipeline->getInitialQuery();
 
     // A $changeStream update lookup attempts to retrieve a single document by documentKey. In this
     // case, we wish to target a single shard using the simple collation, but we also want to ensure
@@ -1125,7 +1125,7 @@ TargetingResults targetPipeline(const boost::intrusive_ptr<ExpressionContext>& e
     }
 
     return {std::move(shardQuery),
-            std::move(shardTargetingCollation),
+            shardTargetingCollation,
             std::move(shardIds),
             needsSplit,
             mustRunOnAllShards,
@@ -1326,10 +1326,10 @@ DispatchShardPipelineResults dispatchShardPipeline(
                                                 shardTargetingPolicy,
                                                 executionNsRoutingInfo);
     return dispatchTargetedShardPipeline(std::move(serializedCommand),
-                                         std::move(targeting),
+                                         targeting,
                                          hasChangeStream,
                                          eligibleForSampling,
-                                         std::move(executionNsRoutingInfo),
+                                         executionNsRoutingInfo,
                                          std::move(pipeline),
                                          std::move(explain),
                                          std::move(readConcern),
@@ -1361,6 +1361,7 @@ AsyncResultsMergerParams buildArmParams(boost::intrusive_ptr<ExpressionContext> 
     // Convert owned cursors into a vector of remote cursors to be transferred to the merge
     // pipeline.
     std::vector<RemoteCursor> remoteCursors;
+    remoteCursors.reserve(ownedCursors.size());
     for (auto&& cursor : ownedCursors) {
         // Transfer ownership of the remote cursor to the $mergeCursors stage.
         remoteCursors.emplace_back(cursor.releaseCursor());
@@ -1655,10 +1656,10 @@ std::unique_ptr<Pipeline, PipelineDeleter> dispatchTargetedPipelineAndAddMergeCu
 
     auto shardDispatchResults =
         dispatchTargetedShardPipeline(aggregation_request_helper::serializeToCommandDoc(aggRequest),
-                                      std::move(targeting),
+                                      targeting,
                                       hasChangeStream,
                                       expCtx->eligibleForSampling(),
-                                      std::move(cri),
+                                      cri,
                                       std::move(pipeline),
                                       boost::none /* explain */,
                                       readConcern,
@@ -1709,7 +1710,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
                 [&](AggregateCommandRequest&& aggRequest) {
                     auto rawPipeline = aggRequest.getPipeline();
                     return std::make_pair(std::move(aggRequest),
-                                          Pipeline::parse(std::move(rawPipeline), expCtx));
+                                          Pipeline::parse(rawPipeline, expCtx));
                 },
                 [&](std::pair<AggregateCommandRequest, std::unique_ptr<Pipeline, PipelineDeleter>>&&
                         aggRequestPipelinePair) {

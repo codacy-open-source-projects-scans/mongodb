@@ -303,7 +303,9 @@ public:
                 }
             }
 
-            if (auto [isTimeseries, _] = timeseries::isTimeseries(opCtx, request()); isTimeseries) {
+            if (auto [isTimeseriesViewRequest, _] =
+                    timeseries::isTimeseriesViewRequest(opCtx, request());
+                isTimeseriesViewRequest) {
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
                 try {
@@ -485,9 +487,10 @@ public:
                 }
             }
 
-            auto [isTimeseries, bucketNs] = timeseries::isTimeseries(opCtx, request());
-            OperationSource source =
-                isTimeseries ? OperationSource::kTimeseriesUpdate : OperationSource::kStandard;
+            auto [isTimeseriesViewRequest, bucketNs] =
+                timeseries::isTimeseriesViewRequest(opCtx, request());
+            OperationSource source = isTimeseriesViewRequest ? OperationSource::kTimeseriesUpdate
+                                                             : OperationSource::kStandard;
 
             long long nModified = 0;
 
@@ -498,7 +501,8 @@ public:
             write_ops_exec::WriteResult reply;
             // For retryable updates on time-series collections, we needs to run them in
             // transactions to ensure the multiple writes are replicated atomically.
-            if (isTimeseries && opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction()) {
+            if (isTimeseriesViewRequest && opCtx->isRetryableWrite() &&
+                !opCtx->inMultiDocumentTransaction()) {
                 auto executor = serverGlobalParams.clusterRole.has(ClusterRole::None)
                     ? ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(
                           opCtx->getServiceContext())
@@ -584,7 +588,8 @@ public:
                     "explained write batches must be of size 1",
                     request().getUpdates().size() == 1);
 
-            auto [isRequestToTimeseries, nss] = timeseries::isTimeseries(opCtx, request());
+            auto [isTimeseriesViewRequest, nss] =
+                timeseries::isTimeseriesViewRequest(opCtx, request());
 
             UpdateRequest updateRequest(request().getUpdates()[0]);
             updateRequest.setNamespaceString(nss);
@@ -609,45 +614,13 @@ public:
             updateRequest.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
             updateRequest.setExplain(verbosity);
 
-            // Explains of write commands are read-only, but we take write locks so that timing
-            // info is more accurate.
-            const auto collection =
-                acquireCollection(opCtx,
-                                  CollectionAcquisitionRequest::fromOpCtx(
-                                      opCtx, nss, AcquisitionPrerequisites::kWrite),
-                                  MODE_IX);
-
-            if (isRequestToTimeseries) {
-                timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
-
-                const auto& requestHint = request().getUpdates()[0].getHint();
-                if (timeseries::isHintIndexKey(requestHint)) {
-                    auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
-                    updateRequest.setHint(
-                        uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
-                            *timeseriesOptions, requestHint)));
-                }
-            }
-
-            ParsedUpdate parsedUpdate(opCtx,
-                                      &updateRequest,
-                                      collection.getCollectionPtr(),
-                                      false /* forgoOpCounterIncrements */,
-                                      isRequestToTimeseries);
-            uassertStatusOK(parsedUpdate.parseRequest());
-
-            auto exec = uassertStatusOK(getExecutorUpdate(
-                &CurOp::get(opCtx)->debug(), collection, &parsedUpdate, verbosity));
-            auto bodyBuilder = result->getBodyBuilder();
-            Explain::explainStages(
-                exec.get(),
-                collection.getCollectionPtr(),
-                verbosity,
-                BSONObj(),
-                SerializationContext::stateCommandReply(request().getSerializationContext()),
-                _commandObj,
-                query_settings::QuerySettings(),
-                &bodyBuilder);
+            write_ops_exec::explainUpdate(opCtx,
+                                          updateRequest,
+                                          isTimeseriesViewRequest,
+                                          request().getSerializationContext(),
+                                          _commandObj,
+                                          verbosity,
+                                          result);
         }
 
         BSONObj _commandObj;
@@ -740,7 +713,9 @@ public:
                 }
             }
 
-            if (auto [isTimeseries, _] = timeseries::isTimeseries(opCtx, request()); isTimeseries) {
+            if (auto [isTimeseriesViewRequest, _] =
+                    timeseries::isTimeseriesViewRequest(opCtx, request());
+                isTimeseriesViewRequest) {
                 source = OperationSource::kTimeseriesDelete;
             }
 
@@ -775,8 +750,10 @@ public:
                     "explained write batches must be of size 1",
                     request().getDeletes().size() == 1);
 
+            auto [isTimeseriesViewRequest, nss] =
+                timeseries::isTimeseriesViewRequest(opCtx, request());
+
             auto deleteRequest = DeleteRequest{};
-            auto [isRequestToTimeseries, nss] = timeseries::isTimeseries(opCtx, request());
             deleteRequest.setNsString(nss);
             deleteRequest.setLegacyRuntimeConstants(request().getLegacyRuntimeConstants().value_or(
                 Variables::generateRuntimeConstants(opCtx)));
@@ -803,41 +780,13 @@ public:
             deleteRequest.setHint(firstDelete.getHint());
             deleteRequest.setIsExplain(true);
 
-            // Explains of write commands are read-only, but we take write locks so that timing
-            // info is more accurate.
-            const auto collection = acquireCollection(
-                opCtx,
-                CollectionAcquisitionRequest::fromOpCtx(
-                    opCtx, deleteRequest.getNsString(), AcquisitionPrerequisites::kWrite),
-                MODE_IX);
-            if (isRequestToTimeseries) {
-                timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
-
-                if (timeseries::isHintIndexKey(firstDelete.getHint())) {
-                    auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
-                    deleteRequest.setHint(
-                        uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
-                            *timeseriesOptions, firstDelete.getHint())));
-                }
-            }
-
-            ParsedDelete parsedDelete(
-                opCtx, &deleteRequest, collection.getCollectionPtr(), isRequestToTimeseries);
-            uassertStatusOK(parsedDelete.parseRequest());
-
-            // Explain the plan tree.
-            auto exec = uassertStatusOK(getExecutorDelete(
-                &CurOp::get(opCtx)->debug(), collection, &parsedDelete, verbosity));
-            auto bodyBuilder = result->getBodyBuilder();
-            Explain::explainStages(
-                exec.get(),
-                collection.getCollectionPtr(),
-                verbosity,
-                BSONObj(),
-                SerializationContext::stateCommandReply(request().getSerializationContext()),
-                _commandObj,
-                query_settings::QuerySettings(),
-                &bodyBuilder);
+            write_ops_exec::explainDelete(opCtx,
+                                          deleteRequest,
+                                          isTimeseriesViewRequest,
+                                          request().getSerializationContext(),
+                                          _commandObj,
+                                          verbosity,
+                                          result);
         }
 
         const BSONObj& _commandObj;

@@ -258,29 +258,6 @@ public:
     }
 
     /**
-     * These functions construct a NamespaceString without checking for presence of TenantId. These
-     * must only be used by auth systems which are not yet tenant aware.
-     *
-     * TODO SERVER-74896 Remove these functions. Any remaining call sites must be changed to use a
-     * function on NamespaceStringUtil.
-     */
-    static NamespaceString createNamespaceStringForAuth(const boost::optional<TenantId>& tenantId,
-                                                        StringData db,
-                                                        StringData coll) {
-        return NamespaceString(tenantId, db, coll);
-    }
-
-    static NamespaceString createNamespaceStringForAuth(const boost::optional<TenantId>& tenantId,
-                                                        StringData ns) {
-        return NamespaceString(tenantId, ns);
-    }
-
-    static NamespaceString createNamespaceStringForAuth(const DatabaseName& dbName,
-                                                        StringData coll) {
-        return NamespaceString(dbName, coll);
-    }
-
-    /**
      * Constructs the namespace '<dbName>.$cmd.aggregate', which we use as the namespace for
      * aggregation commands with the format {aggregate: 1}.
      */
@@ -398,18 +375,6 @@ public:
         }
 
         return TenantId{OID::from(&_data[kDataOffset])};
-    }
-
-    /**
-     * This method is deprecated and will be removed as part of SERVER-65456. We strongly
-     * encourage to make the use of `dbName`, which returns a DatabaseName object instead.
-     * In case you would need to a StringData object instead we strongly recommend taking a look
-     * at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
-     */
-    StringData db_deprecated() const {
-        // TODO SERVER-65456 Remove this function.
-        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
-        return StringData{_data.data() + offset, _dbNameOffsetEnd()};
     }
 
     /**
@@ -547,6 +512,9 @@ public:
     }
     bool isSystemDotJavascript() const {
         return coll() == kSystemDotJavascriptCollectionName;
+    }
+    bool isSystemDotUsers() const {
+        return coll() == kSystemUsers;
     }
     bool isServerConfigurationCollection() const {
         return isAdminDB() && (coll() == "system.version");
@@ -942,6 +910,17 @@ private:
         return StringData{_data.data() + offset, _data.size() - offset};
     }
 
+    /**
+     * This method is deprecated and will be removed as part of SERVER-65456. We strongly
+     * encourage to make the use of `dbName`, which returns a DatabaseName object instead.
+     * In case you would need to a StringData object instead we strongly recommend taking a look
+     * at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
+     */
+    StringData db_deprecated() const {
+        auto offset = _hasTenantId() ? kDataOffset + OID::kOIDSize : kDataOffset;
+        return StringData{_data.data() + offset, _dbNameOffsetEnd()};
+    }
+
     static constexpr size_t kDataOffset = sizeof(uint8_t);
     static constexpr uint8_t kTenantIdMask = 0x80;
     static constexpr uint8_t kDatabaseNameOffsetEndMask = 0x7F;
@@ -1077,6 +1056,15 @@ public:
     friend std::string toStringForLogging(const NamespaceStringOrUUID& nssOrUUID);
 
     void serialize(BSONObjBuilder* builder, StringData fieldName) const;
+
+    template <typename H>
+    friend H AbslHashValue(H h, const NamespaceStringOrUUID& nssOrUUID) {
+        if (nssOrUUID.isNamespaceString()) {
+            return H::combine(std::move(h), nssOrUUID.nss());
+        } else {
+            return H::combine(std::move(h), nssOrUUID.uuid());
+        }
+    }
 
 private:
     using UUIDWithDbName = std::tuple<DatabaseName, UUID>;

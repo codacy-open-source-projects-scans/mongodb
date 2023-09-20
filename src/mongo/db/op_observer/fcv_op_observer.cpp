@@ -55,14 +55,14 @@
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/session_killer.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/executor/egress_tag_closer_manager.h"
+#include "mongo/executor/egress_connection_closer_manager.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/session_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
@@ -89,7 +89,7 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
     }
     serverGlobalParams.mutableFeatureCompatibility.setVersion(newVersion);
     serverGlobalParams.featureCompatibility.logFCVWithContext("setFCV"_sd);
-    FeatureCompatibilityVersion::updateMinWireVersion();
+    FeatureCompatibilityVersion::updateMinWireVersion(opCtx);
 
     // (Generic FCV reference): This FCV check should exist across LTS binary versions.
     if (serverGlobalParams.featureCompatibility.isGreaterThanOrEqualTo(
@@ -98,14 +98,12 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
         // minWireVersion == maxWireVersion on kLatest FCV or upgrading/downgrading FCV.
         // Close all incoming connections from internal clients with binary versions lower than
         // ours.
-        opCtx->getServiceContext()->getServiceEntryPoint()->endAllSessions(
-            transport::Session::kLatestVersionInternalClientKeepOpen |
-            transport::Session::kExternalClientKeepOpen);
+        opCtx->getServiceContext()->getSessionManager()->endAllSessions(
+            Client::kLatestVersionInternalClientKeepOpen | Client::kExternalClientKeepOpen);
         // Close all outgoing connections to servers with binary versions lower than ours.
         pauseBeforeCloseCxns.pauseWhileSet();
 
-        executor::EgressTagCloserManager::get(opCtx->getServiceContext())
-            .dropConnections(transport::Session::kKeepOpen | transport::Session::kPending);
+        executor::EgressConnectionCloserManager::get(opCtx->getServiceContext()).dropConnections();
 
         if (MONGO_unlikely(finishedDropConnections.shouldFail())) {
             LOGV2(575210, "Hit finishedDropConnections failpoint");
@@ -211,6 +209,7 @@ void FcvOpObserver::onUpdate(OperationContext* opCtx,
 void FcvOpObserver::onDelete(OperationContext* opCtx,
                              const CollectionPtr& coll,
                              StmtId stmtId,
+                             const BSONObj& doc,
                              const OplogDeleteEntryArgs& args,
                              OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();

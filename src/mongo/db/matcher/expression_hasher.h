@@ -49,4 +49,16 @@ struct MatchExpressionHasher {
         return calculateHash(*expr);
     }
 };
+
+/**
+ * MatchExpression's equality functor implementation compatible with unordered containers. It uses
+ * 'MatchExpression::equivalent()' under the hood and compatible with 'MatchExpressionHasher'
+ * defined above.
+ */
+struct MatchExpressionEq {
+    bool operator()(const MatchExpression* lhs, const MatchExpression* rhs) const {
+        return lhs->equivalent(rhs);
+    }
+};
+
 }  // namespace mongo

@@ -330,6 +330,9 @@ variables:
   - func: "antithesis image build and push"
     vars:
       suite: suite_name
+      resmoke_args: >-
+        --arg=val
+        --flag
 
 # TODO: split this up into the user files.
 # List of all variants that make mongocryptd
@@ -951,6 +954,7 @@ functions:
   - command: git.get_project
     params:
       directory: src/buildscripts/antithesis/base_images/workload/src
+  - *configure_evergreen_api_credentials
 
   "do non-compile setup":
   - command: manifest.load
@@ -1387,6 +1391,15 @@ functions:
       binary: bash
       args:
       - "src/evergreen/get_bazelisk.sh"
+
+  "verify build output present":
+  # Args:
+  #   $output (string) - relpath to the file-to-be-checked
+  - command: shell.exec
+    params:
+      working_dir: src
+      script: |
+        test -f ${output}
 
   "bazel compile (gcc)":
   - *get_version_expansions
@@ -2673,6 +2686,20 @@ tasks:
   commands:
   # TODO SERVER-80380: Remove "fetch bazel" once bazelisk is added to the toolchain
   - func: "fetch bazel"
+  - func: "scons compile"
+    vars:
+      targets: >-
+        build/fast/mongo/db/commands/libfsync_locked.a
+      task_compile_flags: >-
+        BAZEL_BUILD_ENABLED=1
+        --build-profile=fast
+        --ninja=disabled
+        --link-model=static
+        -j 200
+        --modules=
+  - func: "verify build output present"
+    vars:
+      output: build/fast/mongo/db/commands/libfsync_locked.a
   - func: "bazel compile (gcc)"
     vars:
       targets: src/mongo/db/commands:fsync_locked
@@ -4265,9 +4292,16 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       <<: *jstestfuzz_config_vars
-      num_files: 5
+      # We have seen some common scenarios where the generated pipelines take a while to run and can
+      # hit some timeouts. We'll split 20000 pipelines across 20 files, compared to 20000 pipelines
+      # across 5 files in the other generational agg fuzzers. This approach can be considered if we
+      # see similar timeouts elsewhere. It is not well understood whether/how we could pass
+      # 'numPipelines' as an argument in the yaml here, but it works as part of the
+      # 'jstestfuzz_vars' argument string. If a future reader better understands this evergreen
+      # integration, please update this comment and/or move numPipelines to a yaml arg here.
+      num_files: 20
       num_tasks: 5
-      jstestfuzz_vars: --diffTestingMode timeseries
+      jstestfuzz_vars: --diffTestingMode timeseries --numPipelines=1000
       npm_command: agg-fuzzer
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -6206,6 +6240,30 @@ tasks:
       use_large_distro: "true"
 
 - <<: *gen_task_template
+  name: bulk_write_multi_op_causally_consistent_jscore_passthrough_gen
+  tags: ["bulk_write"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: bulk_write_targeted_override_gen
+  tags: ["bulk_write"]
+  commands:
+    - func: "generate resmoke tasks"
+      vars:
+        use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: concurrency_replication_bulk_write_gen
+  tags: ["bulk_write"]
+  commands:
+    - func: "generate resmoke tasks"
+      vars:
+        use_large_distro: "true"
+
+- <<: *gen_task_template
   name: shard_split_jscore_passthrough_gen
   tags: ["shard_split"]
   commands:
@@ -6880,6 +6938,13 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
+- <<: *task_template
+  name: serverless_MTM
+  tags: ["serverless"]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - <<: *gen_task_template
   name: sharding_gen
   tags: ["sharding", "common"]
@@ -7025,6 +7090,15 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       suite: ssl_x509
+
+- <<: *gen_task_template
+  name: ssl_linear_gen
+  tags: ["encrypt", "ssl", "patch_build"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: ssl_linear
+      resmoke_jobs_max: 1
 
 - <<: *gen_task_template
   name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
@@ -7800,7 +7874,7 @@ tasks:
       shell: bash
       script: |
         set -oe
-        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+        echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
   - command: subprocess.exec
     params:
       binary: bash
@@ -7879,7 +7953,7 @@ tasks:
       shell: bash
       script: |
         set -oe
-        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+        echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
 
   # signing windows artifacts
   - command: subprocess.exec
@@ -8435,7 +8509,7 @@ tasks:
       shell: bash
       script: |
         set -oe
-        podman login --username ${release_tools_container_registry_username} --password ${release_tools_container_registry_password} ${release_tools_container_registry}
+        echo "${release_tools_container_registry_password}" | podman login --password-stdin --username ${release_tools_container_registry_username} ${release_tools_container_registry}
   - command: subprocess.exec
     params:
       binary: bash
@@ -8630,6 +8704,13 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
+- <<: *task_template
+  name: streams_kafka
+  tags: []
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - name: shared_scons_cache_pruning
   tags: []
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
@@ -8721,13 +8802,6 @@ tasks:
       args:
       - "./src/evergreen/todos_check.sh"
 
-- <<: *task_template
-  name: mqlrun
-  tags: []
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
 - name: check_feature_flag_tags
   tags: []
   patch_only: true
@@ -8760,6 +8834,50 @@ tasks:
       binary: bash
       args:
       - "./src/evergreen/generate_buildid_debug_symbols_mapping.sh"
+
+- <<: *antithesis_task_template
+  name: antithesis_config_fuzzer_stress_concurrency_sharded_replication
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: concurrency_sharded_replication
+      resmoke_args: >-
+        --fuzzMongodConfigs=stress
+        --fuzzMongosConfigs=normal
+        --excludeWithAnyTags=does_not_support_config_fuzzer
+
+- <<: *antithesis_task_template
+  name: antithesis_jstestfuzz_sharded
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: jstestfuzz_sharded
+
+- <<: *antithesis_task_template
+  name: antithesis_fcv_upgrade_downgrade_sharded_collections_jscore_passthrough
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough
+
+- <<: *antithesis_task_template
+  name: antithesis_concurrency_sharded_with_stepdowns_and_balancer_config_shard
+  commands:
+  - func: "do setup"
+  - func: "do setup for antithesis"
+  - func: "antithesis image build and push"
+    vars:
+      suite: concurrency_sharded_with_stepdowns_and_balancer
+      resmoke_args: >-
+        --configShard=0
+        --numShards=2
+        --excludeWithAnyTags=config_shard_incompatible
 
 - <<: *antithesis_task_template
   name: antithesis_concurrency_sharded_with_stepdowns_and_balancer

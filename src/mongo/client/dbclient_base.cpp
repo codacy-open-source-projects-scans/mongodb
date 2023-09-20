@@ -62,6 +62,7 @@
 #include "mongo/db/query/kill_cursors_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/remote_command_request.h"
@@ -204,7 +205,7 @@ void appendMetadata(OperationContext* opCtx,
 
 DBClientBase* DBClientBase::runFireAndForgetCommand(OpMsgRequest request) {
     // Make sure to reconnect if needed before building our request.
-    checkConnection();
+    ensureConnection();
 
     auto opCtx = haveClient() ? cc().getOperationContext() : nullptr;
     appendMetadata(opCtx, _metadataWriter, _apiParameters, request);
@@ -217,7 +218,7 @@ DBClientBase* DBClientBase::runFireAndForgetCommand(OpMsgRequest request) {
 std::pair<rpc::UniqueReply, DBClientBase*> DBClientBase::runCommandWithTarget(
     OpMsgRequest request) {
     // Make sure to reconnect if needed before building our request.
-    checkConnection();
+    ensureConnection();
 
     // call() oddly takes this by pointer, so we need to put it on the stack.
     auto host = getServerAddress();
@@ -229,7 +230,7 @@ std::pair<rpc::UniqueReply, DBClientBase*> DBClientBase::runCommandWithTarget(
     Message replyMsg;
 
     try {
-        call(requestMsg, replyMsg, &host);
+        replyMsg = call(requestMsg, &host);
     } catch (DBException& e) {
         e.addContext(str::stream() << str::stream() << "network error while attempting to run "
                                    << "command '" << request.getCommandName() << "' "
@@ -381,14 +382,14 @@ void DBClientBase::_auth(const BSONObj& params) {
     auth::authenticateClient(params, remote, clientName, _makeAuthRunCommandHook()).get();
 }
 
-Status DBClientBase::authenticateInternalUser(auth::StepDownBehavior stepDownBehavior) {
+void DBClientBase::authenticateInternalUser(auth::StepDownBehavior stepDownBehavior) {
     ScopedMetadataWriterRemover remover{this};
     if (!auth::isInternalAuthSet()) {
         if (!serverGlobalParams.quiet.load()) {
             LOGV2(20116, "ERROR: No authentication parameters set for internal user");
         }
-        return {ErrorCodes::AuthenticationFailed,
-                "No authentication parameters set for internal user"};
+        uasserted(ErrorCodes::AuthenticationFailed,
+                  "No authentication parameters set for internal user");
     }
 
     // We will only have a client name if SSL is enabled
@@ -401,35 +402,30 @@ Status DBClientBase::authenticateInternalUser(auth::StepDownBehavior stepDownBeh
 #endif
 
     auto authProvider = auth::createDefaultInternalAuthProvider();
-    auto status = auth::authenticateInternalClient(clientName,
-                                                   HostAndPort(getServerAddress()),
-                                                   boost::none,
-                                                   stepDownBehavior,
-                                                   _makeAuthRunCommandHook(),
-                                                   authProvider)
-                      .getNoThrow();
-    if (status.isOK()) {
-        return status;
+    try {
+        auth::authenticateInternalClient(clientName,
+                                         HostAndPort(getServerAddress()),
+                                         boost::none,
+                                         stepDownBehavior,
+                                         _makeAuthRunCommandHook(),
+                                         authProvider)
+            .get();
+    } catch (const DBException& e) {
+        if (!serverGlobalParams.quiet.load()) {
+            LOGV2(20117,
+                  "Can't authenticate as internal user",
+                  "connString"_attr = toString(),
+                  "error"_attr = e.toStatus());
+        }
+        throw;
     }
-
-    if (!serverGlobalParams.quiet.load()) {
-        LOGV2(20117,
-              "Can't authenticate to {connString} as internal user, error: {error}",
-              "Can't authenticate as internal user",
-              "connString"_attr = toString(),
-              "error"_attr = status);
-    }
-
-    return status;
 }
 
 void DBClientBase::auth(const BSONObj& params) {
     _auth(params);
 }
 
-Status DBClientBase::auth(const DatabaseName& dbname,
-                          StringData username,
-                          StringData password_text) try {
+void DBClientBase::auth(const DatabaseName& dbname, StringData username, StringData password_text) {
     UserName user{username, dbname};
 
     StatusWith<string> mechResult =
@@ -445,10 +441,6 @@ Status DBClientBase::auth(const DatabaseName& dbname,
 
     const auto authParams = auth::buildAuthParams(dbname, username, password_text, mech);
     auth(authParams);
-
-    return Status::OK();
-} catch (const AssertionException& ex) {
-    return ex.toStatus();
 }
 
 void DBClientBase::logout(const string& dbname, BSONObj& info) {
@@ -458,9 +450,8 @@ void DBClientBase::logout(const string& dbname, BSONObj& info) {
 bool DBClientBase::isPrimary(bool& isPrimary, BSONObj* info) {
     BSONObjBuilder bob;
     bob.append("hello", 1);
-    if (auto wireSpec = WireSpec::instance().get(); wireSpec->isInternalClient) {
-        WireSpec::appendInternalClientWireVersion(wireSpec->outgoing, &bob);
-    }
+    ServiceContext* sc = haveClient() ? cc().getServiceContext() : getGlobalServiceContext();
+    WireSpec::getWireSpec(sc).appendInternalClientWireVersionIfNeeded(&bob);
 
     BSONObj o;
     if (info == nullptr)

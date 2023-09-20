@@ -289,7 +289,7 @@ private:
 // TODO(SERVER-63883): Remove when re-introducing real metrics.
 class NoopSessionWorkflowMetrics {
 public:
-    explicit NoopSessionWorkflowMetrics(ServiceEntryPoint*) {}
+    explicit NoopSessionWorkflowMetrics() {}
     void start() {}
     void yieldedBeforeReceive() {}
     void received() {}
@@ -391,10 +391,11 @@ public:
         : _workflow{workflow},
           _serviceContext{client->getServiceContext()},
           _sep{_serviceContext->getServiceEntryPoint()},
+          _sessionManager{_serviceContext->getSessionManager()},
           _clientStrand{ClientStrand::make(std::move(client))} {}
 
     ~Impl() {
-        _sep->onEndSession(session());
+        _sessionManager->onEndSession(session());
     }
 
     Client* client() const {
@@ -413,12 +414,13 @@ public:
     void terminate();
 
     /*
-     * Terminates the associated transport Session if its tags don't match the supplied tags.  If
-     * the session is in a pending state, before any tags have been set, it will not be terminated.
+     * Terminates the associated transport Session if the connection tags in the client don't match
+     * the supplied tags.  If the connection tags indicate a pending state, before any tags have
+     * been set, it will not be terminated.
      *
      * This will not block on the session terminating cleaning itself up, it returns immediately.
      */
-    void terminateIfTagsDontMatch(Session::TagMask tags);
+    void terminateIfTagsDontMatch(Client::TagMask tags);
 
     const std::shared_ptr<Session>& session() const {
         return client()->session();
@@ -459,7 +461,7 @@ private:
     };
 
     struct IterationFrame {
-        explicit IterationFrame(const Impl& impl) : metrics{impl._sep} {
+        explicit IterationFrame(const Impl& impl) : metrics{} {
             metrics.start();
         }
         ~IterationFrame() {
@@ -550,6 +552,7 @@ private:
     SessionWorkflow* const _workflow;
     ServiceContext* const _serviceContext;
     ServiceEntryPoint* _sep;
+    SessionManager* _sessionManager;
     RunnerAndSource _taskRunner;
 
     AtomicWord<bool> _isTerminated{false};
@@ -840,15 +843,15 @@ void SessionWorkflow::Impl::terminate() {
     session()->end();
 }
 
-void SessionWorkflow::Impl::terminateIfTagsDontMatch(Session::TagMask tags) {
+void SessionWorkflow::Impl::terminateIfTagsDontMatch(Client::TagMask tags) {
     if (_isTerminated.load())
         return;
 
-    auto sessionTags = session()->getTags();
+    auto clientTags = client()->getTags();
 
     // If terminateIfTagsDontMatch gets called when we still are 'pending' where no tags have been
     // set, then skip the termination check.
-    if ((sessionTags & tags) || (sessionTags & Session::kPending)) {
+    if ((clientTags & tags) || (clientTags & Client::kPending)) {
         LOGV2(
             22991, "Skip closing connection for connection", "connectionId"_attr = session()->id());
         return;
@@ -875,7 +878,7 @@ void SessionWorkflow::Impl::_cleanupSession(const Status& status) {
     }
     _cleanupExhaustResources();
     _taskRunner = {};
-    _sep->onClientDisconnect(client());
+    _sessionManager->onClientDisconnect(client());
 }
 
 SessionWorkflow::SessionWorkflow(PassKeyTag, ServiceContext::UniqueClient client)
@@ -895,7 +898,7 @@ void SessionWorkflow::terminate() {
     _impl->terminate();
 }
 
-void SessionWorkflow::terminateIfTagsDontMatch(Session::TagMask tags) {
+void SessionWorkflow::terminateIfTagsDontMatch(Client::TagMask tags) {
     _impl->terminateIfTagsDontMatch(tags);
 }
 

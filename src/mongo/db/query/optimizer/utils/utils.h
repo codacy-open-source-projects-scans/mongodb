@@ -182,16 +182,16 @@ public:
         return {useDescriptiveVarNames};
     }
     static PrefixId createForTests() {
-        return {true /*useDescripriveVarNames*/};
+        return {true /*useDescriptiveVarNames*/};
     }
 
     template <size_t N>
     ProjectionName getNextId(const char (&prefix)[N]) {
         if (std::holds_alternative<IdType>(_ids)) {
-            return ProjectionName{str::stream() << "p" << std::get<IdType>(_ids)++};
+            return ProjectionName{StringData(str::stream() << "p" << std::get<IdType>(_ids)++)};
         } else {
-            return ProjectionName{str::stream()
-                                  << prefix << "_" << std::get<PrefixMapType>(_ids)[prefix]++};
+            return ProjectionName{StringData(
+                str::stream() << prefix << "_" << std::get<PrefixMapType>(_ids)[prefix]++)};
         }
     }
 
@@ -256,12 +256,6 @@ struct PartialSchemaReqConversion {
 
     // Requirements we have built so far. May be trivially true.
     PSRExpr::Node _reqMap;
-
-    // Have we added a PathComposeM.
-    bool _hasIntersected;
-
-    // Have we added a PathTraverse.
-    bool _hasTraversed;
 
     // If true, retain original predicate after the conversion. In this case, the requirement map
     // might capture only a part of the predicate.
@@ -500,4 +494,10 @@ void handleScanNodeRemoveOrphansRequirement(const IndexCollationSpec& shardKey,
                                             IndexReqTarget indexReqTarget,
                                             CEType groupCE,
                                             PrefixId& prefixId);
+
+/**
+ * Computes the number of plan elements present in the tree.
+ */
+size_t countElements(const ABT& node);
+
 }  // namespace mongo::optimizer

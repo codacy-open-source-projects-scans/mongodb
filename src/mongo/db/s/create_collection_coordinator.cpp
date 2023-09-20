@@ -1050,6 +1050,15 @@ boost::optional<UUID> createCollectionAndIndexes(
     return *sharding_ddl_util::getCollectionUUID(opCtx, nss);
 }
 
+
+CreateCollectionRequest patchedRequestForChangeStream(
+    const CreateCollectionRequest& originalRequest,
+    const mongo::TranslatedRequestParams& translatedRequestParams) {
+    auto req = originalRequest;
+    req.setShardKey(translatedRequestParams.getKeyPattern().toBSON());
+    return req;
+}
+
 /**
  * Does the following writes:
  * 1. Replaces the config.chunks entries for the new collection.
@@ -1105,11 +1114,14 @@ boost::optional<CreateCollectionResponse> commit(
         coll.setUnique(*request.getUnique());
     }
 
+    const auto patchedRequestBSONObj =
+        patchedRequestForChangeStream(request, *translatedRequestParams).toBSON();
+
     try {
         notifyChangeStreamsOnShardCollection(opCtx,
                                              nss,
                                              *collectionUUID,
-                                             request.toBSON(),
+                                             patchedRequestBSONObj,
                                              CommitPhase::kPrepare,
                                              shardsHoldingData);
 
@@ -1122,7 +1134,7 @@ boost::optional<CreateCollectionResponse> commit(
                                               newSessionBuilder(opCtx));
 
         notifyChangeStreamsOnShardCollection(
-            opCtx, nss, *collectionUUID, request.toBSON(), CommitPhase::kSuccessful);
+            opCtx, nss, *collectionUUID, patchedRequestBSONObj, CommitPhase::kSuccessful);
 
         LOGV2_DEBUG(5277907, 2, "Collection successfully committed", logAttrs(nss));
 
@@ -1145,7 +1157,7 @@ boost::optional<CreateCollectionResponse> commit(
         }
 
         notifyChangeStreamsOnShardCollection(
-            opCtx, nss, *collectionUUID, request.toBSON(), CommitPhase::kAborted);
+            opCtx, nss, *collectionUUID, patchedRequestBSONObj, CommitPhase::kAborted);
 
         throw;
     }
@@ -1286,7 +1298,9 @@ ExecutorFuture<void> CreateCollectionCoordinatorLegacy::_runImpl(
                                 opCtx,
                                 nss(),
                                 *createCollectionResponseOpt->getCollectionUUID(),
-                                _request.toBSON(),
+                                patchedRequestForChangeStream(_request,
+                                                              *_doc.getTranslatedRequestParams())
+                                    .toBSON(),
                                 CommitPhase::kSuccessful);
 
                             // The critical section might have been taken by a migration, we force
@@ -1440,7 +1454,7 @@ void CreateCollectionCoordinator::_acquireCriticalSectionsOnParticipants(
     async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
     async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        blockCRUDOperationsRequest, **executor, token, args);
+        **executor, token, blockCRUDOperationsRequest, args);
     sharding_ddl_util::sendAuthenticatedCommandToShards(
         /* TODO SERVER-78918 Change to only block involved shards*/
         opCtx,
@@ -1460,7 +1474,7 @@ void CreateCollectionCoordinator::_releaseCriticalSectionsOnParticipants(
     async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
     async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        unblockCRUDOperationsRequest, **executor, token, args);
+        **executor, token, unblockCRUDOperationsRequest, args);
     sharding_ddl_util::sendAuthenticatedCommandToShards(
         opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
 }

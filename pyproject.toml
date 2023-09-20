@@ -59,7 +59,7 @@ typing-extensions = ">3.7.4"
 pipx = "1.2.0"
 # TODO: Add in pex as we move forward with this
 # pex = "^2.1.137"
-poetry = "*"
+poetry = "1.5.1"
 
 [tool.poetry.group.evergreen.dependencies]
 click = "^7.1.2"
@@ -113,10 +113,10 @@ cryptography = [
     { version = "36.0.2", markers = "platform_machine != 's390x' and platform_machine != 'ppc64le'" },
 ]
 mongo-ninja-python = [
-    { version = "1.11.1.5", markers = "sys_platform == 'linux'" },
+    { version = "1.11.1.5", markers = "sys_platform == 'linux' and platform_machine != 's390x' and platform_machine != 'ppc64le'" },
 ]
-ninja = [ 
-    { version = ">=1.10.0", markers = "sys_platform != 'linux'" },
+ninja = [
+    { version = ">=1.10.0", markers = "sys_platform != 'linux' or platform_machine == 's390x' or platform_machine == 'ppc64le'" },
 ]
 
 [tool.poetry.group.testing.dependencies]
@@ -152,7 +152,9 @@ opentelemetry-api = "*"
 opentelemetry-sdk = "*"
 # TODO: EVG-20576
 # Once the above is merged we can get rid of our dependency on grpc
-opentelemetry-exporter-otlp-proto-grpc = [ { version = "*", markers = "platform_machine != 'darwin'" } ] # TODO: SERVER-80336 this should work on macosx
+# TODO: SERVER-80336 grpc has problems on macosx, ppc, and s390x.
+# For now lets just disable otel metrics on these variants
+opentelemetry-exporter-otlp-proto-grpc = [ { version = "*", markers = "platform_machine != 'darwin' and platform_machine != 's390x' and platform_machine != 'ppc64le'" } ]
 
 [tool.poetry.group.tooling-metrics.dependencies]
 mongo-tooling-metrics = "1.0.8"

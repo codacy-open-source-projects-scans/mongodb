@@ -115,7 +115,7 @@
 #include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/query_stats/aggregate_key_generator.h"
+#include "mongo/db/query/query_stats/agg_key_generator.h"
 #include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/read_concern.h"
@@ -829,7 +829,6 @@ Status runAggregate(OperationContext* opCtx,
                     const PrivilegeVector& privileges,
                     rpc::ReplyBuilderInterface* result,
                     ExternalDataSourceScopeGuard externalDataSourceGuard) {
-
     // Perform some validations on the LiteParsedPipeline and request before continuing with the
     // aggregation command.
     performValidationChecks(opCtx, request, liteParsedPipeline);
@@ -1082,7 +1081,7 @@ Status runAggregate(OperationContext* opCtx,
             (!liteParsedPipeline.startsWithCollStats() || ctx->getView()->timeseries())) {
             try {
                 invariant(collatorToUse.has_value());
-                query_stats::registerRequest(opCtx, nss, [&]() {
+                query_stats::registerRequest(opCtx, request.getNamespace(), [&]() {
                     // In this path we haven't yet parsed the pipeline, but we need to do so for
                     // query shape stats - which should track the queries before views are resolved.
                     // Inside this callback we know we have already checked that query stats are
@@ -1093,7 +1092,7 @@ Status runAggregate(OperationContext* opCtx,
                     auto&& [expCtx, pipeline] = parsePipeline(
                         *collatorToUse == nullptr ? nullptr : (*collatorToUse)->clone());
 
-                    return std::make_unique<query_stats::AggregateKeyGenerator>(
+                    return std::make_unique<query_stats::AggKeyGenerator>(
                         request,
                         *pipeline,
                         expCtx,
@@ -1154,9 +1153,13 @@ Status runAggregate(OperationContext* opCtx,
         // with encrypted fields. We still collect query stats on collection-less aggregations.
         if (!(ctx && ctx->getCollection() &&
               ctx->getCollection()->getCollectionOptions().encryptedFieldConfig)) {
-            query_stats::registerRequest(opCtx, nss, [&]() {
-                return std::make_unique<query_stats::AggregateKeyGenerator>(
-                    request, *pipeline, expCtx, pipelineInvolvedNamespaces, nss, collectionType);
+            query_stats::registerRequest(opCtx, request.getNamespace(), [&]() {
+                return std::make_unique<query_stats::AggKeyGenerator>(request,
+                                                                      *pipeline,
+                                                                      expCtx,
+                                                                      pipelineInvolvedNamespaces,
+                                                                      request.getNamespace(),
+                                                                      collectionType);
             });
         }
 

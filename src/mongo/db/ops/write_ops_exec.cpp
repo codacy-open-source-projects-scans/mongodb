@@ -762,11 +762,13 @@ UpdateResult performUpdate(OperationContext* opCtx,
                            const boost::optional<mongo::UUID>& collectionUUID,
                            boost::optional<BSONObj>& docFound,
                            const UpdateRequest& updateRequest) {
-    auto [isTimeseriesUpdate, nsString] = timeseries::isTimeseries(opCtx, updateRequest);
+    auto [isTimeseriesViewUpdate, nsString] =
+        timeseries::isTimeseriesViewRequest(opCtx, updateRequest);
     // TODO SERVER-76583: Remove this check.
     uassert(7314600,
             "Retryable findAndModify on a timeseries is not supported",
-            !isTimeseriesUpdate || !opCtx->isRetryableWrite());
+            !isTimeseriesViewUpdate || !updateRequest.shouldReturnAnyDocs() ||
+                !opCtx->isRetryableWrite());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangDuringBatchUpdate,
@@ -824,7 +826,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
             !inTransaction);
     }
 
-    if (isTimeseriesUpdate) {
+    if (isTimeseriesViewUpdate) {
         timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
     }
 
@@ -832,7 +834,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
                               &updateRequest,
                               collection.getCollectionPtr(),
                               false /*forgoOpCounterIncrements*/,
-                              isTimeseriesUpdate);
+                              isTimeseriesViewUpdate);
     uassertStatusOK(parsedUpdate.parseRequest());
 
     const auto exec = uassertStatusOK(
@@ -891,11 +893,13 @@ long long performDelete(OperationContext* opCtx,
                         bool inTransaction,
                         const boost::optional<mongo::UUID>& collectionUUID,
                         boost::optional<BSONObj>& docFound) {
-    auto [isTimeseriesDelete, nsString] = timeseries::isTimeseries(opCtx, deleteRequest);
+    auto [isTimeseriesViewDelete, nsString] =
+        timeseries::isTimeseriesViewRequest(opCtx, deleteRequest);
     // TODO SERVER-76583: Remove this check.
     uassert(7308305,
             "Retryable findAndModify on a timeseries is not supported",
-            !isTimeseriesDelete || !deleteRequest.getReturnDeleted() || !opCtx->isRetryableWrite());
+            !isTimeseriesViewDelete || !deleteRequest.getReturnDeleted() ||
+                !opCtx->isRetryableWrite());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangDuringBatchRemove, opCtx, "hangDuringBatchRemove", []() {
@@ -919,11 +923,11 @@ long long performDelete(OperationContext* opCtx,
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
 
-    if (isTimeseriesDelete) {
+    if (isTimeseriesViewDelete) {
         timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
     }
 
-    ParsedDelete parsedDelete(opCtx, &deleteRequest, collectionPtr, isTimeseriesDelete);
+    ParsedDelete parsedDelete(opCtx, &deleteRequest, collectionPtr, isTimeseriesViewDelete);
     uassertStatusOK(parsedDelete.parseRequest());
 
     auto dbName = nsString.dbName();
@@ -1280,6 +1284,14 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                 timeseries::translateUpdate(updateRequest->getUpdateModification(), *metaField));
             updateRequest->setUpdateModification(modification);
         }
+    }
+
+    if (source == OperationSource::kTimeseriesInsert) {
+        // Disable auto yielding in the plan executor in order to prevent retrying on
+        // WriteConflictExceptions internally. A WriteConflictException can be thrown in order to
+        // abort a WriteBatch in an attempt to retry the operation, so we need it to escape the plan
+        // executor layer.
+        updateRequest->setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
     }
 
     if (const auto& coll = collection.getCollectionPtr()) {
@@ -2948,6 +2960,100 @@ write_ops::InsertCommandReply performTimeseriesWrites(
     globalOpCounters.gotInserts(baseReply.getN());
 
     return insertReply;
+}
+
+void explainUpdate(OperationContext* opCtx,
+                   UpdateRequest& updateRequest,
+                   bool isTimeseriesViewRequest,
+                   const SerializationContext& serializationContext,
+                   const BSONObj& command,
+                   ExplainOptions::Verbosity verbosity,
+                   rpc::ReplyBuilderInterface* result) {
+
+    // Explains of write commands are read-only, but we take write locks so that timing
+    // info is more accurate.
+    const auto collection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, updateRequest.getNamespaceString(), AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+
+    if (isTimeseriesViewRequest) {
+        timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
+
+        const auto& requestHint = updateRequest.getHint();
+        if (timeseries::isHintIndexKey(requestHint)) {
+            auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
+            updateRequest.setHint(
+                uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
+                    *timeseriesOptions, requestHint)));
+        }
+    }
+
+    ParsedUpdate parsedUpdate(opCtx,
+                              &updateRequest,
+                              collection.getCollectionPtr(),
+                              false /* forgoOpCounterIncrements */,
+                              isTimeseriesViewRequest);
+    uassertStatusOK(parsedUpdate.parseRequest());
+
+    auto exec = uassertStatusOK(
+        getExecutorUpdate(&CurOp::get(opCtx)->debug(), collection, &parsedUpdate, verbosity));
+    auto bodyBuilder = result->getBodyBuilder();
+
+    Explain::explainStages(exec.get(),
+                           collection.getCollectionPtr(),
+                           verbosity,
+                           BSONObj(),
+                           SerializationContext::stateCommandReply(serializationContext),
+                           command,
+                           query_settings::QuerySettings(),
+                           &bodyBuilder);
+}
+
+void explainDelete(OperationContext* opCtx,
+                   DeleteRequest& deleteRequest,
+                   bool isTimeseriesViewRequest,
+                   const SerializationContext& serializationContext,
+                   const BSONObj& command,
+                   ExplainOptions::Verbosity verbosity,
+                   rpc::ReplyBuilderInterface* result) {
+    // Explains of write commands are read-only, but we take write locks so that timing
+    // info is more accurate.
+    const auto collection =
+        acquireCollection(opCtx,
+                          CollectionAcquisitionRequest::fromOpCtx(
+                              opCtx, deleteRequest.getNsString(), AcquisitionPrerequisites::kWrite),
+                          MODE_IX);
+
+    if (isTimeseriesViewRequest) {
+        timeseries::assertTimeseriesBucketsCollection(collection.getCollectionPtr().get());
+
+        if (timeseries::isHintIndexKey(deleteRequest.getHint())) {
+            auto timeseriesOptions = collection.getCollectionPtr()->getTimeseriesOptions();
+            deleteRequest.setHint(
+                uassertStatusOK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(
+                    *timeseriesOptions, deleteRequest.getHint())));
+        }
+    }
+
+    ParsedDelete parsedDelete(
+        opCtx, &deleteRequest, collection.getCollectionPtr(), isTimeseriesViewRequest);
+    uassertStatusOK(parsedDelete.parseRequest());
+
+    // Explain the plan tree.
+    auto exec = uassertStatusOK(
+        getExecutorDelete(&CurOp::get(opCtx)->debug(), collection, &parsedDelete, verbosity));
+    auto bodyBuilder = result->getBodyBuilder();
+
+    Explain::explainStages(exec.get(),
+                           collection.getCollectionPtr(),
+                           verbosity,
+                           BSONObj(),
+                           SerializationContext::stateCommandReply(serializationContext),
+                           command,
+                           query_settings::QuerySettings(),
+                           &bodyBuilder);
 }
 
 }  // namespace mongo::write_ops_exec

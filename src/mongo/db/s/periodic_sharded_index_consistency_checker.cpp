@@ -154,8 +154,11 @@ void PeriodicShardedIndexConsistencyChecker::_launchShardedIndexConsistencyCheck
             try {
                 long long numShardedCollsWithInconsistentIndexes = 0;
                 const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-                auto collections = catalogClient->getCollections(
-                    opCtx, DatabaseName::kEmpty, repl::ReadConcernLevel::kLocalReadConcern);
+                auto collections =
+                    catalogClient->getShardedCollections(opCtx,
+                                                         DatabaseName::kEmpty,
+                                                         repl::ReadConcernLevel::kLocalReadConcern,
+                                                         {} /*sort*/);
 
                 for (const auto& coll : collections) {
                     auto nss = coll.getNss();
@@ -167,12 +170,6 @@ void PeriodicShardedIndexConsistencyChecker::_launchShardedIndexConsistencyCheck
                     if (nss.isConfigDB()) {
                         continue;
                     }
-
-                    // TODO: SERVER-78765 add proper consistency check in case of tracked unsharded
-                    // colls
-                    if (coll.getUnsplittable())
-                        continue;
-
 
                     auto request = aggregation_request_helper::parseFromBSON(
                         opCtx, nss, aggRequestBSON, boost::none, false);

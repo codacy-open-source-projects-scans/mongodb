@@ -75,6 +75,7 @@
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/cursor_manager.h"
+#include "mongo/db/cursor_server_params_gen.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/queued_data_stage.h"
 #include "mongo/db/exec/working_set.h"
@@ -178,12 +179,12 @@ public:
             if (auto error = write_ops_exec::generateError(
                     opCtx, writes.results[i].getStatus(), idx, _numErrors)) {
                 auto replyItem = BulkWriteReplyItem(idx, error.get().getStatus());
-                _replies.emplace_back(replyItem);
+                _addReply(replyItem);
                 _numErrors++;
             } else {
                 auto replyItem = BulkWriteReplyItem(idx);
                 replyItem.setN(writes.results[i].getValue().getN());
-                _replies.emplace_back(replyItem);
+                _addReply(replyItem);
             }
         }
     }
@@ -201,7 +202,7 @@ public:
         if (auto error = write_ops_exec::generateError(
                 opCtx, writeResult.results[0].getStatus(), currentOpIdx, _numErrors)) {
             auto replyItem = BulkWriteReplyItem(currentOpIdx, error.get().getStatus());
-            _replies.emplace_back(replyItem);
+            _addReply(replyItem);
             _numErrors++;
         } else {
             auto replyItem = BulkWriteReplyItem(currentOpIdx);
@@ -210,7 +211,7 @@ public:
             if (auto idElement = writeResult.results[0].getValue().getUpsertedId().firstElement()) {
                 replyItem.setUpserted(write_ops::Upserted(0, idElement));
             }
-            _replies.emplace_back(replyItem);
+            _addReply(replyItem);
         }
     }
 
@@ -232,7 +233,7 @@ public:
             _retriedStmtIds.emplace_back(*stmtId);
         }
 
-        _replies.emplace_back(replyItem);
+        _addReply(replyItem);
     }
 
     void addUpdateReply(size_t currentOpIdx,
@@ -270,7 +271,7 @@ public:
             _retriedStmtIds.emplace_back(*stmtId);
         }
 
-        _replies.emplace_back(replyItem);
+        _addReply(replyItem);
     }
 
     void addUpdateErrorReply(OperationContext* opCtx, size_t currentOpIdx, const Status& status) {
@@ -292,20 +293,25 @@ public:
         replyItem.setStatus(error.get().getStatus());
         replyItem.setOk(status.isOK() ? 1.0 : 0.0);
         replyItem.setN(0);
-        _replies.emplace_back(replyItem);
+        _addReply(replyItem);
         _numErrors++;
     }
 
-    std::vector<BulkWriteReplyItem>& getReplies() {
+    const std::vector<BulkWriteReplyItem>& getReplies() const {
         return _replies;
     }
 
-    std::vector<int>& getRetriedStmtIds() {
+    const std::vector<int>& getRetriedStmtIds() const {
         return _retriedStmtIds;
     }
 
-    int getNumErrors() {
+    int getNumErrors() const {
         return _numErrors;
+    }
+
+    // Approximate Size in bytes.
+    int32_t getApproximateSize() const {
+        return _approximateSize;
     }
 
 private:
@@ -314,7 +320,28 @@ private:
     std::vector<int32_t> _retriedStmtIds;
     /// The number of error replies contained in _replies.
     int _numErrors = 0;
+    int32_t _approximateSize = 0;  // Only accounting for _replies.
+
+    // Helper to keep _approximateSize up to date when appending to _replies.
+    void _addReply(const BulkWriteReplyItem& replyItem) {
+        _replies.emplace_back(replyItem);
+        _approximateSize += replyItem.getApproximateSize();
+    }
 };
+
+bool aboveBulkWriteRepliesMaxSize(OperationContext* opCtx,
+                                  size_t idx,
+                                  BulkWriteReplies& responses) {
+    int32_t bulkWriteRepliesMaxSize = gBulkWriteMaxRepliesSize.loadRelaxed();
+    if (responses.getApproximateSize() >= bulkWriteRepliesMaxSize) {
+        Status status{ErrorCodes::ExceededMemoryLimit,
+                      fmt::format("BulkWrite response size exceeded limit ({} bytes)",
+                                  bulkWriteRepliesMaxSize)};
+        responses.addErrorReply(opCtx, idx, status);
+        return true;
+    }
+    return false;
+}
 
 /*
  * InsertGrouper is a helper class to group consecutive insert operations for the same namespace in
@@ -440,11 +467,15 @@ BSONObj getInsertOpDesc(const std::vector<BSONObj>& docs, std::int32_t nsIdx) {
 void setCurOpInfoAndEnsureStarted(OperationContext* opCtx,
                                   CurOp* curOp,
                                   LogicalOp logicalOp,
-                                  const NamespaceString& nsString,
+                                  const NamespaceInfoEntry& nsEntry,
                                   const BSONObj& opDescription) {
     stdx::lock_guard<Client> lk(*opCtx->getClient());
 
-    curOp->setNS_inlock(nsString);
+    // For timeseries operations with the 'isTimeseriesNamespace' field set (i.e. sent from mongos),
+    // use the view namespace for logging/profiling purposes.
+    curOp->setNS_inlock(nsEntry.getIsTimeseriesNamespace()
+                            ? nsEntry.getNs().getTimeseriesViewNamespace()
+                            : nsEntry.getNs());
     curOp->setNetworkOp_inlock(NetworkOp::dbBulkWrite);
     curOp->setLogicalOp_inlock(LogicalOp::opBulkWrite);
     curOp->setOpDescription_inlock(opDescription);
@@ -590,7 +621,7 @@ bool attemptGroupedFLEInserts(OperationContext* opCtx,
     return false;
 }
 
-// A class that meets the type requirements for timeseries::isTimeseries.
+// A class that meets the type requirements for timeseries::isTimeseriesViewRequest.
 class TimeseriesBucketNamespace {
 public:
     TimeseriesBucketNamespace() = delete;
@@ -646,9 +677,9 @@ bool handleGroupedInserts(OperationContext* opCtx,
     auto firstInsert = BulkWriteCRUDOp(ops[firstOpIdx]).getInsert();
     invariant(firstInsert);
 
-    auto nsIdx = firstInsert->getInsert();
-    auto nsEntry = nsInfo[nsIdx];
-    auto& nsString = nsEntry.getNs();
+    const auto nsIdx = firstInsert->getInsert();
+    const auto& nsEntry = nsInfo[nsIdx];
+    const auto& nsString = nsEntry.getNs();
 
     write_ops_exec::WriteResult out;
     out.results.reserve(numOps);
@@ -681,11 +712,12 @@ bool handleGroupedInserts(OperationContext* opCtx,
 
     // Initialize curOp information.
     setCurOpInfoAndEnsureStarted(
-        opCtx, &curOp, LogicalOp::opInsert, nsString, getInsertOpDesc(insertDocs, nsIdx));
+        opCtx, &curOp, LogicalOp::opInsert, nsEntry, getInsertOpDesc(insertDocs, nsIdx));
 
     // Handle timeseries inserts.
     TimeseriesBucketNamespace tsNs(nsString, nsEntry.getIsTimeseriesNamespace());
-    if (auto [isTimeseries, _] = timeseries::isTimeseries(opCtx, tsNs); isTimeseries) {
+    if (auto [isTimeseriesViewRequest, _] = timeseries::isTimeseriesViewRequest(opCtx, tsNs);
+        isTimeseriesViewRequest) {
         try {
             handleGroupedTimeseriesInserts(
                 opCtx, req, firstOpIdx, insertDocs, nsEntry, &curOp, out);
@@ -803,6 +835,9 @@ bool handleInsertOp(OperationContext* opCtx,
                     write_ops_exec::LastOpFixer& lastOpFixer,
                     BulkWriteReplies& responses,
                     InsertGrouper& insertGrouper) {
+    if (aboveBulkWriteRepliesMaxSize(opCtx, currentOpIdx, responses)) {
+        return false;
+    }
     const auto& nsInfo = req.getNsInfo();
     auto idx = op->getInsert();
     const auto& ns = nsInfo[idx].getNs();
@@ -912,9 +947,13 @@ bool handleUpdateOp(OperationContext* opCtx,
                     size_t currentOpIdx,
                     write_ops_exec::LastOpFixer& lastOpFixer,
                     BulkWriteReplies& responses) {
+    if (aboveBulkWriteRepliesMaxSize(opCtx, currentOpIdx, responses)) {
+        return false;
+    }
+
     const auto& nsInfo = req.getNsInfo();
-    auto idx = op->getUpdate();
-    auto nsEntry = nsInfo[idx];
+    const auto idx = op->getUpdate();
+    const auto& nsEntry = nsInfo[idx];
     try {
         if (op->getMulti()) {
             uassert(ErrorCodes::InvalidOptions,
@@ -922,17 +961,17 @@ bool handleUpdateOp(OperationContext* opCtx,
                     !opCtx->isRetryableWrite());
         }
 
-        const NamespaceString& nsString = nsInfo[idx].getNs();
+        const NamespaceString& nsString = nsEntry.getNs();
         uassertStatusOK(userAllowedWriteNS(opCtx, nsString));
         doTransactionValidationForWrites(opCtx, nsString);
 
         // Handle FLE updates.
-        if (nsInfo[idx].getEncryptionInformation().has_value()) {
+        if (nsEntry.getEncryptionInformation().has_value()) {
             // For BulkWrite, re-entry is un-expected.
-            invariant(!nsInfo[idx].getEncryptionInformation()->getCrudProcessed().value_or(false));
+            invariant(!nsEntry.getEncryptionInformation()->getCrudProcessed().value_or(false));
 
             // Map to processFLEUpdate.
-            return attemptProcessFLEUpdate(opCtx, op, req, currentOpIdx, responses, nsInfo[idx]);
+            return attemptProcessFLEUpdate(opCtx, op, req, currentOpIdx, responses, nsEntry);
         }
 
         auto stmtId = opCtx->isRetryableWrite()
@@ -940,10 +979,11 @@ bool handleUpdateOp(OperationContext* opCtx,
             : kUninitializedStmtId;
 
         TimeseriesBucketNamespace tsNs(nsEntry.getNs(), nsEntry.getIsTimeseriesNamespace());
-        auto [isTimeseries, bucketNs] = timeseries::isTimeseries(opCtx, tsNs);
+        auto [isTimeseriesViewRequest, bucketNs] = timeseries::isTimeseriesViewRequest(opCtx, tsNs);
 
         // Handle retryable timeseries updates.
-        if (isTimeseries && opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction()) {
+        if (isTimeseriesViewRequest && opCtx->isRetryableWrite() &&
+            !opCtx->inMultiDocumentTransaction()) {
             write_ops_exec::WriteResult out;
             auto executor = serverGlobalParams.clusterRole.has(ClusterRole::None)
                 ? ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(
@@ -981,12 +1021,13 @@ bool handleUpdateOp(OperationContext* opCtx,
         ON_BLOCK_EXIT([&] { finishCurOp(opCtx, &curOp, LogicalOp::opUpdate); });
 
         // Initialize curOp information.
-        setCurOpInfoAndEnsureStarted(opCtx, &curOp, LogicalOp::opUpdate, nsString, op->toBSON());
+        setCurOpInfoAndEnsureStarted(opCtx, &curOp, LogicalOp::opUpdate, nsEntry, op->toBSON());
 
         // Handle non-retryable normal and timeseries updates, as well as retryable normal
         // updates that were not already executed.
         auto updateRequest = UpdateRequest();
         updateRequest.setNamespaceString(nsString);
+        updateRequest.setIsTimeseriesNamespace(nsEntry.getIsTimeseriesNamespace());
         updateRequest.setQuery(op->getFilter());
         updateRequest.setProj(BSONObj());
         updateRequest.setUpdateModification(op->getUpdateMods());
@@ -1028,7 +1069,7 @@ bool handleUpdateOp(OperationContext* opCtx,
                                                                 opCtx->inMultiDocumentTransaction(),
                                                                 false,
                                                                 updateRequest.isUpsert(),
-                                                                nsInfo[idx].getCollectionUUID(),
+                                                                nsEntry.getCollectionUUID(),
                                                                 docFound,
                                                                 updateRequest);
                     lastOpFixer.finishedOpSuccessfully();
@@ -1060,7 +1101,7 @@ bool handleUpdateOp(OperationContext* opCtx,
         responses.addUpdateErrorReply(opCtx, currentOpIdx, ex.toStatus());
         write_ops_exec::WriteResult out;
         return write_ops_exec::handleError(
-            opCtx, ex, nsInfo[idx].getNs(), req.getOrdered(), op->getMulti(), boost::none, &out);
+            opCtx, ex, nsEntry.getNs(), req.getOrdered(), op->getMulti(), boost::none, &out);
     }
 }
 
@@ -1070,8 +1111,13 @@ bool handleDeleteOp(OperationContext* opCtx,
                     size_t currentOpIdx,
                     write_ops_exec::LastOpFixer& lastOpFixer,
                     BulkWriteReplies& responses) {
+    if (aboveBulkWriteRepliesMaxSize(opCtx, currentOpIdx, responses)) {
+        return false;
+    }
+
     const auto& nsInfo = req.getNsInfo();
     auto idx = op->getDeleteCommand();
+    auto& nsEntry = nsInfo.at(idx);
     try {
         if (op->getMulti()) {
             uassert(ErrorCodes::InvalidOptions,
@@ -1079,13 +1125,13 @@ bool handleDeleteOp(OperationContext* opCtx,
                     !opCtx->isRetryableWrite());
         }
 
-        const NamespaceString& nsString = nsInfo[idx].getNs();
+        const NamespaceString& nsString = nsEntry.getNs();
         uassertStatusOK(userAllowedWriteNS(opCtx, nsString));
         doTransactionValidationForWrites(opCtx, nsString);
 
         // Handle FLE deletes.
-        if (nsInfo[idx].getEncryptionInformation().has_value()) {
-            return attemptProcessFLEDelete(opCtx, op, req, currentOpIdx, responses, nsInfo[idx]);
+        if (nsEntry.getEncryptionInformation().has_value()) {
+            return attemptProcessFLEDelete(opCtx, op, req, currentOpIdx, responses, nsEntry);
         }
 
         // Non-FLE deletes (including timeseries deletes) will be handled by
@@ -1113,10 +1159,11 @@ bool handleDeleteOp(OperationContext* opCtx,
         ON_BLOCK_EXIT([&] { finishCurOp(opCtx, &curOp, LogicalOp::opDelete); });
 
         // Initialize curOp information.
-        setCurOpInfoAndEnsureStarted(opCtx, &curOp, LogicalOp::opDelete, nsString, op->toBSON());
+        setCurOpInfoAndEnsureStarted(opCtx, &curOp, LogicalOp::opDelete, nsEntry, op->toBSON());
 
         auto deleteRequest = DeleteRequest();
         deleteRequest.setNsString(nsString);
+        deleteRequest.setIsTimeseriesNamespace(nsEntry.getIsTimeseriesNamespace());
         deleteRequest.setQuery(op->getFilter());
         deleteRequest.setProj(BSONObj());
         deleteRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
@@ -1139,7 +1186,7 @@ bool handleDeleteOp(OperationContext* opCtx,
                                                           deleteRequest,
                                                           &curOp,
                                                           inTransaction,
-                                                          nsInfo[idx].getCollectionUUID(),
+                                                          nsEntry.getCollectionUUID(),
                                                           docFound);
             lastOpFixer.finishedOpSuccessfully();
             responses.addDeleteReply(currentOpIdx, nDeleted, boost::none);
@@ -1153,8 +1200,105 @@ bool handleDeleteOp(OperationContext* opCtx,
         responses.addErrorReply(opCtx, currentOpIdx, ex.toStatus());
         write_ops_exec::WriteResult out;
         return write_ops_exec::handleError(
-            opCtx, ex, nsInfo[idx].getNs(), req.getOrdered(), false, boost::none, &out);
+            opCtx, ex, nsEntry.getNs(), req.getOrdered(), false, boost::none, &out);
     }
+}
+
+template <typename BulkWriteUpdateOrDeleteOp>
+BSONObj getQueryForExplain(OperationContext* opCtx,
+                           const BulkWriteCommandRequest& req,
+                           const BulkWriteUpdateOrDeleteOp* op,
+                           const NamespaceInfoEntry& nsEntry) {
+    if (shouldDoFLERewrite(nsEntry)) {
+        {
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation_inlock(lk, true);
+        }
+
+        if (!nsEntry.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
+            return processFLEWriteExplainD(opCtx,
+                                           op->getCollation().value_or(BSONObj()),
+                                           nsEntry.getNs(),
+                                           nsEntry.getEncryptionInformation().get(),
+                                           boost::none, /* runtimeConstants */
+                                           req.getLet(),
+                                           op->getFilter());
+        }
+    }
+
+    return op->getFilter();
+}
+
+void explainUpdateOp(OperationContext* opCtx,
+                     const BulkWriteCommandRequest& req,
+                     const mongo::BulkWriteUpdateOp* op,
+                     const NamespaceInfoEntry& nsEntry,
+                     const BSONObj& command,
+                     ExplainOptions::Verbosity verbosity,
+                     rpc::ReplyBuilderInterface* result) {
+    invariant(op);
+    TimeseriesBucketNamespace tsNs(nsEntry.getNs(), nsEntry.getIsTimeseriesNamespace());
+    auto [isTimeseriesViewRequest, nss] = timeseries::isTimeseriesViewRequest(opCtx, tsNs);
+
+    auto updateRequest = UpdateRequest();
+
+    updateRequest.setNamespaceString(nss);
+    updateRequest.setQuery(getQueryForExplain(opCtx, req, op, nsEntry));
+    updateRequest.setProj(BSONObj());
+    updateRequest.setUpdateModification(op->getUpdateMods());
+    updateRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
+    updateRequest.setUpdateConstants(op->getConstants());
+    updateRequest.setLetParameters(req.getLet());
+    updateRequest.setHint(op->getHint());
+    updateRequest.setCollation(op->getCollation().value_or(BSONObj()));
+    updateRequest.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
+    updateRequest.setUpsert(op->getUpsert());
+    updateRequest.setUpsertSuppliedDocument(op->getUpsertSupplied().value_or(false));
+    updateRequest.setReturnDocs(UpdateRequest::RETURN_NONE);
+    updateRequest.setMulti(op->getMulti());
+    updateRequest.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    updateRequest.setExplain(verbosity);
+
+    write_ops_exec::explainUpdate(opCtx,
+                                  updateRequest,
+                                  isTimeseriesViewRequest,
+                                  req.getSerializationContext(),
+                                  command,
+                                  verbosity,
+                                  result);
+}
+
+void explainDeleteOp(OperationContext* opCtx,
+                     const BulkWriteCommandRequest& req,
+                     const mongo::BulkWriteDeleteOp* op,
+                     const NamespaceInfoEntry& nsEntry,
+                     const BSONObj& command,
+                     ExplainOptions::Verbosity verbosity,
+                     rpc::ReplyBuilderInterface* result) {
+    invariant(op);
+    TimeseriesBucketNamespace tsNs(nsEntry.getNs(), nsEntry.getIsTimeseriesNamespace());
+    auto [isTimeseriesViewRequest, nss] = timeseries::isTimeseriesViewRequest(opCtx, tsNs);
+
+    auto deleteRequest = DeleteRequest();
+
+    deleteRequest.setNsString(nss);
+    deleteRequest.setQuery(getQueryForExplain(opCtx, req, op, nsEntry));
+    deleteRequest.setProj(BSONObj());
+    deleteRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
+    deleteRequest.setLet(req.getLet());
+    deleteRequest.setHint(op->getHint());
+    deleteRequest.setCollation(op->getCollation().value_or(BSONObj()));
+    deleteRequest.setMulti(op->getMulti());
+    deleteRequest.setYieldPolicy(PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+    deleteRequest.setIsExplain(true);
+
+    write_ops_exec::explainDelete(opCtx,
+                                  deleteRequest,
+                                  isTimeseriesViewRequest,
+                                  req.getSerializationContext(),
+                                  command,
+                                  verbosity,
+                                  result);
 }
 
 class BulkWriteCmd : public BulkWriteCmdVersion1Gen<BulkWriteCmd> {
@@ -1200,13 +1344,13 @@ public:
         Invocation(OperationContext* opCtx,
                    const Command* command,
                    const OpMsgRequest& opMsgRequest)
-            : InvocationBaseGen(opCtx, command, opMsgRequest) {
+            : InvocationBaseGen(opCtx, command, opMsgRequest), _commandObj(opMsgRequest.body) {
             uassert(
                 ErrorCodes::CommandNotSupported,
                 "BulkWrite may not be run without featureFlagBulkWriteCommand enabled",
                 gFeatureFlagBulkWriteCommand.isEnabled(serverGlobalParams.featureCompatibility));
 
-            bulk_write_common::validateRequest(request());
+            bulk_write_common::validateRequest(request(), /*isRouter=*/false);
 
             // Extract and store the first update op for building mirrored read request.
             _extractFirstUpdateOp();
@@ -1300,6 +1444,33 @@ public:
             throw;
         }
 
+        void explain(OperationContext* opCtx,
+                     ExplainOptions::Verbosity verbosity,
+                     rpc::ReplyBuilderInterface* result) final {
+            const auto& req = request();
+            const auto& ops = req.getOps();
+
+            uassert(ErrorCodes::InvalidLength,
+                    "explained bulkWrite ops must be of size 1",
+                    ops.size() == 1);
+
+            const BulkWriteCRUDOp bulkOp(ops[0]);
+            const auto opType = bulkOp.getType();
+            const auto& nsEntry = req.getNsInfo()[bulkOp.getNsInfoIdx()];
+
+            if (opType == BulkWriteCRUDOp::kInsert) {
+                uasserted(ErrorCodes::IllegalOperation, "Cannot explain insert cmd for bulkWrite");
+            } else if (opType == BulkWriteCRUDOp::kUpdate) {
+                explainUpdateOp(
+                    opCtx, req, bulkOp.getUpdate(), nsEntry, _commandObj, verbosity, result);
+            } else if (opType == BulkWriteCRUDOp::kDelete) {
+                explainDeleteOp(
+                    opCtx, req, bulkOp.getDelete(), nsEntry, _commandObj, verbosity, result);
+            } else {
+                MONGO_UNREACHABLE;
+            }
+        }
+
     private:
         Reply _populateCursorReply(OperationContext* opCtx,
                                    const BulkWriteCommandRequest& req,
@@ -1365,9 +1536,7 @@ public:
             if (exec->isEOF()) {
                 invariant(numRepliesInFirstBatch == replies.size());
                 auto reply = BulkWriteCommandReply(
-                    BulkWriteCommandResponseCursor(
-                        0, std::vector<BulkWriteReplyItem>(std::move(replies))),
-                    numErrors);
+                    BulkWriteCommandResponseCursor(0, std::move(replies), cursorNss), numErrors);
                 if (!retriedStmtIds.empty()) {
                     reply.setRetriedStmtIds(std::move(retriedStmtIds));
                 }
@@ -1398,9 +1567,7 @@ public:
 
             replies.resize(numRepliesInFirstBatch);
             auto reply = BulkWriteCommandReply(
-                BulkWriteCommandResponseCursor(cursorId,
-                                               std::vector<BulkWriteReplyItem>(std::move(replies))),
-                numErrors);
+                BulkWriteCommandResponseCursor(cursorId, std::move(replies), cursorNss), numErrors);
             if (!retriedStmtIds.empty()) {
                 reply.setRetriedStmtIds(std::move(retriedStmtIds));
             }
@@ -1433,6 +1600,7 @@ public:
             }
         }
 
+        const BSONObj& _commandObj;
         const mongo::BulkWriteUpdateOp* _firstUpdateOp{nullptr};
     };
 };
@@ -1472,9 +1640,29 @@ BulkWriteReply performWrites(OperationContext* opCtx, const BulkWriteCommandRequ
     // case there is a mismatch in the mongos request provided versions and the local (shard's)
     // understanding of the version.
     for (const auto& nsInfo : req.getNsInfo()) {
-        // TODO (SERVER-79342): Support timeseries collections.
-        OperationShardingState::setShardRole(
-            opCtx, nsInfo.getNs(), nsInfo.getShardVersion(), nsInfo.getDatabaseVersion());
+        auto& ns = nsInfo.getNs();
+        auto& shardVersion = nsInfo.getShardVersion();
+        auto& databaseVersion = nsInfo.getDatabaseVersion();
+
+        if (shardVersion || databaseVersion) {
+            // If a timeseries collection is sharded, only the buckets collection would be sharded.
+            // We expect all versioned commands to be sent over 'system.buckets' namespace. But it
+            // is possible that a stale mongos may send the request over a view namespace. In this
+            // case, we initialize the 'OperationShardingState' with buckets namespace. The bucket
+            // namespace is used because if the shard recognizes this is a timeseries collection,
+            // the timeseries write path will eventually execute on the bucket namespace and locks
+            // will be acquired with the bucket namespace. So we must initialize the
+            // 'OperationShardingState' with the bucket namespace to trigger the shard version
+            // checks.
+            TimeseriesBucketNamespace tsNs(ns, nsInfo.getIsTimeseriesNamespace());
+            // The returned namespaceForSharding will be the timeseries system bucket collection if
+            // the request is made on a timeseries collection. Otherwise, it will stay unchanged
+            // (i.e. the namespace from the client request).
+            auto [_, namespaceForSharding] = timeseries::isTimeseriesViewRequest(opCtx, tsNs);
+
+            OperationShardingState::setShardRole(
+                opCtx, namespaceForSharding, shardVersion, databaseVersion);
+        }
 
         if (nsInfo.getEncryptionInformation().has_value()) {
             hasEncryptionInformation = true;
@@ -1511,6 +1699,7 @@ BulkWriteReply performWrites(OperationContext* opCtx, const BulkWriteCommandRequ
             if (!handleGroupedInserts(opCtx, req, insertGrouper, lastOpFixer, responses)) {
                 break;
             }
+
             if (hasEncryptionInformation) {
                 uassert(
                     ErrorCodes::InvalidOptions,
@@ -1521,11 +1710,12 @@ BulkWriteReply performWrites(OperationContext* opCtx, const BulkWriteCommandRequ
                 // Update write failed can no longer continue.
                 break;
             }
-        } else {
+        } else if (opType == BulkWriteCRUDOp::kDelete) {
             // Flush grouped insert ops before handling delete ops.
             if (!handleGroupedInserts(opCtx, req, insertGrouper, lastOpFixer, responses)) {
                 break;
             }
+
             if (hasEncryptionInformation) {
                 uassert(
                     ErrorCodes::InvalidOptions,
@@ -1536,6 +1726,8 @@ BulkWriteReply performWrites(OperationContext* opCtx, const BulkWriteCommandRequ
                 // Delete write failed can no longer continue.
                 break;
             }
+        } else {
+            MONGO_UNREACHABLE;
         }
     }
 

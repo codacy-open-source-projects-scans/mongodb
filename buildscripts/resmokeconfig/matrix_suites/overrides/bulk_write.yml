@@ -9,7 +9,7 @@
 - name: single_op_core_excluded_files
   value:
     exclude_files:
-    # TODO (SERVER-80146): Enable the following test(s).
+    # TODO (SERVER-80190): Enable the following test(s).
     - jstests/core/timeseries/timeseries_bucket_index.js
     - jstests/core/timeseries/timeseries_bucket_manual_removal.js
     # TODO (SERVER-80011): Enable the following test(s).
@@ -26,8 +26,6 @@
     - jstests/core/fsync.js
     # TODO (SERVER-79610) Enable these when we support updateMetrics in bulkWrite.
     - jstests/core/write/update/update_metrics.js
-    # TODO (SERVER-76497): Enable these when explain is supported in bulkWrite.
-    - jstests/core/**/explain*.js
     # Runs an update with illegal format (no 'updates'). We could work around this in the override
     # but it is very annoying.
     - jstests/core/write/insert/batch_write_command_insert.js

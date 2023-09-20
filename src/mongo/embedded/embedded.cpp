@@ -97,6 +97,7 @@
 #include "mongo/embedded/read_write_concern_defaults_cache_lookup_embedded.h"
 #include "mongo/embedded/replication_coordinator_embedded.h"
 #include "mongo/embedded/service_entry_point_embedded.h"
+#include "mongo/embedded/session_manager_embedded.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -119,22 +120,25 @@ namespace mongo {
 namespace embedded {
 namespace {
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(WireSpec, ("EndStartupOptionHandling"))(InitializerContext*) {
-    // The featureCompatibilityVersion behavior defaults to the downgrade behavior while the
-    // in-memory version is unset.
-    WireSpec::Specification spec;
-    spec.incomingInternalClient.minWireVersion = RELEASE_2_4_AND_BEFORE;
-    spec.incomingInternalClient.maxWireVersion = LATEST_WIRE_VERSION;
-    spec.outgoing.minWireVersion = SUPPORTS_OP_MSG;
-    spec.outgoing.maxWireVersion = LATEST_WIRE_VERSION;
-    spec.isInternalClient = true;
-
-    WireSpec::instance().initialize(std::move(spec));
-}
-
 // Noop, to fulfill dependencies for other initializers.
 MONGO_INITIALIZER_GENERAL(ForkServer, ("EndStartupOptionHandling"), ("default"))
 (InitializerContext* context) {}
+
+namespace {
+ServiceContext::ConstructorActionRegisterer registerWireSpec{
+    "RegisterWireSpec", [](ServiceContext* service) {
+        // The featureCompatibilityVersion behavior defaults to the downgrade behavior while the
+        // in-memory version is unset.
+        WireSpec::Specification spec;
+        spec.incomingInternalClient.minWireVersion = RELEASE_2_4_AND_BEFORE;
+        spec.incomingInternalClient.maxWireVersion = LATEST_WIRE_VERSION;
+        spec.outgoing.minWireVersion = SUPPORTS_OP_MSG;
+        spec.outgoing.maxWireVersion = LATEST_WIRE_VERSION;
+        spec.isInternalClient = true;
+
+        WireSpec::getWireSpec(service).initialize(std::move(spec));
+    }};
+}  // namespace
 
 void setUpCatalog(ServiceContext* serviceContext) {
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
@@ -254,6 +258,7 @@ ServiceContext* initialize(const char* yaml_config) {
 
     auto serviceContext = getGlobalServiceContext();
     serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointEmbedded>());
+    serviceContext->setSessionManager(std::make_unique<SessionManagerEmbedded>());
 
     auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
     opObserverRegistry->addObserver(

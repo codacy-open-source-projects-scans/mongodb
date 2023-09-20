@@ -169,19 +169,25 @@ public:
         return _uuid >= rhs._uuid;
     }
 
+    template <typename H>
+    friend H AbslHashValue(H h, const UUID& uuid) {
+        return H::combine(std::move(h), uuid._uuid);
+    }
+
     /**
      * Returns true only if the UUID is the RFC 4122 variant, v4 (random).
      */
     bool isRFC4122v4() const;
 
     /**
-     * Custom hasher so UUIDs can be used in unordered data structures.
-     *
-     * ex: std::unordered_set<UUID, UUID::Hash> uuidSet;
+     * Custom hasher so UUIDs can be used in unordered data structures. Uses the first four bytes
+     * of the UUID itself as the hash, since these are already randomly generated.
+     * e.g. std::unordered_set<UUID, UUID::Hash> uuidSet;
      */
     struct Hash {
         std::size_t operator()(const UUID& uuid) const {
-            return murmur3<sizeof(uint32_t)>(uuid.toCDR(), 0 /*seed*/);
+            return uuid.toCDR()
+                .read<BigEndian<uint32_t>>();  // BigEndian because UUID is in network order
         }
     };
 

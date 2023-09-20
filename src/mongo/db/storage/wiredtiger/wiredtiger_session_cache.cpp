@@ -299,9 +299,14 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
     uint32_t current = _lastSyncTime.loadRelaxed();  // synchronized with writes through mutex
     if (current != start) {
         // Someone else synced already since we read lastSyncTime, so we're done!
+
+        // Unconditionally unlock mutex here to run operations that do not require synchronization.
+        // The JournalListener is the only operation that meets this criteria currently.
+        lk.unlock();
         if (token) {
             journalListener->onDurable(token.value());
         }
+
         return;
     }
     _lastSyncTime.store(current + 1);
@@ -326,15 +331,18 @@ void WiredTigerSessionCache::waitUntilDurable(OperationContext* opCtx,
         LOGV2_DEBUG(22420, 4, "created checkpoint");
     }
 
-    if (token) {
-        journalListener->onDurable(token.value());
-    }
-
     // The session is reset periodically so that WT doesn't consider it a rogue session and log
     // about it. The session doesn't actually pin any resources that need to be released.
     if (_timeSinceLastDurabilitySessionReset.millis() > (5 * 60 * 1000 /* 5 minutes */)) {
         _waitUntilDurableSession->reset(_waitUntilDurableSession);
         _timeSinceLastDurabilitySessionReset.reset();
+    }
+
+    // Unconditionally unlock mutex here to run operations that do not require synchronization.
+    // The JournalListener is the only operation that meets this criteria currently.
+    lk.unlock();
+    if (token) {
+        journalListener->onDurable(token.value());
     }
 }
 

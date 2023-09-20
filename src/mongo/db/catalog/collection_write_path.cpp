@@ -240,7 +240,11 @@ Status insertDocumentsImpl(OperationContext* opCtx,
     timestamps.reserve(count);
 
     std::vector<RecordId> cappedRecordIds;
-    if (collection->usesCappedSnapshots()) {
+    // For capped collections requiring capped snapshots, usually RecordIds are reserved and
+    // registered here to handle visibility. If the RecordId is provided by the caller, it is
+    // assumed the caller already reserved and properly registered the inserts in the
+    // CappedVisibilityObserver.
+    if (collection->usesCappedSnapshots() && begin->recordId.isNull()) {
         cappedRecordIds = collection->reserveCappedRecordIds(opCtx, count);
     }
 
@@ -784,10 +788,15 @@ void deleteDocument(OperationContext* opCtx,
     }
 
     OplogDeleteEntryArgs deleteArgs;
+
+    // TODO(SERVER-80956): remove this call.
     opCtx->getServiceContext()->getOpObserver()->aboutToDelete(
         opCtx, collection, doc.value(), &deleteArgs);
 
-    deleteArgs.deletedDoc = nullptr;
+    invariant(doc.value().isOwned(),
+              str::stream() << "Document to delete is not owned: snapshot id: " << doc.snapshotId()
+                            << " document: " << doc.value());
+
     deleteArgs.fromMigrate = fromMigrate;
     deleteArgs.changeStreamPreAndPostImagesEnabledForCollection =
         collection->isChangeStreamPreAndPostImagesEnabled();
@@ -796,26 +805,17 @@ void deleteDocument(OperationContext* opCtx,
         storeDeletedDoc == StoreDeletedDoc::On && retryableWrite == RetryableWrite::kYes;
     if (shouldRecordPreImageForRetryableWrite) {
         deleteArgs.retryableFindAndModifyLocation = RetryableFindAndModifyLocation::kSideCollection;
-        deleteArgs.oplogSlots = reserveOplogSlotsForRetryableFindAndModify(opCtx);
+        deleteArgs.retryableFindAndModifyOplogSlots =
+            reserveOplogSlotsForRetryableFindAndModify(opCtx);
     }
 
-    boost::optional<BSONObj> deletedDoc;
-    const bool isTimeseriesCollection =
-        collection->getTimeseriesOptions() || nss.isTimeseriesBucketsCollection();
-
-    if (shouldRecordPreImageForRetryableWrite ||
-        collection->isChangeStreamPreAndPostImagesEnabled() || isTimeseriesCollection) {
-        deletedDoc.emplace(doc.value().getOwned());
-    }
     int64_t keysDeleted = 0;
     collection->getIndexCatalog()->unindexRecord(
         opCtx, collection, doc.value(), loc, noWarn, &keysDeleted, checkRecordId);
     collection->getRecordStore()->deleteRecord(opCtx, loc);
-    if (deletedDoc) {
-        deleteArgs.deletedDoc = &(deletedDoc.value());
-    }
 
-    opCtx->getServiceContext()->getOpObserver()->onDelete(opCtx, collection, stmtId, deleteArgs);
+    opCtx->getServiceContext()->getOpObserver()->onDelete(
+        opCtx, collection, stmtId, doc.value(), deleteArgs);
 
     if (opDebug) {
         opDebug->additiveMetrics.incrementKeysDeleted(keysDeleted);

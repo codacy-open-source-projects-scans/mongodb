@@ -361,7 +361,6 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
         // primary, blocking behind the critical section.
 
         // Extract which database was updated
-        // TODO SERVER-67789 Change to extract DatabaseName obj, and use when locking db below.
         std::string db;
         fassert(40478,
                 bsonExtractStringField(
@@ -568,6 +567,7 @@ void ShardServerOpObserver::onModifyCollectionShardingIndexCatalog(OperationCont
 void ShardServerOpObserver::onDelete(OperationContext* opCtx,
                                      const CollectionPtr& coll,
                                      StmtId stmtId,
+                                     const BSONObj& doc,
                                      const OplogDeleteEntryArgs& args,
                                      OpStateAccumulator* opAccumulator) {
     const auto& nss = coll->ns();
@@ -584,7 +584,6 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         }
 
         // Extract which database entry is being deleted from the _id field.
-        // TODO SERVER-67789 Change to extract DatabaseName obj, and use when locking db below.
         std::string deletedDatabase;
         fassert(50772,
                 bsonExtractStringField(
@@ -801,7 +800,14 @@ void ShardServerOpObserver::onCollMod(OperationContext* opCtx,
                                       const BSONObj& collModCmd,
                                       const CollectionOptions& oldCollOptions,
                                       boost::optional<IndexCollModInfo> indexInfo) {
-    abortOngoingMigrationIfNeeded(opCtx, nss);
+    // An empty collMod contains only the top-level "collMod": <collection> field. Empty collMods
+    // are sometimes used for FCV upgrades that modify the catalog in a compatible way with existing
+    // data users. These modifications do not change the underlying data assumptions and are
+    // otherwise a no-op since an empty collMod won't change anything.
+    bool emptyCollMod = collModCmd.nFields() <= 1;
+    if (!emptyCollMod) {
+        abortOngoingMigrationIfNeeded(opCtx, nss);
+    }
 };
 
 void ShardServerOpObserver::onReplicationRollback(OperationContext* opCtx,

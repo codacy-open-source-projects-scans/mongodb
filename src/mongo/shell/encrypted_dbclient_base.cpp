@@ -145,8 +145,8 @@ std::string EncryptedDBClientBase::getServerAddress() const {
     return _conn->getServerAddress();
 }
 
-void EncryptedDBClientBase::_call(Message& toSend, Message& response, std::string* actualServer) {
-    _conn->call(toSend, response, actualServer);
+Message EncryptedDBClientBase::_call(Message& toSend, std::string* actualServer) {
+    return _conn->call(toSend, actualServer);
 }
 
 void EncryptedDBClientBase::say(Message& toSend, bool isRetry, std::string* actualServer) {
@@ -891,7 +891,7 @@ void createCollectionObject(JSContext* cx,
     JS::RootedValueArray<2> databaseArgs(cx);
 
     databaseArgs[0].setObject(client.toObject());
-    mozjs::ValueReader(cx, databaseArgs[1]).fromStringData(ns.db_deprecated());
+    mozjs::ValueReader(cx, databaseArgs[1]).fromStringData(ns.dbName().toString_forTest());
     scope->getProto<mozjs::DBInfo>().newInstance(databaseArgs, &databaseRV);
 
     invariant(databaseRV.isObject());
