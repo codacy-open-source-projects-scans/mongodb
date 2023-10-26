@@ -50,10 +50,10 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/db/query/query_stats/transform_algorithm_gen.h"
-#include "mongo/db/query/serialization_options.h"
-#include "mongo/db/query/shape_helpers.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/util/decorable.h"
 
@@ -68,21 +68,31 @@ namespace mongo::query_stats {
  * class's member variables.
  */
 struct UniversalKeyComponents {
-    // TODO SERVER-78429 it feels like maxTimeMS and readConcern are missing from here - at least?
     UniversalKeyComponents(std::unique_ptr<query_shape::Shape> queryShape,
                            const ClientMetadata* clientMetadata,
                            boost::optional<BSONObj> commentObj,
                            boost::optional<BSONObj> hint,
-                           std::unique_ptr<APIParameters> apiParams,
                            boost::optional<BSONObj> readPreference,
-                           query_shape::CollectionType collectionType);
+                           boost::optional<BSONObj> writeConcern,
+                           boost::optional<BSONObj> readConcern,
+                           std::unique_ptr<APIParameters> apiParams,
+                           query_shape::CollectionType collectionType,
+                           bool maxTimeMS);
+    /**
+     * Returns a copy of the read concern object. If there is an "afterClusterTime" component, the
+     * timestamp is shapified according to 'opts'.
+     */
+    static BSONObj shapifyReadConcern(
+        const BSONObj& readConcern,
+        const SerializationOptions& opts =
+            SerializationOptions::kRepresentativeQueryShapeSerializeOptions);
 
     int64_t size() const;
 
     void appendTo(BSONObjBuilder& bob, const SerializationOptions& opts) const;
 
     // Avoid using boost::optional here because it creates extra padding at the beginning of the
-    // struct. Since each QueryStatsEntry has its own KeyGenerator subclass, it's better to minimize
+    // struct. Since each QueryStatsEntry has its own Key subclass, it's better to minimize
     // the struct's size as much as possible.
 
     std::unique_ptr<query_shape::Shape> _queryShape;
@@ -90,6 +100,10 @@ struct UniversalKeyComponents {
     BSONObj _commentObj;      // Shapify this value.
     BSONObj _hintObj;         // Preserve this value.
     BSONObj _readPreference;  // Preserve this value.
+    BSONObj _writeConcern;    // Preserve this value.
+
+    // Preserved literal except afterClusterTime is shapified.
+    BSONObj _shapifiedReadConcern;
 
     // Separate the possibly-enormous BSONObj from the remaining members
 
@@ -100,6 +114,11 @@ struct UniversalKeyComponents {
     // is not set through that code path.
     query_shape::CollectionType _collectionType;
 
+    // Simple hash of the client metadata object. This value is stored separately because it is
+    // cached on the client to avoid re-computing on every operation. If no client metadata is
+    // present, this will be the hash of an empty BSON object (otherwise known as 0).
+    const unsigned long _clientMetaDataHash;
+
     // This anonymous struct represents the presence of the member variables as C++ bit fields.
     // In doing so, each of these boolean values takes up 1 bit instead of 1 byte.
     struct HasField {
@@ -107,6 +126,9 @@ struct UniversalKeyComponents {
         bool comment : 1 = false;
         bool hint : 1 = false;
         bool readPreference : 1 = false;
+        bool writeConcern : 1 = false;
+        bool readConcern : 1 = false;
+        bool maxTimeMS : 1 = false;
     } _hasField;
 };
 
@@ -146,11 +168,13 @@ template <typename H>
 H AbslHashValue(H h, const UniversalKeyComponents& components) {
     return H::combine(std::move(h),
                       *components._queryShape,
-                      simpleHash(components._clientMetaData),
+                      components._clientMetaDataHash,
                       // Note we use the comment's type in the hash function.
                       components._comment.type(),
                       simpleHash(components._hintObj),
                       simpleHash(components._readPreference),
+                      simpleHash(components._writeConcern),
+                      simpleHash(components._shapifiedReadConcern),
                       components._apiParams ? APIParameters::Hash{}(*components._apiParams) : 0,
                       components._collectionType,
                       components._hasField);
@@ -162,18 +186,21 @@ H AbslHashValue(H h, const UniversalKeyComponents::HasField& hasField) {
                       hasField.clientMetaData,
                       hasField.comment,
                       hasField.hint,
-                      hasField.readPreference);
+                      hasField.readPreference,
+                      hasField.writeConcern,
+                      hasField.readConcern,
+                      hasField.maxTimeMS);
 }
 
 
 // This static assert checks to ensure that the struct's size is changed thoughtfully. If adding
 // or otherwise changing the members, this assert may be updated with care.
 static_assert(
-    sizeof(UniversalKeyComponents) <= sizeof(query_shape::Shape) + 4 * sizeof(BSONObj) +
+    sizeof(UniversalKeyComponents) <= sizeof(query_shape::Shape) + 6 * sizeof(BSONObj) +
             sizeof(BSONElement) + sizeof(std::unique_ptr<APIParameters>) +
             sizeof(query_shape::CollectionType) + sizeof(query_shape::QueryShapeHash) +
             sizeof(int64_t),
-    "Size of KeyGenerator is too large! "
+    "Size of Key is too large! "
     "Make sure that the struct has been align- and padding-optimized. "
     "If the struct's members have changed, this assert may need to be updated with a new value.");
 
@@ -189,17 +216,17 @@ static_assert(
  *
  * The interface to do this is to split out the state/memory for these components as a separate
  * struct which can indpendently hash itself and compute its size (both of which are important for
- * the query stats store). Subclasses of KeyGenerator itself should not have any meaningfully sized
+ * the query stats store). Subclasses of Key itself should not have any meaningfully sized
  * state other than the 'specificComponents().'
  */
-class KeyGenerator {
+class Key {
 public:
-    virtual ~KeyGenerator() = default;
+    virtual ~Key() = default;
 
     /**
-     * All KeyGenerators will share these characteristics as part of their query stats store key.
+     * All Keys will share these characteristics as part of their query stats store key.
      * Returns an unowned reference so the caller must ensure the result does not outlive this
-     * KeyGenerator instance.
+     * Key instance.
      */
     const auto& universalComponents() const {
         return _universalComponents;
@@ -218,14 +245,17 @@ public:
      * use the absl::HashOf() API to look them up. Instead, this may be useful to display the key
      * (as it is used for $queryStats) or perhaps one day persist it to storage.
      */
-    BSONObj generate(OperationContext* opCtx, const SerializationOptions& opts) const;
+    BSONObj toBson(OperationContext* opCtx,
+                   const SerializationOptions& opts,
+                   const SerializationContext& serializationContext) const;
 
     /**
      * Convenience function.
      */
-    query_shape::QueryShapeHash getQueryShapeHash(OperationContext* opCtx) const {
+    query_shape::QueryShapeHash getQueryShapeHash(
+        OperationContext* opCtx, const SerializationContext& serializationContext) const {
         // TODO (future ticket?) should we cache this somewhere else?
-        return _universalComponents._queryShape->sha256Hash(opCtx);
+        return _universalComponents._queryShape->sha256Hash(opCtx, serializationContext);
     }
 
     int64_t size() const {
@@ -233,32 +263,32 @@ public:
     }
 
     template <typename H>
-    friend H AbslHashValue(H h, const KeyGenerator& keyGenerator) {
-        return H::combine(
-            std::move(h), keyGenerator._universalComponents, keyGenerator.specificComponents());
+    friend H AbslHashValue(H h, const Key& key) {
+        return H::combine(std::move(h), key._universalComponents, key.specificComponents());
     }
 
     // The default implementation of hashing for smart pointers is not a good one for our purposes.
     // Here we overload them to actually take the hash of the object, rather than hashing the
     // pointer itself.
     template <typename H>
-    friend H AbslHashValue(H h, const std::unique_ptr<const KeyGenerator>& keyGenerator) {
-        return H::combine(std::move(h), *keyGenerator);
+    friend H AbslHashValue(H h, const std::unique_ptr<const Key>& key) {
+        return H::combine(std::move(h), *key);
     }
     template <typename H>
-    friend H AbslHashValue(H h, const std::shared_ptr<const KeyGenerator>& keyGenerator) {
-        return H::combine(std::move(h), *keyGenerator);
+    friend H AbslHashValue(H h, const std::shared_ptr<const Key>& key) {
+        return H::combine(std::move(h), *key);
     }
 
 protected:
     /**
-     * Sub-classes can use this to instantiate a 'real' KeyGenerator. 'queryShape' must not be null,
+     * Sub-classes can use this to instantiate a 'real' Key. 'queryShape' must not be null,
      * but is tracked as a pointer since it is a virtual class and we want to own it here.
      */
-    KeyGenerator(
-        OperationContext* opCtx,
+    Key(OperationContext* opCtx,
         std::unique_ptr<query_shape::Shape> queryShape,
         boost::optional<BSONObj> hint,
+        boost::optional<BSONObj> readConcern,
+        bool maxTimeMS,
         query_shape::CollectionType collectionType = query_shape::CollectionType::kUnknown);
 
     /**

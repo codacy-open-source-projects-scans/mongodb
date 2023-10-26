@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/utility/in_place_factory.hpp>  // IWYU pragma: keep
 #include <iterator>
 #include <list>
@@ -237,7 +236,8 @@ void checkPlacementVersion(OperationContext* opCtx,
                            const PlacementConcern& placementConcern) {
     const auto& receivedDbVersion = placementConcern.dbVersion;
     if (receivedDbVersion) {
-        DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName(), *receivedDbVersion);
+        const auto scopedDss = DatabaseShardingState::acquireShared(opCtx, nss.dbName());
+        scopedDss->assertMatchingDbVersion(opCtx, *receivedDbVersion);
     }
 
     const auto& receivedShardVersion = placementConcern.shardVersion;
@@ -302,12 +302,9 @@ SnapshotedServices acquireServicesSnapshot(OperationContext* opCtx,
     auto collOrView = acquireLocalCollectionOrView(opCtx, catalog, prerequisites);
     const auto& nss = prerequisites.nss;
 
-    const bool isPlacementConcernVersioned =
-        placementConcern.dbVersion || placementConcern.shardVersion;
-
     const auto scopedCSS = CollectionShardingState::acquire(opCtx, nss);
     auto collectionDescription =
-        scopedCSS->getCollectionDescription(opCtx, isPlacementConcernVersioned);
+        scopedCSS->getCollectionDescription(opCtx, placementConcern.shardVersion.has_value());
 
     invariant(!collectionDescription.isSharded() || placementConcern.shardVersion);
     auto optOwnershipFilter = collectionDescription.isSharded()

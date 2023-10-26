@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <memory>
@@ -208,6 +207,22 @@ public:
                       boost::optional<ExplainOptions::Verbosity> explain = boost::none);
 
     /**
+     * Constructs a blank ExpressionContext suitable for creating Query Shapes, but it could be
+     * applied to other use cases as well.
+     *
+     * The process for creating a Query Shape sometimes requires re-parsing the BSON into a proper
+     * AST, and for that you need an ExpressionContext.
+     *
+     * Note: this is meant for introspection and is not suitable for using to execute queries -
+     * since it does not contain for example a collation argument or a real MongoProcessInterface
+     * for execution.
+     */
+    static boost::intrusive_ptr<ExpressionContext> makeBlankExpressionContext(
+        OperationContext* opCtx,
+        const NamespaceStringOrUUID& nssOrUUID,
+        boost::optional<BSONObj> shapifiedLet = boost::none);
+
+    /**
      * Used by a pipeline to check for interrupts so that killOp() works. Throws a UserAssertion if
      * this aggregation pipeline has been interrupted.
      */
@@ -239,11 +254,11 @@ public:
     }
 
     const CollatorInterface* getCollator() const {
-        return _collator.get();
+        return _collator.getCollator();
     }
 
     std::shared_ptr<CollatorInterface> getCollatorShared() const {
-        return _collator;
+        return _collator.getCollatorShared();
     }
 
     /**
@@ -263,7 +278,11 @@ public:
      * the ExpressionContext.
      */
     BSONObj getCollatorBSON() const {
-        return _collator ? _collator->getSpec().toBSON() : CollationSpec::kSimpleSpec;
+        if (_collator.getIgnore()) {
+            return BSONObj();
+        }
+        auto* collator = _collator.getCollator();
+        return collator ? collator->getSpec().toBSON() : CollationSpec::kSimpleSpec;
     }
 
     /**
@@ -273,11 +292,12 @@ public:
      * to change the collation once a Pipeline has been parsed with this ExpressionContext.
      */
     void setCollator(std::shared_ptr<CollatorInterface> collator) {
-        _collator = std::move(collator);
+        _collator.setCollator(std::move(collator));
 
         // Document/Value comparisons must be aware of the collation.
-        _documentComparator = DocumentComparator(_collator.get());
-        _valueComparator = ValueComparator(_collator.get());
+        auto* ptr = _collator.getCollator();
+        _documentComparator = DocumentComparator(ptr);
+        _valueComparator = ValueComparator(ptr);
     }
 
     const DocumentComparator& getDocumentComparator() const {
@@ -329,7 +349,9 @@ public:
      */
     const ResolvedNamespace& getResolvedNamespace(const NamespaceString& nss) const {
         auto it = _resolvedNamespaces.find(nss.coll());
-        invariant(it != _resolvedNamespaces.end());
+        invariant(it != _resolvedNamespaces.end(),
+                  str::stream() << "No resolved namespace provided for "
+                                << nss.toStringForErrorMsg());
         return it->second;
     };
 
@@ -340,6 +362,15 @@ public:
      */
     bool noForeignNamespaces() const {
         return _resolvedNamespaces.empty();
+    }
+
+    /**
+     * Returns true if the tailableMode indicates a tailable
+     * query.
+     */
+    bool isTailable() const {
+        return tailableMode == TailableModeEnum::kTailableAndAwaitData ||
+            tailableMode == TailableModeEnum::kTailable;
     }
 
     /**
@@ -647,6 +678,14 @@ public:
         long long _docsReturnedByIdLookup = 0;
     } sharedSearchState;
 
+    void setIgnoreCollator() {
+        _collator.setIgnore();
+    }
+
+    bool getIgnoreCollator() {
+        return _collator.getIgnore();
+    }
+
 protected:
     static const int kInterruptCheckPeriod = 128;
 
@@ -656,8 +695,50 @@ protected:
     // when _interruptCounter has been decremented to zero.
     void checkForInterruptSlow();
 
-    // Collator used for comparisons.
-    std::shared_ptr<CollatorInterface> _collator;
+    // Class responsible for tracking the collator used for comparisons. Specifically, this
+    // collator enforces the following contract:
+    // - When used in a replica set or a standalone, '_collator' will have the correct collation.
+    // - When routing to a tracked collection, '_collator' will have the correct collation according
+    // to the ChunkManager and can use it.
+    // - When routing to an untracked collection, '_collator' will be set incorrectly as there is
+    // no way to know the collation of an untracked collection on the router. However,
+    // 'ignore' will be set to 'true', which indicates that we will not attach '_collator' when
+    // routing commands to the target collection.
+    // TODO SERVER-81991: Delete this class once we branch for 8.0.
+    class RoutingCollator {
+    public:
+        RoutingCollator(std::shared_ptr<CollatorInterface> collator) : _ptr(std::move(collator)) {}
+        void setIgnore() {
+            _ignore = true;
+        }
+
+        bool getIgnore() const {
+            return _ignore;
+        }
+
+        void setCollator(std::shared_ptr<CollatorInterface> collator) {
+            _ptr = collator;
+            // If we are manually setting the collator, we shouldn't ignore it.
+            _ignore = false;
+        }
+        std::shared_ptr<CollatorInterface> getCollatorShared() const {
+            if (_ignore) {
+                return nullptr;
+            }
+            return _ptr;
+        }
+
+        CollatorInterface* getCollator() const {
+            if (_ignore) {
+                return nullptr;
+            }
+            return _ptr.get();
+        }
+
+    private:
+        std::shared_ptr<CollatorInterface> _ptr = nullptr;
+        bool _ignore = false;
+    } _collator;
 
     // Used for all comparisons of Document/Value during execution of the aggregation operation.
     // Must not be changed after parsing a Pipeline with this ExpressionContext.
@@ -674,6 +755,13 @@ protected:
     bool _requiresTimeseriesExtendedRangeSupport = false;
 
 private:
+    // Instantiates an ExpressionContext which does not increment expression counters and does not
+    // enforce FCV restrictions. It is used for implementing the `makeBlankExpressionContext()`
+    // factory method.
+    ExpressionContext(OperationContext* opCtx,
+                      const NamespaceString& ns,
+                      const boost::optional<BSONObj>& letParameters = boost::none);
+
     std::unique_ptr<ExpressionCounters> _expressionCounters;
     bool _gotTemporarilyUnavailableException = false;
 

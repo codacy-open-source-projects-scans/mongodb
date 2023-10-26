@@ -31,7 +31,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
@@ -101,12 +100,12 @@
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings_manager.h"
-#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/query_stats/find_key_generator.h"
 #include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_utils.h"
-#include "mongo/db/query/serialization_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -197,7 +196,6 @@ void beginQueryOp(OperationContext* opCtx, const NamespaceString& nss, const BSO
  * Performs the lookup for the QuerySettings given the 'parsedRequest'.
  */
 query_settings::QuerySettings lookupQuerySettingsForFind(
-    OperationContext* opCtx,
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const ParsedFindCommand& parsedRequest,
     const CollectionPtr& collection,
@@ -210,15 +208,18 @@ query_settings::QuerySettings lookupQuerySettingsForFind(
              collection, *parsedRequest.findCommandRequest, parsedRequest.collator.get()))) {
         return query_settings::QuerySettings();
     }
+
+    auto opCtx = expCtx->opCtx;
     auto& manager = query_settings::QuerySettingsManager::get(opCtx);
     auto queryShapeHashFn = [&]() {
         auto& opDebug = CurOp::get(opCtx)->debug();
-        if (opDebug.queryStatsKeyGenerator) {
-            return opDebug.queryStatsKeyGenerator->getQueryShapeHash(opCtx);
+        if (opDebug.queryStatsKey) {
+            return opDebug.queryStatsKey->getQueryShapeHash(
+                opCtx, parsedRequest.findCommandRequest->getSerializationContext());
         }
 
         return std::make_unique<query_shape::FindCmdShape>(parsedRequest, expCtx)
-            ->sha256Hash(opCtx);
+            ->sha256Hash(opCtx, parsedRequest.findCommandRequest->getSerializationContext());
     };
 
     // Return the found query settings or an empty one.
@@ -265,14 +266,15 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
             opCtx,
             nss,
             [&]() {
-                return std::make_unique<query_stats::FindKeyGenerator>(
+                return std::make_unique<query_stats::FindKey>(
                     expCtx, *parsedRequest, collOrViewAcquisition.getCollectionType());
             },
             /*requiresFullQueryStatsFeatureFlag*/ false);
     }
 
-    return uassertStatusOK(
-        CanonicalQuery::canonicalize(std::move(expCtx), std::move(parsedRequest)));
+    auto querySettings = lookupQuerySettingsForFind(expCtx, *parsedRequest, collection, nss);
+    return uassertStatusOK(CanonicalQuery::canonicalize(
+        std::move(expCtx), std::move(parsedRequest), std::move(querySettings)));
 }
 
 /**
@@ -446,7 +448,7 @@ public:
             if (!collectionOrView->isView()) {
                 const bool isClusteredCollection = collectionPtr && collectionPtr->isClustered();
                 uassertStatusOK(query_request_helper::validateResumeAfter(
-                    findCommand->getResumeAfter(), isClusteredCollection));
+                    opCtx, findCommand->getResumeAfter(), isClusteredCollection));
             }
             auto expCtx = makeExpressionContext(opCtx, *findCommand, collectionPtr, verbosity);
             auto parsedRequest = uassertStatusOK(
@@ -454,10 +456,13 @@ public:
                                            std::move(findCommand),
                                            extensionsCallback,
                                            MatchExpressionParser::kAllowAllSpecialFeatures));
+
             auto querySettings =
-                lookupQuerySettingsForFind(opCtx, expCtx, *parsedRequest, collectionPtr, nss);
-            auto cq = uassertStatusOK(CanonicalQuery::canonicalize(
-                std::move(expCtx), std::move(parsedRequest), true /* explain */));
+                lookupQuerySettingsForFind(expCtx, *parsedRequest, collectionPtr, nss);
+            auto cq = uassertStatusOK(CanonicalQuery::canonicalize(std::move(expCtx),
+                                                                   std::move(parsedRequest),
+                                                                   std::move(querySettings),
+                                                                   true /* explain */));
 
             // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
             // $$USER_ROLES for the find command.
@@ -478,8 +483,8 @@ public:
                 try {
                     // An empty PrivilegeVector is acceptable because these privileges are only
                     // checked on getMore and explain will not open a cursor.
-                    uassertStatusOK(runAggregate(
-                        opCtx, nss, aggRequest, _request.body, PrivilegeVector(), result));
+                    uassertStatusOK(
+                        runAggregate(opCtx, aggRequest, _request.body, PrivilegeVector(), result));
                 } catch (DBException& error) {
                     if (error.code() == ErrorCodes::InvalidPipelineOperator) {
                         uasserted(ErrorCodes::InvalidPipelineOperator,
@@ -501,18 +506,13 @@ public:
                                                 collection,
                                                 std::move(cq),
                                                 nullptr /* extractAndAttachPipelineStages */,
-                                                permitYield));
+                                                permitYield,
+                                                QueryPlannerParams::DEFAULT));
 
             auto bodyBuilder = result->getBodyBuilder();
             // Got the execution tree. Explain it.
-            Explain::explainStages(exec.get(),
-                                   collection,
-                                   verbosity,
-                                   BSONObj(),
-                                   respSc,
-                                   _request.body,
-                                   querySettings,
-                                   &bodyBuilder);
+            Explain::explainStages(
+                exec.get(), collection, verbosity, BSONObj(), respSc, _request.body, &bodyBuilder);
         }
 
         /**
@@ -707,11 +707,15 @@ public:
             // before beginning the operation.
             if (!collectionOrView->isView()) {
                 uassertStatusOK(query_request_helper::validateResumeAfter(
-                    findCommand->getResumeAfter(), isClusteredCollection));
+                    opCtx, findCommand->getResumeAfter(), isClusteredCollection));
             }
 
             auto cq = parseQueryAndBeginOperation(
                 opCtx, *collectionOrView, nss, _request.body, std::move(findCommand));
+
+            tassert(7922501,
+                    "CanonicalQuery namespace should match catalog namespace",
+                    cq->nss() == nss);
 
             // If we are running a query against a view redirect this query through the aggregation
             // system.
@@ -729,12 +733,7 @@ public:
                                                     aggRequest.getNamespace(),
                                                     aggRequest,
                                                     false));
-                auto status = runAggregate(opCtx,
-                                           aggRequest.getNamespace(),
-                                           aggRequest,
-                                           _request.body,
-                                           privileges,
-                                           result);
+                auto status = runAggregate(opCtx, aggRequest, _request.body, privileges, result);
                 if (status.code() == ErrorCodes::InvalidPipelineOperator) {
                     uasserted(ErrorCodes::InvalidPipelineOperator,
                               str::stream() << "Unsupported in view pipeline: " << status.reason());
@@ -768,7 +767,8 @@ public:
                                                 collection,
                                                 std::move(cq),
                                                 nullptr /* extractAndAttachPipelineStages */,
-                                                permitYield));
+                                                permitYield,
+                                                QueryPlannerParams::DEFAULT));
 
             // If the executor supports it, find operations will maintain the storage engine state
             // across commands.
@@ -942,6 +942,7 @@ public:
                 keyBob.append("min", 1);
                 keyBob.append("max", 1);
                 keyBob.append("shardVersion", 1);
+                keyBob.append("databaseVersion", 1);
                 keyBob.append("encryptionInformation", 1);
                 return keyBob.obj();
             }();
@@ -996,7 +997,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(FindCmd);
+MONGO_REGISTER_COMMAND(FindCmd).forShard();
 
 }  // namespace
 }  // namespace mongo

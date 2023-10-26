@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <set>
 #include <utility>
 
@@ -176,10 +175,10 @@ void AuthOpObserver::postRenameCollection(OperationContext* const opCtx,
                                           const boost::optional<UUID>& dropTargetUUID,
                                           bool stayTemp) {
     const auto cmdNss = fromCollection.getCommandNS();
-
+    const auto sc = SerializationContext::stateDefault();
     BSONObjBuilder builder;
-    builder.append("renameCollection", NamespaceStringUtil::serialize(fromCollection));
-    builder.append("to", NamespaceStringUtil::serialize(toCollection));
+    builder.append("renameCollection", NamespaceStringUtil::serialize(fromCollection, sc));
+    builder.append("to", NamespaceStringUtil::serialize(toCollection, sc));
     builder.append("stayTemp", stayTemp);
     if (dropTargetUUID) {
         dropTargetUUID->appendToBuilder(&builder, "dropTarget");
@@ -214,14 +213,6 @@ void AuthOpObserver::onImportCollection(OperationContext* opCtx,
         ->logOp(opCtx, "m", nss, catalogEntry, &storageMetadata);
 }
 
-void AuthOpObserver::onApplyOps(OperationContext* opCtx,
-                                const DatabaseName& dbName,
-                                const BSONObj& applyOpCmd) {
-    const NamespaceString cmdNss(NamespaceString::makeCommandNamespace(dbName));
-
-    AuthorizationManager::get(opCtx->getServiceContext())
-        ->logOp(opCtx, "c", cmdNss, applyOpCmd, nullptr);
-}
 
 void AuthOpObserver::onEmptyCapped(OperationContext* opCtx,
                                    const NamespaceString& collectionName,

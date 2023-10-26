@@ -616,6 +616,14 @@ MongoRunner.mongoOptions = function(opts) {
 
     opts.port = opts.port || allocatePort();
 
+    // If gRPC is enabled and we have a TLS configuration, allocate an explicit port for gRPC.
+    const keyDefined =
+        (opts.tlsCertificateKeyFile !== undefined) || (opts.sslPEMKeyFile !== undefined);
+    const setParameters = jsTestOptions().setParameters || {};
+    if (setParameters.featureFlagGRPC && keyDefined) {
+        opts.grpcPort = opts.grpcPort || allocatePort();
+    }
+
     opts.pathOpts =
         Object.merge(opts.pathOpts || {}, {port: "" + opts.port, runId: "" + opts.runId});
 
@@ -1351,15 +1359,10 @@ function appendSetParameterArgs(argArray) {
             if (jsTest.options().setParametersMongos) {
                 let params = jsTest.options().setParametersMongos;
                 for (let paramName of Object.keys(params)) {
-                    // Only set the 'logComponentVerbosity' parameter if it has not already
-                    // been specified in the given argument array. This means that any
-                    // 'logComponentVerbosity' settings passed through via TestData will
-                    // always be overridden by settings passed directly to MongoRunner from
-                    // within the shell.
-                    if (paramName === "logComponentVerbosity" &&
-                        argArrayContains("logComponentVerbosity")) {
+                    if (argArrayContainsSetParameterValue(paramName + "=")) {
                         continue;
                     }
+
                     const paramVal = ((param) => {
                         if (typeof param === "object") {
                             return JSON.stringify(param);
@@ -1551,23 +1554,7 @@ function appendSetParameterArgs(argArray) {
                 if (jsTest.options().setParameters) {
                     let params = jsTest.options().setParameters;
                     for (let paramName of Object.keys(params)) {
-                        // Only set the 'logComponentVerbosity' parameter if it has not already
-                        // been specified in the given argument array. This means that any
-                        // 'logComponentVerbosity' settings passed through via TestData will
-                        // always be overridden by settings passed directly to MongoRunner from
-                        // within the shell.
-                        if (paramName === "logComponentVerbosity" &&
-                            argArrayContains("logComponentVerbosity")) {
-                            continue;
-                        }
-
-                        if (paramName === 'enableIndexBuildCommitQuorum' &&
-                            argArrayContains("enableIndexBuildCommitQuorum")) {
-                            continue;
-                        }
-
-                        if (paramName === "reshardingMinimumOperationDurationMillis" &&
-                            argArrayContains("reshardingMinimumOperationDurationMillis")) {
+                        if (argArrayContainsSetParameterValue(paramName + "=")) {
                             continue;
                         }
 

@@ -36,7 +36,6 @@
 #include <boost/container/vector.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <string>
 #include <tuple>
@@ -72,7 +71,10 @@
 #include "mongo/db/pipeline/abt/document_source_visitor.h"
 #include "mongo/db/pipeline/abt/match_expression_visitor.h"
 #include "mongo/db/pipeline/abt/utils.h"
+#include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/ce/heuristic_estimator.h"
 #include "mongo/db/query/ce/histogram_estimator.h"
 #include "mongo/db/query/ce/sampling_estimator.h"
@@ -358,6 +360,7 @@ QueryHints getHintsFromQueryKnobs() {
         internalCascadesOptimizerDisableYieldingTolerantPlans.load();
     hints._minIndexEqPrefixes = internalCascadesOptimizerMinIndexEqPrefixes.load();
     hints._maxIndexEqPrefixes = internalCascadesOptimizerMaxIndexEqPrefixes.load();
+    hints._numSamplingChunks = internalCascadesOptimizerSampleChunks.load();
 
     return hints;
 }
@@ -391,6 +394,7 @@ static ExecParams createExecutor(
     const MultipleCollectionAccessor& collections,
     const bool requireRID,
     const ScanOrder scanOrder,
+    const boost::optional<MatchExpression*> pipelineMatchExpr,
     PlanYieldPolicy::YieldPolicy yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO) {
     auto env = VariableEnvironment::build(planAndProps._node);
     SlotVarMap slotMap;
@@ -398,32 +402,20 @@ static ExecParams createExecutor(
     sbe::value::SlotIdGenerator ids;
     boost::optional<sbe::value::SlotId> ridSlot;
 
-    stdx::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable =
-        PlanYieldPolicy::YieldThroughAcquisitions{};
-
-    if (!collections.isAcquisition()) {
-        yieldable = &(collections.getMainCollection());
-    }
-
     std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy;
     if (!phaseManager.getMetadata().isParallelExecution()) {
         // TODO SERVER-80311: Enable yielding for parallel scan plans.
-
-        sbeYieldPolicy = std::make_unique<PlanYieldPolicySBE>(
-            opCtx,
-            yieldPolicy,
-            opCtx->getServiceContext()->getFastClockSource(),
-            internalQueryExecYieldIterations.load(),
-            Milliseconds{internalQueryExecYieldPeriodMS.load()},
-            yieldable,
-            std::make_unique<YieldPolicyCallbacksImpl>(nss));
+        sbeYieldPolicy = PlanYieldPolicySBE::make(opCtx, yieldPolicy, collections, nss);
     }
 
     // Construct the ShardFilterer and bind it to the correct slot.
     setupShardFiltering(opCtx, collections, *runtimeEnvironment, ids);
+    auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
+
     SBENodeLowering g{env,
                       *runtimeEnvironment,
                       ids,
+                      staticData->inputParamToSlotMap,
                       phaseManager.getMetadata(),
                       planAndProps._map,
                       scanOrder,
@@ -439,7 +431,6 @@ static ExecParams createExecutor(
         OPTIMIZER_DEBUG_LOG(6264802, 5, "Lowered SBE plan", "plan"_attr = p.print(*sbePlan.get()));
     }
 
-    auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
     staticData->resultSlot = slotMap.begin()->second;
     if (requireRID) {
         staticData->recordIdSlot = ridSlot;
@@ -490,7 +481,8 @@ static ExecParams createExecutor(
             nss,
             std::move(sbeYieldPolicy),
             false /*isFromPlanCache*/,
-            true /* generatedByBonsai */};
+            true /* generatedByBonsai */,
+            pipelineMatchExpr};
 }
 
 }  // namespace
@@ -743,19 +735,27 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                 entry.second.shardingMetadata().setMayContainOrphans(false);
             }
 
-            // TODO: consider a limited rewrite set.
-            OptPhaseManager phaseManagerForSampling{OptPhaseManager::getAllRewritesSet(),
-                                                    prefixId,
-                                                    false /*requireRID*/,
-                                                    std::move(metadataForSampling),
-                                                    std::make_unique<HeuristicEstimator>(),
-                                                    std::make_unique<HeuristicEstimator>(),
-                                                    std::make_unique<CostEstimatorImpl>(costModel),
-                                                    defaultConvertPathToInterval,
-                                                    constFold,
-                                                    DebugInfo::kDefaultForProd,
-                                                    {} /*hints*/};
-            return {OptPhaseManager::getAllRewritesSet(),
+
+            // For sampling estimator, we do not run constant folding, path fusion and exploration
+            // phases.
+            OptPhaseManager::PhaseSet rewritesSetForSampling{OptPhase::MemoSubstitutionPhase,
+                                                             OptPhase::MemoImplementationPhase,
+                                                             OptPhase::PathLower,
+                                                             OptPhase::ConstEvalPost_ForSampling};
+            OptPhaseManager phaseManagerForSampling{
+                std::move(rewritesSetForSampling),
+                prefixId,
+                false /*requireRID*/,
+                std::move(metadataForSampling),
+                std::make_unique<HeuristicEstimator>(),
+                std::make_unique<HeuristicEstimator>(),
+                std::make_unique<CostEstimatorImpl>(costModel),
+                defaultConvertPathToInterval,
+                constFold,
+                DebugInfo::kDefaultForProd,
+                {._numSamplingChunks = hints._numSamplingChunks} /*hints*/};
+
+            return {OptPhaseManager::getAllProdRewrites(),
                     prefixId,
                     requireRID,
                     std::move(metadata),
@@ -772,7 +772,7 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
         }
 
         case CEMode::kHistogram:
-            return {OptPhaseManager::getAllRewritesSet(),
+            return {OptPhaseManager::getAllProdRewrites(),
                     prefixId,
                     requireRID,
                     std::move(metadata),
@@ -787,7 +787,7 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     std::move(hints)};
 
         case CEMode::kHeuristic:
-            return {OptPhaseManager::getAllRewritesSet(),
+            return {OptPhaseManager::getAllProdRewrites(),
                     prefixId,
                     requireRID,
                     std::move(metadata),
@@ -865,12 +865,46 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
         : make<ValueScanNode>(ProjectionNameVector{scanProjName},
                               createInitialScanProps(scanProjName, scanDefName));
 
+    // Check if pipeline is eligible for plan caching.
+    auto _isCacheable = false;
     if (pipeline) {
+        _isCacheable = [&]() -> bool {
+            auto& sources = pipeline->getSources();
+            if (sources.empty())
+                return false;
+
+            // First stage must be a DocumentSourceMatch.
+            const auto& it = sources.begin();
+            auto firstStageName = it->get()->getSourceName();
+            if (firstStageName != DocumentSourceMatch::kStageName)
+                return false;
+
+            // If optional second stage exists, must be a projection stage.
+            auto secondStageItr = std::next(it);
+            if (secondStageItr != sources.end())
+                return secondStageItr->get()->getSourceName() == DocumentSourceProject::kStageName;
+
+            return true;
+        }();
+        _isCacheable = false;  // TODO: SERVER-82185: Remove once E2E parameterization enabled
+        if (_isCacheable)
+            MatchExpression::parameterize(
+                dynamic_cast<DocumentSourceMatch*>(pipeline->peekFront())->getMatchExpression());
         abt = translatePipelineToABT(metadata, *pipeline, scanProjName, std::move(abt), prefixId);
     } else {
+        // Clear match expression auto-parameterization by setting max param count to zero before
+        // CQ to ABT translation
+        // TODO: SERVER-82185: Update value of _isCacheable to true for M2-eligible queries
+        if (!_isCacheable)
+            MatchExpression::unparameterize(canonicalQuery->getPrimaryMatchExpression());
         abt = translateCanonicalQueryToABT(
             metadata, *canonicalQuery, scanProjName, std::move(abt), prefixId);
     }
+    // If pipeline exists and is cacheable, save the MatchExpression in ExecParams for binding.
+    const auto pipelineMatchExpr = pipeline && _isCacheable
+        ? boost::make_optional(
+              dynamic_cast<DocumentSourceMatch*>(pipeline->peekFront())->getMatchExpression())
+        : boost::none;
 
     OPTIMIZER_DEBUG_LOG(
         6264803, 5, "Translated ABT", "explain"_attr = ExplainGenerator::explainV2Compact(abt));
@@ -947,7 +981,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                           nss,
                           collections,
                           requireRID,
-                          scanOrder);
+                          scanOrder,
+                          pipelineMatchExpr);
 }
 
 boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
@@ -975,6 +1010,13 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> makeExecFromParams(
     std::unique_ptr<CanonicalQuery> cq, ExecParams execArgs) {
+    if (cq) {
+        input_params::bind(cq->getPrimaryMatchExpression(), execArgs.root.second, false);
+    } else if (execArgs.pipelineMatchExpr != boost::none) {
+        // If pipeline contains a parameterized MatchExpression, bind constants.
+        input_params::bind(execArgs.pipelineMatchExpr.get(), execArgs.root.second, false);
+    }
+
     return plan_executor_factory::make(execArgs.opCtx,
                                        std::move(cq),
                                        std::move(execArgs.solution),

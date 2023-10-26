@@ -113,7 +113,8 @@ public:
 
     NamespaceString parseNs(const DatabaseName& dbName, const BSONObj& cmdObj) const override {
         return NamespaceStringUtil::deserialize(dbName.tenantId(),
-                                                CommandHelpers::parseNsFullyQualified(cmdObj));
+                                                CommandHelpers::parseNsFullyQualified(cmdObj),
+                                                SerializationContext::stateDefault());
     }
 
     bool errmsgRun(OperationContext* opCtx,
@@ -145,10 +146,7 @@ public:
         auto parseShardNameStatus = bsonExtractStringField(cmdObj, "from", &shardName);
         uassertStatusOK(parseShardNameStatus);
 
-        LOGV2(22104,
-              "Received splitChunk request: {request}",
-              "Received splitChunk request",
-              "request"_attr = redact(cmdObj));
+        LOGV2(22104, "Received splitChunk request", "request"_attr = redact(cmdObj));
 
         std::vector<BSONObj> splitKeys;
         {
@@ -209,7 +207,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(SplitChunkCommand);
+MONGO_REGISTER_COMMAND(SplitChunkCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

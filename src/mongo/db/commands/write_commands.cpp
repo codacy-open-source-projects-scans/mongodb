@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -356,7 +355,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(CmdInsert);
+MONGO_REGISTER_COMMAND(CmdInsert).forShard();
 
 class CmdUpdate final : public write_ops::UpdateCmdVersion1Gen<CmdUpdate> {
 public:
@@ -462,6 +461,10 @@ public:
                 !shardVersion.eoo()) {
                 bob->append(shardVersion);
             }
+            if (const auto& databaseVersion = _commandObj.getField("databaseVersion");
+                !databaseVersion.eoo()) {
+                bob->append(databaseVersion);
+            }
             if (const auto& encryptionInfo = _commandObj.getField("encryptionInformation");
                 !encryptionInfo.eoo()) {
                 bob->append(encryptionInfo);
@@ -548,21 +551,10 @@ public:
 
             // Collect metrics.
             for (auto&& update : request().getUpdates()) {
-                // If this was a pipeline style update, record that pipeline-style was used and
-                // which stages were being used.
-                auto& updateMod = update.getU();
-                if (updateMod.type() == write_ops::UpdateModification::Type::kPipeline) {
-                    AggregateCommandRequest aggCmd(request().getNamespace(),
-                                                   updateMod.getUpdatePipeline());
-                    LiteParsedPipeline pipeline(aggCmd);
-                    pipeline.tickGlobalStageCounters();
-                    CmdUpdate::updateMetrics.incrementExecutedWithAggregationPipeline();
-                }
-
-                // If this command had arrayFilters option, record that it was used.
-                if (update.getArrayFilters()) {
-                    CmdUpdate::updateMetrics.incrementExecutedWithArrayFilters();
-                }
+                incrementUpdateMetrics(update.getU(),
+                                       request().getNamespace(),
+                                       CmdUpdate::updateMetrics,
+                                       update.getArrayFilters());
             }
 
             return updateReply;
@@ -632,7 +624,7 @@ public:
     // Update related command execution metrics.
     static UpdateMetrics updateMetrics;
 };
-MONGO_REGISTER_COMMAND(CmdUpdate);
+MONGO_REGISTER_COMMAND(CmdUpdate).forShard();
 
 UpdateMetrics CmdUpdate::updateMetrics{"update"};
 
@@ -792,7 +784,7 @@ public:
         const BSONObj& _commandObj;
     };
 };
-MONGO_REGISTER_COMMAND(CmdDelete);
+MONGO_REGISTER_COMMAND(CmdDelete).forShard();
 
 }  // namespace
 }  // namespace mongo

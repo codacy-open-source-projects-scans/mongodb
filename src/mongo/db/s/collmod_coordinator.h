@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <vector>
 
@@ -83,7 +82,7 @@ public:
 
 private:
     struct CollectionInfo {
-        bool isSharded;
+        bool isTracked;
         boost::optional<TimeseriesOptions> timeSeriesOptions;
         // The targeting namespace can be different from the original namespace in some cases, like
         // time-series collections.

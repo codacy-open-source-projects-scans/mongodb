@@ -36,7 +36,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -47,12 +46,14 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_encoder.h"
+#include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/indexability.h"
 #include "mongo/db/query/parsed_find_command.h"
 #include "mongo/db/query/projection_parser.h"
 #include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
+#include "mongo/db/query/query_settings_manager.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_component.h"
@@ -74,6 +75,20 @@ boost::optional<size_t> loadMaxMatchExpressionParams() {
     return boost::none;
 }
 
+bool isBonsaiEnabled(QueryFrameworkControlEnum frameworkControl) {
+    switch (frameworkControl) {
+        case QueryFrameworkControlEnum::kForceClassicEngine:
+        case QueryFrameworkControlEnum::kTrySbeEngine:
+            return false;
+        case QueryFrameworkControlEnum::kTryBonsai:
+        case QueryFrameworkControlEnum::kTryBonsaiExperimental:
+        case QueryFrameworkControlEnum::kForceBonsai:
+            return true;
+    }
+
+    MONGO_UNREACHABLE;
+}
+
 }  // namespace
 
 // static
@@ -86,7 +101,8 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     MatchExpressionParser::AllowedFeatureSet allowedFeatures,
     const ProjectionPolicies& projectionPolicies,
     std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline,
-    bool isCountLike) {
+    bool isCountLike,
+    bool isSearchQuery) {
     if (givenExpCtx) {
         // Caller provided an ExpressionContext, let's go ahead and use that.
         auto swParsedFind = parsed_find_command::parse(givenExpCtx,
@@ -99,9 +115,11 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
         }
         return canonicalize(std::move(givenExpCtx),
                             std::move(swParsedFind.getValue()),
+                            query_settings::QuerySettings(),
                             explain,
                             std::move(cqPipeline),
-                            isCountLike);
+                            isCountLike,
+                            isSearchQuery);
     } else {
         // No ExpressionContext provided, let's call the override that makes one for us.
         auto swResults = parsed_find_command::parse(
@@ -110,8 +128,13 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
             return swResults.getStatus();
         }
         auto&& [expCtx, parsedFind] = std::move(swResults.getValue());
-        return canonicalize(
-            std::move(expCtx), std::move(parsedFind), explain, std::move(cqPipeline), isCountLike);
+        return canonicalize(std::move(expCtx),
+                            std::move(parsedFind),
+                            query_settings::QuerySettings(),
+                            explain,
+                            std::move(cqPipeline),
+                            isCountLike,
+                            isSearchQuery);
     }
 }
 
@@ -119,15 +142,21 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
 StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     std::unique_ptr<ParsedFindCommand> parsedFind,
+    query_settings::QuerySettings&& querySettings,
     bool explain,
     std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline,
-    bool isCountLike) {
+    bool isCountLike,
+    bool isSearchQuery) {
 
     // Make the CQ we'll hopefully return.
     auto cq = std::make_unique<CanonicalQuery>();
     cq->setExplain(explain);
-    if (auto initStatus = cq->initCq(
-            std::move(expCtx), std::move(parsedFind), std::move(cqPipeline), isCountLike);
+    cq->_querySettings = std::move(querySettings);
+    if (auto initStatus = cq->initCq(std::move(expCtx),
+                                     std::move(parsedFind),
+                                     std::move(cqPipeline),
+                                     isCountLike,
+                                     isSearchQuery);
         !initStatus.isOK()) {
         return initStatus;
     }
@@ -135,7 +164,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
 }
 
 // static
-StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
+StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalizeSubQuery(
     OperationContext* opCtx, const CanonicalQuery& baseQuery, MatchExpression* matchExpr) {
     auto findCommand = std::make_unique<FindCommandRequest>(baseQuery.nss());
     findCommand->setFilter(matchExpr->serialize());
@@ -146,6 +175,10 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     // Make the CQ we'll hopefully return.
     auto cq = std::make_unique<CanonicalQuery>();
     cq->setExplain(baseQuery.getExplain());
+
+    // Copy query settings from the 'baseQuery'.
+    cq->_querySettings = baseQuery._querySettings;
+
     auto swParsedFind = ParsedFindCommand::withExistingFilter(
         baseQuery.getExpCtx(),
         baseQuery.getCollator() ? baseQuery.getCollator()->clone() : nullptr,
@@ -154,10 +187,12 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     if (!swParsedFind.isOK()) {
         return swParsedFind.getStatus();
     }
-    auto initStatus = cq->initCq(baseQuery.getExpCtx(),
-                                 std::move(swParsedFind.getValue()),
-                                 {} /* an empty cqPipeline */,
-                                 baseQuery.isCountLike());
+    auto initStatus =
+        cq->initCq(baseQuery.getExpCtx(),
+                   std::move(swParsedFind.getValue()),
+                   {},     // cqPipeline
+                   false,  // The parent query countLike is independent from the subquery countLike.
+                   baseQuery.isSearchQuery());
     invariant(initStatus.isOK());
     return {std::move(cq)};
 }
@@ -165,15 +200,20 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
 Status CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                               std::unique_ptr<ParsedFindCommand> parsedFind,
                               std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline,
-                              bool isCountLike) {
+                              bool isCountLike,
+                              bool isSearchQuery) {
     _expCtx = expCtx;
+
     _findCommand = std::move(parsedFind->findCommandRequest);
 
-    _forceClassicEngine =
-        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp() ==
-        QueryFrameworkControlEnum::kForceClassicEngine;
+    const auto frameworkControl =
+        QueryKnobConfiguration::decoration(expCtx->opCtx).getInternalQueryFrameworkControlForOp();
+    _forceClassicEngine = frameworkControl == QueryFrameworkControlEnum::kForceClassicEngine;
 
-    _primaryMatchExpression = MatchExpression::normalize(std::move(parsedFind->filter));
+    // TODO SERVER-76509: Enable Boolean expression simplification in Bonsai.
+    _primaryMatchExpression =
+        MatchExpression::normalize(std::move(parsedFind->filter),
+                                   /* enableSimplification*/ !isBonsaiEnabled(frameworkControl));
     if (parsedFind->proj) {
         if (parsedFind->proj->requiresMatchDetails()) {
             // Sadly, in some cases the match details cannot be generated from the unoptimized
@@ -198,6 +238,7 @@ Status CanonicalQuery::initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
     }
     _cqPipeline = std::move(cqPipeline);
     _isCountLike = isCountLike;
+    _isSearchQuery = isSearchQuery;
 
     // Perform SBE auto-parameterization if there is not already a reason not to.
     _disablePlanCache = internalQueryDisablePlanCache.load();
@@ -341,6 +382,9 @@ std::string CanonicalQuery::toString(bool forErrMsg) const {
     if (!_findCommand->getCollation().isEmpty()) {
         ss << "Collation: " << _findCommand->getCollation().toString() << '\n';
     }
+    if (auto querySettingsBson = _querySettings.toBSON(); !querySettingsBson.isEmpty()) {
+        ss << "QuerySettings: " << querySettingsBson.toString() << '\n';
+    }
     return ss;
 }
 
@@ -370,6 +414,10 @@ std::string CanonicalQuery::toStringShort(bool forErrMsg) const {
 
     if (_findCommand->getSkip()) {
         ss << " skip: " << *_findCommand->getSkip();
+    }
+
+    if (auto querySettingsBson = _querySettings.toBSON(); !querySettingsBson.isEmpty()) {
+        ss << " querySettings: " << querySettingsBson.toString();
     }
 
     return ss;

@@ -37,7 +37,6 @@
 // IWYU pragma: no_include "boost/move/detail/iterator_to_raw_pointer.hpp"
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -442,6 +441,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
         case STAGE_GROUP:
         case STAGE_IDHACK:
         case STAGE_MATCH:
+        case STAGE_REPLACE_ROOT:
         case STAGE_MOCK:
         case STAGE_MULTI_ITERATOR:
         case STAGE_MULTI_PLAN:

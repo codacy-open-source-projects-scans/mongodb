@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -193,6 +192,12 @@ public:
         // "hello" is exempt from error code rewrites.
         rpc::RewriteStateChangeErrors::setEnabled(opCtx, false);
 
+        // Negotiate compressors before logging metadata so we can include the result in the log
+        // line.
+        auto result = replyBuilder->getBodyBuilder();
+        MessageCompressorManager::forSession(opCtx->getClient()->session())
+            .serverNegotiate(cmd.getCompression(), &result);
+
         auto client = opCtx->getClient();
         if (ClientMetadata::tryFinalize(client)) {
             audit::logClientMetadata(client);
@@ -226,7 +231,6 @@ public:
                     !clientTopologyVersion && !maxAwaitTimeMS);
         }
 
-        auto result = replyBuilder->getBodyBuilder();
         const auto* mongosTopCoord = MongosTopologyCoordinator::get(opCtx);
 
         auto mongosHelloResponse =
@@ -278,9 +282,6 @@ public:
                 kAutomationServiceDescriptorFieldName)) {
             sp->append(opCtx, &result, kAutomationServiceDescriptorFieldName, boost::none);
         }
-
-        MessageCompressorManager::forSession(opCtx->getClient()->session())
-            .serverNegotiate(cmd.getCompression(), &result);
 
         if (opCtx->isExhaust()) {
             LOGV2_DEBUG(23872, 3, "Using exhaust for hello protocol");
@@ -343,7 +344,7 @@ protected:
         return false;
     }
 };
-MONGO_REGISTER_COMMAND(CmdHello);
+MONGO_REGISTER_COMMAND(CmdHello).forRouter();
 
 class CmdIsMaster : public CmdHello {
 public:
@@ -358,7 +359,7 @@ protected:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdIsMaster);
+MONGO_REGISTER_COMMAND(CmdIsMaster).forRouter();
 
 }  // namespace
 }  // namespace mongo

@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <mutex>
 #include <string>
@@ -107,7 +106,6 @@ std::unique_ptr<AuthorizationSession> authorizationSessionCreateImpl(
 auto authorizationSessionCreateRegistration =
     MONGO_WEAK_FUNCTION_REGISTRATION(AuthorizationSession::create, authorizationSessionCreateImpl);
 
-constexpr StringData ADMIN_DBNAME = "admin"_sd;
 constexpr StringData SYSTEM_BUCKETS_PREFIX = "system.buckets."_sd;
 
 bool checkContracts() {
@@ -130,7 +128,7 @@ ServerlessPermissionMap kServerlessPrivilegesPermitted;
 MONGO_INITIALIZER(ServerlessPrivilegePermittedMap)(InitializerContext*) try {
     ServerlessPermissionMap ret;
 
-    for (std::size_t i = 0; i < kNumMatchTypeEnum; ++i) {
+    for (std::size_t i = 0; i < idlEnumCount<MatchTypeEnum>; ++i) {
         auto matchType = static_cast<MatchTypeEnum>(i);
         auto matchTypeName = MatchType_serializer(matchType);
         auto dataObj = MatchType_get_extra_data(matchType);
@@ -463,13 +461,13 @@ PrivilegeVector AuthorizationSessionImpl::_getDefaultPrivileges() {
     // a system and add the first user.
     if (_externalState->shouldAllowLocalhost()) {
 
-        const DatabaseName kAdminDB = DatabaseNameUtil::deserialize(boost::none, ADMIN_DBNAME);
-        const ResourcePattern adminDBResource = ResourcePattern::forDatabaseName(kAdminDB);
+        const ResourcePattern adminDBResource =
+            ResourcePattern::forDatabaseName(DatabaseName::kAdmin);
         const ActionSet setupAdminUserActionSet{ActionType::createUser, ActionType::grantRole};
         Privilege setupAdminUserPrivilege(adminDBResource, setupAdminUserActionSet);
 
-        const DatabaseName kExternalDB = DatabaseNameUtil::deserialize(boost::none, "$external"_sd);
-        const ResourcePattern externalDBResource = ResourcePattern::forDatabaseName(kExternalDB);
+        const ResourcePattern externalDBResource =
+            ResourcePattern::forDatabaseName(DatabaseName::kExternal);
         Privilege setupExternalUserPrivilege(externalDBResource, ActionType::createUser);
 
         ActionSet setupServerConfigActionSet;
@@ -710,12 +708,19 @@ void AuthorizationSessionImpl::_refreshUserInfoAsNeeded(OperationContext* opCtx)
                     "error"_attr = status);
                 return;
             }
+            case ErrorCodes::LDAPRoleAcquisitionError: {
+                LOGV2_WARNING(
+                    7785501,
+                    "Could not fetch updated user authorization rights via LDAP, continuing "
+                    "to use old information",
+                    "user"_attr = name,
+                    "error"_attr = redact(status));
+                return;
+            }
             default:
                 // Unrecognized error; assume that it's transient, and continue working with the
                 // out-of-date privilege data.
                 LOGV2_WARNING(20247,
-                              "Could not fetch updated user privilege information for {user}; "
-                              "continuing to use old information. Reason is {error}",
                               "Could not fetch updated user privilege information, continuing "
                               "to use old information",
                               "user"_attr = name,

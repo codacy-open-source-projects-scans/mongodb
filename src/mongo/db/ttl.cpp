@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <limits>
@@ -137,6 +136,11 @@ namespace mongo {
 
 namespace {
 const auto getTTLMonitor = ServiceContext::declareDecoration<std::unique_ptr<TTLMonitor>>();
+
+// TODO (SERVER-64506): support change streams' pre- and post-images.
+bool isBatchingEnabled(const CollectionPtr& collectionPtr) {
+    return ttlMonitorBatchDeletes.load() && !collectionPtr->isChangeStreamPreAndPostImagesEnabled();
+}
 
 // When batching is enabled, returns BatchedDeleteStageParams that limit the amount of work done in
 // a delete such that it is possible not all expired documents will be removed. Returns nullptr
@@ -408,7 +412,7 @@ void TTLMonitor::updateSleepSeconds(Seconds newSeconds) {
 }
 
 void TTLMonitor::run() {
-    ThreadClient tc(name(), getGlobalServiceContext());
+    ThreadClient tc(name(), getGlobalServiceContext()->getService(ClusterRole::ShardServer));
     AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
 
     while (true) {
@@ -454,8 +458,9 @@ void TTLMonitor::run() {
 
         try {
             const auto opCtxPtr = cc().makeOperationContext();
-            writeConflictRetry(
-                opCtxPtr.get(), "TTL pass", NamespaceString(), [&] { _doTTLPass(opCtxPtr.get()); });
+            writeConflictRetry(opCtxPtr.get(), "TTL pass", NamespaceString::kEmpty, [&] {
+                _doTTLPass(opCtxPtr.get());
+            });
         } catch (const DBException& ex) {
             LOGV2_WARNING(22537,
                           "TTLMonitor was interrupted, waiting before doing another pass",
@@ -664,7 +669,8 @@ bool TTLMonitor::_doTTLIndexDelete(OperationContext* opCtx,
             auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
             ExecutorFuture<void>(executor)
                 .then([serviceContext = opCtx->getServiceContext(), nss, staleInfo] {
-                    ThreadClient tc("TTLShardVersionRecovery", serviceContext);
+                    ThreadClient tc("TTLShardVersionRecovery",
+                                    serviceContext->getService(ClusterRole::ShardServer));
                     auto uniqueOpCtx = tc->makeOperationContext();
                     auto opCtx = uniqueOpCtx.get();
 
@@ -762,7 +768,7 @@ bool TTLMonitor::_deleteExpiredWithIndex(OperationContext* opCtx,
     // Maintain a consistent view of whether batching is enabled - batching depends on
     // parameters that can be set at runtime, and it is illegal to try to get
     // BatchedDeleteStageStats from a non-batched delete.
-    const bool batchingEnabled = ttlMonitorBatchDeletes.load();
+    const bool batchingEnabled = isBatchingEnabled(collection.getCollectionPtr());
 
     Timer timer;
     auto exec = InternalPlanner::deleteWithIndexScan(opCtx,
@@ -835,7 +841,7 @@ bool TTLMonitor::_deleteExpiredWithCollscan(OperationContext* opCtx,
     // Maintain a consistent view of whether batching is enabled - batching depends on
     // parameters that can be set at runtime, and it is illegal to try to get
     // BatchedDeleteStageStats from a non-batched delete.
-    const bool batchingEnabled = ttlMonitorBatchDeletes.load();
+    const bool batchingEnabled = isBatchingEnabled(collection.getCollectionPtr());
 
     // Deletes records using a bounded collection scan from the beginning of time to the
     // expiration time (inclusive).

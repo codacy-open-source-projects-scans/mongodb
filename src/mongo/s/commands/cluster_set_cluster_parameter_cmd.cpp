@@ -114,7 +114,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         void doCheckAuthorization(OperationContext* opCtx) const override {
@@ -127,7 +127,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(SetClusterParameterCmd);
+MONGO_REGISTER_COMMAND(SetClusterParameterCmd).forRouter();
 
 auto setClusterParameterRegistration =
     MONGO_WEAK_FUNCTION_REGISTRATION(setClusterParameter, setClusterParameterImpl);

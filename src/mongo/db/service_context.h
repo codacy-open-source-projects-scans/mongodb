@@ -75,7 +75,7 @@ class ServiceEntryPoint;
 
 namespace transport {
 class SessionManager;
-class TransportLayer;
+class TransportLayerManager;
 }  // namespace transport
 
 /**
@@ -144,6 +144,55 @@ private:
 using OperationKey = UUID;
 
 class Service;
+namespace service_context_detail {
+/**
+ * A synchronized owning pointer to avoid setters racing with getters.
+ * This only guarantees that getters receive a coherent value, and
+ * not that the pointer is still valid.
+ *
+ * The kernel of operations is `set` and and `get`, others ops are sugar.
+ */
+template <typename T>
+class SyncUnique {
+public:
+    SyncUnique() = default;
+    explicit SyncUnique(std::unique_ptr<T> p) {
+        set(std::move(p));
+    }
+
+    ~SyncUnique() {
+        set(nullptr);
+    }
+
+    SyncUnique& operator=(std::unique_ptr<T> p) {
+        set(std::move(p));
+        return *this;
+    }
+
+    void set(std::unique_ptr<T> p) {
+        delete _ptr.swap(p.release());
+    }
+
+    T* get() const {
+        return _ptr.load();
+    }
+
+    T* operator->() const {
+        return get();
+    }
+
+    T& operator*() const {
+        return *get();
+    }
+
+    explicit operator bool() const {
+        return static_cast<bool>(get());
+    }
+
+private:
+    AtomicWord<T*> _ptr{nullptr};
+};
+}  // namespace service_context_detail
 
 /**
  * Class representing the context of a service, such as a MongoD database service or
@@ -155,6 +204,8 @@ class Service;
 class ServiceContext final : public Decorable<ServiceContext> {
     ServiceContext(const ServiceContext&) = delete;
     ServiceContext& operator=(const ServiceContext&) = delete;
+    template <typename T>
+    using SyncUnique = service_context_detail::SyncUnique<T>;
 
 public:
     /**
@@ -166,8 +217,8 @@ public:
         virtual ~ClientObserver() = default;
 
         /**
-         * Hook called after a new client "client" is created on a service by
-         * service->makeClient().
+         * Hook called after a new client "client" is created on a service
+         * managed by this ServiceContext.
          *
          * For a given client and registered instance of ClientObserver, if onCreateClient
          * returns without throwing an exception, onDestroyClient will be called when "client"
@@ -371,20 +422,9 @@ public:
      *
      * All calls to registerClientObserver must complete before ServiceContext
      * is used in multi-threaded operation, or is used to create clients via calls
-     * to makeClient.
+     * to makeClient on Service instances managed by this ServiceContext.
      */
     void registerClientObserver(std::unique_ptr<ClientObserver> observer);
-
-    /**
-     * Creates a new Client object representing a client session associated with this
-     * ServiceContext.
-     *
-     * The "desc" string is used to set a descriptive name for the client, used in logging.
-     *
-     * If supplied, "session" is the transport::Session used for communicating with the client.
-     */
-    UniqueClient makeClient(std::string desc,
-                            std::shared_ptr<transport::Session> session = nullptr);
 
     /** Internal: Called by Service->makeClient. */
     UniqueClient makeClientForService(std::string desc,
@@ -511,19 +551,12 @@ public:
     //
 
     /**
-     * Get the master TransportLayer. Routes to all other TransportLayers that
+     * Get the master TransportLayerManager. Routes to all other TransportLayers that
      * may be in use within this service.
      *
      * See TransportLayerManager for more details.
      */
-    transport::TransportLayer* getTransportLayer() const;
-
-    /**
-     * Get the service entry point for the service context.
-     *
-     * See ServiceEntryPoint for more details.
-     */
-    ServiceEntryPoint* getServiceEntryPoint() const;
+    transport::TransportLayerManager* getTransportLayerManager() const;
 
     /**
      * Get the SessionManager.
@@ -613,17 +646,12 @@ public:
     void setSessionManager(std::unique_ptr<transport::SessionManager> sm);
 
     /**
-     * Binds the service entry point implementation to the service context.
-     */
-    void setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep);
-
-    /**
-     * Binds the TransportLayer to the service context. The TransportLayer should have already
-     * had setup() called successfully, but not startup().
+     * Binds the TransportLayerManager to the service context. The TransportLayerManager should have
+     * already had setup() called successfully, but not startup().
      *
      * This should be a TransportLayerManager created with the global server configuration.
      */
-    void setTransportLayer(std::unique_ptr<transport::TransportLayer> tl);
+    void setTransportLayerManager(std::unique_ptr<transport::TransportLayerManager> tl);
 
     /**
      * Creates a delayed execution baton with basic functionality
@@ -666,60 +694,12 @@ public:
      * Otherwise, returns the router service.
      *
      * Gets the "main service" of this ServiceContext. Used when a caller needs
-     * some Service (e.g. to call `makeClient`), but it doesn't matter which
+     * some Service, but it doesn't matter which
      * Service they get.
      */
     Service* getService() const;
 
 private:
-    /**
-     * A synchronized owning pointer to avoid setters racing with getters.
-     * This only guarantees that getters receive a coherent value, and
-     * not that the pointer is still valid.
-     *
-     * The kernel of operations is `set` and and `get`, others ops are sugar.
-     */
-    template <typename T>
-    class SyncUnique {
-    public:
-        SyncUnique() = default;
-        explicit SyncUnique(std::unique_ptr<T> p) {
-            set(std::move(p));
-        }
-
-        ~SyncUnique() {
-            set(nullptr);
-        }
-
-        SyncUnique& operator=(std::unique_ptr<T> p) {
-            set(std::move(p));
-            return *this;
-        }
-
-        void set(std::unique_ptr<T> p) {
-            delete _ptr.swap(p.release());
-        }
-
-        T* get() const {
-            return _ptr.load();
-        }
-
-        T* operator->() const {
-            return get();
-        }
-
-        T& operator*() const {
-            return *get();
-        }
-
-        explicit operator bool() const {
-            return static_cast<bool>(get());
-        }
-
-    private:
-        AtomicWord<T*> _ptr{nullptr};
-    };
-
     class ClientObserverHolder {
     public:
         explicit ClientObserverHolder(std::unique_ptr<ClientObserver> observer)
@@ -766,12 +746,7 @@ private:
     /**
      * The TransportLayer.
      */
-    SyncUnique<transport::TransportLayer> _transportLayer;
-
-    /**
-     * The service entry point
-     */
-    SyncUnique<ServiceEntryPoint> _serviceEntryPoint;
+    SyncUnique<transport::TransportLayerManager> _transportLayerManager;
 
     /**
      * The storage engine, if any.
@@ -846,9 +821,21 @@ private:
  * both services can now exist in the same server process (ServiceContext).
  */
 class Service : public Decorable<Service> {
-public:
-    Service(ServiceContext* sc, ClusterRole role) : _sc{sc}, _role{role} {}
+    template <typename T>
+    using SyncUnique = service_context_detail::SyncUnique<T>;
 
+public:
+    Service(ServiceContext* sc, ClusterRole role);
+    ~Service();
+
+    /**
+     * Creates a new Client object representing a client session associated with this
+     * Service.
+     *
+     * The "desc" string is used to set a descriptive name for the client, used in logging.
+     *
+     * If supplied, "session" is the transport::Session used for communicating with the client.
+     */
     ServiceContext::UniqueClient makeClient(std::string desc,
                                             std::shared_ptr<transport::Session> session = nullptr) {
         return _sc->makeClientForService(std::move(desc), std::move(session), this);
@@ -862,9 +849,16 @@ public:
         return _sc;
     }
 
+    void setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep);
+
+    ServiceEntryPoint* getServiceEntryPoint() const {
+        return _serviceEntryPoint.get();
+    }
+
 private:
     ServiceContext* _sc;
     ClusterRole _role;
+    SyncUnique<ServiceEntryPoint> _serviceEntryPoint;
 };
 
 /**

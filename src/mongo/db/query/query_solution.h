@@ -963,6 +963,43 @@ struct MatchNode : public QuerySolutionNode {
 };
 
 /**
+ * ReplaceRootNode is used for $replaceRoot aggregation stages that are pushed down to SBE.
+ */
+struct ReplaceRootNode : public QuerySolutionNode {
+    ReplaceRootNode(std::unique_ptr<QuerySolutionNode> child,
+                    boost::intrusive_ptr<Expression> newRoot)
+        : QuerySolutionNode(std::move(child)), newRoot(newRoot) {}
+
+    virtual StageType getType() const {
+        return STAGE_REPLACE_ROOT;
+    }
+
+    /**
+     * Data from the replaceRoot node is considered fetched iff the child provides fetched data.
+     */
+    bool fetched() const {
+        return children[0]->fetched();
+    }
+
+    FieldAvailability getFieldAvailability(const std::string& field) const {
+        return FieldAvailability::kNotProvided;
+    }
+
+    bool sortedByDiskLoc() const {
+        return children[0]->sortedByDiskLoc();
+    }
+
+    const ProvidedSortSet& providedSorts() const {
+        return children[0]->providedSorts();
+    }
+
+    void appendToString(str::stream* ss, int indent) const final;
+    std::unique_ptr<QuerySolutionNode> clone() const final;
+
+    boost::intrusive_ptr<Expression> newRoot;
+};
+
+/**
  * We have a few implementations of the projection functionality. They are chosen by constructing
  * a type derived from this abstract struct. The most general implementation 'ProjectionNodeDefault'
  * is much slower than the fast-path implementations. We only really have all the information
@@ -1742,11 +1779,15 @@ struct SearchNode : public QuerySolutionNode {
     SearchNode(bool isSearchMeta,
                BSONObj searchQuery,
                boost::optional<long long> limit,
-               boost::optional<int> intermediateResultsProtocolVersion)
+               boost::optional<BSONObj> sortSpec,
+               size_t remoteCursorId,
+               boost::optional<BSONObj> remoteCursorVars)
         : isSearchMeta(isSearchMeta),
           searchQuery(searchQuery),
           limit(limit),
-          intermediateResultsProtocolVersion(intermediateResultsProtocolVersion) {}
+          sortSpec(sortSpec),
+          remoteCursorId(remoteCursorId),
+          remoteCursorVars(remoteCursorVars) {}
 
     StageType getType() const override {
         return STAGE_SEARCH;
@@ -1786,12 +1827,9 @@ struct SearchNode : public QuerySolutionNode {
      */
     boost::optional<long long> limit;
 
-    /**
-     * Protocol version if it must be communicated via the search request.
-     * If we are in a sharded environment but are targeting unsharded collection we may have a
-     * protocol version even though it should not be sent to mongot.
-     */
-    boost::optional<int> intermediateResultsProtocolVersion;
+    boost::optional<BSONObj> sortSpec;
+    size_t remoteCursorId;
+    boost::optional<BSONObj> remoteCursorVars;
 };
 
 /**
@@ -1800,7 +1838,7 @@ struct SearchNode : public QuerySolutionNode {
  */
 struct UnpackTsBucketNode : public QuerySolutionNode {
     UnpackTsBucketNode(std::unique_ptr<QuerySolutionNode> child,
-                       const BucketSpec& spec,
+                       const timeseries::BucketSpec& spec,
                        std::unique_ptr<MatchExpression> eventFilter,
                        std::unique_ptr<MatchExpression> wholeBucketFilter,
                        bool includeMeta)
@@ -1811,7 +1849,7 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
           includeMeta(includeMeta) {
         tassert(7969700,
                 "Only support unpacking with a statically known set of fields.",
-                bucketSpec.behavior() == BucketSpec::Behavior::kInclude);
+                bucketSpec.behavior() == timeseries::BucketSpec::Behavior::kInclude);
     }
 
     StageType getType() const override {
@@ -1854,7 +1892,7 @@ struct UnpackTsBucketNode : public QuerySolutionNode {
                                                     includeMeta);
     }
 
-    BucketSpec bucketSpec;
+    timeseries::BucketSpec bucketSpec;
     std::unique_ptr<MatchExpression> eventFilter = nullptr;
     std::unique_ptr<MatchExpression> wholeBucketFilter = nullptr;
     bool includeMeta = false;

@@ -39,6 +39,10 @@ namespace mongo::optimizer {
 namespace {
 
 using namespace unit_test_abt_literals;
+
+const DatabaseName testDBName =
+    DatabaseNameUtil::deserialize(boost::none, "test", SerializationContext::stateDefault());
+
 TEST(PhysRewriter, RemoveOrphansEnforcerMultipleCollections) {
     // Hypothetical MQL which could generate this ABT:
     //   db.c1.aggregate([{$unionWith: {coll: "c2", pipeline: [{$match: {}}]}}])
@@ -51,7 +55,7 @@ TEST(PhysRewriter, RemoveOrphansEnforcerMultipleCollections) {
     auto prefixId = PrefixId::createForTests();
 
     auto scanDef1 =
-        createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+        createScanDef(testDBName,
                       UUID::gen(),
                       ScanDefOptions{},
                       IndexDefinitions{},
@@ -63,18 +67,18 @@ TEST(PhysRewriter, RemoveOrphansEnforcerMultipleCollections) {
                       boost::none /*ce*/,
                       ShardingMetadata({{_get("a", _id())._n, CollationOp::Ascending}}, true));
 
-    auto scanDef2 =
-        createScanDef(DatabaseNameUtil::deserialize(boost::none, "test2"),
-                      UUID::gen(),
-                      ScanDefOptions{},
-                      IndexDefinitions{},
-                      MultikeynessTrie{},
-                      ConstEval::constFold,
-                      // Sharded on {b: 1}
-                      DistributionAndPaths{DistributionType::Centralized},
-                      true /*exists*/,
-                      boost::none /*ce*/,
-                      ShardingMetadata({{_get("b", _id())._n, CollationOp::Ascending}}, true));
+    auto scanDef2 = createScanDef(
+        DatabaseNameUtil::deserialize(boost::none, "test2", SerializationContext::stateDefault()),
+        UUID::gen(),
+        ScanDefOptions{},
+        IndexDefinitions{},
+        MultikeynessTrie{},
+        ConstEval::constFold,
+        // Sharded on {b: 1}
+        DistributionAndPaths{DistributionType::Centralized},
+        true /*exists*/,
+        boost::none /*ce*/,
+        ShardingMetadata({{_get("b", _id())._n, CollationOp::Ascending}}, true));
 
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
@@ -117,7 +121,7 @@ static ABT optimizeABTWithShardingMetadataNoIndexes(ABT& rootNode,
         trie.add(comp._path);
     }
 
-    auto scanDef = createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+    auto scanDef = createScanDef(testDBName,
                                  UUID::gen(),
                                  ScanDefOptions{},
                                  IndexDefinitions{},
@@ -264,7 +268,7 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetBasic) {
 
     ShardingMetadata sm({{_get("b", _id())._n, CollationOp::Ascending}}, true);
 
-    auto scanDef = createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+    auto scanDef = createScanDef(testDBName,
                                  UUID::gen(),
                                  {},
                                  {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}},
@@ -278,7 +282,8 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetBasic) {
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
          OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
+         OptPhase::MemoImplementationPhase,
+         OptPhase::ProjNormalize},
         prefixId,
         {{{"c1", scanDef}}},
         /*costModel*/ boost::none,
@@ -286,33 +291,20 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetBasic) {
     ABT optimized = rootNode;
     phaseManager.optimize(optimized);
 
-    // Note: we don't assert on the explain of the plan verbatim because there is non-determinism in
-    // the order of rewrites that are applied which causes non-determinism in the projection names
-    // that are generated.
-
     // Assert plan structure contains NLJ with in index scan on left and shard filter + seek on the
     // right.
-    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
-    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
-    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.nodeType");
-    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.indexDefName");
-    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.rightChild.nodeType");
-    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.rightChild.filter.nodeType");
-    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.rightChild.filter.name");
-    ASSERT_BSON_PATH("\"LimitSkip\"", explainRoot, "child.rightChild.child.nodeType");
-    ASSERT_BSON_PATH("\"Seek\"", explainRoot, "child.rightChild.child.child.nodeType");
-
-    // Assert that shard key {b: 1} projection was pushed down into the SeekNode.
-    const auto shardKeyElem = dotted_path_support::extractElementAtPath(
-        explainRoot, "child.rightChild.child.child.fieldProjectionMap.b");
-    ASSERT_TRUE(shardKeyElem.ok());
-    // Get projection to which the shard key is bound.
-    const auto shardKeyProj = shardKeyElem.String();
-    // Assert that the projection used in the 'shardFilter' function call is that of the shard key.
-    ASSERT_EQ(shardKeyProj,
-              dotted_path_support::extractElementAtPath(explainRoot,
-                                                        "child.rightChild.filter.arguments.0.name")
-                  .String());
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{renamed_1}]\n"
+        "NestedLoopJoin [joinType: Inner, {renamed_0}]\n"
+        "|   |   Const [true]\n"
+        "|   Filter []\n"
+        "|   |   FunctionCall [shardFilter]\n"
+        "|   |   Variable [renamed_2]\n"
+        "|   LimitSkip [limit: 1, skip: 0]\n"
+        "|   Seek [ridProjection: renamed_0, {'<root>': renamed_1, 'b': renamed_2}, c1]\n"
+        "IndexScan [{'<rid>': renamed_0}, scanDefName: c1, indexDefName: index1, interval: "
+        "{=Const [1]}]\n",
+        optimized);
 }
 
 TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetDottedSharedPrefix) {
@@ -325,7 +317,7 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetDottedSharedPrefix)
                          {_get("a", _get("b", _get("d", _id())))._n, CollationOp::Ascending}},
                         true);
     auto shardScanDef =
-        createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+        createScanDef(testDBName,
                       UUID::gen(),
                       ScanDefOptions{},
                       {{"index1", makeIndexDefinition("e", CollationOp::Ascending)}},
@@ -341,7 +333,8 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetDottedSharedPrefix)
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
          OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
+         OptPhase::MemoImplementationPhase,
+         OptPhase::ProjNormalize},
         prefixId,
         {{{"c1", shardScanDef}}},
         /*costModel*/ boost::none,
@@ -349,19 +342,32 @@ TEST(PhysRewriter, ScanNodeRemoveOrphansImplementerSeekTargetDottedSharedPrefix)
     ABT optimized = rootNode;
     phaseManager.optimize(optimized);
 
-    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
-    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
-    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.nodeType");
-    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.indexDefName");
-    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.rightChild.nodeType");
-    ASSERT_BSON_PATH("\"Evaluation\"", explainRoot, "child.rightChild.child.nodeType");
-    ASSERT_BSON_PATH("\"Evaluation\"", explainRoot, "child.rightChild.child.child.nodeType");
-    ASSERT_BSON_PATH("\"LimitSkip\"", explainRoot, "child.rightChild.child.child.child.nodeType");
-    ASSERT_BSON_PATH("\"Seek\"", explainRoot, "child.rightChild.child.child.child.child.nodeType");
     // Assert top level field of shard key is pushed down into the SeekNode.
-    ASSERT_TRUE(dotted_path_support::extractElementAtPath(
-                    explainRoot, "child.rightChild.child.child.child.child.fieldProjectionMap.a")
-                    .ok());
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{renamed_1}]\n"
+        "NestedLoopJoin [joinType: Inner, {renamed_0}]\n"
+        "|   |   Const [true]\n"
+        "|   Filter []\n"
+        "|   |   FunctionCall [shardFilter]\n"
+        "|   |   |   Variable [renamed_4]\n"
+        "|   |   Variable [renamed_3]\n"
+        "|   Evaluation [{renamed_4}]\n"
+        "|   |   EvalPath []\n"
+        "|   |   |   Variable [renamed_2]\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathGet [d]\n"
+        "|   |   PathIdentity []\n"
+        "|   Evaluation [{renamed_3}]\n"
+        "|   |   EvalPath []\n"
+        "|   |   |   Variable [renamed_2]\n"
+        "|   |   PathGet [b]\n"
+        "|   |   PathGet [c]\n"
+        "|   |   PathIdentity []\n"
+        "|   LimitSkip [limit: 1, skip: 0]\n"
+        "|   Seek [ridProjection: renamed_0, {'<root>': renamed_1, 'a': renamed_2}, c1]\n"
+        "IndexScan [{'<rid>': renamed_0}, scanDefName: c1, indexDefName: index1, interval: "
+        "{=Const [3]}]\n",
+        optimized);
 }
 
 TEST(PhysRewriter, RemoveOrphansSargableNodeComplete) {
@@ -441,10 +447,11 @@ TEST(PhysRewriter, RemoveOrphansSargableNodeIndex) {
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
          OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
+         OptPhase::MemoImplementationPhase,
+         OptPhase::ProjNormalize},
         prefixId,
         {{{"c1",
-           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+           createScanDef(testDBName,
                          UUID::gen(),
                          {},
                          {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)}},
@@ -465,13 +472,18 @@ TEST(PhysRewriter, RemoveOrphansSargableNodeIndex) {
 
     // The shard filter is performed on the index side of the NLJ and pushed the projection into the
     // index scan.
-    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
-    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
-    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.leftChild.nodeType");
-    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.leftChild.filter.nodeType");
-    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.leftChild.filter.name");
-    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.child.nodeType");
-    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.child.indexDefName");
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{renamed_2}]\n"
+        "NestedLoopJoin [joinType: Inner, {renamed_0}]\n"
+        "|   |   Const [true]\n"
+        "|   LimitSkip [limit: 1, skip: 0]\n"
+        "|   Seek [ridProjection: renamed_0, {'<root>': renamed_2}, c1]\n"
+        "Filter []\n"
+        "|   FunctionCall [shardFilter]\n"
+        "|   Variable [renamed_1]\n"
+        "IndexScan [{'<indexKey> 0': renamed_1, '<rid>': renamed_0}, scanDefName: c1, "
+        "indexDefName: index1, interval: {>Const [1]}]\n",
+        optimized);
 }
 
 TEST(PhysRewriter, RemoveOrphansCovered) {
@@ -489,7 +501,7 @@ TEST(PhysRewriter, RemoveOrphansCovered) {
          OptPhase::MemoImplementationPhase},
         prefixId,
         {{{"c1",
-           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+           createScanDef(testDBName,
                          UUID::gen(),
                          {},
                          {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)}},
@@ -538,10 +550,11 @@ TEST(PhysRewriter, RemoveOrphansIndexDoesntCoverShardKey) {
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
          OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
+         OptPhase::MemoImplementationPhase,
+         OptPhase::ProjNormalize},
         prefixId,
         {{{"c1",
-           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+           createScanDef(testDBName,
                          UUID::gen(),
                          {},
                          {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)}},
@@ -562,14 +575,20 @@ TEST(PhysRewriter, RemoveOrphansIndexDoesntCoverShardKey) {
 
     // Shard key {a: 1, b: 1} and index on {a: 1} means that shard filtering must occur on the seek
     // side.
-    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
-    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
-    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.nodeType");
-    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.rightChild.nodeType");
-    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.rightChild.filter.nodeType");
-    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.rightChild.filter.name");
-    ASSERT_BSON_PATH("\"LimitSkip\"", explainRoot, "child.rightChild.child.nodeType");
-    ASSERT_BSON_PATH("\"Seek\"", explainRoot, "child.rightChild.child.child.nodeType");
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{renamed_1}]\n"
+        "NestedLoopJoin [joinType: Inner, {renamed_0}]\n"
+        "|   |   Const [true]\n"
+        "|   Filter []\n"
+        "|   |   FunctionCall [shardFilter]\n"
+        "|   |   |   Variable [renamed_3]\n"
+        "|   |   Variable [renamed_2]\n"
+        "|   LimitSkip [limit: 1, skip: 0]\n"
+        "|   Seek [ridProjection: renamed_0, {'<root>': renamed_1, 'a': renamed_2, 'b': "
+        "renamed_3}, c1]\n"
+        "IndexScan [{'<rid>': renamed_0}, scanDefName: c1, indexDefName: index1, interval: "
+        "{>Const [1]}]\n",
+        optimized);
 }
 
 TEST(PhysRewriter, RemoveOrphansDottedPathIndex) {
@@ -592,10 +611,11 @@ TEST(PhysRewriter, RemoveOrphansDottedPathIndex) {
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
          OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
+         OptPhase::MemoImplementationPhase,
+         OptPhase::ProjNormalize},
         prefixId,
         {{{"c1",
-           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+           createScanDef(testDBName,
                          UUID::gen(),
                          {},
                          {{"index1", {indexSpec, false}}},
@@ -616,13 +636,18 @@ TEST(PhysRewriter, RemoveOrphansDottedPathIndex) {
 
     // Shard key {"a.b": 1} and index on {"a.b": 1, "a.c": 1}
     // The index scan produces the projections for "a.b" to perform shard filtering.
-    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
-    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
-    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.leftChild.nodeType");
-    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.leftChild.filter.nodeType");
-    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.leftChild.filter.name");
-    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.child.nodeType");
-    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.child.indexDefName");
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{renamed_2}]\n"
+        "NestedLoopJoin [joinType: Inner, {renamed_0}]\n"
+        "|   |   Const [true]\n"
+        "|   LimitSkip [limit: 1, skip: 0]\n"
+        "|   Seek [ridProjection: renamed_0, {'<root>': renamed_2}, c1]\n"
+        "Filter []\n"
+        "|   FunctionCall [shardFilter]\n"
+        "|   Variable [renamed_1]\n"
+        "IndexScan [{'<indexKey> 0': renamed_1, '<rid>': renamed_0}, scanDefName: c1, "
+        "indexDefName: index1, interval: {>Const [1 | maxKey]}]\n",
+        optimized);
 }
 
 TEST(PhysRewriter, RemoveOrphanedMultikeyIndex) {
@@ -650,10 +675,11 @@ TEST(PhysRewriter, RemoveOrphanedMultikeyIndex) {
     auto phaseManager = makePhaseManager(
         {OptPhase::MemoSubstitutionPhase,
          OptPhase::MemoExplorationPhase,
-         OptPhase::MemoImplementationPhase},
+         OptPhase::MemoImplementationPhase,
+         OptPhase::ProjNormalize},
         prefixId,
         {{{"c1",
-           createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
+           createScanDef(testDBName,
                          UUID::gen(),
                          {},
                          {{"index1", {indexSpec, false}}},
@@ -673,13 +699,23 @@ TEST(PhysRewriter, RemoveOrphanedMultikeyIndex) {
     ASSERT_BETWEEN(24, 30, phaseManager.getMemo().getStats()._physPlanExplorationCount);
 
     // Ensure that we perform the shard filter using a projection from the index scan.
-    const BSONObj explainRoot = ExplainGenerator::explainBSONObj(optimized);
-    ASSERT_BSON_PATH("\"NestedLoopJoin\"", explainRoot, "child.nodeType");
-    ASSERT_BSON_PATH("\"Filter\"", explainRoot, "child.leftChild.nodeType");
-    ASSERT_BSON_PATH("\"FunctionCall\"", explainRoot, "child.leftChild.filter.nodeType");
-    ASSERT_BSON_PATH("\"shardFilter\"", explainRoot, "child.leftChild.filter.name");
-    ASSERT_BSON_PATH("\"IndexScan\"", explainRoot, "child.leftChild.child.child.nodeType");
-    ASSERT_BSON_PATH("\"index1\"", explainRoot, "child.leftChild.child.child.indexDefName");
+    ASSERT_EXPLAIN_V2_AUTO(  // NOLINT
+        "Root [{renamed_3}]\n"
+        "NestedLoopJoin [joinType: Inner, {renamed_0}]\n"
+        "|   |   Const [true]\n"
+        "|   LimitSkip [limit: 1, skip: 0]\n"
+        "|   Seek [ridProjection: renamed_0, {'<root>': renamed_3}, c1]\n"
+        "Filter []\n"
+        "|   FunctionCall [shardFilter]\n"
+        "|   Variable [renamed_1]\n"
+        "Filter []\n"
+        "|   EvalFilter []\n"
+        "|   |   Variable [renamed_2]\n"
+        "|   PathCompare [Gt]\n"
+        "|   Const [3]\n"
+        "IndexScan [{'<indexKey> 0': renamed_1, '<indexKey> 1': renamed_2, '<rid>': renamed_0}, "
+        "scanDefName: c1, indexDefName: index1, interval: {>Const [2 | maxKey]}]\n",
+        optimized);
 }
 
 TEST(PhysRewriter, RemoveOrphanEqualityOnSimpleShardKey) {
@@ -931,106 +967,110 @@ TEST(PhysRewriter, RemoveOrphanEqualityHashedShardKey) {
         optimized);
 }
 
-// TODO SERVER-78507: Examine the physical alternatives in the memo, rather than the logical nodes,
-// to check that the children of the RIDIntersect have physical alternatives with both combinations
-// of RemoveOrphansRequirement.
 TEST(PhysRewriter, RIDIntersectRemoveOrphansImplementer) {
     using namespace properties;
 
-    ABT scanNode = make<ScanNode>("root", "c1");
+    // Query: {a: {$gt: 1}}
+    ABT rootNode = NodeBuilder{}
+                       .root("root")
+                       .filter(_evalf(_get("a", _traverse1(_cmp("Gt", "1"_cint64))), "root"_var))
+                       .finish(_scan("root", "c1"));
 
-    ABT filterNode = make<FilterNode>(
-        make<EvalFilter>(make<PathGet>("a",
-                                       make<PathTraverse>(
-                                           PathTraverse::kSingleLevel,
-                                           make<PathCompare>(Operations::Eq, Constant::int64(1)))),
-                         make<Variable>("root")),
-        std::move(scanNode));
+    auto prefixId = PrefixId::createForTests();
+    // Shard key: {a: 1}
+    ShardingMetadata sm({{_get("a", _id())._n, CollationOp::Ascending}}, true);
+    auto phaseManager = makePhaseManager(
+        {OptPhase::MemoSubstitutionPhase,
+         OptPhase::MemoExplorationPhase,
+         OptPhase::MemoImplementationPhase},
+        prefixId,
+        {{{"c1",
+           createScanDef(DatabaseNameUtil::deserialize(
+                             boost::none, "test", SerializationContext::stateDefault()),
+                         UUID::gen(),
+                         {},
+                         {{"index1", makeIndexDefinition("a", CollationOp::Ascending, false)}},
+                         MultikeynessTrie{},
+                         ConstEval::constFold,
+                         DistributionAndPaths{DistributionType::Centralized},
+                         true /*exists*/,
+                         boost::none /*ce*/,
+                         sm)}}},
+        boost::none /*costModel*/,
+        {true /*debugMode*/, 3 /*debugLevel*/, DebugInfo::kIterationLimitForTests});
 
-    ABT rootNode =
-        make<RootNode>(ProjectionRequirement{ProjectionNameVector{"root"}}, std::move(filterNode));
+    // Fully explore search space to enumerate all alternatives to verify the RIDIntersect rewrite
+    // enumerated the rewrites we expected.
+    phaseManager.getHints()._disableBranchAndBound = true;
+    phaseManager.getHints()._keepRejectedPlans = true;
 
-    {
-        auto prefixId = PrefixId::createForTests();
-        ShardingMetadata sm({{_get("a", _id())._n, CollationOp::Ascending}}, true);
-        auto phaseManager = makePhaseManager(
-            {OptPhase::MemoSubstitutionPhase,
-             OptPhase::MemoExplorationPhase,
-             OptPhase::MemoImplementationPhase},
-            prefixId,
-            {{{"c1",
-               createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
-                             UUID::gen(),
-                             {},
-                             {{"index1", makeIndexDefinition("a", CollationOp::Ascending)}},
-                             MultikeynessTrie{},
-                             ConstEval::constFold,
-                             DistributionAndPaths{DistributionType::Centralized},
-                             true /*exists*/,
-                             boost::none /*ce*/,
-                             sm)}}},
-            boost::none /*costModel*/,
-            {true /*debugMode*/, 3 /*debugLevel*/, DebugInfo::kIterationLimitForTests},
-            {});
+    ABT optimized = rootNode;
+    phaseManager.optimize(optimized);
 
-        ABT optimized = rootNode;
-        phaseManager.optimize(optimized);
+    // Examine the memo to verify that there are alternatives in which RemoveOrphansRequirement is
+    // pushed down into the left and right child groups.
+    const auto& memo = phaseManager.getMemo();
 
-        /*
-            Examine the RIDintersectNode in the memo to make sure that it meets the following
-           conditions:
-            1. The right-delegated group needs to have logial node '0' as a scan, and needs to have
-           physical alternatives with RemoveOrphansRequirement both true and false.
-            2. The left-delegated group needs to have logical node '0' as a Sargable [Index] with
-           a=1 and should also have physical alternatives with RemoveOrphansRequirmeent both true
-           and false.
-        */
-
-        const auto& memo = phaseManager.getMemo();
-
-        const RIDIntersectNode* ridIntersectNode = nullptr;
-        for (int groupId = 0; (size_t)groupId < memo.getGroupCount() && !ridIntersectNode;
-             groupId++) {
-            for (auto& node : memo.getLogicalNodes(groupId)) {
-                if (ridIntersectNode = node.cast<RIDIntersectNode>(); ridIntersectNode) {
-                    break;
+    // Get the ID of the group which performs the RIDIntersect.
+    auto ridGroupId = [&memo]() -> boost::optional<size_t> {
+        for (size_t i = 0; i < memo.getGroupCount(); ++i) {
+            for (auto&& node : memo.getLogicalNodes(i)) {
+                if (node.is<RIDIntersectNode>()) {
+                    return {i};
                 }
             }
         }
-        ASSERT(ridIntersectNode);
-        const auto* left = ridIntersectNode->getLeftChild().cast<MemoLogicalDelegatorNode>();
-        const auto* right = ridIntersectNode->getRightChild().cast<MemoLogicalDelegatorNode>();
-        ASSERT(left);
-        ASSERT(right);
+        return boost::none;
+    }();
+    ASSERT_TRUE(ridGroupId.has_value());
 
-        // Given a groupId, checks that the corresponding group contains at least one physical
-        // alternative alternative with RemoveOrphansRequirement 'true' and one with 'false'.
-        // We don't care whether the optimizer found a plan for any of these physical
-        // alternatives; we only care that it attempted all of them.
-        auto containsMustRemoveTrueAndFalse = [&](GroupIdType groupId) {
-            bool containsRemoveOrphansTrueAlternative = false,
-                 containsRemoveOrphansFalseAlternative = false;
-            for (const auto& node : memo.getPhysicalNodes(groupId)) {
-                const PhysProps& props = node->_physProps;
-                ASSERT(hasProperty<RemoveOrphansRequirement>(props));
-                bool result = getPropertyConst<RemoveOrphansRequirement>(props).mustRemove();
-                containsRemoveOrphansTrueAlternative =
-                    containsRemoveOrphansTrueAlternative || result;
-                containsRemoveOrphansFalseAlternative =
-                    containsRemoveOrphansFalseAlternative || !result;
-                if (containsRemoveOrphansTrueAlternative && containsRemoveOrphansFalseAlternative) {
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        // Examine the left delegator.
-        ASSERT(containsMustRemoveTrueAndFalse(left->getGroupId()));
-
-        // Examine the right delegator.
-        ASSERT(containsMustRemoveTrueAndFalse(right->getGroupId()));
+    // Get the result of optimization of this RIDIntersect group when optimized with
+    // RemoveOrphansRequirement{true}.
+    PhysOptimizationResult* ridIntersectWithRemoveOrphans;
+    for (auto&& physOptResult : memo.getPhysicalNodes(*ridGroupId)) {
+        auto physProps = physOptResult->_physProps;
+        if (hasProperty<RemoveOrphansRequirement>(physProps) &&
+            getPropertyConst<RemoveOrphansRequirement>(physProps).mustRemove()) {
+            ridIntersectWithRemoveOrphans = physOptResult.get();
+        }
     }
+    ASSERT_NE(ridIntersectWithRemoveOrphans, nullptr);
+
+    // Keep track whether we've seen alternatives that push the RemoveOrphansRequirement into the
+    // left and right child respectively.
+    bool hasAlternativeWithRorAsLeftChild = false;
+    bool hasAlternativeWithRorAsRightChild = false;
+
+    // Put all alternatives in the same vector to iterate over them.
+    auto allAlternatives = ridIntersectWithRemoveOrphans->_rejectedNodeInfo;
+    if (ridIntersectWithRemoveOrphans->_nodeInfo.has_value()) {
+        allAlternatives.push_back(*ridIntersectWithRemoveOrphans->_nodeInfo);
+    }
+    for (auto&& alternative : allAlternatives) {
+        // We don't care about alternatives that don't use the index.
+        if (!alternative._node.is<NestedLoopJoinNode>()) {
+            continue;
+        }
+        auto nlj = alternative._node.cast<NestedLoopJoinNode>();
+        // Get physical node id of left and right children.
+        auto leftNodeId = nlj->getLeftChild().cast<MemoPhysicalDelegatorNode>()->getNodeId();
+        auto rightNodeId = nlj->getRightChild().cast<MemoPhysicalDelegatorNode>()->getNodeId();
+        // Examine whether the left and right children are optimized with RemoveOrphansRequirement.
+        auto leftRor = getPropertyConst<RemoveOrphansRequirement>(
+            memo.getPhysicalNodes(leftNodeId._groupId).at(leftNodeId._index)->_physProps);
+        auto rightRor = getPropertyConst<RemoveOrphansRequirement>(
+            memo.getPhysicalNodes(rightNodeId._groupId).at(rightNodeId._index)->_physProps);
+        // RemoveOrphansRequirement should only be pushed down to one child.
+        ASSERT_NE(leftRor, rightRor);
+        if (leftRor.mustRemove()) {
+            hasAlternativeWithRorAsLeftChild = true;
+        } else if (rightRor.mustRemove()) {
+            hasAlternativeWithRorAsRightChild = true;
+        }
+    }
+    // Assert that both alternatives exist in the memo.
+    ASSERT_TRUE(hasAlternativeWithRorAsLeftChild);
+    ASSERT_TRUE(hasAlternativeWithRorAsRightChild);
 }
 
 TEST(PhysRewriter, HashedShardKey) {

@@ -6,6 +6,7 @@
  * @tags: [
  *   # Can't wrap queries in facets without going past max BSON depth.
  *   do_not_wrap_aggregations_in_facets,
+ *   not_allowed_with_security_token,
  * ]
  */
 
@@ -73,21 +74,16 @@ function testLargeProject() {
 
 // Run $and and $or with many different types of predicates.
 function testLargeAndOrPredicates() {
-    // TODO: SERVER-78635 remove this early return once this ticket is done. This is a
+    // TODO: SERVER-80735 remove this early return once this ticket is done. This is a
     // Bonsai-specific issues with PSR.
     if (isBonsaiEnabled) {
-        return;
-    }
-    // TODO: SERVER-78587 remove the SBE check. This is an issue with compiling expressions to the
-    // SBE VM, so it affects stage builders and Bonsai.
-    if (isSBEEnabled) {
         return;
     }
     jsTestLog("Testing large $and/$or predicates");
 
     // Large $match of the form {$match: {a0: 1, a1: 1, ...}}
     const largeMatch = {};
-    range(1200000).forEach(function(i) {
+    range(800000).forEach(function(i) {
         largeMatch["a" + i] = NumberInt(1);
     });
     runAgg([{$match: largeMatch}]);
@@ -98,11 +94,11 @@ function testLargeAndOrPredicates() {
 
     const andOrFilters = [
         // Plain a=i filter.
-        intStream(800000).map(function(i) {
+        intStream(500000).map(function(i) {
             return {a: i};
         }),
         // a_i = i filter. Different field for each value.
-        intStream(600000).map(function(i) {
+        intStream(500000).map(function(i) {
             const field = "a" + i;
             return {[field]: i};
         }),
@@ -163,16 +159,9 @@ function testPipelineLimits() {
         {$group: {_id: "$a"}},
         {$addFields: {c: {$add: ["$c", "$d"]}}},
         {$addFields: {a: 5}},
-        // TODO SERVER-78354: Uncomment this test and ensure it passes in the
-        // aggregation_disabled_optimization suite.
-        // {$match: {a: 1}}
+        {$match: {a: 1}},
+        {$project: {a: 1}},
     ];
-
-    if (!isBonsaiEnabled) {
-        // TODO: SERVER-78354 should move $project, $addFields, and $unwind to "stages" so $project
-        // runs with Bonsai. This is an issue with the reference tracker.
-        stages.push({$project: {a: 1}});
-    }
     for (const stage of stages) {
         const pipeline = range(pipelineLimit).map(_ => stage);
         jsTestLog(stage);

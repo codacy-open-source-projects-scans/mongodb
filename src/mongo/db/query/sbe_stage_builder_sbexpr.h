@@ -37,7 +37,7 @@
 #include "mongo/db/query/sbe_stage_builder_type_signature.h"
 
 #include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
-#include "mongo/db/exec/sbe/abt/named_slots.h"
+#include "mongo/db/exec/sbe/abt/slots_provider.h"
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/node_defs.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
@@ -68,7 +68,21 @@ struct TypedExpression {
     TypeSignature typeSignature;
 };
 
-TypedExpression abtToExpr(optimizer::ABT& abt, StageBuilderState& state);
+using VariableTypes = stdx::
+    unordered_map<optimizer::ProjectionName, TypeSignature, optimizer::ProjectionName::Hasher>;
+
+// Run constant folding on the provided ABT tree and return its type signature. If the type
+// information in the slotInfo is available, it is used to assign a type to the visible slots.
+TypeSignature constantFold(optimizer::ABT& abt,
+                           StageBuilderState& state,
+                           const VariableTypes* slotInfo = nullptr);
+
+// Optimize and convert the provided ABT tree into an equivalent EExpression tree, returning its
+// type signature. If the type information in the slotInfo is available, it is used to assign a type
+// to the visible slots.
+TypedExpression abtToExpr(optimizer::ABT& abt,
+                          StageBuilderState& state,
+                          const VariableTypes* slotInfo = nullptr);
 
 /**
  * The SbVar class is used to represent variables in the SBE stage builder. "SbVar" is short for

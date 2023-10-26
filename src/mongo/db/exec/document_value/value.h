@@ -30,7 +30,6 @@
 #pragma once
 
 #include <algorithm>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstring>
 #include <initializer_list>
 #include <iosfwd>
@@ -371,9 +370,9 @@ public:
     friend std::ostream& operator<<(std::ostream& out, const Value& v);
 
     /**
-     * Populates the internal cache by recursively walking the underlying BSON.
+     * Returns a cache-only copy of the value with no backing bson.
      */
-    void fillCache() const;
+    Value shred() const;
 
     void swap(Value& rhs) {
         _storage.swap(rhs._storage);

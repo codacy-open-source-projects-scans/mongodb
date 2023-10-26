@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -98,8 +97,6 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
         if (!autoColl.getCollection()) {
             LOGV2(4416000,
                   "cleanupOrphaned skipping waiting for orphaned data cleanup because "
-                  "{namespace} does not exist",
-                  "cleanupOrphaned skipping waiting for orphaned data cleanup because "
                   "collection does not exist",
                   logAttrs(ns));
             return CleanupResult::kDone;
@@ -111,8 +108,6 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
         auto optCollDescr = scopedCsr->getCurrentMetadataIfKnown();
         if (!optCollDescr || !optCollDescr->isSharded()) {
             LOGV2(4416001,
-                  "cleanupOrphaned skipping waiting for orphaned data cleanup because "
-                  "{namespace} is not sharded",
                   "cleanupOrphaned skipping waiting for orphaned data cleanup because "
                   "collection is not sharded",
                   logAttrs(ns));
@@ -220,7 +215,8 @@ public:
             return false;
         }
 
-        const NamespaceString nss = NamespaceStringUtil::deserialize(boost::none, ns);
+        const NamespaceString nss =
+            NamespaceStringUtil::deserialize(boost::none, ns, SerializationContext::stateDefault());
         uassert(ErrorCodes::InvalidNamespace,
                 str::stream() << "Invalid namespace: " << nss.toStringForErrorMsg(),
                 nss.isValid());
@@ -250,7 +246,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CleanupOrphanedCommand);
+MONGO_REGISTER_COMMAND(CleanupOrphanedCommand).forShard();
 
 BSONField<std::string> CleanupOrphanedCommand::nsField("cleanupOrphaned");
 BSONField<BSONObj> CleanupOrphanedCommand::startingFromKeyField("startingFromKey");

@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -405,7 +404,11 @@ public:
 
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
-        auto cmd = HelloCommand::parse({"hello", apiStrict}, cmdObj);
+        auto sc = SerializationContext::stateCommandRequest();
+        sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
+
+        auto cmd = HelloCommand::parse(IDLParserContext("hello", apiStrict, dbName.tenantId(), sc),
+                                       cmdObj);
 
         waitInHello.execute(
             [&](const BSONObj& customArgs) { _handleHelloFailPoint(customArgs, opCtx, cmdObj); });
@@ -424,6 +427,14 @@ public:
         // Tag connections to avoid closing them on stepdown.
         if (!cmd.getHangUpOnStepDown()) {
             connectionTagsToSet |= Client::kKeepOpen;
+        }
+
+        // Negotiate compressors before logging metadata so we can include the result in the log
+        // line.
+        auto result = replyBuilder->getBodyBuilder();
+        if (opCtx->getClient()->session()) {
+            MessageCompressorManager::forSession(opCtx->getClient()->session())
+                .serverNegotiate(cmd.getCompression(), &result);
         }
 
         auto client = opCtx->getClient();
@@ -501,8 +512,6 @@ public:
                     !clientTopologyVersion && !maxAwaitTimeMS);
         }
 
-        auto result = replyBuilder->getBodyBuilder();
-
         // Try to parse the optional 'helloOk' field. This should be provided on the initial
         // handshake for an incoming connection if the client supports the hello command. Clients
         // that specify 'helloOk' do not rely on "not master" error message parsing, which means
@@ -561,11 +570,6 @@ public:
         if (auto param = ServerParameterSet::getNodeParameterSet()->getIfExists(
                 kAutomationServiceDescriptorFieldName)) {
             param->append(opCtx, &result, kAutomationServiceDescriptorFieldName, boost::none);
-        }
-
-        if (opCtx->getClient()->session()) {
-            MessageCompressorManager::forSession(opCtx->getClient()->session())
-                .serverNegotiate(cmd.getCompression(), &result);
         }
 
         if (opCtx->isExhaust()) {
@@ -662,7 +666,7 @@ private:
         waitInHello.pauseWhileSet(opCtx);
     }
 };
-MONGO_REGISTER_COMMAND(CmdHello);
+MONGO_REGISTER_COMMAND(CmdHello).forShard();
 
 class CmdIsMaster : public CmdHello {
 public:
@@ -685,7 +689,7 @@ protected:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdIsMaster);
+MONGO_REGISTER_COMMAND(CmdIsMaster).forShard();
 
 OpCounterServerStatusSection replOpCounterServerStatusSection("opcountersRepl", &replOpCounters);
 

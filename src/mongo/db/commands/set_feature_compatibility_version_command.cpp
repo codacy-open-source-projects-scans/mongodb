@@ -32,7 +32,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <functional>
 #include <map>
@@ -197,7 +196,8 @@ void abortAllReshardCollection(OperationContext* opCtx) {
 
     std::vector<std::string> nsWithReshardColl;
     store.forEach(opCtx, {}, [&](const ReshardingCoordinatorDocument& doc) {
-        nsWithReshardColl.push_back(NamespaceStringUtil::serialize(doc.getSourceNss()));
+        nsWithReshardColl.push_back(NamespaceStringUtil::serialize(
+            doc.getSourceNss(), SerializationContext::stateDefault()));
         return true;
     });
 
@@ -628,6 +628,19 @@ private:
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kCreateCollection);
+        }
+
+        // TODO SERVER-77915: Remove once trackUnshardedCollections becomes lastLTS.
+        if ((isUpgrading &&
+             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+                 .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
+                                                               originalVersion)) ||
+            (isDowngrading &&
+             feature_flags::gTrackUnshardedCollectionsOnShardingCatalog
+                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
+                                                               originalVersion))) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx, DDLCoordinatorTypeEnum::kCollMod);
         }
 
         if (isUpgrading) {
@@ -1554,7 +1567,7 @@ private:
         }
     }
 };
-MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCommand);
+MONGO_REGISTER_COMMAND(SetFeatureCompatibilityVersionCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

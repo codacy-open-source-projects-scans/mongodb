@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -101,6 +100,11 @@ public:
 
     bool isFullIndexValidation() const {
         return isFullValidation() || _mode == ValidateMode::kForegroundFullIndexOnly;
+    }
+
+    bool shouldDecompressBSONColumn() const {
+        return isFullValidation() || _mode == ValidateMode::kBackgroundCheckBSON ||
+            _mode == ValidateMode::kForegroundCheckBSON;
     }
 
     BSONValidateMode getBSONValidateMode() const {

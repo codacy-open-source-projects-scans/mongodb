@@ -39,7 +39,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <cstdint>
@@ -119,6 +118,7 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/index_bounds_builder.h"
+#include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/interval.h"
 #include "mongo/db/query/interval_evaluation_tree.h"
@@ -142,8 +142,9 @@
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
+#include "mongo/db/query/query_settings_gen.h"
+#include "mongo/db/query/query_settings_manager.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/sbe_cached_solution_planner.h"
 #include "mongo/db/query/sbe_multi_planner.h"
@@ -182,6 +183,7 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/overloaded_visitor.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
@@ -372,13 +374,77 @@ ColumnIndexEntry columnIndexEntryFromIndexCatalogEntry(OperationContext* opCtx,
 }
 
 /**
- * If query supports index filters, filter params.indices according to any index filters that have
- * been configured. In addition, sets that there were indeed index filters applied.
+ * If query has query settings index hints set, filters params.indices according to the
+ * configuration. In addition, sets that there were index filters or query settings applied.
+ * Returns true if query settings were applied.
+ */
+bool applyQuerySettings(const CollectionPtr& collection,
+                        const CanonicalQuery& canonicalQuery,
+                        QueryPlannerParams* plannerParams) {
+    // If 'querySettings' has no index hints specified, then there are no settings to be applied to
+    // this query.
+    auto indexHintSpecs = canonicalQuery.getQuerySettings().getIndexHints();
+    if (!indexHintSpecs) {
+        return false;
+    }
+
+    // Retrieving the allowed indexes for the given collection.
+    auto allowedIndexes = stdx::visit(
+        OverloadedVisitor{
+            [&](const std::vector<mongo::query_settings::IndexHintSpec>& hints) {
+                // TODO: SERVER-79231 Apply QuerySettings for aggregate commands.
+                // Implement the proper nss comparison.
+                auto hintIt = std::find_if(
+                    hints.begin(),
+                    hints.end(),
+                    [&](const mongo::query_settings::IndexHintSpec& hint) {
+                        return hint.getNs()->getDb() ==
+                            canonicalQuery.nss().dbName().serializeWithoutTenantPrefix_UNSAFE() &&
+                            hint.getNs()->getColl() == canonicalQuery.nss().coll();
+                    });
+                return hintIt->getAllowedIndexes();
+            },
+            [](const mongo::query_settings::IndexHintSpec& hints) {
+                return hints.getAllowedIndexes();
+            },
+        },
+        *indexHintSpecs);
+
+    // Checks if index entry is present in the 'allowedIndexes' list.
+    auto notInAllowedIndexes = [&](const IndexEntry& indexEntry) {
+        return std::none_of(
+            allowedIndexes.begin(), allowedIndexes.end(), [&](const IndexHint& allowedIndex) {
+                return stdx::visit(OverloadedVisitor{
+                                       [&](const mongo::IndexKeyPattern& indexKeyPattern) {
+                                           return indexKeyPattern.woCompare(
+                                                      indexEntry.keyPattern) == 0;
+                                       },
+                                       [&](const mongo::IndexName& indexName) {
+                                           return indexName == indexEntry.identifier.catalogName;
+                                       },
+                                       [](const mongo::NaturalOrderHint&) { return false; },
+                                   },
+                                   allowedIndex.getHint());
+            });
+    };
+
+    // Remove indices from the planner parameters if the index is not in the 'allowedIndexes' list.
+    plannerParams->indices.erase(std::remove_if(plannerParams->indices.begin(),
+                                                plannerParams->indices.end(),
+                                                notInAllowedIndexes),
+                                 plannerParams->indices.end());
+
+    plannerParams->querySettingsApplied = true;
+    return true;
+}
+
+/**
+ * If query supports index filters, filters params.indices according to the configuration. In
+ * addition, sets that there were index filters or query settings applied.
  */
 void applyIndexFilters(const CollectionPtr& collection,
                        const CanonicalQuery& canonicalQuery,
                        QueryPlannerParams* plannerParams) {
-
     const QuerySettings* querySettings =
         QuerySettingsDecoration::get(collection->getSharedDecorations());
     const auto key = canonicalQuery.encodeKeyForPlanCacheCommand();
@@ -389,6 +455,20 @@ void applyIndexFilters(const CollectionPtr& collection,
             querySettings->getAllowedIndicesFilter(key)) {
         filterAllowedIndexEntries(*allowedIndicesFilter, &plannerParams->indices);
         plannerParams->indexFiltersApplied = true;
+    }
+}
+
+/**
+ * Applies query settings to the query if applicable. If not, tries to apply index filters.
+ */
+void applyQuerySettingsOrIndexFilters(const CollectionPtr& collection,
+                                      const CanonicalQuery& canonicalQuery,
+                                      QueryPlannerParams* plannerParams) {
+    bool didApplyQuerySettings = applyQuerySettings(collection, canonicalQuery, plannerParams);
+
+    // Try to apply index filters only if query settings were not applied.
+    if (!didApplyQuerySettings) {
+        applyIndexFilters(collection, canonicalQuery, plannerParams);
     }
 }
 
@@ -463,9 +543,8 @@ void fillOutPlannerParams(OperationContext* opCtx,
                             plannerParams->indices,
                             plannerParams->columnStoreIndexes);
 
-        // If query supports index filters, filter params.indices by indices in query settings.
-        // Ignore index filters when it is possible to use the id-hack.
-        applyIndexFilters(collection, *canonicalQuery, plannerParams);
+        // If query supports index filters or query settings, filter params.indices.
+        applyQuerySettingsOrIndexFilters(collection, *canonicalQuery, plannerParams);
     }
 
     // We will not output collection scans unless there are no indexed solutions. NO_TABLE_SCAN
@@ -1191,13 +1270,13 @@ protected:
         auto multiPlanStage =
             std::make_unique<MultiPlanStage>(_cq->getExpCtxRaw(), _collection, _cq);
 
-        for (size_t ix = 0; ix < solutions.size(); ++ix) {
-            solutions[ix]->indexFilterApplied = _plannerParams.indexFiltersApplied;
+        for (auto&& solution : solutions) {
+            solution->indexFilterApplied = _plannerParams.indexFiltersApplied;
 
-            auto&& nextPlanRoot = buildExecutableTree(*solutions[ix]);
+            auto&& nextPlanRoot = buildExecutableTree(*solution);
 
             // Takes ownership of 'nextPlanRoot'.
-            multiPlanStage->addPlan(std::move(solutions[ix]), std::move(nextPlanRoot), _ws);
+            multiPlanStage->addPlan(std::move(solution), std::move(nextPlanRoot), _ws);
         }
 
         auto result = releaseResult();
@@ -1293,10 +1372,10 @@ protected:
     std::unique_ptr<SlotBasedPrepareExecutionResult> buildMultiPlan(
         std::vector<std::unique_ptr<QuerySolution>> solutions) final {
         auto result = releaseResult();
-        for (size_t ix = 0; ix < solutions.size(); ++ix) {
-            solutions[ix]->indexFilterApplied = _plannerParams.indexFiltersApplied;
+        for (auto&& solution : solutions) {
+            solution->indexFilterApplied = _plannerParams.indexFiltersApplied;
 
-            addSolutionToResult(result.get(), std::move(solutions[ix]));
+            addSolutionToResult(result.get(), std::move(solution));
         }
         return result;
     }
@@ -1398,20 +1477,6 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     return nullptr;
 }
 
-std::unique_ptr<PlanYieldPolicySBE> makeSbeYieldPolicy(
-    OperationContext* opCtx,
-    PlanYieldPolicy::YieldPolicy policy,
-    stdx::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable,
-    NamespaceString nss) {
-    return std::make_unique<PlanYieldPolicySBE>(opCtx,
-                                                policy,
-                                                opCtx->getServiceContext()->getFastClockSource(),
-                                                internalQueryExecYieldIterations.load(),
-                                                Milliseconds{internalQueryExecYieldPeriodMS.load()},
-                                                yieldable,
-                                                std::make_unique<YieldPolicyCallbacksImpl>(nss));
-}
-
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExecutor(
     OperationContext* opCtx,
     const MultipleCollectionAccessor& collections,
@@ -1484,9 +1549,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
         plan_cache_util::updatePlanCache(opCtx, collections, *cq, *solutions[0], *root, data);
     }
 
+    auto remoteCursors = getSearchHelpers(cq->getOpCtx()->getServiceContext())
+                             ->getSearchRemoteCursors(cq->cqPipeline());
+
     // Prepare the SBE tree for execution.
     stage_builder::prepareSlotBasedExecutableTree(
-        opCtx, root.get(), &data, *cq, collections, yieldPolicy.get(), true);
+        opCtx, root.get(), &data, *cq, collections, yieldPolicy.get(), true, remoteCursors.get());
 
     return plan_executor_factory::make(opCtx,
                                        std::move(cq),
@@ -1497,7 +1565,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
                                        std::move(nss),
                                        std::move(yieldPolicy),
                                        planningResult->isRecoveredFromPlanCache(),
-                                       false /* generatedByBonsai */);
+                                       false /* generatedByBonsai */,
+                                       std::move(remoteCursors));
 }  // getSlotBasedExecutor
 
 /**
@@ -1576,16 +1645,15 @@ attemptToGetSlotBasedExecutor(
     // SBE-compatible query using SBE, even if the query uses features that are not on in SBE by
     // default. Either way, try to construct an SBE plan executor.
     if (canUseRegularSbe || sbeFull) {
-        stdx::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable;
-        if (collections.isAcquisition()) {
-            yieldable = PlanYieldPolicy::YieldThroughAcquisitions{};
-        } else {
-            yieldable = &collections.getMainCollection();
-        }
         auto sbeYieldPolicy =
-            makeSbeYieldPolicy(opCtx, yieldPolicy, yieldable, canonicalQuery->nss());
+            PlanYieldPolicySBE::make(opCtx, yieldPolicy, collections, canonicalQuery->nss());
         SlotBasedPrepareExecutionHelper helper{
-            opCtx, collections, canonicalQuery.get(), sbeYieldPolicy.get(), plannerParams.options};
+            opCtx,
+            collections,
+            canonicalQuery.get(),
+            sbeYieldPolicy.get(),
+            plannerParams.options,
+        };
         auto planningResultWithStatus = helper.prepare();
         if (!planningResultWithStatus.isOK()) {
             return planningResultWithStatus.getStatus();
@@ -1627,6 +1695,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     std::function<void(CanonicalQuery*, bool)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     const QueryPlannerParams& plannerParams) {
+    auto& querySettings = canonicalQuery->getQuerySettings();
     auto exec = [&]() {
         invariant(canonicalQuery);
         const auto& mainColl = collections.getMainCollection();
@@ -1653,8 +1722,21 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
             }
         }
 
-        // Use SBE if 'canonicalQuery' is SBE compatible.
-        if (!canonicalQuery->getForceClassicEngine() && canonicalQuery->isSbeCompatible()) {
+        bool shouldAttemptSBE = [&]() {
+            // If the query is not SBE compatible, do not attempt to run it on SBE.
+            if (!canonicalQuery->isSbeCompatible()) {
+                return false;
+            }
+
+            // If query settings engine version is set, use it to determine which engine should be
+            // used.
+            if (auto querySettingsEngineVersion = querySettings.getQueryEngineVersion()) {
+                return *querySettingsEngineVersion == query_settings::QueryEngineVersionEnum::kV2;
+            }
+
+            return !canonicalQuery->getForceClassicEngine();
+        }();
+        if (shouldAttemptSBE) {
             auto statusWithExecutor =
                 attemptToGetSlotBasedExecutor(opCtx,
                                               collections,
@@ -1770,6 +1852,36 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
                            std::move(extractAndAttachPipelineStages),
                            permitYield,
                            QueryPlannerParams{plannerOptions});
+}
+
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSearchMetadataExecutorSBE(
+    OperationContext* opCtx,
+    const MultipleCollectionAccessor& collections,
+    const NamespaceString& nss,
+    const CanonicalQuery& cq,
+    executor::TaskExecutorCursor metadataCursor) {
+    // For metadata executor, we always have only one remote cursor, any id will work.
+    const size_t metadataCursorId = 0;
+    auto remoteCursors = std::make_unique<RemoteCursorMap>();
+    remoteCursors->insert(
+        {metadataCursorId,
+         std::make_unique<executor::TaskExecutorCursor>(std::move(metadataCursor))});
+
+    auto sbeYieldPolicy =
+        PlanYieldPolicySBE::make(opCtx, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, collections, nss);
+    auto root = stage_builder::buildSearchMetadataExecutorSBE(
+        opCtx, cq, metadataCursorId, remoteCursors.get(), sbeYieldPolicy.get());
+    return plan_executor_factory::make(opCtx,
+                                       nullptr /* cq */,
+                                       nullptr /* solution */,
+                                       std::move(root),
+                                       nullptr /* optimizerData */,
+                                       {} /* plannerOptions */,
+                                       cq.nss(),
+                                       std::move(sbeYieldPolicy),
+                                       false /* planIsFromCache */,
+                                       false /* generatedByBonsai */,
+                                       std::move(remoteCursors));
 }
 
 namespace {
@@ -2007,7 +2119,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
             ws.get(),
             std::move(root),
             coll,
-            BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
+            timeseries::BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
             parsedDelete->releaseResidualExpr());
     } else if (batchDelete) {
         root = std::make_unique<BatchedDeleteStage>(expCtxRaw,
@@ -2034,7 +2146,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDele
                                        coll,
                                        policy,
                                        defaultPlannerOptions,
-                                       NamespaceString(),
+                                       NamespaceString::kEmpty,
                                        std::move(querySolution));
 }
 
@@ -2197,7 +2309,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
                 ws.get(),
                 std::move(root),
                 coll,
-                BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
+                timeseries::BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
                 parsedUpdate->releaseResidualExpr(),
                 parsedUpdate->releaseOriginalExpr(),
                 *request);
@@ -2208,7 +2320,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
                 ws.get(),
                 std::move(root),
                 coll,
-                BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
+                timeseries::BucketUnpacker(*collectionPtr->getTimeseriesOptions()),
                 parsedUpdate->releaseResidualExpr(),
                 parsedUpdate->releaseOriginalExpr());
         }
@@ -2233,7 +2345,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpda
                                        coll,
                                        policy,
                                        defaultPlannerOptions,
-                                       NamespaceString(),
+                                       NamespaceString::kEmpty,
                                        std::move(querySolution));
 }
 
@@ -2590,7 +2702,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
                                        coll,
                                        yieldPolicy,
                                        plannerOptions,
-                                       NamespaceString(),
+                                       NamespaceString::kEmpty,
                                        std::move(querySolution));
 }
 
@@ -2831,12 +2943,13 @@ QueryPlannerParams fillOutPlannerParamsForDistinct(OperationContext* opCtx,
     const CanonicalQuery* canonicalQuery = parsedDistinct.getQuery();
     const BSONObj& hint = canonicalQuery->getFindCommandRequest().getHint();
 
-    applyIndexFilters(collection, *canonicalQuery, &plannerParams);
+    applyQuerySettingsOrIndexFilters(collection, *canonicalQuery, &plannerParams);
 
     // If there exists an index filter, we ignore all hints. Else, we only keep the index specified
     // by the hint. Since we cannot have an index with name $natural, that case will clear the
     // plannerParams.indices.
-    if (!plannerParams.indexFiltersApplied && !hint.isEmpty()) {
+    if (!plannerParams.indexFiltersApplied && !plannerParams.querySettingsApplied &&
+        !hint.isEmpty()) {
         std::vector<IndexEntry> temp =
             QueryPlannerIXSelect::findIndexesByHint(hint, plannerParams.indices);
         temp.swap(plannerParams.indices);
@@ -2909,7 +3022,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorForS
                                             coll,
                                             yieldPolicy,
                                             plannerParams.options,
-                                            NamespaceString(),
+                                            NamespaceString::kEmpty,
                                             std::move(soln));
     if (exec.isOK()) {
         LOGV2_DEBUG(20931,
@@ -2962,7 +3075,7 @@ getExecutorDistinctFromIndexSolutions(OperationContext* opCtx,
                                                     coll,
                                                     yieldPolicy,
                                                     plannerOptions,
-                                                    NamespaceString(),
+                                                    NamespaceString::kEmpty,
                                                     std::move(currentSolution));
             if (exec.isOK()) {
                 LOGV2_DEBUG(

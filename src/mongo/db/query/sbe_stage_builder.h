@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <functional>
 #include <iterator>
@@ -80,6 +79,23 @@ class PlanStageReqs;
 class PlanStageSlots;
 
 struct PlanStageData;
+
+/**
+ * Returns a vector of the slot IDs corresponding to 'reqs', ordered by slot name. This function
+ * is intended for use in situations where a branch or union is being constructed and the contents
+ * of multiple PlanStageSlots objects need to be merged together.
+ *
+ * Note that a given slot ID may appear more than once in the SlotVector returned. This is
+ * the intended behavior.
+ */
+sbe::value::SlotVector getSlotsOrderedByName(const PlanStageReqs& reqs,
+                                             const PlanStageSlots& outputs);
+
+/**
+ * Returns a vector of the unique slot IDs needed by 'reqs', ordered by slot ID. This function is
+ * intended for use in situations where a join or sort or something else is being constructed and
+ * a PlanStageSlot's contents need to be "forwarded" through a PlanStage.
+ */
 sbe::value::SlotVector getSlotsToForward(const PlanStageReqs& reqs,
                                          const PlanStageSlots& outputs,
                                          const sbe::value::SlotVector& exclude = sbe::makeSV());
@@ -98,7 +114,15 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
                                     const CanonicalQuery& cq,
                                     const MultipleCollectionAccessor& collections,
                                     PlanYieldPolicySBE* yieldPolicy,
-                                    bool preparingFromCache);
+                                    bool preparingFromCache,
+                                    RemoteCursorMap* remoteCursors = nullptr);
+
+std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData>
+buildSearchMetadataExecutorSBE(OperationContext* opCtx,
+                               const CanonicalQuery& cq,
+                               size_t remoteCursorId,
+                               RemoteCursorMap* remoteCursors,
+                               PlanYieldPolicySBE* yieldPolicy);
 
 /**
  * Associate a slot with a signature representing all the possible types that the value stored at
@@ -130,11 +154,14 @@ public:
     //    Typically, this is requested by stages that wish to avoid generating duplicate
     //    expressions for path traversal (for example, $group stages which reference the same
     //    field path across multiple accumulators).
+    // 5) kFilterCellField slots represent the value obtained from evaluating a dotted path on top
+    //    of a timeseries bucket, expanding arrays as they are encountered during the traversal.
     enum class Type {
         kMeta,
         kField,
         kSortKey,
         kPathExpr,
+        kFilterCellField,
     };
 
     using Name = std::pair<Type, StringData>;
@@ -144,6 +171,7 @@ public:
     static constexpr auto kField = Type::kField;
     static constexpr auto kSortKey = Type::kSortKey;
     static constexpr auto kPathExpr = Type::kPathExpr;
+    static constexpr auto kFilterCellField = Type::kFilterCellField;
 
     static constexpr Name kResult = {kMeta, "result"_sd};
     static constexpr Name kRecordId = {kMeta, "recordId"_sd};
@@ -155,7 +183,8 @@ public:
     static constexpr Name kMetadataSearchScore = {kMeta, "metadataSearchScore"_sd};
     static constexpr Name kMetadataSearchHighlights = {kMeta, "metadataSearchHighlights"_sd};
     static constexpr Name kMetadataSearchDetails = {kMeta, "metadataSearchDetails"_sd};
-    static constexpr Name kMetadataSortValues = {kMeta, "metadataSortValues"_sd};
+    static constexpr Name kMetadataSearchSortValues = {kMeta, "metadataSearchSortValues"_sd};
+    static constexpr Name kMetadataSearchSequenceToken = {kMeta, "metadataSearchSequenceToken"_sd};
 
     PlanStageSlots() = default;
 
@@ -226,6 +255,7 @@ public:
     inline void forEachSlot(const PlanStageReqs& reqs,
                             const std::function<void(const TypedSlot&, const Name&)>& fn) const;
     inline void forEachSlot(const std::function<void(const TypedSlot&)>& fn) const;
+    inline void forEachSlot(const std::function<void(const Name&, const TypedSlot&)>& fn) const;
     inline void clearNonRequiredSlots(const PlanStageReqs& reqs);
 
     struct NameHasher {
@@ -445,6 +475,13 @@ void PlanStageSlots::forEachSlot(const std::function<void(const TypedSlot&)>& fn
     }
 }
 
+void PlanStageSlots::forEachSlot(
+    const std::function<void(const Name&, const TypedSlot&)>& fn) const {
+    for (const auto& entry : _slots) {
+        fn(entry.first, entry.second);
+    }
+}
+
 void PlanStageSlots::clearNonRequiredSlots(const PlanStageReqs& reqs) {
     auto it = _slots.begin();
     while (it != _slots.end()) {
@@ -477,7 +514,11 @@ public:
     static constexpr auto kMetadataSearchScore = PlanStageSlots::kMetadataSearchScore;
     static constexpr auto kMetadataSearchHighlights = PlanStageSlots::kMetadataSearchHighlights;
     static constexpr auto kMetadataSearchDetails = PlanStageSlots::kMetadataSearchDetails;
-    static constexpr auto kMetadataSortValues = PlanStageSlots::kMetadataSortValues;
+    static constexpr auto kMetadataSearchSortValues = PlanStageSlots::kMetadataSearchSortValues;
+    static constexpr auto kMetadataSearchSequenceToken =
+        PlanStageSlots::kMetadataSearchSequenceToken;
+
+    static constexpr auto kNothingEnvSlotName = "nothing"_sd;
 
     SlotBasedStageBuilder(OperationContext* opCtx,
                           const MultipleCollectionAccessor& collections,
@@ -542,6 +583,9 @@ private:
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildMatch(
+        const QuerySolutionNode* root, const PlanStageReqs& reqs);
+
+    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildReplaceRoot(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildProjectionSimple(

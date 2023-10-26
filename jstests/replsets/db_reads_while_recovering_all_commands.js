@@ -128,6 +128,7 @@ const allCommands = {
     _shardsvrSetUserWriteBlockMode: {skip: isPrimaryOnly},
     _shardsvrUnregisterIndex: {skip: isPrimaryOnly},
     _shardsvrValidateShardKeyCandidate: {skip: isPrimaryOnly},
+    _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
     _shardsvrCollMod: {skip: isPrimaryOnly},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
     _shardsvrParticipantBlock: {skip: isAnInternalCommand},
@@ -439,6 +440,7 @@ const allCommands = {
     voteCommitImportCollection: {skip: isNotAUserDataRead},
     voteCommitIndexBuild: {skip: isNotAUserDataRead},
     waitForFailPoint: {skip: isNotAUserDataRead},
+    getShardingReady: {skip: isNotAUserDataRead},
     whatsmysni: {skip: isNotAUserDataRead},
     whatsmyuri: {skip: isNotAUserDataRead}
 };

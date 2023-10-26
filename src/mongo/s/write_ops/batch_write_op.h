@@ -93,12 +93,6 @@ struct ShardWCError {
 
 using TargetedBatchMap = std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>;
 
-enum class WriteType {
-    Ordinary,
-    WithoutShardKeyOrId,
-    TimeseriesRetryableUpdate,
-};
-
 /**
  * The BatchWriteOp class manages the lifecycle of a batched write received by mongos.  Each
  * item in a batch is tracked via a WriteOp, and the function of the BatchWriteOp is to
@@ -191,13 +185,6 @@ public:
     void abortBatch(const write_ops::WriteError& error);
 
     /**
-     * Disposes of all tracked targeted batches when an error is encountered during a transaction.
-     * This is safe because any partially written data on shards will be rolled back if mongos
-     * decides to abort.
-     */
-    void forgetTargetedBatchesOnTransactionAbortingError();
-
-    /**
      * Returns false if the batch write op needs more processing.
      */
     bool isFinished();
@@ -215,6 +202,11 @@ public:
 
     boost::optional<int> getNShardsOwningChunks();
 
+    /**
+     * Returns the WriteOp with index referencing the write item in the batch.
+     */
+    WriteOp& getWriteOp(int index);
+
 private:
     /**
      * Maintains the batch execution statistics when a response is received.
@@ -231,10 +223,6 @@ private:
 
     // Array of ops being processed from the client request
     std::vector<WriteOp> _writeOps;
-
-    // Current outstanding batch op write requests
-    // Not owned here but tracked for reporting
-    std::set<const TargetedWriteBatch*> _targeted;
 
     // Write concern responses from all write batches so far
     std::vector<ShardWCError> _wcErrors;

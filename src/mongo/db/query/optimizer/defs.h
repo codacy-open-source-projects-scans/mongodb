@@ -133,7 +133,7 @@ QUERY_UTIL_NAMED_ENUM_DEFINE(DistributionType, DISTRIBUTIONTYPE_NAMES);
 struct FieldProjectionMap {
     boost::optional<ProjectionName> _ridProjection;
     boost::optional<ProjectionName> _rootProjection;
-    opt::unordered_map<FieldNameType, ProjectionName, FieldNameType::Hasher> _fieldProjections;
+    std::map<FieldNameType, ProjectionName> _fieldProjections;
 
     bool operator==(const FieldProjectionMap& other) const;
 };
@@ -341,6 +341,10 @@ struct QueryHints {
     // index. The minimum bound is only used for testing and in production should remain set to 1.
     size_t _minIndexEqPrefixes = 1;
     size_t _maxIndexEqPrefixes = 1;
+
+    // Rather than sampling a fully random set of documents, sample N documents (5 by default)
+    // randomly and scan sequentially from each of them for the rest.
+    int32_t _numSamplingChunks = 5;
 };
 
 }  // namespace mongo::optimizer

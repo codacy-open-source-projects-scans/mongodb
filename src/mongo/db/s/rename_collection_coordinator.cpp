@@ -52,6 +52,7 @@
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
+#include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
@@ -96,8 +97,10 @@
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
+#include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/s/router_role.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -112,16 +115,6 @@
 
 namespace mongo {
 namespace {
-
-boost::optional<CollectionType> getCollectionFromConfigServer(OperationContext* opCtx,
-                                                              const NamespaceString& nss) {
-    try {
-        return Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss);
-    } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-        // The collection is untracked or doesn't exist
-        return boost::none;
-    }
-}
 
 // TODO (SERVER-80704): Get rid of isCollectionSharded function once targetIsSharded field is
 // deprecated.
@@ -200,7 +193,8 @@ std::vector<ShardId> getLatestCollectionPlacementInfoFor(OperationContext* opCtx
                                                          const UUID& uuid) {
     // Use the content of config.chunks to obtain the placement of the collection being renamed.
     // The request is equivalent to 'configDb.chunks.distinct("shard", {uuid:collectionUuid})'.
-    auto query = BSON(NamespacePlacementType::kNssFieldName << NamespaceStringUtil::serialize(nss));
+    auto query = BSON(NamespacePlacementType::kNssFieldName
+                      << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
 
     auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
@@ -241,8 +235,9 @@ SemiFuture<BatchedCommandResponse> deleteTrackedCollectionStatement(
 
     if (uuid) {
         const auto deleteCollectionQuery =
-            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)
-                                               << CollectionType::kUuidFieldName << *uuid);
+            BSON(CollectionType::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+                 << CollectionType::kUuidFieldName << *uuid);
 
         write_ops::DeleteCommandRequest deleteOp(CollectionType::ConfigNS);
         deleteOp.setDeletes({[&]() {
@@ -274,7 +269,8 @@ SemiFuture<BatchedCommandResponse> renameTrackedCollectionStatement(
     }
 
     // Implemented as an upsert to be idempotent
-    auto query = BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(newNss));
+    auto query = BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                          newNss, SerializationContext::stateDefault()));
     write_ops::UpdateCommandRequest updateOp(CollectionType::ConfigNS);
     updateOp.setUpdates({[&] {
         write_ops::UpdateOpEntry entry;
@@ -351,8 +347,10 @@ SemiFuture<BatchedCommandResponse> updateZonesStatement(const txn_api::Transacti
                                                         const NamespaceString& oldNss,
                                                         const NamespaceString& newNss) {
 
-    const auto query = BSON(TagsType::ns(NamespaceStringUtil::serialize(oldNss)));
-    const auto update = BSON("$set" << BSON(TagsType::ns(NamespaceStringUtil::serialize(newNss))));
+    const auto query = BSON(
+        TagsType::ns(NamespaceStringUtil::serialize(oldNss, SerializationContext::stateDefault())));
+    const auto update = BSON("$set" << BSON(TagsType::ns(NamespaceStringUtil::serialize(
+                                 newNss, SerializationContext::stateDefault()))));
 
     BatchedCommandRequest request([&] {
         write_ops::UpdateCommandRequest updateOp(TagsType::ConfigNS);
@@ -372,7 +370,8 @@ SemiFuture<BatchedCommandResponse> updateZonesStatement(const txn_api::Transacti
 SemiFuture<BatchedCommandResponse> deleteZonesStatement(const txn_api::TransactionClient& txnClient,
                                                         const NamespaceString& nss) {
 
-    const auto query = BSON(TagsType::ns(NamespaceStringUtil::serialize(nss)));
+    const auto query = BSON(
+        TagsType::ns(NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())));
     const auto hint = BSON(TagsType::ns() << 1 << TagsType::min() << 1);
 
     BatchedCommandRequest request([&] {
@@ -534,9 +533,8 @@ void renameCollectionMetadataInTransaction(OperationContext* opCtx,
         ShardingLogging::get(opCtx)->logChange(
             opCtx,
             str::stream() << logMsg << ": dropped target collection and renamed source collection",
-            NamespaceStringUtil::deserialize(boost::none,
-                                             "renameCollection.metadata",
-                                             SerializationContext::stateCommandRequest()),
+            NamespaceStringUtil::deserialize(
+                boost::none, "renameCollection.metadata", SerializationContext::stateDefault()),
             BSON("newCollMetadata" << optFromCollType->toBSON()),
             ShardingCatalogClient::kMajorityWriteConcern,
             Grid::get(opCtx)->shardRegistry()->getConfigShard(),
@@ -588,14 +586,49 @@ void renameCollectionMetadataInTransaction(OperationContext* opCtx,
         ShardingLogging::get(opCtx)->logChange(
             opCtx,
             str::stream() << logMsg << " : dropped target collection.",
-            NamespaceStringUtil::deserialize(boost::none,
-                                             "renameCollection.metadata",
-                                             SerializationContext::stateCommandRequest()),
+            NamespaceStringUtil::deserialize(
+                boost::none, "renameCollection.metadata", SerializationContext::stateDefault()),
             BSONObj(),
             ShardingCatalogClient::kMajorityWriteConcern,
             Grid::get(opCtx)->shardRegistry()->getConfigShard(),
             Grid::get(opCtx)->catalogClient());
     }
+}
+
+void checkExpectedTargetCollectionOptionsMatch(OperationContext* opCtx,
+                                               const NamespaceString targetNss,
+                                               const BSONObj& expectedOptions) {
+    const auto collectionOptions = [&]() {
+        // Collection options can be read from the local shard even if it doesn't own any chunks,
+        // because the dbPrimary shard is kept consistent with the data-owning chunks.
+        AutoGetCollection coll(opCtx, targetNss, MODE_IS);
+        return coll ? coll->getCollectionOptions().toBSON() : BSONObj();
+    }();
+
+    checkTargetCollectionOptionsMatch(targetNss, expectedOptions, collectionOptions);
+}
+
+void checkExpectedTargetIndexesMatch(OperationContext* opCtx,
+                                     const NamespaceString targetNss,
+                                     const std::vector<BSONObj>& expectedIndexes) {
+    sharding::router::CollectionRouter router(opCtx->getServiceContext(), targetNss);
+    const auto currentIndexes =
+        router.route(opCtx,
+                     "checking indexes prerequisites within rename collection coordinator",
+                     [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
+                         const auto response =
+                             loadIndexesFromAuthoritativeShard(opCtx, targetNss, cri);
+                         if (response.getStatus() == ErrorCodes::NamespaceNotFound) {
+                             // Collection does not exist. Consider as no index exist.
+                             return std::vector<BSONObj>();
+                         }
+                         return uassertStatusOK(response).docs;
+                     });
+
+    checkTargetCollectionIndexesMatch(
+        targetNss,
+        std::list<BSONObj>{expectedIndexes.begin(), expectedIndexes.end()},
+        std::list<BSONObj>{currentIndexes.begin(), currentIndexes.end()});
 }
 }  // namespace
 
@@ -631,6 +664,23 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) noexcept {
     return ExecutorFuture<void>(**executor)
+        .then([this, executor = executor, anchor = shared_from_this()]() {
+            // Check expected target collection indexes, if necessary.
+            // Done only before having advanced into or past the kCheckPreconditions phase. It
+            // cannot be done within the kCheckPreconditions phase because that phase takes the
+            // critical section on the destination namespace, which makes it impossible to send
+            // a versioned command to the participant shards to get the current indexes.
+            if (_doc.getPhase() < Phase::kCheckPreconditions &&
+                _doc.getRenameCollectionRequest().getExpectedIndexes()) {
+                auto opCtxHolder = cc().makeOperationContext();
+                auto* opCtx = opCtxHolder.get();
+                getForwardableOpMetadata().setOn(opCtx);
+                checkExpectedTargetIndexesMatch(
+                    opCtx,
+                    _request.getTo(),
+                    *_doc.getRenameCollectionRequest().getExpectedIndexes());
+            }
+        })
         .then(_buildPhaseHandler(
             Phase::kCheckPreconditions,
             [this, executor = executor, anchor = shared_from_this()] {
@@ -681,13 +731,15 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     }
 
                     // Make sure the source collection exists
-                    const auto optSourceCollType = getCollectionFromConfigServer(opCtx, fromNss);
+                    const auto optSourceCollType =
+                        sharding_ddl_util::getCollectionFromConfigServer(opCtx, fromNss);
                     const auto sourceCollUuid =
                         getCollectionUUID(opCtx, fromNss, optSourceCollType);
                     _doc.setSourceUUID(sourceCollUuid);
                     _doc.setOptTrackedCollInfo(optSourceCollType);
 
-                    const auto optTargetCollType = getCollectionFromConfigServer(opCtx, toNss);
+                    const auto optTargetCollType =
+                        sharding_ddl_util::getCollectionFromConfigServer(opCtx, toNss);
                     _doc.setTargetUUID(getCollectionUUID(
                         opCtx, toNss, optTargetCollType, /*throwNotFound*/ false));
 
@@ -744,6 +796,23 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     sharding_ddl_util::checkCatalogConsistencyAcrossShardsForRename(
                         opCtx, fromNss, toNss, _doc.getDropTarget(), executor);
 
+                    // Check that the target collection is not sharded, if requested.
+                    if (_doc.getRenameCollectionRequest().getTargetMustNotBeSharded().get_value_or(
+                            false)) {
+                        uassert(ErrorCodes::IllegalOperation,
+                                str::stream() << "cannot rename to sharded collection '"
+                                              << toNss.toStringForErrorMsg() << "'",
+                                !_doc.getTargetIsSharded());
+                    }
+
+                    // Check expected target collection options, if necessary.
+                    if (_doc.getRenameCollectionRequest().getExpectedCollectionOptions()) {
+                        checkExpectedTargetCollectionOptionsMatch(
+                            opCtx,
+                            toNss,
+                            *_doc.getRenameCollectionRequest().getExpectedCollectionOptions());
+                    }
+
                     {
                         AutoGetCollection coll{
                             opCtx,
@@ -792,8 +861,11 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     opCtx,
                     "renameCollection.start",
                     fromNss,
-                    BSON("source" << NamespaceStringUtil::serialize(fromNss) << "destination"
-                                  << NamespaceStringUtil::serialize(toNss)),
+                    BSON("source" << NamespaceStringUtil::serialize(
+                                         fromNss, SerializationContext::stateDefault())
+                                  << "destination"
+                                  << NamespaceStringUtil::serialize(
+                                         toNss, SerializationContext::stateDefault())),
                     ShardingCatalogClient::kMajorityWriteConcern);
 
                 // Block migrations on involved collections.
@@ -876,10 +948,12 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 // collections, if they exist.
                 sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(
                     opCtx,
-                    BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName
-                         << BSON("$in" << BSON_ARRAY(
-                                     NamespaceStringUtil::serialize(nss())
-                                     << NamespaceStringUtil::serialize(_request.getTo())))));
+                    BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName << BSON(
+                             "$in" << BSON_ARRAY(
+                                 NamespaceStringUtil::serialize(
+                                     nss(), SerializationContext::stateDefault())
+                                 << NamespaceStringUtil::serialize(
+                                        _request.getTo(), SerializationContext::stateDefault())))));
 
                 // For an untracked collection the CSRS server can not verify the targetUUID.
                 // Use the session ID + txnNumber to ensure no stale requests get through.
@@ -977,8 +1051,11 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                 opCtx,
                 "renameCollection.end",
                 nss(),
-                BSON("source" << NamespaceStringUtil::serialize(nss()) << "destination"
-                              << NamespaceStringUtil::serialize(_request.getTo())),
+                BSON("source" << NamespaceStringUtil::serialize(
+                                     nss(), SerializationContext::stateDefault())
+                              << "destination"
+                              << NamespaceStringUtil::serialize(
+                                     _request.getTo(), SerializationContext::stateDefault())),
                 ShardingCatalogClient::kMajorityWriteConcern);
             LOGV2(5460504, "Collection renamed", logAttrs(nss()));
         }));

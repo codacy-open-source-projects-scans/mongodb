@@ -60,13 +60,6 @@ public:
                     serverGlobalParams.featureCompatibility));
 
             const auto& nss = ns();
-            const auto& catalogCache = Grid::get(opCtx)->catalogCache();
-            const auto cri = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
-
-            uassert(ErrorCodes::NamespaceNotSharded,
-                    "Namespace must be sharded to perform an unshardCollection command",
-                    cri.cm.isSharded());
-
             ShardsvrReshardCollection shardsvrReshardCollection(nss);
             shardsvrReshardCollection.setDbName(request().getDbName());
 
@@ -84,6 +77,7 @@ public:
             std::vector<mongo::ShardKeyRange> destinationShard = {toShard};
             reshardCollectionRequest.setShardDistribution(destinationShard);
             reshardCollectionRequest.setForceRedistribution(true);
+            reshardCollectionRequest.setNumInitialChunks(1);
 
             shardsvrReshardCollection.setReshardCollectionRequest(
                 std::move(reshardCollectionRequest));
@@ -91,9 +85,10 @@ public:
             LOGV2(8018400,
                   "Running a reshard collection command for the unshard collection request.",
                   "dbName"_attr = request().getDbName(),
-                  "toShard"_attr = request().getToShard());
+                  "toShard"_attr = toShard);
 
-            const auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss.dbName()));
+            const auto dbInfo =
+                uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
 
             auto cmdResponse = executeCommandAgainstDatabasePrimary(
                 opCtx,
@@ -140,7 +135,8 @@ public:
 };
 
 MONGO_REGISTER_COMMAND(ClusterUnshardCollectionCmd)
-    .requiresFeatureFlag(&resharding::gFeatureFlagUnshardCollection);
+    .requiresFeatureFlag(&resharding::gFeatureFlagUnshardCollection)
+    .forRouter();
 
 }  // namespace
 }  // namespace mongo

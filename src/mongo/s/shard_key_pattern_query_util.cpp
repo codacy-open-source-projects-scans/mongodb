@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -469,6 +468,10 @@ void getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
         auto defaultCollator = cm.getDefaultCollator();
         findCommand->setCollation(defaultCollator->getSpec().toBSON());
         expCtx->setCollator(defaultCollator->clone());
+    }
+
+    if (!cm.hasRoutingTable() && collation.isEmpty()) {
+        expCtx->setIgnoreCollator();
     }
 
     auto cq = uassertStatusOK(

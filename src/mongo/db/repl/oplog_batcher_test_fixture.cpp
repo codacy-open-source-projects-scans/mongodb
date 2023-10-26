@@ -28,7 +28,6 @@
  */
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <mutex>
 
@@ -254,7 +253,7 @@ OplogEntry makeNoopOplogEntry(int t, const StringData& msg) {
     BSONObj oField = BSON("msg" << msg << "count" << t);
     return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),  // optime
                               OpTypeEnum::kNoop,           // op type
-                              NamespaceString(),           // namespace
+                              NamespaceString::kEmpty,     // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert

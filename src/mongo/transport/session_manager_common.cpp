@@ -109,54 +109,7 @@ std::size_t getSupportedMax() {
     return supportedMax;
 }
 
-void _setupRestrictionEnvironment(std::shared_ptr<Session>& session) {
-    const auto& remoteAddr = session->remoteAddr();
-    const auto& localAddr = session->localAddr();
-    invariant(remoteAddr.isValid() && localAddr.isValid());
-    auto restrictionEnvironment = std::make_unique<RestrictionEnvironment>(remoteAddr, localAddr);
-    RestrictionEnvironment::set(session, std::move(restrictionEnvironment));
-}
-
 }  // namespace
-
-bool shouldOverrideMaxConns(const std::shared_ptr<transport::Session>& session,
-                            const std::vector<stdx::variant<CIDR, std::string>>& exemptions) {
-    if (exemptions.empty()) {
-        return false;
-    }
-
-    boost::optional<CIDR> remoteCIDR;
-    if (const auto& ra = session->remoteAddr(); ra.isValid() && ra.isIP()) {
-        remoteCIDR = uassertStatusOK(CIDR::parse(ra.getAddr()));
-    }
-
-#ifndef _WIN32
-    boost::optional<std::string> localPath;
-    if (const auto& la = session->localAddr(); la.isValid() && !la.isIP()) {
-        localPath = la.getAddr();
-    }
-#endif
-
-    return std::any_of(exemptions.begin(), exemptions.end(), [&](const auto& exemption) {
-        return stdx::visit(
-            [&](auto&& ex) {
-                using Alt = std::decay_t<decltype(ex)>;
-                if constexpr (std::is_same_v<Alt, CIDR>) {
-                    return remoteCIDR && ex.contains(*remoteCIDR);
-                }
-#ifndef _WIN32
-                // Otherwise the exemption is a UNIX path and we should check the local path
-                // (the remoteAddr == "anonymous unix socket") against the exemption string.
-                // On Windows we don't check this at all and only CIDR ranges are supported.
-                if constexpr (std::is_same_v<Alt, std::string>) {
-                    return localPath && *localPath == ex;
-                }
-#endif
-                return false;
-            },
-            exemption);
-    });
-}
 
 /**
  * Container implementation for currently active sessions.
@@ -251,16 +204,31 @@ public:
 };
 
 SessionManagerCommon::SessionManagerCommon(ServiceContext* svcCtx)
+    : SessionManagerCommon(svcCtx, std::vector<std::unique_ptr<ClientTransportObserver>>()) {}
+
+// Helper for single observer constructor.
+// std::initializer_list uses copy semantics, so we can't just call the vector version with:
+// `{std::make_unique<MyObserver>()}`.
+// Instead, construct with an empty array then push our singular one in.
+SessionManagerCommon::SessionManagerCommon(ServiceContext* svcCtx,
+                                           std::unique_ptr<ClientTransportObserver> observer)
+    : SessionManagerCommon(svcCtx) {
+    _observers.push_back(std::move(observer));
+}
+
+SessionManagerCommon::SessionManagerCommon(
+    ServiceContext* svcCtx, std::vector<std::unique_ptr<ClientTransportObserver>> observers)
     : _svcCtx(svcCtx),
       _maxOpenSessions(getSupportedMax()),
-      _sessions(std::make_unique<Sessions>()) {}
+      _sessions(std::make_unique<Sessions>()),
+      _observers(std::move(observers)) {}
 
 SessionManagerCommon::~SessionManagerCommon() = default;
 
 void SessionManagerCommon::configureServiceExecutorContext(Client* client,
                                                            bool isPrivilegedSession) const {
     auto seCtx = std::make_unique<ServiceExecutorContext>();
-    seCtx->setUseDedicatedThread(gInitialUseDedicatedThread);
+    seCtx->setThreadModel(gInitialUseDedicatedThread ? seCtx->kSynchronous : seCtx->kFixed);
     seCtx->setCanUseReserved(isPrivilegedSession);
     stdx::lock_guard lk(*client);
     ServiceExecutorContext::set(client, std::move(seCtx));
@@ -269,13 +237,12 @@ void SessionManagerCommon::configureServiceExecutorContext(Client* client,
 void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
     invariant(session);
     IngressHandshakeMetrics::get(*session).onSessionStarted(_svcCtx->getTickSource());
-    _setupRestrictionEnvironment(session);
 
     const bool isPrivilegedSession =
-        shouldOverrideMaxConns(session, serverGlobalParams.maxConnsOverride);
+        session->shouldOverrideMaxConns(serverGlobalParams.maxConnsOverride);
     const bool verbose = !quiet();
 
-    auto uniqueClient = _svcCtx->makeClient("conn{}"_format(session->id()), session);
+    auto uniqueClient = _svcCtx->getService()->makeClient("conn{}"_format(session->id()), session);
     auto client = uniqueClient.get();
 
     std::shared_ptr<transport::SessionWorkflow> workflow;
@@ -306,7 +273,10 @@ void SessionManagerCommon::startSession(std::shared_ptr<Session> session) {
         }
     }
 
-    onClientConnect(client);
+    for (auto&& observer : _observers) {
+        observer->onClientConnect(client);
+    }
+
     // TODO SERVER-77921: use the return value of `Session::isFromRouterPort()` to choose an
     // instance of `ServiceEntryPoint`.
     workflow->start();
@@ -318,24 +288,6 @@ void SessionManagerCommon::endAllSessions(Client::TagMask tags) {
 
 void SessionManagerCommon::endAllSessionsNoTagMask() {
     _sessions->sync().forEach([&](auto&& workflow) { workflow.terminate(); });
-}
-
-Status SessionManagerCommon::start() {
-    if (auto status = ServiceExecutorSynchronous::get(_svcCtx)->start(); !status.isOK()) {
-        return status;
-    }
-
-    if (auto exec = ServiceExecutorReserved::get(_svcCtx)) {
-        if (auto status = exec->start(); !status.isOK()) {
-            return status;
-        }
-    }
-
-    if (auto status = ServiceExecutorFixed::get(_svcCtx)->start(); !status.isOK()) {
-        return status;
-    }
-
-    return Status::OK();
 }
 
 bool SessionManagerCommon::shutdown(Milliseconds timeout) {
@@ -380,8 +332,6 @@ bool SessionManagerCommon::shutdownAndWait(Milliseconds timeout) {
         }
     }
 
-    transport::ServiceExecutor::shutdownAll(_svcCtx, deadline);
-
     return drainedAll;
 }
 
@@ -423,13 +373,21 @@ void SessionManagerCommon::appendStats(BSONObjBuilder* bob) const {
         BSONObjBuilder section(bob->subobjStart("adminConnections"));
         adminExec->appendStats(&section);
     }
+
+    for (auto&& observer : _observers) {
+        observer->appendTransportServerStats(bob);
+    }
 }
 
 std::size_t SessionManagerCommon::numOpenSessions() const {
     return _sessions->size();
 }
 
-void SessionManagerCommon::onClientDisconnect(Client* client) {
+void SessionManagerCommon::endSessionByClient(Client* client) {
+    for (auto&& observer : _observers) {
+        observer->onClientDisconnect(client);
+    }
+
     {
         stdx::lock_guard lk(*client);
         ServiceExecutorContext::reset(client);

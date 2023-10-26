@@ -31,7 +31,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <fmt/format.h>
@@ -154,6 +153,7 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
             return existingHistory->optRt->makeUpdated(collectionAndChunks.timeseriesFields,
                                                        collectionAndChunks.reshardingFields,
                                                        collectionAndChunks.allowMigrations,
+                                                       collectionAndChunks.unsplittable,
                                                        collectionAndChunks.changedChunks);
         }
 
@@ -817,8 +817,6 @@ void CatalogCache::invalidateEntriesThatReferenceShard(const ShardId& shardId) {
 
             LOGV2_DEBUG(22647,
                         3,
-                        "Invalidating cached collection {namespace} that has data "
-                        "on shard {shardId}",
                         "Invalidating cached collection",
                         logAttrs(rt.nss()),
                         "shardId"_attr = shardId);
@@ -826,7 +824,6 @@ void CatalogCache::invalidateEntriesThatReferenceShard(const ShardId& shardId) {
         });
 
     LOGV2(22648,
-          "Finished invalidating databases and collections with data on shard: {shardId}",
           "Finished invalidating databases and collections that reference specific shard",
           "shardId"_attr = shardId);
 }
@@ -1065,10 +1062,6 @@ CatalogCache::CollectionCache::LookupResult CatalogCache::CollectionCache::_look
                                       "duration"_attr = Milliseconds(t.millis()));
 
             return LookupResult(OptionalRoutingTableHistory(), std::move(newComparableVersion));
-        } else if (ex.code() == ErrorCodes::InvalidOptions) {
-            LOGV2_WARNING(5738000,
-                          "This error could be due to the fact that the config server is running "
-                          "an older version");
         }
 
         LOGV2_FOR_CATALOG_REFRESH(4619903,

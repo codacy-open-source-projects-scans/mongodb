@@ -31,7 +31,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -67,17 +66,28 @@ MultikeynessTrie createTrie(const IndexDefinitions& indexDefs) {
     return multikeynessTrie;
 }
 
+static IndexedFieldPaths createIndexedFieldPaths(IndexDefinitions indexDefs) {
+    IndexedFieldPaths indexedFieldPaths;
+    for (const auto& [indexDefName, indexDef] : indexDefs) {
+        for (const auto& component : indexDef.getCollationSpec()) {
+            indexedFieldPaths.add(component._path);
+        }
+    }
+    return indexedFieldPaths;
+}
+
 ScanDefinition createScanDef(ScanDefOptions options, IndexDefinitions indexDefs) {
 
     MultikeynessTrie multikeynessTrie = createTrie(indexDefs);
-    return createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
-                         UUID::gen(),
-                         std::move(options),
-                         std::move(indexDefs),
-                         std::move(multikeynessTrie),
-                         ConstEval::constFold,
-                         {DistributionType::Centralized},
-                         true);
+    return createScanDef(
+        DatabaseNameUtil::deserialize(boost::none, "test", SerializationContext::stateDefault()),
+        UUID::gen(),
+        std::move(options),
+        std::move(indexDefs),
+        std::move(multikeynessTrie),
+        ConstEval::constFold,
+        {DistributionType::Centralized},
+        true);
 }
 
 ScanDefinition createScanDef(ScanDefOptions options,
@@ -90,17 +100,18 @@ ScanDefinition createScanDef(ScanDefOptions options,
 
     MultikeynessTrie multikeynessTrie = createTrie(indexDefs);
 
-    return createScanDef(DatabaseNameUtil::deserialize(boost::none, "test"),
-                         UUID::gen(),
-                         std::move(options),
-                         std::move(indexDefs),
-                         std::move(multikeynessTrie),
-                         constFold,
-                         std::move(distributionAndPaths),
-                         exists,
-                         std::move(ce),
-                         {} /*shardingMetadata*/,
-                         pathToInterval);
+    return createScanDef(
+        DatabaseNameUtil::deserialize(boost::none, "test", SerializationContext::stateDefault()),
+        UUID::gen(),
+        std::move(options),
+        std::move(indexDefs),
+        std::move(multikeynessTrie),
+        constFold,
+        std::move(distributionAndPaths),
+        exists,
+        std::move(ce),
+        {} /*shardingMetadata*/,
+        pathToInterval);
 }
 
 ScanDefinition createScanDef(DatabaseName dbName,
@@ -114,6 +125,8 @@ ScanDefinition createScanDef(DatabaseName dbName,
                              boost::optional<CEType> ce,
                              ShardingMetadata shardingMetadata,
                              const PathToIntervalFn& pathToInterval) {
+
+    IndexedFieldPaths indexedFieldPaths = createIndexedFieldPaths(indexDefs);
 
     // Simplify partial filter requirements using the non-multikey paths.
     for (auto& [indexDefName, indexDef] : indexDefs) {
@@ -140,7 +153,8 @@ ScanDefinition createScanDef(DatabaseName dbName,
             std::move(distributionAndPaths),
             exists,
             std::move(ce),
-            std::move(shardingMetadata)};
+            std::move(shardingMetadata),
+            std::move(indexedFieldPaths)};
 }
 
 }  // namespace mongo::optimizer

@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -88,7 +87,7 @@ TimeseriesModifyStage::TimeseriesModifyStage(ExpressionContext* expCtx,
                                              WorkingSet* ws,
                                              std::unique_ptr<PlanStage> child,
                                              CollectionAcquisition coll,
-                                             BucketUnpacker bucketUnpacker,
+                                             timeseries::BucketUnpacker bucketUnpacker,
                                              std::unique_ptr<MatchExpression> residualPredicate,
                                              std::unique_ptr<MatchExpression> originalPredicate)
     : RequiresWritableCollectionStage(kStageType, expCtx, coll),
@@ -268,7 +267,7 @@ std::vector<BSONObj> TimeseriesModifyStage::_applyUpdate(
             modifiedMeasurements.emplace_back(doc.getObject());
         } else {
             // The document wasn't modified, write it back to the original bucket unchanged.
-            unchangedMeasurements.emplace_back(std::move(measurement));
+            unchangedMeasurements.emplace_back(measurement);
         }
     }
 
@@ -462,7 +461,6 @@ TimeseriesModifyStage::_writeToTimeseriesBuckets(ScopeGuard<F>& bucketFreer,
     if (matchedMeasurements.empty()) {
         return {false, PlanStage::NEED_TIME, boost::none};
     }
-    _specificStats.nMeasurementsMatched += matchedMeasurements.size();
 
     bool isUpdate = _params.isUpdate;
 
@@ -495,7 +493,7 @@ TimeseriesModifyStage::_writeToTimeseriesBuckets(ScopeGuard<F>& bucketFreer,
                 // measurement. If we did not, then we should return the old measurement instead.
                 return boost::optional<BSONObj>(std::move(matchedMeasurements[0]));
             } else {
-                return boost::optional<BSONObj>(std::move(modifiedMeasurements[0]));
+                return boost::optional<BSONObj>(modifiedMeasurements[0]);
             }
         }
         return boost::optional<BSONObj>();
@@ -514,17 +512,22 @@ TimeseriesModifyStage::_writeToTimeseriesBuckets(ScopeGuard<F>& bucketFreer,
         return {true, PlanStage::NEED_TIME, getMeasurementToReturn()};
     }
 
-    handlePlanStageYield(
+    const auto saveRet = handlePlanStageYield(
         expCtx(),
         "TimeseriesModifyStage saveState",
         [&] {
             child()->saveState();
-            return PlanStage::NEED_TIME /* unused */;
+            return PlanStage::NEED_TIME;
         },
         [&] {
             // yieldHandler
-            std::terminate();
+            // We need to retry the bucket, so we should not free the current bucket.
+            bucketFreer.dismiss();
+            _retryBucket(bucketWsmId);
         });
+    if (saveRet != PlanStage::NEED_TIME) {
+        return {false, saveRet, boost::none};
+    }
 
     auto recordId = _ws->get(bucketWsmId)->recordId;
     try {
@@ -684,7 +687,7 @@ void TimeseriesModifyStage::_prepareToReturnMeasurement(WorkingSetID& out, BSONO
     auto member = _ws->get(out);
     // The measurement does not have record id.
     member->recordId = RecordId{};
-    member->doc.value() = Document{std::move(measurement)};
+    member->doc.value() = Document{measurement};
     _ws->transitionToOwnedObj(out);
 }
 
@@ -749,6 +752,7 @@ PlanStage::StageState TimeseriesModifyStage::doWork(WorkingSetID* out) {
 
     auto isWriteSuccessful = false;
     boost::optional<BSONObj> measurementToReturn = boost::none;
+    auto numMatchedMeasurements = matchedMeasurements.size();
     std::tie(isWriteSuccessful, status, measurementToReturn) =
         _writeToTimeseriesBuckets(bucketFreer,
                                   id,
@@ -757,11 +761,14 @@ PlanStage::StageState TimeseriesModifyStage::doWork(WorkingSetID* out) {
                                   bucketFromMigrate);
     if (status != PlanStage::NEED_TIME) {
         *out = WorkingSet::INVALID_ID;
-    } else if (isWriteSuccessful && measurementToReturn) {
-        // If the write was successful and if asked to return the old or new measurement, then
-        // 'measurementToReturn' must have been filled out and we can return it immediately.
-        _prepareToReturnMeasurement(*out, std::move(*measurementToReturn));
-        status = PlanStage::ADVANCED;
+    } else if (isWriteSuccessful) {
+        _specificStats.nMeasurementsMatched += numMatchedMeasurements;
+        if (measurementToReturn) {
+            // If the write was successful and if asked to return the old or new measurement, then
+            // 'measurementToReturn' must have been filled out and we can return it immediately.
+            _prepareToReturnMeasurement(*out, std::move(*measurementToReturn));
+            status = PlanStage::ADVANCED;
+        }
     }
 
     if (status == PlanStage::NEED_TIME && isEOF()) {

@@ -42,7 +42,6 @@
 #include <type_traits>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -151,7 +150,8 @@ PlanCacheKey makeKey(const CanonicalQuery& cq, const std::vector<CoreIndexInfo>&
     plan_cache_detail::encodeIndexability(
         cq.getPrimaryMatchExpression(), indexabilityState, &indexabilityKeyBuilder);
 
-    return {PlanCacheKeyInfo{cq.encodeKey(), indexabilityKeyBuilder.str()}};
+    return {PlanCacheKeyInfo{
+        cq.encodeKey(), indexabilityKeyBuilder.str(), query_settings::QuerySettings()}};
 }
 
 /**
@@ -877,7 +877,7 @@ TEST_F(PlanCacheTest, GetMatchingStatsMatchesAndSerializesCorrectly) {
     ASSERT_EQ(2U, planCache.size());
 
     // Define a serialization function which just serializes the number of works.
-    const auto serializer = [](const PlanCacheEntry& entry) {
+    const auto serializer = [](const auto key, const PlanCacheEntry& entry) {
         ASSERT_TRUE(entry.works);
         return BSON("works" << static_cast<int>(entry.works.value()));
     };
@@ -1290,7 +1290,8 @@ protected:
 };
 
 const std::string mockKey("mock_cache_key");
-const PlanCacheKey CachePlanSelectionTest::ck{PlanCacheKeyInfo{mockKey, ""}};
+const PlanCacheKey CachePlanSelectionTest::ck{
+    PlanCacheKeyInfo{mockKey, "", query_settings::QuerySettings()}};
 
 //
 // Equality

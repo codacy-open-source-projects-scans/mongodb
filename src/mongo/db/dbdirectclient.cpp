@@ -34,7 +34,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
@@ -148,7 +147,7 @@ DbResponse loopbackBuildResponse(OperationContext* const opCtx, Message& toSend)
     toSend.header().setId(nextMessageId());
     toSend.header().setResponseToMsgId(0);
     IgnoreAPIParametersBlock ignoreApiParametersBlock(opCtx);
-    return opCtx->getServiceContext()->getServiceEntryPoint()->handleRequest(opCtx, toSend).get();
+    return opCtx->getService()->getServiceEntryPoint()->handleRequest(opCtx, toSend).get();
 }
 }  // namespace
 

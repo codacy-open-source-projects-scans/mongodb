@@ -192,7 +192,9 @@ public:
                   ::grpc::internal::RpcMethod::BIDI_STREAMING,
                   channel) {}
 
-        ::grpc::Status connect() {
+        ::grpc::Status connect(
+            Milliseconds connectTimeout = CommandServiceTestFixtures::kDefaultConnectTimeout) {
+            _channel->WaitForConnected((Date_t::now() + connectTimeout).toSystemTimePoint());
             ::grpc::ClientContext ctx;
             CommandServiceTestFixtures::addAllClientMetadata(ctx);
             auto stream = unauthenticatedCommandStream(&ctx);
@@ -209,6 +211,14 @@ public:
             return std::shared_ptr<ClientStream>{
                 ::grpc::internal::ClientReaderWriterFactory<WriteMessageType, ReadMessageType>::
                     Create(_channel.get(), _unauthenticatedCommandStreamMethod, context)};
+        }
+
+        void assertConnected() {
+            ASSERT_EQ(connect().error_code(), ::grpc::StatusCode::OK);
+        }
+
+        void assertNotConnected() {
+            ASSERT_EQ(connect(Milliseconds(50)).error_code(), ::grpc::StatusCode::UNAVAILABLE);
         }
 
     private:
@@ -236,6 +246,19 @@ public:
         GRPCClient::Options options;
         options.tlsCAFile = kCAFile;
         options.tlsCertificateKeyFile = kClientCertificateKeyFile;
+        return options;
+    }
+
+    static GRPCTransportLayer::Options makeTLOptions() {
+        GRPCTransportLayer::Options options{};
+        options.bindIpList = {};
+        options.bindPort = kBindPort;
+        options.maxServerThreads = kMaxThreads;
+        options.useUnixDomainSockets = false;
+        options.unixDomainSocketPermissions = DEFAULT_UNIX_PERMS;
+        options.enableEgress = true;
+        options.clientMetadata = makeClientMetadataDocument();
+
         return options;
     }
 
@@ -359,6 +382,13 @@ public:
         return makeStub("localhost:{}"_format(kBindPort), options);
     }
 
+    static Stub makeStubWithCerts(std::string caFile, std::string clientCertFile) {
+        auto stubOptions = CommandServiceTestFixtures::Stub::Options{};
+        stubOptions.tlsCAFile = caFile;
+        stubOptions.tlsCertificateKeyFile = clientCertFile;
+        return makeStub(stubOptions);
+    }
+
     static CommandService::RPCHandler makeEchoHandler() {
         return [](std::shared_ptr<IngressSession> session) {
             auto msg = uassertStatusOK(session->sourceMessage());
@@ -416,7 +446,8 @@ public:
 inline std::shared_ptr<EgressSession> makeEgressSession(
     GRPCTransportLayer& tl,
     const HostAndPort& addr = CommandServiceTestFixtures::defaultServerAddress()) {
-    auto swSession = tl.connect(addr, ConnectSSLMode::kGlobalSSLMode, Milliseconds(5000));
+    auto swSession = tl.connect(
+        addr, ConnectSSLMode::kGlobalSSLMode, CommandServiceTestFixtures::kDefaultConnectTimeout);
     return std::dynamic_pointer_cast<EgressSession>(uassertStatusOK(swSession));
 }
 

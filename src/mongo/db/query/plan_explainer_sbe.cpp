@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonelement.h"
@@ -59,8 +58,8 @@
 #include "mongo/db/query/projection_ast.h"
 #include "mongo/db/query/projection_ast_util.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/record_id_bound.h"
-#include "mongo/db/query/serialization_options.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/unordered_map.h"
@@ -254,7 +253,8 @@ void statsToBSON(const QuerySolutionNode* node,
             auto eln = static_cast<const EqLookupNode*>(node);
 
             bob->append("foreignCollection",
-                        NamespaceStringUtil::serialize(eln->foreignCollection));
+                        NamespaceStringUtil::serialize(eln->foreignCollection,
+                                                       SerializationContext::stateDefault()));
             bob->append("localField", eln->joinFieldLocal.fullPath());
             bob->append("foreignField", eln->joinFieldForeign.fullPath());
             bob->append("asField", eln->joinField.fullPath());
@@ -279,8 +279,7 @@ void statsToBSON(const QuerySolutionNode* node,
                 BSONObjBuilder filtersBob(bob->subobjStart("filtersByPath"));
                 for (const auto& [path, matchExpr] : cisn->filtersByPath) {
                     SerializationOptions opts;
-                    opts.includePath = false;
-                    filtersBob.append(path, matchExpr->serialize(opts));
+                    filtersBob.append(path, matchExpr->serialize(opts, false));
                 }
             }
 
@@ -295,11 +294,16 @@ void statsToBSON(const QuerySolutionNode* node,
             auto utsbn = static_cast<const UnpackTsBucketNode*>(node);
             {
                 const auto behaviorField =
-                    utsbn->bucketSpec.behavior() == BucketSpec::Behavior::kInclude ? "include"
-                                                                                   : "exclude";
+                    utsbn->bucketSpec.behavior() == timeseries::BucketSpec::Behavior::kInclude
+                    ? "include"
+                    : "exclude";
                 BSONArrayBuilder fieldsBab{bob->subarrayStart(behaviorField)};
                 for (const auto& field : utsbn->bucketSpec.fieldSet()) {
                     fieldsBab.append(field);
+                }
+                if (utsbn->bucketSpec.behavior() == timeseries::BucketSpec::Behavior::kInclude &&
+                    utsbn->includeMeta) {
+                    fieldsBab.append(*utsbn->bucketSpec.metaField());
                 }
             }
             {
@@ -311,7 +315,7 @@ void statsToBSON(const QuerySolutionNode* node,
             bob->append("includeMeta", utsbn->includeMeta);
             bob->append("eventFilter",
                         utsbn->eventFilter ? utsbn->eventFilter->serialize() : BSONObj());
-            bob->append("wholebucketFilter",
+            bob->append("wholeBucketFilter",
                         utsbn->wholeBucketFilter ? utsbn->wholeBucketFilter->serialize()
                                                  : BSONObj());
 

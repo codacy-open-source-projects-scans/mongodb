@@ -34,7 +34,6 @@
 #include <bitset>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <deque>
 #include <iterator>
@@ -1064,7 +1063,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> generateIndexScanWith
                                   accessMethod->getSortedDataInterface()->getKeyStringVersion(),
                                   accessMethod->getSortedDataInterface()->getOrdering(),
                                   ixn->direction,
-                                  std::move(ixn->iets),
+                                  ixn->iets,
                                   std::move(parameterizedScanSlots)});
 
     return {std::move(stage), std::move(outputs)};

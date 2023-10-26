@@ -85,6 +85,7 @@ selector:
   - jstests/core/timeseries/timeseries_find_and_modify_update.js
   - jstests/core/timeseries/timeseries_delete_compressed_buckets.js
   - jstests/core/timeseries/timeseries_bucket_limit_count.js
+  - jstests/core/timeseries/timeseries_insert_after_update.js
 
   # These use "columnstore indexes are under development and cannot be used without enabling the feature flag"
   - jstests/core/query/null_query_semantics.js
@@ -148,6 +149,10 @@ selector:
   # TODO (SERVER-77935): Investigate timeout from fcv downgrade in jstests/core/query/push/push2.js.
   - jstests/core/query/push/push2.js
   - jstests/core/write/update/update_addToSet2.js
+
+  # TODO SERVER-80490: The test below requires a precise lock count that can get modified by concurrent
+  # setFCV operations. The exclusion can be removed once the linked ticket is fixed.
+  - jstests/core/top.js
 
   exclude_with_any_tags:
   - assumes_standalone_mongod

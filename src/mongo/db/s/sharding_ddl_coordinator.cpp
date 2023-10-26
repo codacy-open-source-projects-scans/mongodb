@@ -39,7 +39,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -256,10 +255,18 @@ ExecutorFuture<void> ShardingDDLCoordinator::_acquireAllLocksAsync(
     OperationContext* opCtx,
     std::shared_ptr<executor::ScopedTaskExecutor> executor,
     const CancellationToken& token) {
+    // Fetching all the locks that need to be acquired. Sort them by nss to avoid deadlocks.
+    // If the requested nss represents a timeseries buckets namespace, translate it to its view nss.
+    std::set<NamespaceString> locksToAcquire;
+    locksToAcquire.insert(originalNss().isTimeseriesBucketsCollection()
+                              ? originalNss().getTimeseriesViewNamespace()
+                              : originalNss());
 
-    // Fetching all the locks that need to be acquired
-    std::set<NamespaceString> locksToAcquire = _getAdditionalLocksToAcquire(opCtx);
-    locksToAcquire.insert(originalNss());
+    for (const auto& additionalLock : _getAdditionalLocksToAcquire(opCtx)) {
+        locksToAcquire.insert(additionalLock.isTimeseriesBucketsCollection()
+                                  ? additionalLock.getTimeseriesViewNamespace()
+                                  : additionalLock);
+    }
 
     // Acquiring all DDL locks in sorted order to avoid deadlocks
     // Note that the sorted order is provided by default through the std::set container
@@ -363,7 +370,10 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                     metadata().getDatabaseVersion() /* databaseVersion */);
 
                 // Check under the dbLock if this is still the primary shard for the database
-                DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, originalNss().dbName());
+                Lock::DBLock dbLock(opCtx, originalNss().dbName(), MODE_IS);
+                const auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireShared(
+                    opCtx, originalNss().dbName());
+                scopedDss->assertIsPrimaryShardForDb(opCtx);
             };
         })
         .then([this, executor, token, anchor = shared_from_this()] {
@@ -375,13 +385,6 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
                 return ExecutorFuture<void>(**executor);
             }
             return _translateTimeseriesNss(executor, token);
-        })
-        .then([this, executor, token, anchor = shared_from_this()] {
-            if (const auto bucketNss = metadata().getBucketNss()) {
-                return _acquireLockAsync<NamespaceString>(
-                    executor, token, bucketNss.value(), MODE_X);
-            }
-            return ExecutorFuture<void>(**executor);
         })
         .then([this, anchor = shared_from_this()] {
             stdx::lock_guard<Latch> lg(_mutex);
@@ -552,6 +555,7 @@ void ShardingDDLCoordinator::_performNoopRetryableWriteOnAllShardsAndConfigsvr(
 bool ShardingDDLCoordinator::_isRetriableErrorForDDLCoordinator(const Status& status) {
     return status.isA<ErrorCategory::CursorInvalidatedError>() ||
         status.isA<ErrorCategory::ShutdownError>() || status.isA<ErrorCategory::RetriableError>() ||
+        status.isA<ErrorCategory::Interruption>() ||
         status.isA<ErrorCategory::CancellationError>() ||
         status.isA<ErrorCategory::ExceededTimeLimitError>() ||
         status.isA<ErrorCategory::WriteConcernError>() ||

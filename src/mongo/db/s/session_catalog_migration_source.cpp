@@ -30,7 +30,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -276,7 +275,7 @@ void SessionCatalogMigrationSource::init(OperationContext* opCtx,
 
     boost::optional<LastTxnSession> lastTxnSession;
     while (cursor->more()) {
-        const auto txnRecord =
+        auto txnRecord =
             SessionTxnRecord::parse(IDLParserContext("Session migration cloning"), cursor->next());
 
         const auto sessionId = txnRecord.getSessionId();
@@ -316,7 +315,8 @@ void SessionCatalogMigrationSource::init(OperationContext* opCtx,
             NamespaceString::kRsOplogNamespace,
             [&] {
                 const auto message =
-                    BSON("sessionMigrateCloneStart" << NamespaceStringUtil::serialize(_ns));
+                    BSON("sessionMigrateCloneStart" << NamespaceStringUtil::serialize(
+                             _ns, SerializationContext::stateDefault()));
 
                 WriteUnitOfWork wuow(opCtx);
                 opCtx->getClient()->getServiceContext()->getOpObserver()->onInternalOpMessage(

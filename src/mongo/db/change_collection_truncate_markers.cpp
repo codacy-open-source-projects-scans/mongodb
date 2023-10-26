@@ -35,7 +35,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -89,19 +88,19 @@ bool ChangeCollectionTruncateMarkers::_hasExcessMarkers(OperationContext* opCtx)
     }
 
     const Marker& oldestMarker = markers.front();
-    const auto& [highestRecordIdInserted, _] = getPartialMarker();
-    if (highestRecordIdInserted <= oldestMarker.lastRecord) {
-        // We cannot expire the marker when the last entry is present there as it would break the
-        // requirement of always having at least 1 entry present in the collection.
-        return false;
-    }
-
-    return hasMarkerWallTimeExpired(opCtx, oldestMarker.wallTime, _tenantId);
+    return checkPartialMarkerWith([&](const RecordId& highestRecordIdInserted, const Date_t&) {
+               // We cannot expire the marker when the last entry is present there as it would
+               // break the requirement of always having at least 1 entry present in the
+               // collection.
+               return highestRecordIdInserted > oldestMarker.lastRecord;
+           }) &&
+        hasMarkerWallTimeExpired(opCtx, oldestMarker.wallTime, _tenantId);
 }
 
-bool ChangeCollectionTruncateMarkers::_hasPartialMarkerExpired(OperationContext* opCtx) const {
-    const auto& [_, highestSeenWallTime] = getPartialMarker();
-
+bool ChangeCollectionTruncateMarkers::_hasPartialMarkerExpired(
+    OperationContext* opCtx,
+    const RecordId& highestSeenRecordId,
+    const Date_t& highestSeenWallTime) const {
     return hasMarkerWallTimeExpired(opCtx, highestSeenWallTime, _tenantId);
 }
 
@@ -130,9 +129,6 @@ void ChangeCollectionTruncateMarkers::expirePartialMarker(OperationContext* opCt
         return;
     }
 
-    // Abandon the snapshot so we can fetch the most recent version of the table. This increases the
-    // chances the last entry isn't present in the new partial marker.
-    opCtx->recoveryUnit()->abandonSnapshot();
     WriteUnitOfWork wuow(opCtx);
 
     auto backCursor = changeCollection->getRecordStore()->getCursor(opCtx, false);

@@ -81,7 +81,7 @@ public:
         }
 
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         bool supportsWriteConcern() const override {
@@ -98,7 +98,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(DropConnectionsCmd);
+MONGO_REGISTER_COMMAND(DropConnectionsCmd).forRouter().forShard();
 
 }  // namespace
 }  // namespace mongo

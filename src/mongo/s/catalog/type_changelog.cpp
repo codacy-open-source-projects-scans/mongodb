@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -115,7 +114,8 @@ StatusWith<ChangeLogType> ChangeLogType::fromBSON(const BSONObj& source) {
         if (!status.isOK())
             return status;
         // TODO SERVER-80466 changeLogNs comes from BSON Extract.
-        changeLog._ns = NamespaceStringUtil::deserialize(boost::none, changeLogNs);
+        changeLog._ns = NamespaceStringUtil::deserialize(
+            boost::none, changeLogNs, SerializationContext::stateDefault());
     }
 
     {
@@ -169,7 +169,9 @@ BSONObj ChangeLogType::toBSON() const {
     if (_what)
         builder.append(what.name(), getWhat());
     if (_ns)
-        builder.append(ns.name(), NamespaceStringUtil::serialize(getNS()));
+        builder.append(
+            ns.name(),
+            NamespaceStringUtil::serialize(getNS(), SerializationContext::stateDefault()));
     if (_details)
         builder.append(details.name(), getDetails());
 

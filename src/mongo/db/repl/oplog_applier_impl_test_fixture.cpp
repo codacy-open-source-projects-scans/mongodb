@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -492,7 +491,7 @@ OplogEntry makeOplogEntry(OpTime opTime,
                           boost::optional<RetryImageEnum> needsRetryImage) {
     return {DurableOplogEntry(opTime,                     // optime
                               opType,                     // opType
-                              std::move(nss),             // namespace
+                              nss,                        // namespace
                               uuid,                       // uuid
                               fromMigrate,                // fromMigrate
                               boost::none,                // checkExistenceForDiffInsert

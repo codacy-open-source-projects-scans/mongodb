@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cstddef>
@@ -463,7 +462,8 @@ void OpObserverImpl::onStartIndexBuildSinglePhase(OperationContext* opCtx,
         {},
         boost::none,
         BSON("msg" << std::string(str::stream() << "Creating indexes. Coll: "
-                                                << NamespaceStringUtil::serialize(nss))),
+                                                << NamespaceStringUtil::serialize(
+                                                       nss, SerializationContext::stateDefault()))),
         boost::none,
         boost::none,
         boost::none,
@@ -482,7 +482,8 @@ void OpObserverImpl::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
         {},
         boost::none,
         BSON("msg" << std::string(str::stream() << "Aborting indexes. Coll: "
-                                                << NamespaceStringUtil::serialize(nss))),
+                                                << NamespaceStringUtil::serialize(
+                                                       nss, SerializationContext::stateDefault()))),
         boost::none,
         boost::none,
         boost::none,
@@ -648,9 +649,6 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
     sleepBetweenInsertOpTimeGenerationAndLogOp.execute([&](const BSONObj& data) {
         auto numMillis = data["waitForMillis"].numberInt();
         LOGV2(7456300,
-              "Sleeping for {sleepMillis}ms after receiving {numOpTimesReceived} optimes from "
-              "{firstOpTime} to "
-              "{lastOpTime}",
               "Sleeping due to sleepBetweenInsertOpTimeGenerationAndLogOp failpoint",
               "sleepMillis"_attr = numMillis,
               "numOpTimesReceived"_attr = count,
@@ -1323,8 +1321,11 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
                                                  bool markFromMigrate) {
     BSONObjBuilder builder;
 
-    builder.append("renameCollection", NamespaceStringUtil::serialize(fromCollection));
-    builder.append("to", NamespaceStringUtil::serialize(toCollection));
+    builder.append(
+        "renameCollection",
+        NamespaceStringUtil::serialize(fromCollection, SerializationContext::stateDefault()));
+    builder.append(
+        "to", NamespaceStringUtil::serialize(toCollection, SerializationContext::stateDefault()));
     builder.append("stayTemp", stayTemp);
     if (dropTargetUUID) {
         dropTargetUUID->appendToBuilder(&builder, "dropTarget");
@@ -1404,17 +1405,6 @@ void OpObserverImpl::onImportCollection(OperationContext* opCtx,
     logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
 }
 
-void OpObserverImpl::onApplyOps(OperationContext* opCtx,
-                                const DatabaseName& dbName,
-                                const BSONObj& applyOpCmd) {
-    MutableOplogEntry oplogEntry;
-    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-
-    oplogEntry.setTid(dbName.tenantId());
-    oplogEntry.setNss(NamespaceString::makeCommandNamespace(dbName));
-    oplogEntry.setObject(applyOpCmd);
-    logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _oplogWriter.get());
-}
 
 void OpObserverImpl::onEmptyCapped(OperationContext* opCtx,
                                    const NamespaceString& collectionName,
@@ -1956,7 +1946,8 @@ void OpObserverImpl::onModifyCollectionShardingIndexCatalog(OperationContext* op
                                                             const UUID& uuid,
                                                             BSONObj opDoc) {
     repl::MutableOplogEntry oplogEntry;
-    auto obj = BSON(kShardingIndexCatalogOplogEntryName << NamespaceStringUtil::serialize(nss))
+    auto obj = BSON(kShardingIndexCatalogOplogEntryName
+                    << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))
                    .addFields(opDoc);
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
     oplogEntry.setNss(nss);

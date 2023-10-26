@@ -30,7 +30,6 @@
 
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <iterator>
 #include <memory>
@@ -125,7 +124,8 @@ StatusWith<long long> retrieveCollectionShardSize(OperationContext* opCtx,
 
     const Minutes maxTimeMSOverride{10};
     const auto cmdObj =
-        BSON("dataSize" << NamespaceStringUtil::serialize(ns) << "estimate" << estimate);
+        BSON("dataSize" << NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())
+                        << "estimate" << estimate);
     auto statStatus = shardStatus.getValue()->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
@@ -227,7 +227,8 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
     }
 
     BSONObjBuilder cmd;
-    cmd.append("splitChunk", NamespaceStringUtil::serialize(nss));
+    cmd.append("splitChunk",
+               NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     cmd.append("from", shardId.toString());
     cmd.append("keyPattern", shardKeyPattern.toBSON());
     cmd.append("epoch", epoch);
@@ -261,7 +262,6 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
 
     if (!status.isOK()) {
         LOGV2(22878,
-              "Split chunk {request} failed: {error}",
               "Split chunk request against shard failed",
               "request"_attr = redact(cmdObj),
               "shardId"_attr = shardId,
@@ -281,8 +281,6 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
     } else if (status != ErrorCodes::NoSuchKey) {
         LOGV2_WARNING(
             22879,
-            "Chunk migration will be skipped because splitChunk returned invalid response: "
-            "{response}. Extracting {field} field failed: {error}",
             "Chunk migration will be skipped because extracting field from splitChunk response "
             "failed",
             "response"_attr = redact(cmdResponse),

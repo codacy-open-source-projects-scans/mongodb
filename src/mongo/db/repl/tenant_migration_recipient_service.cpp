@@ -45,7 +45,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
@@ -1105,14 +1104,15 @@ void TenantMigrationRecipientService::Instance::_processCommittedTransactionEntr
     MutableOplogEntry noopEntry;
     noopEntry.setOpType(repl::OpTypeEnum::kNoop);
 
-    const auto tenantNss = NamespaceStringUtil::deserialize(boost::none, getTenantId() + "_");
+    const auto tenantNss = NamespaceStringUtil::deserialize(
+        boost::none, getTenantId() + "_", SerializationContext::stateDefault());
     noopEntry.setNss(tenantNss);
 
     // Write a fake applyOps with the tenantId as the namespace so that this will be picked
     // up by the committed transaction prefetch pipeline in subsequent migrations.
-    noopEntry.setObject(
-        BSON("applyOps" << BSON_ARRAY(
-                 BSON(OplogEntry::kNssFieldName << NamespaceStringUtil::serialize(tenantNss)))));
+    noopEntry.setObject(BSON(
+        "applyOps" << BSON_ARRAY(BSON(OplogEntry::kNssFieldName << NamespaceStringUtil::serialize(
+                                          tenantNss, SerializationContext::stateDefault())))));
 
     noopEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
     noopEntry.setSessionId(sessionId);

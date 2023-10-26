@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <array>
 #include <boost/cstdint.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <iterator>
@@ -162,6 +161,8 @@ Status sharding_ddl_util_deserializeErrorStatusFromBSON(const BSONElement& bsonE
 namespace sharding_ddl_util {
 namespace {
 
+const auto kUnsplittableShardKey = KeyPattern(BSON("_id" << 1));
+
 void deleteChunks(OperationContext* opCtx,
                   const std::shared_ptr<Shard>& configShard,
                   const UUID& collectionUUID,
@@ -209,8 +210,9 @@ void deleteCollection(OperationContext* opCtx,
         // resolved with an IXSCAN (thanks to the index on '_id') and is idempotent (thanks to the
         // 'uuid')
         const auto deleteCollectionQuery =
-            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)
-                                               << CollectionType::kUuidFieldName << uuid);
+            BSON(CollectionType::kNssFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+                 << CollectionType::kUuidFieldName << uuid);
 
         write_ops::DeleteCommandRequest deleteOp(CollectionType::ConfigNS);
         deleteOp.setDeletes({[&]() {
@@ -316,7 +318,7 @@ void setAllowMigrations(OperationContext* opCtx,
         );
     try {
         uassertStatusOKWithContext(
-            Shard::CommandResponse::getEffectiveStatus(std::move(swSetAllowMigrationsResult)),
+            Shard::CommandResponse::getEffectiveStatus(swSetAllowMigrationsResult),
             str::stream() << "Error setting allowMigrations to " << allowMigrations
                           << " for collection " << nss.toStringForErrorMsg());
     } catch (const ExceptionFor<ErrorCodes::NamespaceNotSharded>&) {
@@ -447,9 +449,9 @@ void removeTagsMetadataFromConfig(OperationContext* opCtx,
         CommandHelpers::appendMajorityWriteConcern(configsvrRemoveTagsCmd.toBSON(osi.toBSON())),
         Shard::RetryPolicy::kIdempotent);
 
-    uassertStatusOKWithContext(
-        Shard::CommandResponse::getEffectiveStatus(std::move(swRemoveTagsResult)),
-        str::stream() << "Error removing tags for collection " << nss.toStringForErrorMsg());
+    uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(swRemoveTagsResult),
+                               str::stream() << "Error removing tags for collection "
+                                             << nss.toStringForErrorMsg());
 }
 
 void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONObj& filter) {
@@ -470,7 +472,7 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONOb
         Shard::RetryPolicy::kIdempotent);
 
     uassertStatusOKWithContext(
-        Shard::CommandResponse::getEffectiveStatus(std::move(deleteResult)),
+        Shard::CommandResponse::getEffectiveStatus(deleteResult),
         str::stream() << "Failed to remove query analyzer documents that match the filter"
                       << filter);
 }
@@ -633,15 +635,15 @@ void resumeMigrations(OperationContext* opCtx,
 
 bool checkAllowMigrations(OperationContext* opCtx, const NamespaceString& nss) {
     auto collDoc =
-        uassertStatusOK(
-            Grid::get(opCtx)->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
-                opCtx,
-                ReadPreferenceSetting(ReadPreference::PrimaryOnly, TagSet{}),
-                repl::ReadConcernLevel::kMajorityReadConcern,
-                CollectionType::ConfigNS,
-                BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(nss)),
-                BSONObj(),
-                1))
+        uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
+                            opCtx,
+                            ReadPreferenceSetting(ReadPreference::PrimaryOnly, TagSet{}),
+                            repl::ReadConcernLevel::kMajorityReadConcern,
+                            CollectionType::ConfigNS,
+                            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                                     nss, SerializationContext::stateDefault())),
+                            BSONObj(),
+                            1))
             .docs;
 
     uassert(ErrorCodes::NamespaceNotFound,
@@ -713,10 +715,11 @@ void sendDropCollectionParticipantCommandToShards(OperationContext* opCtx,
 }
 
 BSONObj getCriticalSectionReasonForRename(const NamespaceString& from, const NamespaceString& to) {
-    return BSON("command"
-                << "rename"
-                << "from" << NamespaceStringUtil::serialize(from) << "to"
-                << NamespaceStringUtil::serialize(to));
+    return BSON(
+        "command"
+        << "rename"
+        << "from" << NamespaceStringUtil::serialize(from, SerializationContext::stateDefault())
+        << "to" << NamespaceStringUtil::serialize(to, SerializationContext::stateDefault()));
 }
 
 void runTransactionOnShardingCatalog(OperationContext* opCtx,
@@ -728,7 +731,9 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
     // The Internal Transactions API receives the write concern option and osi through the
     // passed Operation context. We opt for creating a new one to avoid any possible side
     // effects.
-    auto newClient = opCtx->getServiceContext()->makeClient("ShardingCatalogTransaction");
+    auto newClient = opCtx->getServiceContext()
+                         ->getService(ClusterRole::ShardServer)
+                         ->makeClient("ShardingCatalogTransaction");
 
     AuthorizationSession::get(newClient.get())->grantInternalAuthorization(newClient.get());
     AlternativeClientRegion acr(newClient);
@@ -768,10 +773,10 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
     }();
 
     if (osi.getSessionId()) {
+        auto lk = stdx::lock_guard(*newOpCtx->getClient());
         newOpCtx->setLogicalSessionId(*osi.getSessionId());
         newOpCtx->setTxnNumber(*osi.getTxnNumber());
     }
-
     newOpCtx->setWriteConcern(writeConcern);
 
     txn_api::SyncTransactionWithRetries txn(newOpCtx,
@@ -780,6 +785,20 @@ void runTransactionOnShardingCatalog(OperationContext* opCtx,
                                             inlineExecutor,
                                             std::move(customTxnClient));
     txn.run(newOpCtx, std::move(transactionChain));
+}
+
+const KeyPattern& unsplittableCollectionShardKey() {
+    return kUnsplittableShardKey;
+}
+
+boost::optional<CollectionType> getCollectionFromConfigServer(OperationContext* opCtx,
+                                                              const NamespaceString& nss) {
+    try {
+        return Grid::get(opCtx)->catalogClient()->getCollection(opCtx, nss);
+    } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+        // The collection is not tracked by the config server or doesn't exist.
+        return boost::none;
+    }
 }
 
 }  // namespace sharding_ddl_util

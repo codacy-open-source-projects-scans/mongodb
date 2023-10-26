@@ -45,7 +45,6 @@
 #include "mongo/db/auth/authorization_manager_impl.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/authz_manager_external_state_mock.h"
-#include "mongo/db/auth/restriction_environment.h"
 #include "mongo/db/auth/role_name.h"
 #include "mongo/db/auth/sasl_options.h"
 #include "mongo/db/auth/user.h"
@@ -252,7 +251,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ExampleIncrementCommand);
+MONGO_REGISTER_COMMAND(ExampleIncrementCommand).forShard();
 
 // Just like ExampleIncrementCommand, but using the MinimalInvocationBase.
 class ExampleMinimalCommand final : public TypedCommand<ExampleMinimalCommand> {
@@ -300,7 +299,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ExampleMinimalCommand);
+MONGO_REGISTER_COMMAND(ExampleMinimalCommand).forShard();
 
 // Just like ExampleIncrementCommand, but with a void typedRun.
 class ExampleVoidCommand final : public TypedCommand<ExampleVoidCommand> {
@@ -348,7 +347,7 @@ public:
 
     mutable std::int32_t iCapture = 0;
 };
-MONGO_REGISTER_COMMAND(ExampleVoidCommand);
+MONGO_REGISTER_COMMAND(ExampleVoidCommand).forShard();
 
 template <typename Derived>
 class MyCommand : public TypedCommand<MyCommand<Derived>> {
@@ -402,7 +401,7 @@ public:
         uasserted(ErrorCodes::UnknownError, "some error");
     }
 };
-MONGO_REGISTER_COMMAND(ThrowsStatusCommand);
+MONGO_REGISTER_COMMAND(ThrowsStatusCommand).forShard();
 
 class UnauthorizedCommand : public MyCommand<UnauthorizedCommand> {
 public:
@@ -411,7 +410,7 @@ public:
         uasserted(ErrorCodes::Unauthorized, "Not authorized");
     }
 };
-MONGO_REGISTER_COMMAND(UnauthorizedCommand);
+MONGO_REGISTER_COMMAND(UnauthorizedCommand).forShard();
 
 class TypedCommandTest : public ServiceContextMongoDTest {
 public:
@@ -433,10 +432,8 @@ public:
         _authzManager->setAuthEnabled(true);
 
         _session = _transportLayer.createSession();
-        _client = getServiceContext()->makeClient("testClient", _session);
+        _client = getServiceContext()->getService()->makeClient("testClient", _session);
         _registry = getCommandRegistry(_client->getService());
-        RestrictionEnvironment::set(
-            _session, std::make_unique<RestrictionEnvironment>(SockAddr(), SockAddr()));
         _authzSession = AuthorizationSession::get(_client.get());
 
         // Insert a user document that will represent the user used for running the commands.
@@ -740,7 +737,7 @@ TEST_F(CommandConstructionPlanTest, ExecutePlanPredicateTrue) {
     CommandConstructionPlan plan;
     auto fullSet = registerSomeUniqueNops<2>(plan);
     CommandRegistry reg;
-    plan.execute(&reg, [](auto&&) { return true; });
+    plan.execute(&reg, nullptr, [](auto&&) { return true; });
     ASSERT_EQ(getCommandTypes(reg), fullSet);
 }
 
@@ -748,12 +745,12 @@ TEST_F(CommandConstructionPlanTest, ExecutePlanPredicateFalse) {
     CommandConstructionPlan plan;
     auto fullSet = registerSomeUniqueNops<2>(plan);
     CommandRegistry reg;
-    plan.execute(&reg, [](auto&&) { return false; });
+    plan.execute(&reg, nullptr, [](auto&&) { return false; });
     ASSERT_EQ(getCommandTypes(reg), TypeInfoSet{});
 }
 
 /** Create a ServiceContext for each supported ClusterRole mask. */
-class BasicCommandRegistryTest : public ServiceContextMongoDTest {
+class BasicCommandRegistryTest : public ServiceContextTest {
 public:
     struct ExecutePlanForServiceResult {
         TypeInfoSet fullSet;
@@ -766,7 +763,9 @@ public:
         TypeInfoSet typesAdded;
         // Populate plan with a few commands, each configured for `serverRole()`.
         auto populateOneCommand = [&]<typename Cmd>(std::type_identity<Cmd>) {
-            *CommandConstructionPlan::EntryBuilder::make<Cmd>().roles(serverRole()).setPlan(&plan);
+            *CommandConstructionPlan::EntryBuilder::make<Cmd>()
+                 .addRoles(serverRole())
+                 .setPlan(&plan);
             typesAdded.insert(&typeid(Cmd));
         };
         [&]<int... i>(std::integer_sequence<int, i...>) {

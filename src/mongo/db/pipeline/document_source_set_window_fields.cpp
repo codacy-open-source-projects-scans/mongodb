@@ -33,7 +33,6 @@
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include <algorithm>
 #include <array>
-#include <boost/preprocessor/control/iif.hpp>
 #include <iterator>
 
 #include <boost/move/utility_core.hpp>
@@ -512,13 +511,15 @@ DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext()
     // Populate the output document with the result from each window function.
     auto projSpec = std::make_unique<projection_executor::InclusionNode>(
         ProjectionPolicies{ProjectionPolicies::DefaultIdPolicy::kIncludeId});
-    for (auto&& [fieldName, function] : _executableOutputs) {
+    for (auto&& outputField : _outputFields) {
         try {
             // If we hit a uassert while evaluating expressions on user data, delete the temporary
             // table before aborting the operation.
+            auto& fieldName = outputField.fieldName;
             projSpec->addExpressionForPath(
                 FieldPath(fieldName),
-                ExpressionConstant::create(pExpCtx.get(), function->getNext()));
+                ExpressionConstant::create(pExpCtx.get(),
+                                           _executableOutputs[fieldName]->getNext()));
         } catch (const DBException&) {
             _iterator.finalize();
             throw;

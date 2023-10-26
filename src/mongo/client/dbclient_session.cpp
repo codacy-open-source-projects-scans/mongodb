@@ -199,12 +199,9 @@ executor::RemoteCommandResponse initWireVersion(
         bob.append("hostInfo", sb.str());
     }
 
-    auto versionString = VersionInfoInterface::instance().version();
-
-    Status serializeStatus =
-        ClientMetadata::serialize("MongoDB Internal Client", versionString, applicationName, &bob);
-    if (!serializeStatus.isOK()) {
-        return serializeStatus;
+    if (auto status = DBClientSession::appendClientMetadata(applicationName, &bob);
+        !status.isOK()) {
+        return status;
     }
 
     conn->getCompressorManager().clientBegin(&bob);
@@ -369,7 +366,9 @@ void DBClientSession::connectNoHello(const HostAndPort& serverAddress,
     }
     _sessionCreationTimeMicros = curTimeMicros64();
     _lastConnectivityCheck = Date_t::now();
-    _session->setTimeout(_socketTimeout);
+    if (_socketTimeout) {
+        _session->setTimeout(_socketTimeout);
+    }
     LOGV2_DEBUG(20119, 1, "Connected to host", "connString"_attr = toString());
 }
 
@@ -457,6 +456,13 @@ uint64_t DBClientSession::getSockCreationMicroSec() const {
     } else {
         return INVALID_SOCK_CREATION_TIME;
     }
+}
+
+Status DBClientSession::appendClientMetadata(StringData applicationName, BSONObjBuilder* bob) {
+    auto versionString = VersionInfoInterface::instance().version();
+
+    return ClientMetadata::serialize(
+        "MongoDB Internal Client", versionString, applicationName, bob);
 }
 
 DBClientSession::DBClientSession(bool _autoReconnect,

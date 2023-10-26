@@ -13,6 +13,7 @@
 //   do_not_wrap_aggregations_in_facets,
 //   requires_pipeline_optimization,
 //   requires_profiling,
+//   not_allowed_with_security_token,
 // ]
 import {isWiredTiger} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 import {
@@ -774,6 +775,26 @@ pipeline = [{$project: {x: 0}}];
 assertPipelineDoesNotUseAggregation(
     {pipeline: pipeline, expectedStages: ["PROJECTION_SIMPLE", "COLLSCAN"]});
 
+// Test that $replaceRoot can be pushed down.
+pipeline = [
+    {
+        $addFields:
+            {replacementDoc: {double: {$multiply: [2, "$x"]}, square: {$multiply: ["$x", "$x"]}}}
+    },
+    {$replaceRoot: {newRoot: "$replacementDoc"}}
+];
+if (featureFlagSbeFull) {
+    assertPipelineDoesNotUseAggregation({
+        pipeline: pipeline,
+        expectedStages: ["REPLACE_ROOT", "PROJECTION_DEFAULT", "PROJECTION_SIMPLE", "COLLSCAN"]
+    });
+} else {
+    assertPipelineUsesAggregation({
+        pipeline: pipeline,
+        expectedStages: ["PROJECTION_SIMPLE", "COLLSCAN", "$addFields", "$replaceRoot"]
+    });
+}
+
 // getMore cases.
 
 // Test getMore on a collection with an optimized away pipeline.
@@ -814,7 +835,10 @@ if (!FixtureHelpers.isMongos(db) && isWiredTiger(db)) {
     // Should turn off profiling before dropping system.profile collection.
     db.setProfilingLevel(0);
     db.system.profile.drop();
-    db.setProfilingLevel(2);
+    // Don't profile the setFCV command, which could be run during this test in the
+    // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
+    assert.commandWorked(db.setProfilingLevel(
+        1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
     testGetMore({
         command: {
             aggregate: coll.getName(),
@@ -833,7 +857,10 @@ if (!FixtureHelpers.isMongos(db) && isWiredTiger(db)) {
     // pipeline.
     if (!FixtureHelpers.isSharded(coll)) {
         db.system.profile.drop();
-        db.setProfilingLevel(2);
+        // Don't profile the setFCV command, which could be run in the
+        // fcv_upgrade_downgrade_replica_sets_jscore_passthrough.
+        assert.commandWorked(db.setProfilingLevel(
+            1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
         testGetMore({
             command: {
                 find: view.getName(),

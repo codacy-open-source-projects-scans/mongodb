@@ -117,7 +117,9 @@ optimizer::ABT makeVariable(optimizer::ProjectionName var) {
     return optimizer::make<optimizer::Variable>(std::move(var));
 }
 
-TypedExpression abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
+TypeSignature constantFold(optimizer::ABT& abt,
+                           StageBuilderState& state,
+                           const VariableTypes* slotInfo) {
     auto& runtimeEnv = *state.env;
 
     auto env = optimizer::VariableEnvironment::build(abt);
@@ -148,6 +150,11 @@ TypedExpression abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
         constEval.optimize(abt);
 
         TypeChecker typeChecker;
+        if (slotInfo) {
+            for (const auto& var : *slotInfo) {
+                typeChecker.bind(var.first, var.second);
+            }
+        }
         signature = typeChecker.typeCheck(abt);
 
         modified = typeChecker.modified();
@@ -155,6 +162,18 @@ TypedExpression abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
             env.rebuild(abt);
         }
     } while (modified);
+
+    return signature;
+}
+
+TypedExpression abtToExpr(optimizer::ABT& abt,
+                          StageBuilderState& state,
+                          const VariableTypes* slotInfo) {
+    TypeSignature signature = constantFold(abt, state, slotInfo);
+
+    auto& runtimeEnv = *state.env;
+
+    auto env = optimizer::VariableEnvironment::build(abt);
 
     auto varResolver = optimizer::VarResolver([](const optimizer::ProjectionName& var) {
         if (auto slotId = getSbeVariableInfo(var)) {
@@ -170,7 +189,10 @@ TypedExpression abtToExpr(optimizer::ABT& abt, StageBuilderState& state) {
     });
 
     // And finally convert to the SBE expression.
-    optimizer::SBEExpressionLowering exprLower{env, std::move(varResolver), runtimeEnv};
+    sbe::value::SlotIdGenerator ids;
+    auto staticData = std::make_unique<stage_builder::PlanStageStaticData>();
+    optimizer::SBEExpressionLowering exprLower{
+        env, std::move(varResolver), runtimeEnv, ids, staticData->inputParamToSlotMap};
     return {exprLower.optimize(abt), signature};
 }
 

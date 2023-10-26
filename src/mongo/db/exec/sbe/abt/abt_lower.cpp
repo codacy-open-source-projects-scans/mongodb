@@ -36,7 +36,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -52,7 +51,7 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/exec/sbe/abt/named_slots.h"
+#include "mongo/db/exec/sbe/abt/slots_provider.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/exchange.h"
@@ -72,6 +71,7 @@
 #include "mongo/db/exec/sbe/stages/unique.h"
 #include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/abt/match_expression_visitor.h"
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
@@ -208,11 +208,20 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
     std::unique_ptr<sbe::EExpression> lhs,
     std::unique_ptr<sbe::EExpression> rhs) {
 
+    if (op.op() == Operations::EqMember) {
+        // We directly translate BinaryOp [EqMember] to the SBE function isMember.
+        sbe::EExpression::Vector isMemberArgs;
+        isMemberArgs.push_back(std::move(lhs));
+        isMemberArgs.push_back(std::move(rhs));
+
+        return sbe::makeE<sbe::EFunction>("isMember", std::move(isMemberArgs));
+    }
+
     sbe::EPrimBinary::Op sbeOp = getEPrimBinaryOp(op.op());
 
     if (sbe::EPrimBinary::isComparisonOp(sbeOp)) {
         boost::optional<sbe::value::SlotId> collatorSlot =
-            _namedSlots.getSlotIfExists("collator"_sd);
+            _providedSlots.getSlotIfExists("collator"_sd);
         if (collatorSlot) {
             return sbe::makeE<sbe::EPrimBinary>(
                 sbeOp, std::move(lhs), std::move(rhs), sbe::makeE<sbe::EVariable>(*collatorSlot));
@@ -314,7 +323,7 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::handleShardFilterFuncti
 
     // Prepare the FunctionCall expression.
     sbe::EExpression::Vector argVector;
-    argVector.push_back(sbe::makeE<sbe::EVariable>(_namedSlots.getSlot(kshardFiltererSlotName)));
+    argVector.push_back(sbe::makeE<sbe::EVariable>(_providedSlots.getSlot(kshardFiltererSlotName)));
     argVector.push_back(std::move(shardKeyBSONObjExpression));
     return sbe::makeE<sbe::EFunction>(name, std::move(argVector));
 }
@@ -376,6 +385,30 @@ std::unique_ptr<sbe::EExpression> SBEExpressionLowering::transport(
 
     if (name == "shardFilter") {
         return handleShardFilterFunctionCall(fn, args, name);
+    }
+
+    if (name == parameterFunctionName) {
+        uassert(8128700, "Invalid number of arguments to getParam()", fn.nodes().size() == 2);
+        const auto* paramId = fn.nodes().at(0).cast<Constant>();
+        auto paramIdVal = paramId->getValueInt32();
+
+        auto slotId = [&]() {
+            auto it = _inputParamToSlotMap.find(paramIdVal);
+            if (it != _inputParamToSlotMap.end()) {
+                // This input parameter id has already been tied to a particular runtime environment
+                // slot. Just return that slot to the caller. This can happen if a query planning
+                // optimization or rewrite chose to clone one of the input expressions from the
+                // user's query.
+                return it->second;
+            }
+
+            auto newSlotId = _providedSlots.registerSlot(
+                sbe::value::TypeTags::Nothing, 0, false /* owned */, &_slotIdGenerator);
+            _inputParamToSlotMap.emplace(paramIdVal, newSlotId);
+            return newSlotId;
+        }();
+
+        return sbe::makeE<sbe::EVariable>(slotId);
     }
 
     // TODO - this is an open question how to do the name mappings.
@@ -821,7 +854,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const GroupByNode& n,
         aggs.push_back({slot, sbe::AggExprPair{nullptr, std::move(expr)}});
     }
 
-    boost::optional<sbe::value::SlotId> collatorSlot = _namedSlots.getSlotIfExists("collator"_sd);
+    boost::optional<sbe::value::SlotId> collatorSlot =
+        _providedSlots.getSlotIfExists("collator"_sd);
     // Unused
     sbe::value::SlotVector seekKeysSlots;
 
@@ -914,7 +948,8 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const HashJoinNode& n,
     auto outerKeys = convertProjectionsToSlots(slotMap, n.getRightKeys());
     auto outerProjects = convertRequiredProjectionsToSlots(slotMap, rightProps, outerKeys);
 
-    boost::optional<sbe::value::SlotId> collatorSlot = _namedSlots.getSlotIfExists("collator"_sd);
+    boost::optional<sbe::value::SlotId> collatorSlot =
+        _providedSlots.getSlotIfExists("collator"_sd);
     const PlanNodeId planNodeId = _nodeToGroupPropsMap.at(&n)._planNodeId;
     return sbe::makeS<sbe::HashJoinStage>(std::move(outerStage),
                                           std::move(innerStage),
@@ -1115,12 +1150,7 @@ void SBENodeLowering::generateSlots(SlotVarMap& slotMap,
         mapProjToSlot(slotMap, *projName, rootSlot.value());
     }
 
-    // Soring is not essential. Here we sort only for SBE plan stability.
-    std::map<FieldNameType, ProjectionName> ordered;
-    for (const auto& entry : fieldProjectionMap._fieldProjections) {
-        ordered.insert(entry);
-    }
-    for (const auto& [fieldName, projectionName] : ordered) {
+    for (const auto& [fieldName, projectionName] : fieldProjectionMap._fieldProjections) {
         vars.push_back(_slotIdGenerator.generate());
         mapProjToSlot(slotMap, projectionName, vars.back());
         fields.push_back(fieldName.value().toString());
@@ -1364,5 +1394,4 @@ std::unique_ptr<sbe::PlanStage> SBENodeLowering::walk(const SeekNode& n,
                                       planNodeId,
                                       callbacks);
 }
-
 }  // namespace mongo::optimizer

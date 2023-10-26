@@ -42,7 +42,6 @@
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -191,7 +190,7 @@ using logv2::LogComponent;
 
 void shutdown(ServiceContext* srvContext) {
     {
-        ThreadClient tc(srvContext);
+        ThreadClient tc(srvContext->getService());
         auto const client = Client::getCurrent();
         auto const serviceContext = client->getServiceContext();
 
@@ -245,7 +244,7 @@ ServiceContext* initialize(const char* yaml_config) {
     ScopeGuard giGuard([] { mongo::runGlobalDeinitializers().ignore(); });
     setGlobalServiceContext(ServiceContext::make());
 
-    Client::initThread("initandlisten");
+    Client::initThread("initandlisten", getGlobalServiceContext()->getService());
 
     // TODO(SERVER-74659): Please revisit if this thread could be made killable.
     {
@@ -257,7 +256,8 @@ ServiceContext* initialize(const char* yaml_config) {
     ScopeGuard clientGuard([] { Client::releaseCurrent(); });
 
     auto serviceContext = getGlobalServiceContext();
-    serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointEmbedded>());
+    serviceContext->getService()->setServiceEntryPoint(
+        std::make_unique<ServiceEntryPointEmbedded>());
     serviceContext->setSessionManager(std::make_unique<SessionManagerEmbedded>());
 
     auto opObserverRegistry = std::make_unique<OpObserverRegistry>();

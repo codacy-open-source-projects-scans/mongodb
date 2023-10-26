@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
@@ -666,6 +665,7 @@ public:
         Intersection,
         Union,
         Equals,
+        IsSubset,
     };
 
     void visit(const ExpressionConstant* expr) final {
@@ -2886,9 +2886,12 @@ public:
 
         generateSetExpression(expr, SetOperation::Intersection);
     }
-
     void visit(const ExpressionSetIsSubset* expr) final {
-        unsupportedExpression(expr->getOpName());
+        tassert(5154700,
+                "$setIsSubset expects two expressions in the input",
+                expr->getChildren().size() == 2);
+
+        generateSetExpression(expr, SetOperation::IsSubset);
     }
     void visit(const ExpressionSetUnion* expr) final {
         if (expr->getChildren().size() == 0) {
@@ -3605,7 +3608,7 @@ private:
 
         // "date" parameter validation.
         inputValidationCases.emplace_back(generateABTFailIfNotCoercibleToDate(
-            std::move(dateVar), ErrorCodes::Error{5157904}, std::move(exprName), "date"_sd));
+            dateVar, ErrorCodes::Error{5157904}, std::move(exprName), "date"_sd));
 
         pushABT(optimizer::make<optimizer::Let>(
             std::move(dateName),
@@ -3995,6 +3998,9 @@ private:
             case SetOperation::Equals:
                 return std::make_pair("setEquals"_sd,
                                       hasCollator ? "collSetEquals"_sd : "setEquals"_sd);
+            case SetOperation::IsSubset:
+                return std::make_pair("setIsSubset"_sd,
+                                      hasCollator ? "collSetIsSubset"_sd : "setIsSubset"_sd);
         }
         MONGO_UNREACHABLE;
     }

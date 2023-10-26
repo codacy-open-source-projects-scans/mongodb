@@ -38,7 +38,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/util/serialization_context.h"
 
@@ -69,14 +69,11 @@ public:
      *
      * Do not use this function when serializing a NamespaceString object for catalog.
      */
-    static std::string serialize(
-        const NamespaceString& ns,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static std::string serialize(const NamespaceString& ns, const SerializationContext& context);
 
-    static std::string serialize(
-        const NamespaceString& ns,
-        const SerializationOptions& options,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static std::string serialize(const NamespaceString& ns,
+                                 const SerializationOptions& options,
+                                 const SerializationContext& context);
 
     /**
      * Serializes a NamespaceString object for catalog.
@@ -112,10 +109,9 @@ public:
      * and NamespaceString is constructor without the tenantID.
      * eg. deserialize(boost::none, "foo.bar") -> NamespaceString(boost::none, "foo.bar")
      */
-    static NamespaceString deserialize(
-        boost::optional<TenantId> tenantId,
-        StringData ns,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static NamespaceString deserialize(boost::optional<TenantId> tenantId,
+                                       StringData ns,
+                                       const SerializationContext& context);
 
     /**
      * Deserializes dbname and coll to a NamespaceString object.
@@ -124,11 +120,10 @@ public:
      */
     static NamespaceString deserialize(const DatabaseName& dbName, StringData coll);
 
-    static NamespaceString deserialize(
-        const boost::optional<TenantId>& tenantId,
-        StringData db,
-        StringData coll,
-        const SerializationContext& context = SerializationContext::stateDefault());
+    static NamespaceString deserialize(const boost::optional<TenantId>& tenantId,
+                                       StringData db,
+                                       StringData coll,
+                                       const SerializationContext& context);
 
     /**
      * Constructs a NamespaceString from the string 'ns'. Should only be used when reading a

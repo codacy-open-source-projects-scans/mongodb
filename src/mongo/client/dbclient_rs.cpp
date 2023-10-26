@@ -30,7 +30,6 @@
 #include "mongo/client/dbclient_rs.h"
 
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
 #include <memory>
@@ -145,8 +144,6 @@ ReplicaSetMonitorPtr DBClientReplicaSet::_getMonitor() {
 string DBClientReplicaSet::getServerAddress() const {
     if (!_rsm) {
         LOGV2_WARNING(20147,
-                      "Trying to get server address for DBClientReplicaSet, "
-                      "but no ReplicaSetMonitor exists for {replicaSet}",
                       "Trying to get server address for DBClientReplicaSet, "
                       "but no ReplicaSetMonitor exists",
                       "replicaSet"_attr = _setName);
@@ -332,7 +329,6 @@ void DBClientReplicaSet::_authConnection(DBClientConnection* conn) {
             conn->authenticateInternalUser();
         } catch (const DBException& e) {
             LOGV2_WARNING(20148,
-                          "Cached auth failed for set {replicaSet}: {error}",
                           "Cached auth failed",
                           "replicaSet"_attr = _setName,
                           "error"_attr = e.toStatus());
@@ -340,32 +336,30 @@ void DBClientReplicaSet::_authConnection(DBClientConnection* conn) {
         }
     }
 
-    for (map<string, BSONObj>::const_iterator i = _auths.begin(); i != _auths.end(); ++i) {
+    for (const auto& kv : _auths) {
         try {
-            conn->auth(i->second);
+            conn->auth(kv.second);
         } catch (const AssertionException&) {
             LOGV2_WARNING(20149,
-                          "Cached auth failed for set: {replicaSet} db: {db} user: {user}",
                           "Cached auth failed",
                           "replicaSet"_attr = _setName,
-                          "db"_attr = i->second[saslCommandUserDBFieldName].str(),
-                          "user"_attr = i->second[saslCommandUserFieldName].str());
+                          "db"_attr = kv.first.toStringForErrorMsg(),
+                          "user"_attr = kv.second[saslCommandUserFieldName].str());
         }
     }
 }
 
 void DBClientReplicaSet::logoutAll(DBClientConnection* conn) {
     _internalAuthRequested = false;
-    for (map<string, BSONObj>::const_iterator i = _auths.begin(); i != _auths.end(); ++i) {
+    for (const auto& kv : _auths) {
         BSONObj response;
         try {
-            conn->logout(i->first, response);
+            conn->logout(kv.first, response);
         } catch (const AssertionException& ex) {
             LOGV2_WARNING(20150,
-                          "Failed to logout: {connString} on db: {db} with error: {error}",
                           "Failed to logout",
                           "connString"_attr = conn->getServerAddress(),
-                          "db"_attr = i->first,
+                          "db"_attr = kv.first.toStringForErrorMsg(),
                           "error"_attr = redact(ex));
         }
     }
@@ -405,7 +399,6 @@ void DBClientReplicaSet::_runAuthLoop(Authenticate authCb) {
 
     LOGV2_DEBUG(20132,
                 3,
-                "dbclient_rs attempting authentication of {replicaSet}",
                 "dbclient_rs attempting authentication",
                 "replicaSet"_attr = _getMonitor()->getName());
 
@@ -468,15 +461,19 @@ void DBClientReplicaSet::_auth(const BSONObj& params) {
     _runAuthLoop([&](DBClientConnection* conn) {
         conn->auth(params);
         // Cache the new auth information since we now validated it's good
-        _auths[params[saslCommandUserDBFieldName].str()] = params.getOwned();
+        const DatabaseName dbName =
+            DatabaseNameUtil::deserialize(boost::none,
+                                          params[saslCommandUserDBFieldName].valueStringDataSafe(),
+                                          SerializationContext::stateAuthPrevalidated());
+        _auths[dbName] = params.getOwned();
     });
 }
 
-void DBClientReplicaSet::logout(const string& dbname, BSONObj& info) {
+void DBClientReplicaSet::logout(const DatabaseName& dbName, BSONObj& info) {
     DBClientConnection* priConn = checkPrimary();
 
-    priConn->logout(dbname, info);
-    _auths.erase(dbname);
+    priConn->logout(dbName, info);
+    _auths.erase(dbName);
 
     /* Also logout the cached secondary connection. Note that this is only
      * needed when we actually have something cached and is last known to be
@@ -485,7 +482,7 @@ void DBClientReplicaSet::logout(const string& dbname, BSONObj& info) {
     if (_lastSecondaryOkConn.get() != nullptr && !_lastSecondaryOkConn->isFailed()) {
         try {
             BSONObj dummy;
-            _lastSecondaryOkConn->logout(dbname, dummy);
+            _lastSecondaryOkConn->logout(dbName, dummy);
         } catch (const DBException&) {
             // Make sure we can't use this connection again.
             MONGO_verify(_lastSecondaryOkConn->isFailed());
@@ -628,7 +625,6 @@ DBClientConnection* DBClientReplicaSet::selectNodeUsingTags(
     if (checkLastHost(readPref.get())) {
         LOGV2_DEBUG(20137,
                     3,
-                    "dbclient_rs selecting compatible last used node {lastTagged}",
                     "dbclient_rs selecting compatible last used node",
                     "lastTagged"_attr = _lastSecondaryOkHost);
 
@@ -642,7 +638,6 @@ DBClientConnection* DBClientReplicaSet::selectNodeUsingTags(
     if (!selectedNodeStatus.isOK()) {
         LOGV2_DEBUG(20138,
                     3,
-                    "dbclient_rs no compatible node found: {error}",
                     "dbclient_rs no compatible node found",
                     "error"_attr = redact(selectedNodeStatus.getStatus()));
         return nullptr;
@@ -664,11 +659,8 @@ DBClientConnection* DBClientReplicaSet::selectNodeUsingTags(
     if (monitor->isPrimary(selectedNode)) {
         checkPrimary();
 
-        LOGV2_DEBUG(20139,
-                    3,
-                    "dbclient_rs selecting primary node {connString}",
-                    "dbclient_rs selecting primary node",
-                    "connString"_attr = selectedNode);
+        LOGV2_DEBUG(
+            20139, 3, "dbclient_rs selecting primary node", "connString"_attr = selectedNode);
 
         _lastSecondaryOkConn = _primary;
 
@@ -702,11 +694,7 @@ DBClientConnection* DBClientReplicaSet::selectNodeUsingTags(
         }
     }
 
-    LOGV2_DEBUG(20140,
-                3,
-                "dbclient_rs selecting node {connString}",
-                "dbclient_rs selecting node",
-                "connString"_attr = _lastSecondaryOkHost);
+    LOGV2_DEBUG(20140, 3, "dbclient_rs selecting node", "connString"_attr = _lastSecondaryOkHost);
 
     return _lastSecondaryOkConn.get();
 }
@@ -715,11 +703,8 @@ void DBClientReplicaSet::say(Message& toSend, bool isRetry, string* actualServer
     if (!isRetry)
         _lastClient = nullptr;
 
-    LOGV2_DEBUG(20142,
-                3,
-                "dbclient_rs say to primary node in {replicaSet}",
-                "dbclient_rs say to primary node",
-                "replicaSet"_attr = _getMonitor()->getName());
+    LOGV2_DEBUG(
+        20142, 3, "dbclient_rs say to primary node", "replicaSet"_attr = _getMonitor()->getName());
 
     DBClientConnection* primary = checkPrimary();
     if (actualServer)
@@ -812,11 +797,8 @@ std::pair<rpc::UniqueReply, std::shared_ptr<DBClientBase>> DBClientReplicaSet::r
 }
 
 Message DBClientReplicaSet::_call(Message& toSend, string* actualServer) {
-    LOGV2_DEBUG(20146,
-                3,
-                "dbclient_rs call to primary node in {replicaSet}",
-                "dbclient_rs call to primary node",
-                "replicaSet"_attr = _getMonitor()->getName());
+    LOGV2_DEBUG(
+        20146, 3, "dbclient_rs call to primary node", "replicaSet"_attr = _getMonitor()->getName());
 
     DBClientConnection* m = checkPrimary();
     if (actualServer)

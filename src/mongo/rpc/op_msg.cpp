@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_type_validated.h"
@@ -289,7 +288,7 @@ boost::optional<TenantId> parseDollarTenant(const BSONObj body) {
 
 DatabaseName OpMsgRequest::getDbName() const {
     if (!gMultitenancySupport) {
-        return DatabaseNameUtil::deserialize(boost::none, getDatabase());
+        return DatabaseNameUtil::deserialize(boost::none, getDatabase(), getSerializationContext());
     }
     auto tenantId = getValidatedTenantId() ? getValidatedTenantId() : parseDollarTenant(body);
 

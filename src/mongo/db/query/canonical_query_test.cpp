@@ -41,6 +41,7 @@
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_test_service_context.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/framework.h"
@@ -313,7 +314,8 @@ TEST(CanonicalQueryTest, CanonicalizeFromBaseQuery) {
         assertGet(CanonicalQuery::canonicalize(opCtx.get(), std::move(findCommand), isExplain));
 
     MatchExpression* firstClauseExpr = baseCq->getPrimaryMatchExpression()->getChild(0);
-    auto childCq = assertGet(CanonicalQuery::canonicalize(opCtx.get(), *baseCq, firstClauseExpr));
+    auto childCq =
+        assertGet(CanonicalQuery::canonicalizeSubQuery(opCtx.get(), *baseCq, firstClauseExpr));
 
     ASSERT_BSONOBJ_EQ(childCq->getFindCommandRequest().getFilter(), firstClauseExpr->serialize());
 
@@ -356,7 +358,8 @@ TEST(CanonicalQueryTest, CanonicalizeFromBaseQueryWithSpecialFeature) {
     // MatchExpression tree as part of canonicalization. This will put the text search clause
     // second.
     MatchExpression* secondClauseExpr = baseCq->getPrimaryMatchExpression()->getChild(1);
-    auto childCq = assertGet(CanonicalQuery::canonicalize(opCtx.get(), *baseCq, secondClauseExpr));
+    auto childCq =
+        assertGet(CanonicalQuery::canonicalizeSubQuery(opCtx.get(), *baseCq, secondClauseExpr));
 
     ASSERT_BSONOBJ_EQ(childCq->getFindCommandRequest().getFilter(), secondClauseExpr->serialize());
 
@@ -396,7 +399,8 @@ TEST(CanonicalQueryTest, CanonicalQueryFromBaseQueryWithNoCollation) {
     findCommand->setFilter(fromjson("{$or:[{a:1,b:1},{a:1,c:1}]}"));
     auto baseCq = assertGet(CanonicalQuery::canonicalize(opCtx.get(), std::move(findCommand)));
     MatchExpression* firstClauseExpr = baseCq->getPrimaryMatchExpression()->getChild(0);
-    auto childCq = assertGet(CanonicalQuery::canonicalize(opCtx.get(), *baseCq, firstClauseExpr));
+    auto childCq =
+        assertGet(CanonicalQuery::canonicalizeSubQuery(opCtx.get(), *baseCq, firstClauseExpr));
     ASSERT_TRUE(baseCq->getCollator() == nullptr);
     ASSERT_TRUE(childCq->getCollator() == nullptr);
 }
@@ -411,7 +415,8 @@ TEST(CanonicalQueryTest, CanonicalQueryFromBaseQueryWithCollation) {
                                    << "reverse"));
     auto baseCq = assertGet(CanonicalQuery::canonicalize(opCtx.get(), std::move(findCommand)));
     MatchExpression* firstClauseExpr = baseCq->getPrimaryMatchExpression()->getChild(0);
-    auto childCq = assertGet(CanonicalQuery::canonicalize(opCtx.get(), *baseCq, firstClauseExpr));
+    auto childCq =
+        assertGet(CanonicalQuery::canonicalizeSubQuery(opCtx.get(), *baseCq, firstClauseExpr));
     ASSERT(baseCq->getCollator());
     ASSERT(childCq->getCollator());
     ASSERT_TRUE(*(childCq->getCollator()) == *(baseCq->getCollator()));
@@ -458,6 +463,9 @@ TEST(CanonicalQueryTest, NorWithOneChildNormalizedToNot) {
 }
 
 TEST(CanonicalQueryTest, NorWithTwoChildrenNotNormalized) {
+    RAIIServerParameterControllerForTest controller(
+        "internalQueryEnableBooleanExpressionsSimplifier", false);
+
     unique_ptr<CanonicalQuery> cq(canonicalize("{$nor: [{a: 1}, {b: 1}]}"));
     auto root = cq->getPrimaryMatchExpression();
     ASSERT_EQ(MatchExpression::NOR, root->matchType());

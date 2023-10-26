@@ -45,7 +45,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
@@ -1178,7 +1177,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::getElement(value::TypeT
 
         auto [tag, val] = value::getArrayView(arrValue)->getAt(convertedIdx);
         return {false, tag, val};
-    } else if (arrTag == value::TypeTags::bsonArray || arrTag == value::TypeTags::ArraySet) {
+    } else if (arrTag == value::TypeTags::bsonArray || arrTag == value::TypeTags::ArraySet ||
+               arrTag == value::TypeTags::ArrayMultiSet) {
         value::ArrayEnumerator enumerator(arrTag, arrValue);
 
         if (!isNegative) {
@@ -1631,6 +1631,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::getArraySize(value::Typ
         }
         case value::TypeTags::ArraySet: {
             result = value::getArraySetView(val)->size();
+            break;
+        }
+        case value::TypeTags::ArrayMultiSet: {
+            result = value::getArrayMultiSetView(val)->size();
             break;
         }
         case value::TypeTags::bsonArray: {
@@ -2329,7 +2333,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericNewKeyString(
                 break;
             }
             case value::TypeTags::Array:
-            case value::TypeTags::ArraySet: {
+            case value::TypeTags::ArraySet:
+            case value::TypeTags::ArrayMultiSet: {
                 value::ArrayEnumerator enumerator{tag, val};
                 BSONArrayBuilder arrayBuilder;
                 bson::convertToBsonArr(arrayBuilder, enumerator);
@@ -4477,6 +4482,28 @@ FastTuple<bool, value::TypeTags, value::Value> setEquals(
 
     return {false, value::TypeTags::Boolean, true};
 }
+
+FastTuple<bool, value::TypeTags, value::Value> setIsSubset(
+    value::TypeTags lhsTag,
+    value::Value lhsVal,
+    value::TypeTags rhsTag,
+    value::Value rhsVal,
+    const CollatorInterface* collator = nullptr) {
+
+    if (!value::isArray(lhsTag) || !value::isArray(rhsTag)) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto setValuesSecondArg = valueToSetHelper(rhsTag, rhsVal, collator);
+
+    bool isSubset = true;
+    value::arrayAny(lhsTag, lhsVal, [&](value::TypeTags elTag, value::Value elVal) {
+        isSubset = (setValuesSecondArg.count({elTag, elVal}) > 0);
+        return !isSubset;
+    });
+
+    return {false, value::TypeTags::Boolean, isSubset};
+}
 }  // namespace
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetUnion(ArityType arity) {
@@ -4795,6 +4822,20 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetEquals(Ar
     return setEquals(argTags, argVals, value::getCollatorView(collVal));
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetIsSubset(ArityType arity) {
+    tassert(5154701, "$setIsSubset expects two sets and a collator", arity == 3);
+
+    auto [_, collTag, collVal] = getFromStack(0);
+    if (collTag != value::TypeTags::collator) {
+        return {false, value::TypeTags::Nothing, 0};
+    }
+
+    auto [lhsOwned, lhsTag, lhsVal] = getFromStack(1);
+    auto [rhsOwned, rhsTag, rhsVal] = getFromStack(2);
+
+    return setIsSubset(lhsTag, lhsVal, rhsTag, rhsVal, value::getCollatorView(collVal));
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetDifference(ArityType arity) {
     invariant(arity == 2);
 
@@ -4825,6 +4866,38 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetEquals(ArityT
     }
 
     return setEquals(argTags, argVals);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetIsSubset(ArityType arity) {
+    tassert(5154702, "$setIsSubset expects two sets", arity == 2);
+
+    auto [lhsOwned, lhsTag, lhsVal] = getFromStack(0);
+    auto [rhsOwned, rhsTag, rhsVal] = getFromStack(1);
+
+    return setIsSubset(lhsTag, lhsVal, rhsTag, rhsVal);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetToArray(ArityType arity) {
+    invariant(arity == 1);
+
+    auto [owned, tag, val] = getFromStack(0);
+
+    if (tag != value::TypeTags::ArraySet && tag != value::TypeTags::ArrayMultiSet) {
+        // passthrough if its not a set
+        topStack(false, value::TypeTags::Nothing, 0);
+        return {owned, tag, val};
+    }
+
+    auto [resTag, resVal] = value::makeNewArray();
+    value::ValueGuard resGuard{resTag, resVal};
+    auto resView = value::getArrayView(resVal);
+
+    value::arrayForEach<true>(tag, val, [&](value::TypeTags elTag, value::Value elVal) {
+        resView->push_back(elTag, elVal);
+    });
+
+    resGuard.reset();
+    return {true, resTag, resVal};
 }
 
 namespace {
@@ -6540,8 +6613,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxNFinali
     return {true, arrayTag, arrayVal};
 }
 
-std::tuple<value::Array*, std::pair<value::TypeTags, value::Value>, int64_t, int64_t> rankState(
-    value::TypeTags stateTag, value::Value stateVal) {
+std::tuple<value::Array*, std::pair<value::TypeTags, value::Value>, bool, int64_t, int64_t>
+rankState(value::TypeTags stateTag, value::Value stateVal) {
     uassert(
         7795500, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
     auto state = value::getArrayView(stateVal);
@@ -6551,8 +6624,15 @@ std::tuple<value::Array*, std::pair<value::TypeTags, value::Value>, int64_t, int
             state->size() == AggRankElems::kRankArraySize);
 
     auto lastValue = state->getAt(AggRankElems::kLastValue);
+    auto [lastValueIsNothingTag, lastValueIsNothingVal] =
+        state->getAt(AggRankElems::kLastValueIsNothing);
     auto [lastRankTag, lastRankVal] = state->getAt(AggRankElems::kLastRank);
     auto [sameRankCountTag, sameRankCountVal] = state->getAt(AggRankElems::kSameRankCount);
+
+    uassert(8188900,
+            "Last rank is nothing component should be a boolean",
+            lastValueIsNothingTag == value::TypeTags::Boolean);
+    auto lastValueIsNothing = value::bitcastTo<bool>(lastValueIsNothingVal);
 
     uassert(7795502,
             "Last rank component should be a 64-bit integer",
@@ -6563,7 +6643,7 @@ std::tuple<value::Array*, std::pair<value::TypeTags, value::Value>, int64_t, int
             "Same rank component should be a 64-bit integer",
             sameRankCountTag == value::TypeTags::NumberInt64);
     auto sameRankCount = value::bitcastTo<int64_t>(sameRankCountVal);
-    return {state, lastValue, lastRank, sameRankCount};
+    return {state, lastValue, lastValueIsNothing, lastRank, sameRankCount};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> builtinAggRankImpl(
@@ -6583,15 +6663,29 @@ FastTuple<bool, value::TypeTags, value::Value> builtinAggRankImpl(
         if (!valueOwned) {
             std::tie(valueTag, valueVal) = value::copyValue(valueTag, valueVal);
         }
-        newState->push_back(valueTag, valueVal);
-        newState->push_back(value::TypeTags::NumberInt64, 1);
-        newState->push_back(value::TypeTags::NumberInt64, 1);
+        if (valueTag == value::TypeTags::Nothing) {
+            newState->push_back(value::TypeTags::Null, 0);  // kLastValue
+            newState->push_back(value::TypeTags::Boolean,
+                                value::bitcastFrom<bool>(true));  // kLastValueIsNothing
+        } else {
+            newState->push_back(valueTag, valueVal);  // kLastValue
+            newState->push_back(value::TypeTags::Boolean,
+                                value::bitcastFrom<bool>(false));  // kLastValueIsNothing
+        }
+        newState->push_back(value::TypeTags::NumberInt64, 1);  // kLastRank
+        newState->push_back(value::TypeTags::NumberInt64, 1);  // kSameRankCount
         newStateGuard.reset();
         return {true, newStateTag, newStateVal};
     }
 
     value::ValueGuard stateGuard{stateTag, stateVal};
-    auto [state, lastValue, lastRank, sameRankCount] = rankState(stateTag, stateVal);
+    auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount] =
+        rankState(stateTag, stateVal);
+    // Update the last value to Nothing before comparison if the flag is set.
+    if (lastValueIsNothing) {
+        lastValue.first = value::TypeTags::Nothing;
+        lastValue.second = 0;
+    }
     auto [compareTag, compareVal] =
         value::compareValue(valueTag, valueVal, lastValue.first, lastValue.second, collator);
     if (compareTag == value::TypeTags::NumberInt32 && compareVal == 0) {
@@ -6600,7 +6694,17 @@ FastTuple<bool, value::TypeTags, value::Value> builtinAggRankImpl(
         if (!valueOwned) {
             std::tie(valueTag, valueVal) = value::copyValue(valueTag, valueVal);
         }
-        state->setAt(AggRankElems::kLastValue, valueTag, valueVal);
+        if (valueTag == value::TypeTags::Nothing) {
+            state->setAt(AggRankElems::kLastValue, value::TypeTags::Null, 0);
+            state->setAt(AggRankElems::kLastValueIsNothing,
+                         value::TypeTags::Boolean,
+                         value::bitcastFrom<bool>(true));
+        } else {
+            state->setAt(AggRankElems::kLastValue, valueTag, valueVal);
+            state->setAt(AggRankElems::kLastValueIsNothing,
+                         value::TypeTags::Boolean,
+                         value::bitcastFrom<bool>(false));
+        }
         state->setAt(AggRankElems::kLastRank,
                      value::TypeTags::NumberInt64,
                      dense ? lastRank + 1 : lastRank + sameRankCount);
@@ -6658,7 +6762,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDenseRankColl
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRankFinalize(ArityType arity) {
     invariant(arity == 1);
     auto [stateOwned, stateTag, stateVal] = getFromStack(0);
-    auto [state, lastValue, lastRank, sameRankCount] = rankState(stateTag, stateVal);
+    auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount] =
+        rankState(stateTag, stateVal);
     return {true, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(lastRank)};
 }
 
@@ -7086,7 +7191,7 @@ size_t arrayQueueSize(value::Array* arrayQueue) {
 }
 
 // Initialize an array queue
-std::tuple<value::TypeTags, value::Value> arrayQueueInit(size_t bufferSize = 4) {
+std::tuple<value::TypeTags, value::Value> arrayQueueInit() {
     auto [arrayQueueTag, arrayQueueVal] = value::makeNewArray();
     value::ValueGuard arrayQueueGuard{arrayQueueTag, arrayQueueVal};
     auto arrayQueue = value::getArrayView(arrayQueueVal);
@@ -7094,11 +7199,10 @@ std::tuple<value::TypeTags, value::Value> arrayQueueInit(size_t bufferSize = 4) 
 
     auto [bufferTag, bufferVal] = value::makeNewArray();
     value::ValueGuard bufferGuard{bufferTag, bufferVal};
+
+    // Make the buffer has at least 1 capacity so that the start index will always be valid.
     auto buffer = value::getArrayView(bufferVal);
-    buffer->reserve(bufferSize);
-    for (size_t i = 0; i < bufferSize; ++i) {
-        buffer->push_back(value::TypeTags::Null, 0);
-    }
+    buffer->push_back(value::TypeTags::Null, 0);
 
     bufferGuard.reset();
     arrayQueue->push_back(bufferTag, bufferVal);
@@ -7907,6 +8011,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovablePush
     }
     value::ValueGuard stateGuard{stateTag, stateVal};
     auto [inputTag, inputVal] = moveOwnedFromStack(1);
+    if (inputTag == value::TypeTags::Nothing) {
+        stateGuard.reset();
+        return {true, stateTag, stateVal};
+    }
     value::ValueGuard inputGuard{inputTag, inputVal};
 
     uassert(7993100, "State should be of array type", stateTag == value::TypeTags::Array);
@@ -7921,6 +8029,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovablePush
     ArityType arity) {
     auto [stateTag, stateVal] = moveOwnedFromStack(0);
     value::ValueGuard stateGuard{stateTag, stateVal};
+    auto [inputTag, inputVal] = moveOwnedFromStack(1);
+    if (inputTag == value::TypeTags::Nothing) {
+        stateGuard.reset();
+        return {true, stateTag, stateVal};
+    }
+    value::ValueGuard inputGuard{inputTag, inputVal};
 
     uassert(7993101, "State should be of array type", stateTag == value::TypeTags::Array);
     auto state = value::getArrayView(stateVal);
@@ -8313,7 +8427,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggLinearFillFin
     return linearFillInterpolate(x1, y1, x2, y2, {sortByTag, sortByVal});
 }
 
-
 /**
  * Implementation for $firstN/$lastN removable window function
  */
@@ -8406,6 +8519,137 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggFirstLastNFin
         auto [arrTag, arrVal] = arrayQueueBackN(queue, n);
         return {true, arrTag, arrVal};
     }
+}
+
+std::tuple<value::Array*, value::ArrayMultiSet*, int32_t> addToSetState(value::TypeTags stateTag,
+                                                                        value::Value stateVal) {
+    tassert(8124900, "state should be of type Array", stateTag == value::TypeTags::Array);
+    auto stateArr = value::getArrayView(stateVal);
+    tassert(8124901,
+            str::stream() << "state array should have "
+                          << static_cast<size_t>(AggArrayWithSize::kLast) << " elements",
+            stateArr->size() == static_cast<size_t>(AggArrayWithSize::kLast));
+
+    // Read the accumulator from the state.
+    auto [accMultiSetTag, accMultiSetVal] =
+        stateArr->getAt(static_cast<size_t>(AggArrayWithSize::kValues));
+    tassert(8124902,
+            "accumulator should be of type MultiSet",
+            accMultiSetTag == value::TypeTags::ArrayMultiSet);
+    auto accMultiSet = value::getArrayMultiSetView(accMultiSetVal);
+
+    auto [accMultiSetSizeTag, accMultiSetSizeVal] =
+        stateArr->getAt(static_cast<size_t>(AggArrayWithSize::kSizeOfValues));
+    tassert(8124903,
+            "accumulator size be of type NumberInt32",
+            accMultiSetSizeTag == value::TypeTags::NumberInt32);
+
+    return {stateArr, accMultiSet, value::bitcastTo<int32_t>(accMultiSetSizeVal)};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> aggRemovableAddToSetInitImpl(
+    CollatorInterface* collator) {
+    auto [stateTag, stateVal] = value::makeNewArray();
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto stateArr = value::getArrayView(stateVal);
+
+    auto [mSetTag, mSetVal] = value::makeNewArrayMultiSet(collator);
+
+    // the order is important!!!
+    stateArr->push_back(mSetTag, mSetVal);  // the multiset with the values
+    stateArr->push_back(value::TypeTags::NumberInt32,
+                        value::bitcastFrom<int32_t>(0));  // the size in bytes of the multiset
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableAddToSetInit(
+    ArityType arity) {
+    return aggRemovableAddToSetInitImpl(nullptr /* collator */);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableAddToSetCollInit(
+    ArityType arity) {
+    auto [collatorOwned, collatorTag, collatorVal] = getFromStack(0);
+    tassert(8124904, "expected value of type 'collator'", collatorTag == value::TypeTags::collator);
+
+    return aggRemovableAddToSetInitImpl(value::getCollatorView(collatorVal));
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableAddToSetAdd(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto [newElTag, newElVal] = moveOwnedFromStack(1);
+    value::ValueGuard newElGuard{newElTag, newElVal};
+    auto [sizeCapOwned, sizeCapTag, sizeCapVal] = getFromStack(2);
+    tassert(8124905,
+            "The size cap must be of type NumberInt32",
+            sizeCapTag == value::TypeTags::NumberInt32);
+    auto capSize = value::bitcastTo<int32_t>(sizeCapVal);
+
+    auto [stateArr, accMultiSet, accMultiSetSize] = addToSetState(stateTag, stateVal);
+
+    // Check the size of the accumulator will not exceed the cap.
+    int32_t newElSize = value::getApproximateSize(newElTag, newElVal);
+    if (accMultiSetSize + newElSize >= capSize) {
+        auto elsNum = accMultiSet->size();
+        auto setTotalSize = accMultiSetSize;
+        uasserted(ErrorCodes::ExceededMemoryLimit,
+                  str::stream() << "Used too much memory for a single set. Memory limit: "
+                                << capSize << " bytes. The set contains " << elsNum
+                                << " elements and is of size " << setTotalSize
+                                << " bytes. The element being added has size " << newElSize
+                                << " bytes.");
+    }
+
+    // Update the state.
+    stateArr->setAt(static_cast<size_t>(AggArrayWithSize::kSizeOfValues),
+                    value::TypeTags::NumberInt32,
+                    value::bitcastFrom<int32_t>(accMultiSetSize + newElSize));
+
+    accMultiSet->push_back(newElTag, newElVal);
+    newElGuard.reset();
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableAddToSetRemove(
+    ArityType arity) {
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+    auto [elTag, elVal] = moveOwnedFromStack(1);
+    value::ValueGuard elGuard{elTag, elVal};
+
+    auto [stateArr, accMultiSet, accMultiSetSize] = addToSetState(stateTag, stateVal);
+
+    int32_t elSize = value::getApproximateSize(elTag, elVal);
+    invariant(elSize <= accMultiSetSize);
+    stateArr->setAt(static_cast<size_t>(AggArrayWithSize::kSizeOfValues),
+                    value::TypeTags::NumberInt32,
+                    value::bitcastFrom<int32_t>(accMultiSetSize - elSize));
+
+    accMultiSet->remove(elTag, elVal);
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRemovableAddToSetFinalize(
+    ArityType arity) {
+    auto [stateOwned, stateTag, stateVal] = getFromStack(0);
+
+    auto [stateArr, accMultiSet, _] = addToSetState(stateTag, stateVal);
+
+    // Convert the multiSet to Set.
+    auto [accSetTag, accSetVal] = value::makeNewArraySet(accMultiSet->getCollator());
+    value::ValueGuard resGuard{accSetTag, accSetVal};
+    auto accSet = value::getArraySetView(accSetVal);
+    for (const auto& p : accMultiSet->values()) {
+        auto [cTag, cVal] = copyValue(p.first, p.second);
+        accSet->push_back(cTag, cVal);
+    }
+    resGuard.reset();
+    return {true, accSetTag, accSetVal};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin f,
@@ -8600,6 +8844,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinSetDifference(arity);
         case Builtin::setEquals:
             return builtinSetEquals(arity);
+        case Builtin::setIsSubset:
+            return builtinSetIsSubset(arity);
         case Builtin::collSetUnion:
             return builtinCollSetUnion(arity);
         case Builtin::collSetIntersection:
@@ -8608,6 +8854,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinCollSetDifference(arity);
         case Builtin::collSetEquals:
             return builtinCollSetEquals(arity);
+        case Builtin::collSetIsSubset:
+            return builtinCollSetIsSubset(arity);
         case Builtin::runJsPredicate:
             return builtinRunJsPredicate(arity);
         case Builtin::regexCompile:
@@ -8685,6 +8933,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinObjectToArray(arity);
         case Builtin::arrayToObject:
             return builtinArrayToObject(arity);
+        case Builtin::setToArray:
+            return builtinSetToArray(arity);
         case Builtin::aggFirstNNeedsMoreInput:
             return builtinAggFirstNNeedsMoreInput(arity);
         case Builtin::aggFirstN:
@@ -8793,10 +9043,28 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinAggFirstLastNRemove(arity);
         case Builtin::aggRemovableLastNFinalize:
             return builtinAggFirstLastNFinalize<AccumulatorFirstLastN::Sense::kLast>(arity);
+        case Builtin::aggRemovableAddToSetInit:
+            return builtinAggRemovableAddToSetInit(arity);
+        case Builtin::aggRemovableAddToSetCollInit:
+            return builtinAggRemovableAddToSetCollInit(arity);
+        case Builtin::aggRemovableAddToSetAdd:
+            return builtinAggRemovableAddToSetAdd(arity);
+        case Builtin::aggRemovableAddToSetRemove:
+            return builtinAggRemovableAddToSetRemove(arity);
+        case Builtin::aggRemovableAddToSetFinalize:
+            return builtinAggRemovableAddToSetFinalize(arity);
+        case Builtin::aggLinearFillCanAdd:
+            return builtinAggLinearFillCanAdd(arity);
+        case Builtin::aggLinearFillAdd:
+            return builtinAggLinearFillAdd(arity);
+        case Builtin::aggLinearFillFinalize:
+            return builtinAggLinearFillFinalize(arity);
         case Builtin::valueBlockExists:
             return builtinValueBlockExists(arity);
         case Builtin::valueBlockFillEmpty:
             return builtinValueBlockFillEmpty(arity);
+        case Builtin::valueBlockFillEmptyBlock:
+            return builtinValueBlockFillEmptyBlock(arity);
         case Builtin::valueBlockMin:
             return builtinValueBlockMin(arity);
         case Builtin::valueBlockMax:
@@ -8809,18 +9077,34 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockGteScalar(arity);
         case Builtin::valueBlockEqScalar:
             return builtinValueBlockEqScalar(arity);
+        case Builtin::valueBlockNeqScalar:
+            return builtinValueBlockNeqScalar(arity);
         case Builtin::valueBlockLtScalar:
             return builtinValueBlockLtScalar(arity);
         case Builtin::valueBlockLteScalar:
             return builtinValueBlockLteScalar(arity);
+        case Builtin::valueBlockCmp3wScalar:
+            return builtinValueBlockCmp3wScalar(arity);
         case Builtin::valueBlockCombine:
             return builtinValueBlockCombine(arity);
-        case Builtin::aggLinearFillCanAdd:
-            return builtinAggLinearFillCanAdd(arity);
-        case Builtin::aggLinearFillAdd:
-            return builtinAggLinearFillAdd(arity);
-        case Builtin::aggLinearFillFinalize:
-            return builtinAggLinearFillFinalize(arity);
+        case Builtin::valueBlockLogicalAnd:
+            return builtinValueBlockLogicalAnd(arity);
+        case Builtin::valueBlockLogicalOr:
+            return builtinValueBlockLogicalOr(arity);
+        case Builtin::valueBlockLogicalNot:
+            return builtinValueBlockLogicalNot(arity);
+        case Builtin::valueBlockNewFill:
+            return builtinValueBlockNewFill(arity);
+        case Builtin::valueBlockSize:
+            return builtinValueBlockSize(arity);
+        case Builtin::valueBlockNone:
+            return builtinValueBlockNone(arity);
+        case Builtin::cellFoldValues_F:
+            return builtinCellFoldValues_F(arity);
+        case Builtin::cellFoldValues_P:
+            return builtinCellFoldValues_P(arity);
+        case Builtin::cellBlockGetFlatValuesBlock:
+            return builtinCellBlockGetFlatValuesBlock(arity);
     }
 
     MONGO_UNREACHABLE;
@@ -9103,6 +9387,8 @@ std::string builtinToString(Builtin b) {
             return "objectToArray";
         case Builtin::arrayToObject:
             return "arrayToObject";
+        case Builtin::setToArray:
+            return "setToArray";
         case Builtin::aggFirstNNeedsMoreInput:
             return "aggFirstNNeedsMoreInput";
         case Builtin::aggFirstN:
@@ -9209,10 +9495,28 @@ std::string builtinToString(Builtin b) {
             return "aggRemovableLastNRemove";
         case Builtin::aggRemovableLastNFinalize:
             return "aggRemovableLastNFinalize";
+        case Builtin::aggLinearFillCanAdd:
+            return "aggLinearFillCanAdd";
+        case Builtin::aggLinearFillAdd:
+            return "aggLinearFillAdd";
+        case Builtin::aggLinearFillFinalize:
+            return "aggLinearFillFinalize";
+        case Builtin::aggRemovableAddToSetInit:
+            return "aggRemovableAddToSetInit";
+        case Builtin::aggRemovableAddToSetCollInit:
+            return "aggRemovableAddToSetCollInit";
+        case Builtin::aggRemovableAddToSetAdd:
+            return "aggRemovableAddToSetAdd";
+        case Builtin::aggRemovableAddToSetRemove:
+            return "aggRemovableAddToSetRemove";
+        case Builtin::aggRemovableAddToSetFinalize:
+            return "aggRemovableAddToSetFinalize";
         case Builtin::valueBlockExists:
             return "valueBlockExists";
         case Builtin::valueBlockFillEmpty:
             return "valueBlockFillEmpty";
+        case Builtin::valueBlockFillEmptyBlock:
+            return "valueBlockFillEmptyBlock";
         case Builtin::valueBlockMin:
             return "valueBlockMin";
         case Builtin::valueBlockMax:
@@ -9225,18 +9529,34 @@ std::string builtinToString(Builtin b) {
             return "valueBlockGteScalar";
         case Builtin::valueBlockEqScalar:
             return "valueBlockEqScalar";
+        case Builtin::valueBlockNeqScalar:
+            return "valueBlockNeqScalar";
         case Builtin::valueBlockLtScalar:
             return "valueBlockLtScalar";
         case Builtin::valueBlockLteScalar:
             return "valueBlockLteScalar";
+        case Builtin::valueBlockCmp3wScalar:
+            return "valueBlockCmp3wScalar";
         case Builtin::valueBlockCombine:
             return "valueBlockCombine";
-        case Builtin::aggLinearFillCanAdd:
-            return "aggLinearFillCanAdd";
-        case Builtin::aggLinearFillAdd:
-            return "aggLinearFillAdd";
-        case Builtin::aggLinearFillFinalize:
-            return "aggLinearFillFinalize";
+        case Builtin::valueBlockLogicalAnd:
+            return "valueBlockLogicalAnd";
+        case Builtin::valueBlockLogicalOr:
+            return "valueBlockLogicalOr";
+        case Builtin::valueBlockLogicalNot:
+            return "valueBlockLogicalNot";
+        case Builtin::valueBlockNewFill:
+            return "valueBlockNewFill";
+        case Builtin::valueBlockSize:
+            return "valueBlockSize";
+        case Builtin::valueBlockNone:
+            return "valueBlockNone";
+        case Builtin::cellFoldValues_F:
+            return "cellFoldValues_F";
+        case Builtin::cellFoldValues_P:
+            return "cellFoldValues_P";
+        case Builtin::cellBlockGetFlatValuesBlock:
+            return "cellBlockGetFlatValuesBlock";
         default:
             MONGO_UNREACHABLE;
     }

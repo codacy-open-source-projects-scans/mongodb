@@ -6,9 +6,11 @@
  *
  * @tags: [
  *  requires_capped,
+ *  # This test works on a capped collection, which do not support sharding.
+ *  assumes_unsharded_collection,
  * ]
  */
-import {assertAlways} from "jstests/concurrency/fsm_libs/assert.js";
+import {interruptedQueryErrors} from "jstests/concurrency/fsm_libs/assert.js";
 
 export const $config = (function() {
     const data = {
@@ -24,16 +26,28 @@ export const $config = (function() {
             size: 8192  // multiple of 256; larger than 4096 default
         };
 
+        function createCollName(prefix, suffix) {
+            return prefix + suffix;
+        }
+
         function randomCollectionName(prefix, collCount) {
-            return prefix + Random.randInt(collCount);
+            return createCollName(prefix, Random.randInt(collCount));
         }
 
         function create(db, collName) {
-            const localDb = db.getSiblingDB("local");
-            const myCollName = randomCollectionName(this.prefix, this.collectionCount);
-            localDb.runCommand({drop: myCollName});
-            localDb.createCollection(myCollName, options);
-            localDb[myCollName].insert({x: 1});
+            // Avoid concurrency issues with two threads attempting to drop and recreate the same
+            // collection simultaneously. Limit DDL activity on one collection to a single thread.
+            //
+            // If we allow multiple threads to interact with the same collection the document insert
+            // performed at the end could potentially create an uncapped collection if another
+            // thread just dropped the collection.
+            if (this.tid <= this.collectionCount) {
+                const localDb = db.getSiblingDB("local");
+                const myCollName = createCollName(this.prefix, this.tid);
+                localDb.runCommand({drop: myCollName});
+                localDb.createCollection(myCollName, options);
+                localDb[myCollName].insert({x: 1});
+            }
         }
 
         function findOne(db, collName) {
@@ -41,7 +55,7 @@ export const $config = (function() {
             const myCollName = randomCollectionName(this.prefix, this.collectionCount);
             for (let i = 0; i < 10; ++i) {
                 let res = localDb.runCommand({find: myCollName, filter: {}});
-                assertAlways.commandWorked(res);
+                assert.commandWorkedOrFailedWithCode(res, interruptedQueryErrors);
             }
         }
 
@@ -51,10 +65,10 @@ export const $config = (function() {
             for (let i = 0; i < 10; ++i) {
                 let res = localDb.runCommand(
                     {find: myCollName, filter: {}, tailable: true, batchSize: 0});
-                assertAlways.commandWorked(res);
-                assertAlways.commandWorkedOrFailedWithCode(
+                assert.commandWorked(res);
+                assert.commandWorkedOrFailedWithCode(
                     localDb.runCommand({getMore: res.cursor.id, collection: myCollName}),
-                    [ErrorCodes.QueryPlanKilled, ErrorCodes.CursorNotFound]);
+                    interruptedQueryErrors);
             }
         }
 

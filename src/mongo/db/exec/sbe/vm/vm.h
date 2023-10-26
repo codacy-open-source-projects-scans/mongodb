@@ -33,7 +33,6 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/hash/hash.h>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -240,6 +239,9 @@ std::pair<value::TypeTags, value::Value> genericCompare(
             return {value::TypeTags::Boolean, value::bitcastFrom<bool>(result)};
         }
     }
+
+    // TODO: SERVER-82089: Use cmp3w instead of simple comparisons in ABT optimization + lowering of
+    // parameterized constants
 
     return {value::TypeTags::Nothing, 0};
 }
@@ -749,10 +751,12 @@ enum class Builtin : uint16_t {
     setIntersection,
     setDifference,
     setEquals,
+    setIsSubset,
     collSetUnion,
     collSetIntersection,
     collSetDifference,
     collSetEquals,
+    collSetIsSubset,
     runJsPredicate,
     regexCompile,  // compile <pattern, options> into value::pcreRegex
     regexFind,
@@ -792,6 +796,7 @@ enum class Builtin : uint16_t {
     isoDayOfWeek,
     isoWeek,
     objectToArray,
+    setToArray,
     arrayToObject,
 
     aggFirstNNeedsMoreInput,
@@ -851,21 +856,39 @@ enum class Builtin : uint16_t {
     aggRemovableLastNAdd,
     aggRemovableLastNRemove,
     aggRemovableLastNFinalize,
+    aggRemovableAddToSetInit,
+    aggRemovableAddToSetCollInit,
+    aggRemovableAddToSetAdd,
+    aggRemovableAddToSetRemove,
+    aggRemovableAddToSetFinalize,
 
     // Additional one-byte builtins go here.
 
     // Start of 2 byte builtins.
     valueBlockExists = 256,
     valueBlockFillEmpty,
+    valueBlockFillEmptyBlock,
     valueBlockMin,
     valueBlockMax,
     valueBlockCount,
     valueBlockGtScalar,
     valueBlockGteScalar,
     valueBlockEqScalar,
+    valueBlockNeqScalar,
     valueBlockLtScalar,
     valueBlockLteScalar,
+    valueBlockCmp3wScalar,
     valueBlockCombine,
+    valueBlockLogicalAnd,
+    valueBlockLogicalOr,
+    valueBlockLogicalNot,
+    valueBlockNewFill,
+    valueBlockSize,
+    valueBlockNone,
+
+    cellFoldValues_F,
+    cellFoldValues_P,
+    cellBlockGetFlatValuesBlock,
 };
 
 std::string builtinToString(Builtin b);
@@ -1005,11 +1028,12 @@ enum AggStdDevValueElems {
  *
  * The array contains three elements:
  * - The element at index `kLastValue` is the last value.
+ * - The element at index `kLastValueIsNothing` is true if the last value is nothing.
  * - The element at index `kLastRank` is the rank of the last value.
  * - The element at index `kSameRankCount` is how many values are of the same rank as the last
  * value.
  */
-enum AggRankElems { kLastValue, kLastRank, kSameRankCount, kRankArraySize };
+enum AggRankElems { kLastValue, kLastValueIsNothing, kLastRank, kSameRankCount, kRankArraySize };
 
 /**
  * This enum defines indices into an 'Array' that returns the result of accumulators that track the
@@ -1128,6 +1152,9 @@ public:
 
     void append(CodeFragment&& code);
     void appendNoStack(CodeFragment&& code);
+    // Used when either `lhs` or `rhs` will run, but not both. This method will adjust the stack
+    // size once in this call, rather than twice (once for each CodeFragment). The CodeFragments
+    // must have the same stack size for us to know how to adjust the stack at compile time.
     void append(CodeFragment&& lhs, CodeFragment&& rhs);
     void appendConstVal(value::TypeTags tag, value::Value val);
     void appendAccessVal(value::SlotAccessor* accessor);
@@ -1360,6 +1387,8 @@ class ByteCode {
     static_assert(std::is_trivially_copyable_v<FastTuple<bool, value::TypeTags, value::Value>>);
 
 public:
+    struct InvokeLambdaFunctor;
+
     ByteCode() {
         _argStack = reinterpret_cast<uint8_t*>(mongoMalloc(sizeOfElement * 4));
         _argStackEnd = _argStack + sizeOfElement * 4;
@@ -1794,7 +1823,7 @@ private:
                                                                       CollatorInterface* collator);
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToSetCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollAddToSetCapped(ArityType arity);
-
+    FastTuple<bool, value::TypeTags, value::Value> builtinSetToArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDoubleDoubleSum(ArityType arity);
     // The template parameter is false for a regular DoubleDouble summation and true if merging
     // partially computed DoubleDouble sums.
@@ -1864,10 +1893,12 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinSetIntersection(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetDifference(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetEquals(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinSetIsSubset(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetIntersection(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetDifference(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollSetEquals(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCollSetIsSubset(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinRunJsPredicate(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinRegexCompile(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinRegexFind(ArityType arity);
@@ -1991,27 +2022,57 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNRemove(ArityType arity);
     template <AccumulatorFirstLastN::Sense S>
     FastTuple<bool, value::TypeTags, value::Value> builtinAggFirstLastNFinalize(ArityType arity);
-
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMin(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGtScalar(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGteScalar(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockEqScalar(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLtScalar(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLteScalar(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCombine(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillCanAdd(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillAdd(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggLinearFillFinalize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetInit(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetCollInit(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetAdd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetRemove(
+        ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAggRemovableAddToSetFinalize(
+        ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> linearFillInterpolate(
         std::pair<value::TypeTags, value::Value> x1,
         std::pair<value::TypeTags, value::Value> y1,
         std::pair<value::TypeTags, value::Value> x2,
         std::pair<value::TypeTags, value::Value> y2,
         std::pair<value::TypeTags, value::Value> x);
+
+
+    // Block builtins
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmptyBlock(ArityType arity);
+    template <bool less>
+    FastTuple<bool, value::TypeTags, value::Value> valueBlockMinMaxImpl(
+        value::ValueBlock* inputBlock, value::ValueBlock* bitsetBlock);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMin(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
+
+    template <class Cmp>
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmpScalar(ArityType arity);
+
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGtScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGteScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockEqScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockNeqScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLtScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLteScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmp3wScalar(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCombine(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLogicalAnd(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLogicalOr(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockLogicalNot(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockNewFill(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockSize(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockNone(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCellFoldValues_F(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCellFoldValues_P(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCellBlockGetFlatValuesBlock(
+        ArityType arity);
 
     FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f,
                                                                    ArityType arity,
@@ -2136,6 +2197,26 @@ private:
 
     // Expression execution stack of (owned, tag, value) tuples each of 'sizeOfElement' bytes.
     uint8_t* _argStack{nullptr};
+};
+
+struct ByteCode::InvokeLambdaFunctor {
+    InvokeLambdaFunctor(ByteCode& bytecode, const CodeFragment* code, int64_t lamPos)
+        : bytecode(bytecode), code(code), lamPos(lamPos) {}
+
+    std::pair<value::TypeTags, value::Value> operator()(value::TypeTags tag,
+                                                        value::Value val) const {
+        // Invoke the lambda.
+        bytecode.pushStack(false, tag, val);
+        bytecode.runLambdaInternal(code, lamPos);
+        // Move the result off the stack, make sure it's owned, and return it.
+        auto result = bytecode.moveOwnedFromStack(0);
+        bytecode.popStack();
+        return result;
+    }
+
+    ByteCode& bytecode;
+    const CodeFragment* const code;
+    const int64_t lamPos;
 };
 }  // namespace vm
 }  // namespace sbe

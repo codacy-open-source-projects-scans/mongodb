@@ -2,8 +2,7 @@
 // @tags: [
 //   directly_against_shardsvrs_incompatible,
 //   featureFlagQuerySettings,
-//   tenant_migration_incompatible,
-//   command_not_supported_in_serverless,
+//   simulate_atlas_proxy_incompatible
 // ]
 //
 
@@ -28,7 +27,7 @@ const nonExistentQueryShapeHash = "0".repeat(64);
         7746402);
     assert.commandFailedWithCode(
         db.adminCommand(
-            {setQuerySettings: qsutils.makeQueryInstance(), settings: {notAValid: "settings"}}),
+            {setQuerySettings: qsutils.makeFindQueryInstance(), settings: {notAValid: "settings"}}),
         40415);
 }
 

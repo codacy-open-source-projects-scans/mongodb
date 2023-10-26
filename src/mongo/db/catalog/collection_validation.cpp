@@ -47,7 +47,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -579,7 +578,8 @@ Status validate(OperationContext* opCtx,
                 const AdditionalOptions& additionalOptions,
                 ValidateResults* results,
                 BSONObjBuilder* output,
-                bool logDiagnostics) {
+                bool logDiagnostics,
+                const SerializationContext& sc) {
     invariant(!opCtx->lockState()->isLocked() || storageGlobalParams.repair);
 
     // This is deliberately outside of the try-catch block, so that any errors thrown in the
@@ -592,8 +592,6 @@ Status validate(OperationContext* opCtx,
     uassertStatusOK(replCoord->checkCanServeReadsFor(
         opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
-    SerializationContext sc = SerializationContext::stateCommandReply();
-    sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
     output->append("ns", NamespaceStringUtil::serialize(validateState.nss(), sc));
 
     validateState.uuid().appendToBuilder(output, "uuid");

@@ -38,7 +38,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -100,7 +99,7 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(failPreimagesCollectionCreation);
-MONGO_FAIL_POINT_DEFINE(truncateOnlyOnSecondaries);
+MONGO_FAIL_POINT_DEFINE(preImagesTruncateOnlyOnSecondaries);
 
 const auto getPreImagesCollectionManager =
     ServiceContext::declareDecoration<ChangeStreamPreImagesCollectionManager>();
@@ -480,7 +479,7 @@ size_t ChangeStreamPreImagesCollectionManager::_deleteExpiredPreImagesWithTrunca
 
 
     if (!preImagesColl.exists() ||
-        (MONGO_unlikely(truncateOnlyOnSecondaries.shouldFail()) &&
+        (MONGO_unlikely(preImagesTruncateOnlyOnSecondaries.shouldFail()) &&
          repl::ReplicationCoordinator::get(opCtx)->getMemberState() ==
              repl::MemberState::RS_PRIMARY)) {
         return 0;

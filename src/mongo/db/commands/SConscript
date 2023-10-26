@@ -42,6 +42,31 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='update_metrics',
+    source=[
+        'update_metrics.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+        'server_status_core',
+    ],
+)
+
+env.Library(
+    target='write_commands_common',
+    source=[
+        'write_commands_common.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/auth',
+        '$BUILD_DIR/mongo/db/auth/authprivilege',
+        '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+        '$BUILD_DIR/mongo/db/pipeline/lite_parsed_document_source',
+        'update_metrics',
+    ],
+)
+
 # Commands available in every process that executes commands
 env.Library(
     target='core',
@@ -66,9 +91,8 @@ env.Library(
         'server_status_command.cpp',
         'sessions_commands.idl',
         'start_session_command.cpp',
-        'update_metrics.cpp',
-        'write_commands_common.cpp',
     ],
+    LIBDEPS=['update_metrics', 'write_commands_common'],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/bson/mutable/mutable_bson',
         '$BUILD_DIR/mongo/crypto/encrypted_field_config',
@@ -81,6 +105,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/fle_crud',
         '$BUILD_DIR/mongo/db/mongohasher',
         '$BUILD_DIR/mongo/db/ops/write_ops_parsers',
+        '$BUILD_DIR/mongo/db/pipeline/lite_parsed_document_source',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/session/kill_sessions',
         '$BUILD_DIR/mongo/db/session/logical_session_cache',
@@ -96,27 +121,27 @@ env.Library(
 )
 
 env.Library(
-    target='query_settings_cmds', source=[
+    target='query_settings_cmds',
+    source=[
+        # This document source has been re-located here from 'pipeline' to avoid the
+        # 'pipeline' -> 'query_settings_utils' -> 'pipeline' cyclic dependency.
+        # Generating the Debug Query Shape requires re-parsing the query instance via
+        # `query_settings::utils::createRepresentativeInfo()`, which internally uses
+        # `Pipeline::parse()`.
+        '$BUILD_DIR/mongo/db/pipeline/document_source_query_settings.cpp',
         "query_settings_cmds.idl",
         "query_settings_cmds.cpp",
-    ], LIBDEPS_PRIVATE=[
+    ],
+    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         '$BUILD_DIR/mongo/db/commands',
-        '$BUILD_DIR/mongo/db/commands/query_settings_utils',
         '$BUILD_DIR/mongo/db/dbdirectclient',
         '$BUILD_DIR/mongo/db/query/canonical_query',
+        '$BUILD_DIR/mongo/db/query/query_plan_cache',
         '$BUILD_DIR/mongo/db/query/query_settings_manager',
-        '$BUILD_DIR/mongo/db/query/query_shape',
+        '$BUILD_DIR/mongo/db/query/query_settings_utils',
+        '$BUILD_DIR/mongo/db/query/query_shape/query_shape',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
-    ])
-
-env.Library(
-    target='query_settings_utils', source=[
-        "query_settings_utils.cpp",
-    ], LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/query/canonical_query',
-        '$BUILD_DIR/mongo/db/query/query_settings_manager',
-        '$BUILD_DIR/mongo/db/query/query_shape',
     ])
 
 # Commands available in all mongodb server processes (mongod, mongos, etc.)
@@ -367,6 +392,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
+        '$BUILD_DIR/mongo/db/stats/server_read_concern_write_concern_metrics',
         '$BUILD_DIR/mongo/db/transaction/transaction',
         '$BUILD_DIR/mongo/logv2/logv2_options',
         '$BUILD_DIR/mongo/s/grid',
@@ -374,6 +400,8 @@ env.Library(
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'bulk_write_common',
         'bulk_write_parser',
+        'update_metrics',
+        'write_commands_common',
     ],
 )
 
@@ -473,7 +501,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/command_request_response',
         '$BUILD_DIR/mongo/db/query/cursor_response_idl',
         '$BUILD_DIR/mongo/db/query/query_settings_manager',
-        '$BUILD_DIR/mongo/db/query/query_shape',
+        '$BUILD_DIR/mongo/db/query/query_shape/query_shape',
         '$BUILD_DIR/mongo/db/query/query_stats/query_stats',
         '$BUILD_DIR/mongo/db/query/stats/stats',
         '$BUILD_DIR/mongo/db/query/stats/stats_histograms',
@@ -614,9 +642,10 @@ env.Library(
     target="mongod",
     source=[
         "apply_ops_cmd.cpp",
+        "change_stream_state_command.cpp",
         "collection_to_capped.cpp",
         "compact.cpp",
-        "change_stream_state_command.cpp",
+        "compact.idl",
         "dbcheck.cpp",
         "dbcommands_d.cpp",
         "dbhash.cpp",
@@ -917,6 +946,7 @@ env.CppUnitTest(
 env.CppUnitTest(
     target='db_commands_test',
     source=[
+        'create_command_test.cpp',
         'create_indexes_test.cpp',
         'external_data_source_commands_test.cpp',
         'fle_compact_test.cpp',

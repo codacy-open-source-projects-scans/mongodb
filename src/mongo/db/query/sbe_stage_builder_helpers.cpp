@@ -36,7 +36,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <iterator>
@@ -615,7 +614,7 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
                 // (or if the index is dropped).
                 uassert(ErrorCodes::QueryPlanKilled,
                         str::stream() << "query plan killed :: index dropped: " << indexIdent,
-                        indexDesc && entry && !entry->isDropped());
+                        indexDesc && entry);
 
                 auto [newIt, _] = entryMap.emplace(indexIdent, entry);
 

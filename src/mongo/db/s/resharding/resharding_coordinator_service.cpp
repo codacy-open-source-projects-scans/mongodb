@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <boost/cstdint.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
@@ -460,6 +459,11 @@ BSONObj createReshardingFieldsUpdateForOriginalNss(
                     BSON("indexVersion" << newCollectionIndexVersion->indexVersion()));
             }
 
+            auto provenance = coordinatorDoc.getCommonReshardingMetadata().getProvenance();
+            if (provenance && provenance.get() == ProvenanceEnum::kUnshardCollection) {
+                setFields = setFields.addFields(BSON("unsplittable" << true));
+            }
+
             return BSON("$set" << setFields);
         }
         case mongo::CoordinatorStateEnum::kQuiesced:
@@ -517,7 +521,8 @@ void updateConfigCollectionsForOriginalNss(OperationContext* opCtx,
     auto request = BatchedCommandRequest::buildUpdateOp(
         CollectionType::ConfigNS,
         BSON(CollectionType::kNssFieldName
-             << NamespaceStringUtil::serialize(coordinatorDoc.getSourceNss())),  // query
+             << NamespaceStringUtil::serialize(coordinatorDoc.getSourceNss(),
+                                               SerializationContext::stateDefault())),  // query
         writeOp,
         false,  // upsert
         false   // multi
@@ -565,7 +570,8 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
                 return BatchedCommandRequest::buildUpdateOp(
                     CollectionType::ConfigNS,
                     BSON(CollectionType::kNssFieldName
-                         << NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss())),
+                         << NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss(),
+                                                           SerializationContext::stateDefault())),
                     BSON("$set" << BSON(
                              "reshardingFields.state"
                              << CoordinatorState_serializer(nextState).toString()
@@ -587,7 +593,8 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
                 return BatchedCommandRequest::buildDeleteOp(
                     CollectionType::ConfigNS,
                     BSON(CollectionType::kNssFieldName
-                         << NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss())),
+                         << NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss(),
+                                                           SerializationContext::stateDefault())),
                     false  // multi
                 );
             default: {
@@ -614,7 +621,8 @@ void writeToConfigCollectionsForTempNss(OperationContext* opCtx,
                 return BatchedCommandRequest::buildUpdateOp(
                     CollectionType::ConfigNS,
                     BSON(CollectionType::kNssFieldName
-                         << NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss())),
+                         << NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss(),
+                                                           SerializationContext::stateDefault())),
                     updateBuilder.obj(),
                     true,  // upsert
                     false  // multi
@@ -889,8 +897,8 @@ void writeDecisionPersistedState(OperationContext* opCtx,
                                                         txnNumber);
 
             // Delete all of the config.tags entries for the user collection namespace.
-            const auto removeTagsQuery =
-                BSON(TagsType::ns(NamespaceStringUtil::serialize(coordinatorDoc.getSourceNss())));
+            const auto removeTagsQuery = BSON(TagsType::ns(NamespaceStringUtil::serialize(
+                coordinatorDoc.getSourceNss(), SerializationContext::stateDefault())));
             removeTagsDocs(opCtx, removeTagsQuery, txnNumber);
 
             // Update all of the config.tags entries for the temporary resharding namespace
@@ -906,12 +914,14 @@ void updateTagsDocsForTempNss(OperationContext* opCtx,
     auto tagsRequest = BatchedCommandRequest::buildUpdateOp(
         TagsType::ConfigNS,
         BSON(TagsType::ns(
-            NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss()))),  // query
-        BSON("$set" << BSON(
-                 "ns" << NamespaceStringUtil::serialize(coordinatorDoc.getSourceNss()))),  // update
-        false,                                                                             // upsert
-        true,                                                                              // multi
-        hint                                                                               // hint
+            NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss(),
+                                           SerializationContext::stateDefault()))),  // query
+        BSON("$set" << BSON("ns" << NamespaceStringUtil::serialize(
+                                coordinatorDoc.getSourceNss(),
+                                SerializationContext::stateDefault()))),  // update
+        false,                                                            // upsert
+        true,                                                             // multi
+        hint                                                              // hint
     );
 
     // Update the 'ns' field to be the original collection namespace for all tags documents that
@@ -931,8 +941,8 @@ void insertCoordDocAndChangeOrigCollEntry(OperationContext* opCtx,
                 opCtx,
                 CollectionType::ConfigNS,
                 txnNumber,
-                BSON(CollectionType::kNssFieldName
-                     << NamespaceStringUtil::serialize(coordinatorDoc.getSourceNss())));
+                BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                         coordinatorDoc.getSourceNss(), SerializationContext::stateDefault())));
 
             uassert(5808200,
                     str::stream() << "config.collection entry not found for "
@@ -965,8 +975,8 @@ void writeParticipantShardsAndTempCollInfo(
     std::vector<BSONObj> zones,
     boost::optional<CollectionIndexes> indexVersion,
     boost::optional<bool> isUnsplittable) {
-    const auto tagsQuery = BSON(
-        TagsType::ns(NamespaceStringUtil::serialize(updatedCoordinatorDoc.getTempReshardingNss())));
+    const auto tagsQuery = BSON(TagsType::ns(NamespaceStringUtil::serialize(
+        updatedCoordinatorDoc.getTempReshardingNss(), SerializationContext::stateDefault())));
 
     removeChunkAndTagsDocs(opCtx, tagsQuery, updatedCoordinatorDoc.getReshardingUUID());
     insertChunkAndTagDocsForTempNss(opCtx, initialChunks, zones);
@@ -1069,8 +1079,8 @@ ReshardingCoordinatorDocument removeOrQuiesceCoordinatorDocAndRemoveReshardingFi
     }
     emplaceTruncatedAbortReasonIfExists(updatedCoordinatorDoc, abortReason);
 
-    const auto tagsQuery =
-        BSON(TagsType::ns(NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss())));
+    const auto tagsQuery = BSON(TagsType::ns(NamespaceStringUtil::serialize(
+        coordinatorDoc.getTempReshardingNss(), SerializationContext::stateDefault())));
     // Once the decision has been persisted, the coordinator would have modified the
     // config.chunks and config.collections entry. This means that the UUID of the
     // non-temp collection is now the UUID of what was previously the UUID of the temp
@@ -1082,8 +1092,8 @@ ReshardingCoordinatorDocument removeOrQuiesceCoordinatorDocAndRemoveReshardingFi
         uassertStatusOK(catalogClient->removeConfigDocuments(
             opCtx,
             CollectionType::ConfigNS,
-            BSON(CollectionType::kNssFieldName
-                 << NamespaceStringUtil::serialize(coordinatorDoc.getTempReshardingNss())),
+            BSON(CollectionType::kNssFieldName << NamespaceStringUtil::serialize(
+                     coordinatorDoc.getTempReshardingNss(), SerializationContext::stateDefault())),
             kMajorityWriteConcern));
 
         removeChunkAndTagsDocs(opCtx, tagsQuery, coordinatorDoc.getReshardingUUID());
@@ -1305,7 +1315,7 @@ void ReshardingCoordinatorService::checkIfConflictsWithOtherInstances(
     const std::vector<const PrimaryOnlyService::Instance*>& existingInstances) {
     auto coordinatorDoc = ReshardingCoordinatorDocument::parse(
         IDLParserContext("ReshardingCoordinatorService::checkIfConflictsWithOtherInstances"),
-        std::move(initialState));
+        initialState);
 
     for (const auto& instance : existingInstances) {
         auto typedInstance = checked_cast<const ReshardingCoordinator*>(instance);
@@ -1334,11 +1344,15 @@ void ReshardingCoordinatorService::checkIfConflictsWithOtherInstances(
             typedInstance->getMetadata().getReshardingKey().toBSON() ==
             coordinatorDoc.getReshardingKey().toBSON());
 
+        const bool isProvenanceSame =
+            (typedInstance->getMetadata().getProvenance() ==
+             coordinatorDoc.getCommonReshardingMetadata().getProvenance());
+
         iassert(ErrorCodes::ConflictingOperationInProgress,
                 str::stream() << "Only one resharding operation is allowed to be active at a "
                                  "time, aborting resharding op for "
                               << coordinatorDoc.getSourceNss().toStringForErrorMsg(),
-                isUserReshardingUUIDSame && isNssSame && isReshardingKeySame);
+                isUserReshardingUUIDSame && isNssSame && isReshardingKeySame && isProvenanceSame);
 
         std::string userReshardingIdMsg;
         if (coordinatorDoc.getUserReshardingUUID()) {
@@ -1361,7 +1375,7 @@ std::shared_ptr<repl::PrimaryOnlyService::Instance> ReshardingCoordinatorService
     return std::make_shared<ReshardingCoordinator>(
         this,
         ReshardingCoordinatorDocument::parse(IDLParserContext("ReshardingCoordinatorStateDoc"),
-                                             std::move(initialState)),
+                                             initialState),
         std::make_shared<ReshardingCoordinatorExternalStateImpl>(),
         _serviceContext);
 }
@@ -1460,7 +1474,9 @@ void ReshardingCoordinator::installCoordinatorDoc(
     BSONObjBuilder bob;
     bob.append("newState", CoordinatorState_serializer(doc.getState()));
     bob.append("oldState", CoordinatorState_serializer(_coordinatorDoc.getState()));
-    bob.append("namespace", NamespaceStringUtil::serialize(doc.getSourceNss()));
+    bob.append(
+        "namespace",
+        NamespaceStringUtil::serialize(doc.getSourceNss(), SerializationContext::stateDefault()));
     bob.append("collectionUUID", doc.getSourceUUID().toString());
     bob.append("reshardingUUID", doc.getReshardingUUID().toString());
 
@@ -1821,31 +1837,20 @@ SemiFuture<void> ReshardingCoordinator::run(std::shared_ptr<executor::ScopedTask
     return _isReshardingOpRedundant(executor)
         .thenRunOn(_coordinatorService->getInstanceCleanupExecutor())
         .onCompletion([this, self = shared_from_this(), executor](
-                          StatusWith<bool> shardKeyMatchesSW) -> ExecutorFuture<void> {
-            if (shardKeyMatchesSW.isOK() && shardKeyMatchesSW.getValue()) {
-                // If forceRedistribution is true, still do resharding.
-                if (_coordinatorDoc.getForceRedistribution() &&
-                    *_coordinatorDoc.getForceRedistribution()) {
-                    return _runReshardingOp(executor);
-                }
-
-                this->_coordinatorService->releaseInstance(this->_id,
-                                                           shardKeyMatchesSW.getStatus());
+                          StatusWith<bool> isOpRedundantSW) -> ExecutorFuture<void> {
+            if (isOpRedundantSW.isOK() && isOpRedundantSW.getValue()) {
+                this->_coordinatorService->releaseInstance(this->_id, isOpRedundantSW.getStatus());
                 _coordinatorDocWrittenPromise.emplaceValue();
                 _completionPromise.emplaceValue();
                 _reshardingCoordinatorObserver->fulfillPromisesBeforePersistingStateDoc();
-                return ExecutorFuture<void>(**executor, shardKeyMatchesSW.getStatus());
-            } else if (!shardKeyMatchesSW.isOK()) {
-                this->_coordinatorService->releaseInstance(this->_id,
-                                                           shardKeyMatchesSW.getStatus());
-                _coordinatorDocWrittenPromise.setError(shardKeyMatchesSW.getStatus());
-                _completionPromise.setError(shardKeyMatchesSW.getStatus());
-                _reshardingCoordinatorObserver->interrupt(shardKeyMatchesSW.getStatus());
-                return ExecutorFuture<void>(**executor, shardKeyMatchesSW.getStatus());
+                return ExecutorFuture<void>(**executor, isOpRedundantSW.getStatus());
+            } else if (!isOpRedundantSW.isOK()) {
+                this->_coordinatorService->releaseInstance(this->_id, isOpRedundantSW.getStatus());
+                _coordinatorDocWrittenPromise.setError(isOpRedundantSW.getStatus());
+                _completionPromise.setError(isOpRedundantSW.getStatus());
+                _reshardingCoordinatorObserver->interrupt(isOpRedundantSW.getStatus());
+                return ExecutorFuture<void>(**executor, isOpRedundantSW.getStatus());
             }
-            // If this is not forced same-key resharding, set forceRedistribution to false so we can
-            // identify forced same-key resharding by this field later.
-            _coordinatorDoc.setForceRedistribution(false);
             return _runReshardingOp(executor);
         })
         .onCompletion([this, self = shared_from_this(), executor](Status status) {
@@ -1914,7 +1919,8 @@ ExecutorFuture<void> ReshardingCoordinator::_runReshardingOp(
                     auto ns = data.getStringField("sourceNamespace");
                     return ns.empty() ? true
                                       : ns.toString() ==
-                            NamespaceStringUtil::serialize(_coordinatorDoc.getSourceNss());
+                            NamespaceStringUtil::serialize(_coordinatorDoc.getSourceNss(),
+                                                           SerializationContext::stateDefault());
                 });
 
             {
@@ -2143,11 +2149,32 @@ ExecutorFuture<bool> ReshardingCoordinator::_isReshardingOpRedundant(
                    cm.emplace(cri.cm);
                }
 
+               if (resharding::isMoveCollection(_metadata.getProvenance())) {
+                   // Verify if the moveCollection is redundant by checking if the operation is
+                   // attempting to move to the same shard.
+                   std::set<ShardId> shardIdsSet;
+                   cm->getAllShardIds(&shardIdsSet);
+                   const auto currentShard =
+                       _coordinatorDoc.getShardDistribution().get().front().getShard();
+                   return shardIdsSet.find(currentShard) != shardIdsSet.end();
+               }
+
                const auto currentShardKey = cm->getShardKeyPattern().getKeyPattern();
                // Verify if there is any work to be done by the resharding operation by checking
                // if the existing shard key matches the desired new shard key.
-               return SimpleBSONObjComparator::kInstance.evaluate(
+               bool isOpRedundant = SimpleBSONObjComparator::kInstance.evaluate(
                    currentShardKey.toBSON() == _coordinatorDoc.getReshardingKey().toBSON());
+
+               // If forceRedistribution is true, still do resharding.
+               if (isOpRedundant && _coordinatorDoc.getForceRedistribution() &&
+                   *_coordinatorDoc.getForceRedistribution()) {
+                   return false;
+               }
+
+               // If this is not forced same-key resharding, set forceRedistribution to false so
+               // we can identify forced same-key resharding by this field later.
+               _coordinatorDoc.setForceRedistribution(false);
+               return isOpRedundant;
            })
         .onTransientError([](const StatusWith<bool>& status) {
             LOGV2(7074600,
@@ -2249,8 +2276,10 @@ void ReshardingCoordinator::_calculateParticipantsAndChunksThenWriteToDisk() {
         updatedCoordinatorDoc.getSourceNss(),
         updatedCoordinatorDoc.getReshardingUUID());
 
+    auto provenance = updatedCoordinatorDoc.getCommonReshardingMetadata().getProvenance();
     auto isUnsplittable = _reshardingCoordinatorExternalState->getIsUnsplittable(
-        opCtx.get(), updatedCoordinatorDoc.getSourceNss());
+                              opCtx.get(), updatedCoordinatorDoc.getSourceNss()) ||
+        (provenance && provenance.get() == ProvenanceEnum::kUnshardCollection);
 
     resharding::writeParticipantShardsAndTempCollInfo(opCtx.get(),
                                                       _metrics.get(),
@@ -2487,7 +2516,7 @@ void ReshardingCoordinator::_commit(const ReshardingCoordinatorDocument& coordin
 
         collectionPlacementAsVector.reserve(collectionPlacement.size());
         for (auto& elem : collectionPlacement) {
-            collectionPlacementAsVector.emplace_back(std::move(elem));
+            collectionPlacementAsVector.emplace_back(elem);
         }
         return collectionPlacementAsVector;
     }();
@@ -2800,7 +2829,7 @@ void ReshardingCoordinator::_logStatsOnCompletion(bool success) {
         statsBuilder.append("endTime", endTime);
 
         auto elapsedMillis = (endTime - startTime).count();
-        statsBuilder.append("totalElapsedMillis", elapsedMillis);
+        statsBuilder.append("operationDuration", elapsedMillis);
     } else {
         statsBuilder.append("endTime", getCurrentTime());
     }
@@ -2820,6 +2849,35 @@ void ReshardingCoordinator::_logStatsOnCompletion(bool success) {
         shardBuilder.append("oplogApplied", shard.getMutableState().getOplogApplied().value_or(0));
         statsBuilder.append(shard.getId(), shardBuilder.obj());
     }
+
+    int64_t totalDocuments = 0;
+    int64_t docSize = 0;
+    int64_t totalIndexes = 0;
+    for (auto shard : _coordinatorDoc.getRecipientShards()) {
+        totalDocuments += shard.getMutableState().getTotalNumDocuments().value_or(0);
+        docSize += shard.getMutableState().getTotalDocumentSize().value_or(0);
+        if (shard.getMutableState().getNumOfIndexes().value_or(0) > totalIndexes) {
+            totalIndexes = shard.getMutableState().getNumOfIndexes().value_or(0);
+        }
+    }
+    statsBuilder.append("numberOfTotalDocuments", totalDocuments);
+    statsBuilder.append("averageDocSize", totalDocuments > 0 ? (docSize / totalDocuments) : 0);
+    statsBuilder.append("numberOfIndexes", totalIndexes);
+
+    statsBuilder.append("numberOfSourceShards", (int64_t)(_coordinatorDoc.getDonorShards().size()));
+
+    auto numDestinationShards = 0;
+    if (const auto& shardDistribution = _coordinatorDoc.getShardDistribution()) {
+        std::set<ShardId> destinationShards;
+        for (const auto& shardDist : *shardDistribution) {
+            destinationShards.emplace(shardDist.getShard());
+        }
+        numDestinationShards = destinationShards.size();
+    } else {
+        numDestinationShards = _coordinatorDoc.getRecipientShards().size();
+    }
+    statsBuilder.append("numberOfDestinationShards", (int64_t)numDestinationShards);
+
     builder.append("statistics", statsBuilder.obj());
     LOGV2(7763800, "Resharding complete", "info"_attr = builder.obj());
 }

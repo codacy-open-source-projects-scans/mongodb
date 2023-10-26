@@ -37,7 +37,6 @@
 #include <vector>
 
 #include <absl/container/node_hash_set.h>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -391,8 +390,8 @@ Status SetFilter::set(OperationContext* opCtx,
     return Status::OK();
 }
 
-MONGO_REGISTER_COMMAND(ListFilters);
-MONGO_REGISTER_COMMAND(ClearFilters);
-MONGO_REGISTER_COMMAND(SetFilter);
+MONGO_REGISTER_COMMAND(ListFilters).forShard();
+MONGO_REGISTER_COMMAND(ClearFilters).forShard();
+MONGO_REGISTER_COMMAND(SetFilter).forShard();
 
 }  // namespace mongo

@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <initializer_list>
 #include <js/Object.h>
 #include <js/PropertyDescriptor.h>
@@ -593,13 +592,16 @@ void MongoBase::Functions::logout::call(JSContext* cx, JS::CallArgs args) {
     if (args.length() != 1)
         uasserted(ErrorCodes::BadValue, "logout needs 1 arg");
 
+    JSStringWrapper jsstr;
+    const DatabaseName dbName =
+        DatabaseNameUtil::deserialize(boost::none,
+                                      ValueWriter(cx, args.get(0)).toStringData(&jsstr),
+                                      SerializationContext::stateDefault());
+
     BSONObj ret;
-
-    std::string db = ValueWriter(cx, args.get(0)).toString();
-
     auto conn = getConnection(args);
     if (conn) {
-        conn->logout(db, ret);
+        conn->logout(dbName, ret);
     }
 
     // Make a copy because I want to insulate us from whether conn->logout
@@ -728,7 +730,7 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
             }
         }
     }
-
+#ifdef MONGO_CONFIG_GRPC
     if (cs.isGRPC()) {
         uassert(ErrorCodes::InvalidOptions,
                 "Cannot enable gRPC mode when connecting to a replica set",
@@ -738,11 +740,15 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
                 "Authentication is not currently supported when gRPC mode is enabled",
                 cs.getUser().empty());
     }
+#endif
 
     boost::optional<std::string> appname = cs.getAppName();
     std::string errmsg;
     std::shared_ptr<DBClientBase> conn(
-        cs.connect(appname.value_or("MongoDB Shell"), errmsg, boost::none, &apiParameters));
+        cs.connect(appname.value_or(MongoURI::kDefaultTestRunnerAppName),
+                   errmsg,
+                   boost::none,
+                   &apiParameters));
 
     if (!conn.get()) {
         uasserted(ErrorCodes::InternalError, errmsg);

@@ -161,6 +161,7 @@ let viewsCommandTests = {
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
+    _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isUnrelated},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
@@ -373,12 +374,8 @@ let viewsCommandTests = {
     delete: {command: {delete: "view", deletes: [{q: {x: 1}, limit: 1}]}, expectFailure: true},
     distinct: {command: {distinct: "view", key: "_id"}},
     donorAbortMigration: {skip: isUnrelated},
-    // TODO : remove overrides once possible SERVER-61845
-    donorAbortSplit: {skip: "has been removed from the server"},
     donorForgetMigration: {skip: isUnrelated},
-    donorForgetSplit: {skip: "has been removed from the server"},
     donorStartMigration: {skip: isUnrelated},
-    donorStartSplit: {skip: "has been removed from the server"},
     donorWaitForMigrationToCommit: {skip: isUnrelated},
     abortShardSplit: {skip: isUnrelated},
     commitShardSplit: {skip: isUnrelated},
@@ -558,12 +555,11 @@ let viewsCommandTests = {
         expectedErrorCode: ErrorCodes.NamespaceNotSharded,
     },
     moveCollection: {
-        // TODO(SERVER-80156): update test case to succeed on unsharded collections
         command: {moveCollection: "test.view", toShard: "move_collection-rs"},
         setup: function(conn) {
             assert.commandWorked(conn.adminCommand({enableSharding: "test"}));
         },
-        expectedErrorCode: [ErrorCodes.NamespaceNotSharded, ErrorCodes.NamespaceNotFound],
+        expectedErrorCode: [ErrorCodes.NamespaceNotFound],
         skipStandalone: true,
         expectFailure: true,
         isAdminCommand: true,
@@ -784,6 +780,7 @@ let viewsCommandTests = {
     voteCommitTransaction: {skip: isUnrelated},
     voteAbortTransaction: {skip: isUnrelated},
     waitForFailPoint: {skip: isUnrelated},
+    getShardingReady: {skip: isAnInternalCommand},
     whatsmyuri: {skip: isUnrelated},
     whatsmysni: {skip: isUnrelated}
 };

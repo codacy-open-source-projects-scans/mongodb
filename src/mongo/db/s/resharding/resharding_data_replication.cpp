@@ -29,7 +29,6 @@
 
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <initializer_list>
@@ -199,7 +198,8 @@ std::shared_ptr<executor::TaskExecutor> ReshardingDataReplication::_makeCollecti
     threadPoolOptions.threadNamePrefix = prefix + "-";
     threadPoolOptions.poolName = prefix + "ThreadPool";
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName.c_str());
+        Client::initThread(threadName.c_str(),
+                           getGlobalServiceContext()->getService(ClusterRole::ShardServer));
         auto* client = Client::getCurrent();
         AuthorizationSession::get(*client)->grantInternalAuthorization(client);
     };

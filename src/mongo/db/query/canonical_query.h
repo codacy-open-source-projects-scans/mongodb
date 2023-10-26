@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <memory>
 #include <string>
@@ -60,6 +59,7 @@
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings_gen.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/stage_types.h"
 #include "mongo/util/assert_util.h"
@@ -98,7 +98,8 @@ public:
             MatchExpressionParser::kDefaultSpecialFeatures,
         const ProjectionPolicies& projectionPolicies = ProjectionPolicies::findProjectionPolicies(),
         std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline = {},
-        bool isCountLike = false);
+        bool isCountLike = false,
+        bool isSearchQuery = false);
 
     /**
      * Creates a CanonicalQuery from a ParsedFindCommand. Uses 'expCtx->opCtx', which must be valid.
@@ -106,9 +107,11 @@ public:
     static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
         boost::intrusive_ptr<ExpressionContext> expCtx,
         std::unique_ptr<ParsedFindCommand> parsedFind,
+        query_settings::QuerySettings&& querySettings,
         bool explain = false,
         std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline = {},
-        bool isCountLike = false);
+        bool isCountLike = false,
+        bool isSearchQuery = false);
 
     /**
      * For testing or for internal clients to use.
@@ -121,9 +124,8 @@ public:
      *
      * Does not take ownership of 'root'.
      */
-    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(OperationContext* opCtx,
-                                                                    const CanonicalQuery& baseQuery,
-                                                                    MatchExpression* matchExpr);
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalizeSubQuery(
+        OperationContext* opCtx, const CanonicalQuery& baseQuery, MatchExpression* matchExpr);
 
     /**
      * Returns true if "query" describes an exact-match query on _id.
@@ -181,6 +183,10 @@ public:
 
     std::shared_ptr<CollatorInterface> getCollatorShared() const {
         return _expCtx->getCollatorShared();
+    }
+
+    const query_settings::QuerySettings& getQuerySettings() const {
+        return _querySettings;
     }
 
     /**
@@ -302,6 +308,10 @@ public:
         return _cqPipeline;
     }
 
+    std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline() {
+        return _cqPipeline;
+    }
+
     /**
      * Returns true if the query is a count-like query, i.e. has no dependencies on inputs (see
      * DepsTracker::hasNoRequirements()). These queries can be served without accessing the source
@@ -349,11 +359,17 @@ public:
         return _inputParamIdToExpressionMap.size();
     }
 
+    // Return true if the cqPipeline starts with $search or $searchMeta.
+    bool isSearchQuery() const {
+        return _isSearchQuery;
+    }
+
 private:
     Status initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                   std::unique_ptr<ParsedFindCommand> parsedFind,
                   std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline,
-                  bool isCountLike);
+                  bool isCountLike,
+                  bool isSearchQuery);
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
@@ -420,6 +436,11 @@ private:
     // predicates (usally > 512). This flag can be reused for additional do-not-cache conditions in
     // the future.
     bool _isUncacheableSbe = false;
+
+    bool _isSearchQuery = false;
+
+    // Query settings associated with the given query.
+    query_settings::QuerySettings _querySettings = query_settings::QuerySettings();
 };
 
 }  // namespace mongo

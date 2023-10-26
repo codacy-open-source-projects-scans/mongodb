@@ -35,7 +35,6 @@
 #include <algorithm>
 #include <boost/container/vector.hpp>
 #include <boost/move/utility_core.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <map>
 #include <mutex>
 
@@ -126,7 +125,15 @@ StorageEngineImpl::StorageEngineImpl(OperationContext* opCtx,
           [](OperationContext* opCtx, Timestamp timestamp) {
               // We take the global lock so there can be no concurrent
               // BatchedCollectionCatalogWriter and we are thus safe to perform writes.
-              Lock::GlobalLock lk{opCtx, MODE_IX};
+              //
+              // No need to hold the RSTL lock nor acquire a flow control ticket. This doesn't care
+              // about the replica state of the node and the operations aren't replicated.
+              Lock::GlobalLock lk{
+                  opCtx,
+                  MODE_IX,
+                  Date_t::max(),
+                  Lock::InterruptBehavior::kThrow,
+                  Lock::GlobalLockSkipOptions{.skipFlowControlTicket = true, .skipRSTLLock = true}};
 
               if (CollectionCatalog::latest(opCtx)->catalogIdTracker().dirty(timestamp)) {
                   CollectionCatalog::write(opCtx, [timestamp](CollectionCatalog& catalog) {
@@ -289,9 +296,6 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
                         // reconcileCatalogAndIdents() will later drop this ident.
                         LOGV2_ERROR(
                             22268,
-                            "Cannot create an entry in the catalog for the orphaned "
-                            "collection ident: {ident} due to {statusWithNs_getStatus_reason}. "
-                            "Restarting the server will remove this ident",
                             "Cannot create an entry in the catalog for orphaned ident. Restarting "
                             "the server will remove this ident",
                             "ident"_attr = ident,
@@ -357,8 +361,6 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
                     _recoverOrphanedCollection(opCtx, entry.catalogId, entry.nss, collectionIdent);
                 if (!status.isOK()) {
                     LOGV2_WARNING(22266,
-                                  "Failed to recover orphaned data file for collection "
-                                  "'{namespace}': {error}",
                                   "Failed to recover orphaned data file for collection",
                                   logAttrs(entry.nss),
                                   "error"_attr = status);
@@ -561,7 +563,7 @@ bool StorageEngineImpl::_handleInternalIdent(OperationContext* opCtx,
     // When starting up after a clean shutdown and resumable index builds are supported, find the
     // internal idents that contain the relevant information to resume each index build and recover
     // the state.
-    auto rs = _engine->getRecordStore(opCtx, NamespaceString(), ident, CollectionOptions());
+    auto rs = _engine->getRecordStore(opCtx, NamespaceString::kEmpty, ident, CollectionOptions());
 
     auto cursor = rs->getCursor(opCtx);
     auto record = cursor->next();
@@ -726,7 +728,7 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
     // secondary.
     for (const DurableCatalog::EntryIdentifier& entry : catalogEntries) {
         const auto catalogEntry = _catalog->getParsedCatalogEntry(opCtx, entry.catalogId);
-        const auto md = catalogEntry->metadata;
+        auto md = catalogEntry->metadata;
 
         // Batch up the indexes to remove them from `metaData` outside of the iterator.
         std::vector<std::string> indexesToDrop;
@@ -744,11 +746,6 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
             if (!indexMetaData.multikey && hasMultiKeyPaths) {
                 LOGV2_WARNING(
                     22267,
-                    "The 'multikey' field for index {index} on collection {namespace} was "
-                    "false with non-empty 'multikeyPaths'. This indicates corruption of "
-                    "the catalog. Consider either dropping and recreating the index, or "
-                    "rerunning with the --repair option. See "
-                    "http://dochub.mongodb.org/core/repair for more information.",
                     "The 'multikey' field for index was false with non-empty 'multikeyPaths'. This "
                     "indicates corruption of the catalog. Consider either dropping and recreating "
                     "the index, or rerunning with the --repair option. See "
@@ -816,15 +813,12 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
             }
 
             // The last anomaly is when the index build did not complete. This implies the index
-            // build was on a standalone and the `createIndexes` command never successfully
-            // returned. In this case the index entry in the catalog should be dropped.
+            // build was on:
+            // (1) a standalone and the `createIndexes` command never successfully returned, or
+            // (2) an initial syncing node bulk building indexes during a collection clone.
+            // In both cases the index entry in the catalog should be dropped.
             if (!indexMetaData.ready) {
-                // Index builds on a secondary node are built using the two-phase protocol on
-                // non-empty collections. On empty collections, the index is built atomically during
-                // oplog application so we should never see an index with {ready: false} in this
-                // case.
                 invariant(!indexMetaData.isBackgroundSecondaryBuild);
-                invariant(!getGlobalReplSettings().isReplSet());
 
                 LOGV2(22256,
                       "Dropping unfinished index",
@@ -1085,7 +1079,7 @@ StorageEngineImpl::makeTemporaryRecordStoreForResumableIndexBuild(OperationConte
 
 std::unique_ptr<TemporaryRecordStore> StorageEngineImpl::makeTemporaryRecordStoreFromExistingIdent(
     OperationContext* opCtx, StringData ident) {
-    auto rs = _engine->getRecordStore(opCtx, NamespaceString(), ident, CollectionOptions());
+    auto rs = _engine->getRecordStore(opCtx, NamespaceString::kEmpty, ident, CollectionOptions());
     return std::make_unique<DeferredDropRecordStore>(std::move(rs), this);
 }
 
@@ -1223,10 +1217,11 @@ void StorageEngineImpl::_dumpCatalog(OperationContext* opCtx) {
     opCtx->recoveryUnit()->abandonSnapshot();
 }
 
-void StorageEngineImpl::addDropPendingIdent(const Timestamp& dropTimestamp,
-                                            std::shared_ptr<Ident> ident,
-                                            DropIdentCallback&& onDrop) {
-    _dropPendingIdentReaper.addDropPendingIdent(dropTimestamp, ident, std::move(onDrop));
+void StorageEngineImpl::addDropPendingIdent(
+    const stdx::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
+    std::shared_ptr<Ident> ident,
+    DropIdentCallback&& onDrop) {
+    _dropPendingIdentReaper.addDropPendingIdent(dropTime, ident, std::move(onDrop));
 }
 
 void StorageEngineImpl::dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) {
@@ -1241,32 +1236,29 @@ void StorageEngineImpl::checkpoint(OperationContext* opCtx) {
     _engine->checkpoint(opCtx);
 }
 
+StorageEngine::CheckpointIteration StorageEngineImpl::getCheckpointIteration() const {
+    return _engine->getCheckpointIteration();
+}
+
+bool StorageEngineImpl::hasDataBeenCheckpointed(
+    StorageEngine::CheckpointIteration checkpointIteration) const {
+    return _engine->hasDataBeenCheckpointed(checkpointIteration);
+}
+
 void StorageEngineImpl::_onMinOfCheckpointAndOldestTimestampChanged(OperationContext* opCtx,
                                                                     const Timestamp& timestamp) {
-    // No drop-pending idents present if getEarliestDropTimestamp() returns boost::none.
-    if (auto earliestDropTimestamp = _dropPendingIdentReaper.getEarliestDropTimestamp()) {
+    if (_dropPendingIdentReaper.hasExpiredIdents(timestamp)) {
+        LOGV2(22260,
+              "Removing drop-pending idents with drop timestamps before timestamp",
+              "timestamp"_attr = timestamp);
 
-        auto checkpoint = _engine->getCheckpointTimestamp();
-        auto oldest = _engine->getOldestTimestamp();
-
-        // We won't try to drop anything unless we know it is both safe to drop (older than the
-        // oldest timestamp) and present in a checkpoint for non-ephemeral storage engines.
-        // Otherwise, the drop will fail, and we'll keep attempting a drop for each new `timestamp`.
-        // Note that this is not required for correctness and is only done to avoid unnecessary work
-        // and spamming the logs when we actually have nothing to do. Additionally, these values may
-        // have both advanced since `timestamp` was calculated, but this is not expected to be
-        // common and does not affect correctness.
-        // For ephemeral storage engines, we can always drop immediately.
-        const bool safeToDrop = oldest >= *earliestDropTimestamp;
-        const bool canDropWithoutTransientErrors =
-            isEphemeral() || checkpoint >= *earliestDropTimestamp;
-        if (safeToDrop && canDropWithoutTransientErrors) {
-            LOGV2(22260,
-                  "Removing drop-pending idents with drop timestamps before timestamp",
-                  "timestamp"_attr = timestamp);
-
-            _dropPendingIdentReaper.dropIdentsOlderThan(opCtx, timestamp);
-        }
+        _dropPendingIdentReaper.dropIdentsOlderThan(opCtx, timestamp);
+    } else {
+        LOGV2_DEBUG(8097401,
+                    1,
+                    "No drop-pending idents have expired",
+                    "timestamp"_attr = timestamp,
+                    "pendingIdentsCount"_attr = _dropPendingIdentReaper.getNumIdents());
     }
 }
 
@@ -1300,12 +1292,13 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
             }
 
             try {
-                auto opCtx = client->getOperationContext();
-                mongo::ServiceContext::UniqueOperationContext uOpCtx;
-                if (!opCtx) {
-                    uOpCtx = client->makeOperationContext();
-                    opCtx = uOpCtx.get();
-                }
+                auto uniqueOpCtx = client->makeOperationContext();
+                auto opCtx = uniqueOpCtx.get();
+
+                // The TimestampMonitor is an important background cleanup task for the storage
+                // engine and needs to be able to make progress to free up resources.
+                ScopedAdmissionPriorityForLock immediatePriority(
+                    opCtx->lockState(), AdmissionContext::Priority::kImmediate);
 
                 Timestamp checkpoint;
                 Timestamp oldest;

@@ -37,7 +37,6 @@
 #include <memory>
 
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/data_type_endian.h"
@@ -102,7 +101,8 @@ const StringDataSet Document::allMetadataFieldNames{Document::metaFieldTextScore
                                                     Document::metaFieldSearchSortValues,
                                                     Document::metaFieldIndexKey,
                                                     Document::metaFieldSearchScoreDetails,
-                                                    Document::metaFieldVectorSearchScore};
+                                                    Document::metaFieldVectorSearchScore,
+                                                    Document::metaFieldSearchSequenceToken};
 
 DocumentStorageIterator::DocumentStorageIterator(DocumentStorage* storage, BSONObjIterator bsonIt)
     : _bsonIt(std::move(bsonIt)),
@@ -425,10 +425,21 @@ void DocumentStorage::reset(const BSONObj& bson, bool bsonHasMetadata) {
     _metadataFields.setModified(false);
 }
 
-void DocumentStorage::fillCache() const {
-    for (DocumentStorageIterator it = iterator(); !it.atEnd(); it.advance()) {
-        it->val.fillCache();
+Document DocumentStorage::shred() const {
+    MutableDocument md;
+    // Iterate raw bson if possible. This avoids caching all of the values in a doc that might get
+    // thrown away.
+    if (!isModified() && !bsonHasMetadata()) {
+        for (const auto& elem : _bson) {
+            md[elem.fieldNameStringData()] = Value(elem).shred();
+        }
+    } else {
+        for (DocumentStorageIterator it = iterator(); !it.atEnd(); it.advance()) {
+            const auto& valueElem = it.get();
+            md[it.fieldName()] = valueElem.val.shred();
+        }
     }
+    return md.freeze();
 }
 
 void DocumentStorage::loadLazyMetadata() const {
@@ -482,6 +493,8 @@ void DocumentStorage::loadLazyMetadata() const {
                 _metadataFields.setSearchSortValues(elem.Obj());
             } else if (fieldName == Document::metaFieldVectorSearchScore) {
                 _metadataFields.setVectorSearchScore(elem.Double());
+            } else if (fieldName == Document::metaFieldSearchSequenceToken) {
+                _metadataFields.setSearchSequenceToken(Value(elem));
             }
         }
     }
@@ -582,6 +595,9 @@ void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
         builder->append(metaFieldSearchScoreDetails, metadata().getSearchScoreDetails());
     if (metadata().hasSearchSortValues()) {
         builder->append(metaFieldSearchSortValues, metadata().getSearchSortValues());
+    }
+    if (metadata().hasSearchSequenceToken()) {
+        metadata().getSearchSequenceToken().addToBsonObj(builder, metaFieldSearchSequenceToken);
     }
     if (metadata().hasVectorSearchScore()) {
         builder->append(metaFieldVectorSearchScore, metadata().getVectorSearchScore());

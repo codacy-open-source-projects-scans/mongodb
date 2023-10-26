@@ -31,7 +31,6 @@
 
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <tuple>
@@ -332,7 +331,6 @@ void CollectionShardingRuntime::_clearFilteringMetadata(OperationContext* opCtx,
     stdx::lock_guard lk(_metadataManagerLock);
     LOGV2_DEBUG(4798530,
                 1,
-                "Clearing metadata for collection {namespace}",
                 "Clearing collection metadata",
                 logAttrs(_nss),
                 "collIsDropped"_attr = collIsDropped);
@@ -361,7 +359,7 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
                                                ChunkRange orphanRange,
                                                Date_t deadline) {
     while (true) {
-        const StatusWith<SharedSemiFuture<void>> swOrphanCleanupFuture =
+        StatusWith<SharedSemiFuture<void>> swOrphanCleanupFuture =
             [&]() -> StatusWith<SharedSemiFuture<void>> {
             AutoGetCollection autoColl(opCtx, nss, MODE_IX);
             const auto self =
@@ -392,7 +390,6 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
         if (orphanCleanupFuture.isReady()) {
             LOGV2_OPTIONS(21918,
                           {logv2::LogComponent::kShardingMigration},
-                          "Finished waiting for deletion of {namespace} range {orphanRange}",
                           "Finished waiting for deletion of orphans",
                           logAttrs(nss),
                           "orphanRange"_attr = redact(orphanRange.toString()));
@@ -401,7 +398,6 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
 
         LOGV2_OPTIONS(21919,
                       {logv2::LogComponent::kShardingMigration},
-                      "Waiting for deletion of {namespace} range {orphanRange}",
                       "Waiting for deletion of orphans",
                       logAttrs(nss),
                       "orphanRange"_attr = orphanRange);
@@ -613,7 +609,8 @@ CollectionShardingRuntime::_getMetadataWithVersionCheckAt(
 void CollectionShardingRuntime::appendShardVersion(BSONObjBuilder* builder) const {
     auto optCollDescr = getCurrentMetadataIfKnown();
     if (optCollDescr) {
-        BSONObjBuilder versionBuilder(builder->subobjStart(NamespaceStringUtil::serialize(_nss)));
+        BSONObjBuilder versionBuilder(builder->subobjStart(
+            NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault())));
         versionBuilder.appendTimestamp("placementVersion",
                                        optCollDescr->getShardPlacementVersion().toLong());
         versionBuilder.append("timestamp", optCollDescr->getShardPlacementVersion().getTimestamp());
@@ -746,7 +743,7 @@ void CollectionShardingRuntime::_cleanupBeforeInstallingNewCollectionMetadata(
     const auto oldShardVersion = _metadataManager->getActivePlacementVersion();
     ExecutorFuture<void>{Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()}
         .then([svcCtx{opCtx->getServiceContext()}, oldUUID, oldShardVersion] {
-            ThreadClient tc{"CleanUpShardedMetadata", svcCtx};
+            ThreadClient tc{"CleanUpShardedMetadata", svcCtx->getService(ClusterRole::ShardServer)};
             auto uniqueOpCtx{tc->makeOperationContext()};
             auto opCtx{uniqueOpCtx.get()};
 

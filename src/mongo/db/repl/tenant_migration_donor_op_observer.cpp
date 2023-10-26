@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/timestamp.h"
@@ -186,7 +185,7 @@ void onTransitionToAborted(OperationContext* opCtx,
  */
 class TenantMigrationDonorCommitOrAbortHandler final : public RecoveryUnit::Change {
 public:
-    TenantMigrationDonorCommitOrAbortHandler(const TenantMigrationDonorDocument donorStateDoc)
+    TenantMigrationDonorCommitOrAbortHandler(TenantMigrationDonorDocument donorStateDoc)
         : _donorStateDoc(std::move(donorStateDoc)) {}
 
     void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {

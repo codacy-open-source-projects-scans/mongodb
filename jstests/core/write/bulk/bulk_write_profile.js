@@ -7,8 +7,6 @@
  *   command_not_supported_in_serverless,
  *   # TODO SERVER-52419 Remove this tag.
  *   featureFlagBulkWriteCommand,
- *   # TODO SERVER-79506 Remove this tag.
- *   assumes_unsharded_collection,
  *   does_not_support_stepdowns,
  *   requires_non_retryable_writes,
  *   requires_profiling,
@@ -25,8 +23,11 @@ import {getNLatestProfilerEntries} from "jstests/libs/profiler.js";
 var testDB = db.getSiblingDB(jsTestName());
 assert.commandWorked(testDB.dropDatabase());
 
-const coll1 = testDB.getCollection("test_1");
-const coll2 = testDB.getCollection("test_2");
+const collName1 = jsTestName() + "_1"
+const collName2 = jsTestName() + "_2"
+const coll1 = testDB.getCollection(collName1);
+const coll2 = testDB.getCollection(collName2);
+
 const isClustered = ClusteredCollectionUtil.areAllCollectionsClustered(testDB);
 
 for (var i = 0; i < 10; ++i) {
@@ -34,7 +35,12 @@ for (var i = 0; i < 10; ++i) {
 }
 assert.commandWorked(coll2.createIndex({a: 1}));
 
-testDB.setProfilingLevel(1, {filter: {ns: {$in: [coll1.getFullName(), coll2.getFullName()]}}});
+testDB.setProfilingLevel(1, {
+    filter: {
+        ns: {$in: [coll1.getFullName(), coll2.getFullName()]},
+        'command.setFeatureCompatibilityVersion': {'$exists': false}
+    }
+});
 
 assert.commandWorked(testDB.adminCommand({
     bulkWrite: 1,

@@ -98,7 +98,8 @@ public:
                 opCtx,
                 DatabaseNameUtil::deserialize(
                     boost::none, dbname, request().getSerializationContext()),
-                request().getPrimaryShardId());
+                request().getPrimaryShardId(),
+                request().getSerializationContext());
 
             return {dbt.getVersion()};
         }
@@ -136,7 +137,7 @@ private:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigSvrCreateDatabaseCommand);
+MONGO_REGISTER_COMMAND(ConfigSvrCreateDatabaseCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

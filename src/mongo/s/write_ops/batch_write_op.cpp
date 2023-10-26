@@ -28,12 +28,12 @@
  */
 
 #include "mongo/rpc/write_concern_error_detail.h"
+#include "mongo/s/write_ops/write_op.h"
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
 #include <cstdint>
@@ -298,15 +298,14 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
 
     for (auto& writeOp : writeOps) {
         bool useTwoPhaseWriteProtocol = false;
-
+        bool isNonTargetedWriteWithoutShardKeyWithExactId = false;
         // Only target Ready op.
         if (writeOp.getWriteState() != WriteOpState_Ready)
             continue;
 
-        // If we got a write without shard key or a time-series retryable update in the previous
-        // iteration, it should be sent in its own batch.
-        if (writeType == WriteType::WithoutShardKeyOrId ||
-            writeType == WriteType::TimeseriesRetryableUpdate) {
+        // If we got a non Ordinary write in the previous iteration, it should be sent in its own
+        // batch.
+        if (writeType != WriteType::Ordinary) {
             break;
         }
 
@@ -314,7 +313,11 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
         std::vector<std::unique_ptr<TargetedWrite>> writes;
         auto targetStatus = [&] {
             try {
-                writeOp.targetWrites(opCtx, targeter, &writes, &useTwoPhaseWriteProtocol);
+                writeOp.targetWrites(opCtx,
+                                     targeter,
+                                     &writes,
+                                     &useTwoPhaseWriteProtocol,
+                                     &isNonTargetedWriteWithoutShardKeyWithExactId);
                 return Status::OK();
             } catch (const DBException& ex) {
                 return ex.toStatus();
@@ -395,7 +398,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             break;
         }
 
-        if (targeter.isShardedTimeSeriesBucketsNamespace() &&
+        if (targeter.isTrackedTimeSeriesBucketsNamespace() &&
             writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Update &&
             opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction()) {
             if (!batchMap.empty()) {
@@ -403,6 +406,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                 break;
             } else {
                 writeType = WriteType::TimeseriesRetryableUpdate;
+                writeOp.setWriteType(WriteType::TimeseriesRetryableUpdate);
             }
         }
 
@@ -429,8 +433,15 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                     break;
                 } else {
                     writeType = WriteType::WithoutShardKeyOrId;
+                    writeOp.setWriteType(writeType);
                 }
             };
+
+            if (!isMultiWrite && isNonTargetedWriteWithoutShardKeyWithExactId &&
+                !opCtx->inMultiDocumentTransaction() && batchMap.empty()) {
+                writeType = WriteType::WithoutShardKeyWithId;
+                writeOp.setWriteType(writeType);
+            }
         }
 
         // Targeting went ok, add to appropriate TargetedBatch
@@ -644,7 +655,7 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(
         wcb.setEncryptionInformation(
             _clientRequest.getWriteCommandRequestBase().getEncryptionInformation());
 
-        if (targeter.isShardedTimeSeriesBucketsNamespace() &&
+        if (targeter.isTrackedTimeSeriesBucketsNamespace() &&
             !_clientRequest.getNS().isTimeseriesBucketsCollection()) {
             wcb.setIsTimeseriesNamespace(true);
         }
@@ -696,9 +707,6 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
         noteBatchError(targetedBatch, error);
         return;
     }
-
-    // Stop tracking targeted batch
-    _targeted.erase(&targetedBatch);
 
     // Increment stats for this batch
     _incBatchStats(response);
@@ -756,7 +764,11 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
         // Finish the response (with error, if needed)
         if (!writeError) {
             if (!ordered || !lastError) {
-                writeOp.noteWriteComplete(*write);
+                if (writeOp.getWriteType() == WriteType::WithoutShardKeyWithId) {
+                    writeOp.noteWriteWithoutShardKeyWithIdResponse(*write, response.getN());
+                } else {
+                    writeOp.noteWriteComplete(*write);
+                }
             } else {
                 // We didn't actually apply this write - cancel so we can retarget
                 dassert(writeOp.getNumTargeted() == 1u);
@@ -796,6 +808,10 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
             _upsertedIds.push_back(std::move(upsertedId));
         }
     }
+}
+
+WriteOp& BatchWriteOp::getWriteOp(int index) {
+    return _writeOps[index];
 }
 
 void BatchWriteOp::noteBatchError(const TargetedWriteBatch& targetedBatch,
@@ -839,10 +855,6 @@ void BatchWriteOp::abortBatch(const write_ops::WriteError& error) {
     }
 
     dassert(isFinished());
-}
-
-void BatchWriteOp::forgetTargetedBatchesOnTransactionAbortingError() {
-    _targeted.clear();
 }
 
 bool BatchWriteOp::isFinished() {

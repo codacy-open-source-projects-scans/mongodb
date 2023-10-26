@@ -51,6 +51,8 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/expression_dependencies.h"
+#include "mongo/db/pipeline/name_expression.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/record_id.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
@@ -157,6 +159,10 @@ Document fromBson(BSONObj obj) {
     return Document(obj);
 }
 
+Document fromJson(const std::string& json) {
+    return Document(fromjson(json));
+}
+
 /** Create a Value from a BSONObj. */
 Value valueFromBson(BSONObj obj) {
     BSONElement element = obj.firstElement();
@@ -188,13 +194,6 @@ void parseAndVerifyResults(
     VariablesParseState vps = expCtx.variablesParseState;
     auto expr = parseFn(&expCtx, elem, vps);
     ASSERT_VALUE_EQ(expr->evaluate({}, &expCtx.variables), expected);
-}
-
-/**
- * A default redaction strategy that generates easy to check results for testing purposes.
- */
-std::string applyHmacForTest(StringData s) {
-    return str::stream() << "HASH<" << s << ">";
 }
 
 /**
@@ -3780,6 +3779,7 @@ TEST(ExpressionGetFieldTest, GetFieldSerializesCorrectly) {
     VariablesParseState vps = expCtx.variablesParseState;
     BSONObj expr = fromjson("{$meta: {\"field\": \"foo\", \"input\": {a: 1}}}");
     auto expression = ExpressionGetField::parse(&expCtx, expr.firstElement(), vps);
+
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "ignoredField": {
@@ -3796,13 +3796,167 @@ TEST(ExpressionGetFieldTest, GetFieldSerializesCorrectly) {
             }
         })",
         BSON("ignoredField" << expression->serialize(SerializationOptions{})));
+
+    expr = fromjson("{$meta: {\"field\": {$const: \"$foo\"}, \"input\": {a: 1}}}");
+    expression = ExpressionGetField::parse(&expCtx, expr.firstElement(), vps);
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                "$getField": {
+                    "field": {
+                        "$const": "$foo"
+                    },
+                    "input": {
+                        "a": {
+                            "$const": 1
+                        }
+                    }
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(SerializationOptions{})));
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                "$getField": {
+                    "field": {
+                        "$const": "$foo"
+                    },
+                    input: {
+                        $const: {"?": "?"}
+                    }
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(
+                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                "$getField": {
+                    "field": {
+                        "$const": "$foo"
+                    },
+                    "input": "?object"
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(
+                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+}
+
+TEST(ExpressionGetFieldTest, GetFieldWithDynamicFieldExpressionSerializesCorrectly) {
+    auto expCtx = ExpressionContextForTest{};
+    VariablesParseState vps = expCtx.variablesParseState;
+    BSONObj expr = fromjson("{$meta: {\"field\": {$toString: \"$foo\"}, \"input\": {a: 1}}}");
+    auto expression = ExpressionGetField::parse(&expCtx, expr.firstElement(), vps);
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                "$getField": {
+                    "field": {
+                        $convert: {
+                            input: "$foo", 
+                            to: {$const: "string"}
+                        }
+                    },
+                    "input": {
+                        "a": {
+                            "$const": 1
+                        }
+                    }
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(SerializationOptions{})));
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                $getField: {
+                    field: {
+                        $convert: {
+                            input: "$foo",
+                            to: {$const: "?"}
+                        }
+                    },
+                    input: {
+                        $const: {"?": "?"}
+                    }
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(
+                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                $getField: {
+                    field: {
+                        $convert: {
+                            input: "$foo",
+                            to: "?string"
+                        }
+                    },
+                    input: "?object"
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(
+                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
+
+    expr = fromjson("{$meta: {\"field\": \"$foo\", \"input\": {a: 1}}}");
+    expression = ExpressionGetField::parse(&expCtx, expr.firstElement(), vps);
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                "$getField": {
+                    "field": "$foo",
+                    "input": {
+                        "a": {
+                            "$const": 1
+                        }
+                    }
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(SerializationOptions{})));
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                "$getField": {
+                    "field": "$foo",
+                    "input": {
+                        $const: {"?": "?"}
+                    }
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(
+                 SerializationOptions::kRepresentativeQueryShapeSerializeOptions)));
+
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "ignoredField": {
+                "$getField": {
+                    "field": "$foo",
+                    "input": "?object"
+                }
+            }
+        })",
+        BSON("ignoredField" << expression->serialize(
+                 SerializationOptions::kDebugQueryShapeSerializeOptions)));
 }
 
 TEST(ExpressionGetFieldTest, GetFieldSerializesAndRedactsCorrectly) {
-    SerializationOptions options;
-    options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
-    options.transformIdentifiers = true;
-    options.transformIdentifiersCallback = applyHmacForTest;
+    SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
 
@@ -3875,10 +4029,7 @@ TEST(ExpressionGetFieldTest, GetFieldSerializesAndRedactsCorrectly) {
 }
 
 TEST(ExpressionSetFieldTest, SetFieldRedactsCorrectly) {
-    SerializationOptions options;
-    options.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
-    options.transformIdentifiersCallback = applyHmacForTest;
-    options.transformIdentifiers = true;
+    SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
     auto expCtx = ExpressionContextForTest{};
     VariablesParseState vps = expCtx.variablesParseState;
 
@@ -4788,5 +4939,64 @@ TEST(ExpressionConvert, StringToDouble) {
     }
 }
 
+TEST(NameExpression, Literal) {
+    auto expCtx = ExpressionContextForTest{};
+    auto nameExprObj = fromjson(R"({db: "abc"})");
+    auto nameExpr = NameExpression::parseFromBSON(nameExprObj["db"]);
+    ASSERT_TRUE(nameExpr.isLiteral());
+    ASSERT_EQ("abc", nameExpr.getLiteral());
+
+    auto serializedStr = nameExpr.toString();
+    ASSERT_EQ(nameExprObj.toString(), serializedStr);
+}
+
+TEST(NameExpression, SimplePath) {
+    auto expCtx = ExpressionContextForTest{};
+    auto nameExprObj = fromjson(R"({coll: "$apath"})");
+    auto nameExpr = NameExpression::parseFromBSON(nameExprObj["coll"]);
+    ASSERT_FALSE(nameExpr.isLiteral());
+    ASSERT_EQ("ljk", nameExpr.evaluate(&expCtx, fromJson(R"({apath: "ljk"})")));
+
+    auto serializedStr = nameExpr.toString();
+    ASSERT_EQ(nameExprObj.toString(), serializedStr);
+}
+
+TEST(NameExpression, Expression) {
+    auto expCtx = ExpressionContextForTest{};
+    auto nameExprObj =
+        fromjson(R"({fullName: {$concat: ["$customer.firstname", " ", "$customer.surname"]}})");
+    auto nameExpr = NameExpression::parseFromBSON(nameExprObj["fullName"]);
+    ASSERT_FALSE(nameExpr.isLiteral());
+    ASSERT_EQ("Firstname Lastname", nameExpr.evaluate(&expCtx, fromJson(R"(
+                                    {
+                                        customer: {
+                                            firstname: "Firstname",
+                                            surname: "Lastname"
+                                        }
+                                    }
+                                )")));
+
+    auto serializedStr = nameExpr.toString();
+    ASSERT_EQ(nameExprObj.toString(), serializedStr);
+}
+
+TEST(NameExpression, NonStringValue) {
+    auto expCtx = ExpressionContextForTest{};
+    auto nameExprObj = fromjson(R"({fullName: {$add: ["$customer.id", 10]}})");
+    auto nameExpr = NameExpression::parseFromBSON(nameExprObj["fullName"]);
+    ASSERT_FALSE(nameExpr.isLiteral());
+    ASSERT_THROWS_CODE(
+        nameExpr.evaluate(&expCtx, fromJson(R"({customer: {id: 10}})")), DBException, 8117101);
+}
+
+TEST(NameExpression, InvalidInput) {
+    auto expCtx = ExpressionContextForTest{};
+    auto nameExprObj =
+        fromjson(R"({fullName: {$concat: ["$customer.firstname", " ", "$customer.surname"]}})");
+    auto nameExpr = NameExpression::parseFromBSON(nameExprObj["fullName"]);
+    ASSERT_FALSE(nameExpr.isLiteral());
+    ASSERT_THROWS_CODE(
+        nameExpr.evaluate(&expCtx, fromJson(R"({customer: {id: 10}})")), DBException, 8117101);
+}
 }  // namespace ExpressionTests
 }  // namespace mongo

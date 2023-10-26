@@ -1,22 +1,25 @@
 """Tools to dump debug info for each OS."""
 
-import concurrent.futures
 import glob
+from io import StringIO
 import itertools
 import logging
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from abc import ABCMeta, abstractmethod
 from collections import namedtuple
 from distutils import spawn
-from typing import List
+from typing import List, Tuple
 
 from buildscripts.resmokelib.hang_analyzer.process import call, callo, find_program
 from buildscripts.resmokelib.hang_analyzer.process_list import Pinfo
 from buildscripts.resmokelib import config as resmoke_config
+from buildscripts.simple_report import Report, Result
 
 Dumpers = namedtuple('Dumpers', ['dbg', 'jstack'])
 
@@ -115,6 +118,12 @@ class Dumper(metaclass=ABCMeta):
     def _postfix(self):
         """Return the commands to exit the debugger."""
         raise NotImplementedError("_postfix must be implemented in OS-specific subclasses")
+
+    @abstractmethod
+    def get_binary_from_core_dump(self, core_file_path):
+        """Return the name of the binary that created the input core dump."""
+        raise NotImplementedError(
+            "get_binary_from_core_dump must be implemented in OS-specific subclasses")
 
 
 class WindowsDumper(Dumper):
@@ -272,6 +281,9 @@ class WindowsDumper(Dumper):
         """Return the dump file extension."""
         return "mdmp"
 
+    def get_binary_from_core_dump(self, core_file_path):
+        raise NotImplementedError("get_binary_from_core_dump is not implemented on windows")
+
 
 # LLDB dumper is for MacOS X
 class LLDBDumper(Dumper):
@@ -397,6 +409,9 @@ class LLDBDumper(Dumper):
             files[pid] = "dump_%s.%d.%s" % (pinfo.name, pid, self.get_dump_ext())
         return files
 
+    def get_binary_from_core_dump(self, core_file_path):
+        raise NotImplementedError("get_binary_from_core_dump is not implemented on macos")
+
 
 # GDB dumper is for Linux
 class GDBDumper(Dumper):
@@ -423,25 +438,14 @@ class GDBDumper(Dumper):
 
     def _prefix(self):
         """Return the commands to set up a debugger process."""
-        script_dir = "buildscripts"
-        gdb_dir = os.path.join(script_dir, "gdb")
-        mongo_script = os.path.join(gdb_dir, "mongo.py")
-        mongo_printers_script = os.path.join(gdb_dir, "mongo_printers.py")
-        mongo_lock_script = os.path.join(gdb_dir, "mongo_lock.py")
 
         add_venv_sys_path = f"py sys.path.extend({sys.path})"  # Makes venv packages available in GDB
-        source_mongo = "source %s" % mongo_script
-        source_mongo_printers = "source %s" % mongo_printers_script
-        source_mongo_lock = "source %s" % mongo_lock_script
 
         cmds = [
             "set interactive-mode off",
             "set print thread-events off",  # Suppress GDB messages of threads starting/finishing.
-            "set python print-stack full",
             add_venv_sys_path,
-            source_mongo,
-            source_mongo_printers,
-            source_mongo_lock,
+            "source .gdbinit",
         ]
         return cmds
 
@@ -474,12 +478,9 @@ class GDBDumper(Dumper):
             mongodb_dump_storage_engine_info = "mongodb-dump-storage-engine-info"
 
             for pid in pinfo.pidv:
-                if not logger.mongo_process_filename:
-                    set_logging_on_commands = []
-                    set_logging_off_commands = []
-                    raw_stacks_commands = []
-                else:
-                    base, ext = os.path.splitext(logger.mongo_process_filename)
+                filename = "debugger_%s_%d.log" % (os.path.splitext(pinfo.name)[0], pid)
+                if logger:
+                    base, ext = os.path.splitext(filename)
                     set_logging_on_commands = [
                         'set logging file %s_%d%s' % (base, pid, ext), 'set logging on'
                     ]
@@ -495,6 +496,10 @@ class GDBDumper(Dumper):
                         'set logging off',
                         'set logging redirect off',
                     ]
+                else:
+                    set_logging_on_commands = []
+                    set_logging_off_commands = []
+                    raw_stacks_commands = []
 
                 mongodb_waitsfor_graph = "mongodb-waitsfor-graph debugger_waitsfor_%s_%d.gv" % \
                     (pinfo.name, pid)
@@ -530,7 +535,7 @@ class GDBDumper(Dumper):
         """Dump info."""
 
         dbg = self._find_debugger()
-        logger = _get_process_logger(self._dbg_output, pinfo.name)
+        logger = self._root_logger
         _start_time = datetime.now()
 
         if dbg is None:
@@ -572,51 +577,68 @@ class GDBDumper(Dumper):
         self._root_logger.info("Done analyzing %s processes with PIDs %s", pinfo.name,
                                str(pinfo.pidv))
 
-    def analyze_cores(self, core_file_dir: str, install_dir: str, analysis_dir: str):
+    def analyze_cores(self, core_file_dir: str, install_dir: str, analysis_dir: str) -> Report:
         core_files = find_files(f"*.{self.get_dump_ext()}", core_file_dir)
         if not core_files:
             raise RuntimeError(f"No core dumps found in {core_file_dir}")
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            futures = []
-            for filename in core_files:
-                core_file_path = os.path.abspath(filename)
-                futures.append(
-                    executor.submit(self.analyze_core, core_file_path=core_file_path,
-                                    install_dir=install_dir, analysis_dir=analysis_dir))
 
-            concurrent.futures.wait(futures)
+        tmp_dir = os.path.join(analysis_dir, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        report = Report({"failures": 0, "results": []})
+        for filename in core_files:
+            core_file_path = os.path.abspath(filename)
+            basename = os.path.basename(filename)
+            self._root_logger.info("Starting analysis of %s", basename)
+            log_stream = StringIO()
+            logger = logging.Logger(basename, level=logging.DEBUG)
+            handler = logging.StreamHandler(log_stream)
+            handler.setFormatter(logging.Formatter(fmt="%(message)s"))
+            logger.addHandler(handler)
+            try:
+                exit_code, status = self.analyze_core(
+                    core_file_path=core_file_path, install_dir=install_dir,
+                    analysis_dir=analysis_dir, tmp_dir=tmp_dir, logger=logger)
+            except Exception:
+                logger.exception("Exception occured while analyzing core")
+                exit_code = 1
+                status = "fail"
+            output = log_stream.getvalue()
+            result = Result(
+                Result({
+                    "status": status, "exit_code": exit_code, "test_file": basename,
+                    "log_raw": output
+                }))
+            if exit_code == 1:
+                report["failures"] += 1
+            report["results"].append(result)
+            self._root_logger.info("Analysis of %s ended with status %s", basename, status)
+        shutil.rmtree(tmp_dir)
+        return report
 
-    def analyze_core(self, core_file_path: str, install_dir: str, analysis_dir: str):
+    def analyze_core(self, core_file_path: str, install_dir: str, analysis_dir: str, tmp_dir: str,
+                     logger: logging.Logger) -> Tuple[int, str]:  # returns (exit_code, test_status)
         cmds = []
         dbg = self._find_debugger()
         basename = os.path.basename(core_file_path)
         if dbg is None:
             self._root_logger.error("Debugger not found, skipping dumping of %s", basename)
-            raise RuntimeError(f"Debugger not found, skipping dumping of {basename}")
+            return 1, "fail"
 
         # ensure debugger version is loggged
-        call([dbg, "--version"], self._root_logger)
+        call([dbg, "--version"], logger)
         lib_dir = None
 
-        regex = re.search(fr"dump_(.+)\.([0-9]+)\.{self.get_dump_ext()}", basename)
-
-        if not regex:
-            self._root_logger.error(
-                f"Core dump could not be processed because the name did not match the expected pattern: {basename}"
-            )
-            return
-        binary_name = regex.group(1)
+        binary_name = self.get_binary_from_core_dump(core_file_path)
         binary_files = find_files(binary_name, install_dir)
 
         if not binary_files:
             # This can sometimes happen because coredumps can appear from non-mongo processes
-            self._root_logger.warn("Binary %s not found, cannot process %s", binary_name, basename)
-            return
+            logger.warn("Binary %s not found, cannot process %s", binary_name, basename)
+            return 0, "skip"
 
         if len(binary_files) > 1:
-            self._root_logger.error("More than one file found in %s matching %s", install_dir,
-                                    binary_name)
-            raise RuntimeError(f"More than one file found in {install_dir} matching {binary_name}")
+            logger.error("More than one file found in %s matching %s", install_dir, binary_name)
+            return 1, "fail"
 
         binary_path = binary_files[0]
         lib_dir = os.path.abspath(os.path.join(os.path.dirname(binary_files[0]), "..", "lib"))
@@ -625,35 +647,63 @@ class GDBDumper(Dumper):
         logging_dir = os.path.join(analysis_dir, basename)
         os.makedirs(logging_dir, exist_ok=True)
 
-        def get_file_name(process_type: str) -> str:
-            return os.path.join(logging_dir, f"{basename}.{process_type}.txt")
-
-        raw_stacks_filename = get_file_name("stacks")
         cmds += [
             f"set solib-search-path {lib_dir}",
-            "set index-cache directory /tmp/index-cache",
+            f"set index-cache directory {tmp_dir}",
             "set index-cache enabled on",
             f"file {binary_path}",
             f"core-file {core_file_path}",
-            f"echo \\nWriting raw stacks to {raw_stacks_filename}.\\n",
-            # This sends output to log file rather than stdout until we turn logging off.
-            "set logging redirect on",
-            f"set logging file {raw_stacks_filename}",
-            "set logging enabled on",
-            "thread apply all bt",
-            "set logging enabled off",
-            "set logging redirect off",
-            "show index-cache stats"
+            "python import gdbmongo",
+            "python gdbmongo.register_printers()",
+            "set width 0",
         ]
+
+        def add_commands(command: str, name: str):
+            file_path = os.path.join(logging_dir, f"{basename}.{name}.txt")
+            cmds.extend([
+                f"echo \\nWriting {name} to {file_path}.\\n",
+                f"set logging file {file_path}",
+                "set logging enabled on",
+                command,
+                "set logging enabled off",
+            ])
+
+        add_commands("info threads", "info_threads")
+        add_commands("thread apply all bt", "backtraces")
+        add_commands("mongodb-uniqstack mongodb-bt-if-active", "uniqstack")
+        add_commands("mongodb-show-locks", "show_locks")
+        add_commands("mongod-dump-sessions", "dump_sessions")
+        add_commands("mongodb-dump-mutexes", "dump_mutexes")
+        add_commands("mongodb-dump-recovery-units", "dump_recovery_units")
+        # depends on gdbmongo python dependency
+        add_commands("python print(gdbmongo.LockManagerPrinter.from_global().val)", "dump_locks")
 
         cmds = self._prefix() + cmds + self._postfix()
 
-        call([dbg] + list(itertools.chain.from_iterable([['-ex', b] for b in cmds])),
-             self._root_logger)
+        call([dbg, "--nx"] + list(itertools.chain.from_iterable([['-ex', b] for b in cmds])),
+             logger)
+
+        return 0, "pass"
 
     def get_dump_ext(self):
         """Return the dump file extension."""
         return "core"
+
+    def get_binary_from_core_dump(self, core_file_path):
+        dbg = self._find_debugger()
+        if dbg is None:
+            raise RuntimeError("Debugger not found, can't run get_binary_from_core_dump")
+        process = subprocess.run([dbg, "-batch", "--quiet", "-ex", f"core {core_file_path}"],
+                                 check=True, capture_output=True, text=True)
+
+        regex = re.search("Core was generated by `(.*)'.", process.stdout)
+        if not regex:
+            raise RuntimeError("gdb output did not match pattern, could not find binary name")
+
+        binary_path = regex.group(1)
+        binary_name = binary_path.split(" ")[0]
+        binary_name = binary_name.split("/")[-1]
+        return binary_name
 
     @staticmethod
     def _find_gcore():

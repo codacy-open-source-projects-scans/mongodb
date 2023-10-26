@@ -34,7 +34,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -637,7 +636,6 @@ Status OplogApplierUtils::applyOplogBatchCommon(
                 }
 
                 LOGV2_FATAL_CONTINUE(21237,
-                                     "Error applying operation ({oplogEntry}): {error}",
                                      "Error applying operation",
                                      "oplogEntry"_attr = redact(op->toBSONForLogging()),
                                      "error"_attr = causedBy(redact(status)));
@@ -658,7 +656,6 @@ Status OplogApplierUtils::applyOplogBatchCommon(
             }
 
             LOGV2_FATAL_CONTINUE(21238,
-                                 "writer worker caught exception: {error} on: {oplogEntry}",
                                  "Writer worker caught exception",
                                  "error"_attr = redact(e),
                                  "oplogEntry"_attr = redact(op->toBSONForLogging()));

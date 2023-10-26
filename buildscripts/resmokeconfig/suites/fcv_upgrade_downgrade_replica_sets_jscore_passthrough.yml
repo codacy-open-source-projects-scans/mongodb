@@ -87,6 +87,15 @@ selector:
   # Queryable encryption uses internal transactions (which are aborted on fcv upgrade/downgrade)
   - jstests/core/queryable_encryption/**/*.js
 
+  # TODO SERVER-80490: The test below requires a precise lock count that can get modified by concurrent
+  # setFCV operations. The exclusion can be removed once the linked ticket is fixed.
+  - jstests/core/top.js
+
+  # Tests that use profiling at level 2 are expecting to profile a specific command or a specific number
+  # of commands. If they profile the setFCV command, this could cause the test to fail.
+  - jstests/core/administrative/profile/profile_sampling.js
+  - jstests/core/administrative/profile/profile1.js
+
 executor:
   archive:
     hooks:

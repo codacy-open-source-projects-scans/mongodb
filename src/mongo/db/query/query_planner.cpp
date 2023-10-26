@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstring>
 #include <s2cellid.h>
@@ -70,6 +69,7 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
+#include "mongo/db/pipeline/document_source_internal_replace_root.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
@@ -536,18 +536,13 @@ bool canUseClusteredCollScan(QuerySolutionNode* node,
  * Creates a query solution node for $search plans that are being pushed down into SBE.
  */
 StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
-    const CanonicalQuery& query) {
+    const QueryPlannerParams& params, const CanonicalQuery& query) {
     if (query.cqPipeline().empty()) {
         return {ErrorCodes::InvalidOptions,
                 "not building $search node because the query pipeline is empty"};
     }
 
-    const auto stage = query.cqPipeline().front()->documentSource();
-    auto isSearch = getSearchHelpers(query.getOpCtx()->getServiceContext())->isSearchStage(stage);
-    auto isSearchMeta =
-        getSearchHelpers(query.getOpCtx()->getServiceContext())->isSearchMetaStage(stage);
-
-    if (isSearch || isSearchMeta) {
+    if (query.isSearchQuery()) {
         tassert(7816300,
                 "Pushing down $search into SBE but forceClassicEngine is true.",
                 !query.getForceClassicEngine());
@@ -558,12 +553,17 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
                 "Pushing down $search into SBE but featureFlagSearchInSbe is disabled.",
                 feature_flags::gFeatureFlagSearchInSbe.isEnabledAndIgnoreFCVUnsafe());
 
-        auto searchNode =
-            getSearchHelpers(query.getOpCtx()->getServiceContext())->getSearchNode(stage);
+        auto searchNode = getSearchHelpers(query.getOpCtx()->getServiceContext())
+                              ->getSearchNode(query.cqPipeline().front()->documentSource());
 
-        auto querySoln = std::make_unique<QuerySolution>();
-        querySoln->setRoot(std::move(searchNode));
-        return std::move(querySoln);
+        if (searchNode->searchQuery.getBoolField(kReturnStoredSourceArg) ||
+            searchNode->isSearchMeta) {
+            auto querySoln = std::make_unique<QuerySolution>();
+            querySoln->setRoot(std::move(searchNode));
+            return std::move(querySoln);
+        }
+        // Apply shard filter if needed.
+        return QueryPlannerAnalysis::analyzeDataAccess(query, params, std::move(searchNode));
     }
 
     return {ErrorCodes::InvalidOptions, "no search stage found at front of pipeline"};
@@ -1185,7 +1185,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // were used to override the allowed indices for planning, we should not use the hinted index
     // requested in the query.
     boost::optional<BSONObj> hintedIndexBson = boost::none;
-    if (!params.indexFiltersApplied) {
+    if (!params.indexFiltersApplied && !params.querySettingsApplied) {
         if (auto hintObj = query.getFindCommandRequest().getHint(); !hintObj.isEmpty()) {
             hintedIndexBson = hintObj;
         }
@@ -1666,7 +1666,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     // Create a $search QuerySolution if we are performing a $search.
     if (out.empty()) {
-        auto statusWithSoln = tryToBuildSearchQuerySolution(query);
+        auto statusWithSoln = tryToBuildSearchQuerySolution(params, query);
         if (statusWithSoln.isOK()) {
             out.emplace_back(std::move(statusWithSoln.getValue()));
         } else {
@@ -1792,6 +1792,14 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
         if (projectionStage) {
             solnForAgg = std::make_unique<ProjectionNodeDefault>(
                 std::move(solnForAgg), nullptr, projectionStage->projection());
+            continue;
+        }
+
+        auto replaceRootStage =
+            dynamic_cast<DocumentSourceInternalReplaceRoot*>(innerStage->documentSource());
+        if (replaceRootStage) {
+            solnForAgg = std::make_unique<ReplaceRootNode>(std::move(solnForAgg),
+                                                           replaceRootStage->newRootExpression());
             continue;
         }
 
@@ -2048,7 +2056,7 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
         auto orChild = planningResult.orExpression->getChild(i);
 
         // Turn the i-th child into its own query.
-        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx, query, orChild);
+        auto statusWithCQ = CanonicalQuery::canonicalizeSubQuery(opCtx, query, orChild);
         if (!statusWithCQ.isOK()) {
             str::stream ss;
             ss << "Can't canonicalize subchild " << orChild->debugString() << " "

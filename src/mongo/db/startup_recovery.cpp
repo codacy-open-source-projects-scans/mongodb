@@ -43,7 +43,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #include "mongo/base/error_codes.h"
@@ -127,7 +126,11 @@ bool isWriteableStorageEngine() {
 }
 
 // Attempt to restore the featureCompatibilityVersion document if it is missing.
-Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx) {
+// The optional parameter `startupTimeElapsedBuilder` is for adding time elapsed of tasks done in
+// this function into one single builder that records the time elapsed during startup. Its default
+// value is nullptr because we only want to time this function when it is called during startup.
+Status restoreMissingFeatureCompatibilityVersionDocument(
+    OperationContext* opCtx, BSONObjBuilder* startupTimeElapsedBuilder = nullptr) {
     const NamespaceString fcvNss(NamespaceString::kServerConfigurationNamespace);
 
     // If the admin database, which contains the server configuration collection with the
@@ -149,6 +152,10 @@ Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx
               "Re-creating featureCompatibilityVersion document that was deleted. Creating new "
               "document with last LTS version.",
               "version"_attr = multiversion::toString(multiversion::GenericFCV::kLastLTS));
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Create new fcv document",
+                                                startupTimeElapsedBuilder);
         uassertStatusOK(createCollection(opCtx, fcvNss.dbName(), BSON("create" << fcvNss.coll())));
     }
 
@@ -167,6 +174,10 @@ Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx
                           fcvColl.getCollectionPtr(),
                           BSON("_id" << multiversion::kParameterName),
                           featureCompatibilityVersion)) {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Restore fcv document",
+                                                startupTimeElapsedBuilder);
         // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
         LOGV2(21000,
               "Re-creating featureCompatibilityVersion document that was deleted. Creating new "
@@ -283,17 +294,13 @@ Status ensureCollectionProperties(OperationContext* opCtx,
         // that was created manually by the user. Check the list of indexes to confirm index
         // does not exist before attempting to build it or returning an error.
         if (requiresIndex && !hasAutoIndexIdField && !checkIdIndexExists(opCtx, coll)) {
-            LOGV2(21001,
-                  "collection {coll_ns} is missing an _id index",
-                  "Collection is missing an _id index",
-                  logAttrs(*coll));
+            LOGV2(21001, "Collection is missing an _id index", logAttrs(*coll));
             if (EnsureIndexPolicy::kBuildMissing == ensureIndexPolicy) {
                 auto writableCollection =
                     catalog->lookupCollectionByUUIDForMetadataWrite(opCtx, coll->uuid());
                 auto status = buildMissingIdIndex(opCtx, writableCollection);
                 if (!status.isOK()) {
                     LOGV2_ERROR(21021,
-                                "could not build an _id index on collection {coll_ns}: {error}",
                                 "Could not build an _id index on collection",
                                 logAttrs(*coll),
                                 "error"_attr = status);
@@ -355,13 +362,10 @@ void assertCappedOplog(OperationContext* opCtx) {
     const Collection* oplogCollection =
         CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, oplogNss);
     if (oplogCollection && !oplogCollection->isCapped()) {
-        LOGV2_FATAL_NOTRACE(
-            40115,
-            "The oplog collection {oplogNamespace} is not capped; a capped oplog is a "
-            "requirement for replication to function.",
-            "The oplog collection is not capped; a capped oplog is a "
-            "requirement for replication to function.",
-            "oplogNamespace"_attr = oplogNss);
+        LOGV2_FATAL_NOTRACE(40115,
+                            "The oplog collection is not capped; a capped oplog is a "
+                            "requirement for replication to function.",
+                            "oplogNamespace"_attr = oplogNss);
     }
 }
 
@@ -403,13 +407,6 @@ bool useUnreplicatedTruncatesForChangeStreamCollections() {
 
 void cleanupChangeCollectionAfterUncleanShutdown(OperationContext* opCtx,
                                                  const TenantId& tenantId) {
-    AutoGetChangeCollection tenantChangeCollection{
-        opCtx, AutoGetChangeCollection::AccessMode::kWrite, tenantId};
-
-    if (!tenantChangeCollection) {
-        return;
-    }
-
     auto currentTime =
         change_stream_serverless_helpers::getCurrentTimeForChangeCollectionRemoval(opCtx);
     auto expireAfterSeconds =
@@ -431,68 +428,56 @@ void cleanupChangeCollectionAfterUncleanShutdown(OperationContext* opCtx,
     auto baseExpirationTime = currentTime - expireAfterSeconds;
     auto adjustedExpirationTime = baseExpirationTime +
         Seconds(startup_recovery::kChangeStreamPostUncleanShutdownExpiryExtensionSeconds);
-    LOGV2_DEBUG(7842800,
+    auto expirationTSEstimate = Timestamp(adjustedExpirationTime.toMillisSinceEpoch() / 1000.0,
+                                          std::numeric_limits<unsigned>::max());
+    RecordId maxExpiredRecordIdEstimate =
+        record_id_helpers::keyForOptime(expirationTSEstimate, KeyFormat::String).getValue();
+
+    writeConflictRetry(
+        opCtx,
+        "truncate change collection by approximate timestamp expiration",
+        NamespaceString::makeChangeCollectionNSS(tenantId),
+        [&] {
+            AutoGetChangeCollection tenantChangeCollection{
+                opCtx, AutoGetChangeCollection::AccessMode::kWrite, tenantId};
+
+            if (!tenantChangeCollection) {
+                return;
+            }
+
+            LOGV2_DEBUG(
+                8148800,
                 0,
-                "Extending truncate range for change collection",
+                "About to truncate change collection entries for tenant after unclean shutdown",
                 "originalExpirationDate"_attr = baseExpirationTime,
                 "newExpirationDate"_attr = adjustedExpirationTime,
                 "expiryRangeExtensionSeconds"_attr =
                     startup_recovery::kChangeStreamPostUncleanShutdownExpiryExtensionSeconds,
-                "tenantId"_attr = tenantId);
-
-    auto expirationTSEstimate = Timestamp(adjustedExpirationTime.toMillisSinceEpoch() / 1000.0,
-                                          std::numeric_limits<unsigned>::max());
-    LOGV2_DEBUG(7842801,
-                0,
-                "About to truncate change collection entries for tenant after unclean shutdown",
                 "truncateAtTimestamp"_attr = expirationTSEstimate,
                 "tenantId"_attr = tenantId);
-    RecordId maxExpiredRecordIdEstimate =
-        record_id_helpers::keyForOptime(expirationTSEstimate, KeyFormat::String).getValue();
 
-    writeConflictRetry(opCtx,
-                       "truncate change collection by approximate timestamp expiration",
-                       tenantChangeCollection->ns(),
-                       [&] {
-                           // Exclusively truncate based on the most recent WT snapshot.
-                           opCtx->recoveryUnit()->abandonSnapshot();
-                           opCtx->recoveryUnit()->allowOneUntimestampedWrite();
+            // Exclusively truncate based on the most recent WT snapshot.
+            opCtx->recoveryUnit()->abandonSnapshot();
+            opCtx->recoveryUnit()->allowOneUntimestampedWrite();
 
-                           WriteUnitOfWork wuow(opCtx);
+            WriteUnitOfWork wuow(opCtx);
 
-                           // Truncation is based on Timestamp expiration approximation -
-                           // meaning there isn't a good estimate of the number of bytes and
-                           // documents to be truncated, so default to 0.
-                           auto rs = tenantChangeCollection->getRecordStore();
-                           auto status = rs->rangeTruncate(
-                               opCtx, RecordId(), maxExpiredRecordIdEstimate, 0, 0);
-                           invariantStatusOK(status);
-                           wuow.commit();
-                       });
+            // Truncation is based on Timestamp expiration approximation -
+            // meaning there isn't a good estimate of the number of bytes and
+            // documents to be truncated, so default to 0.
+            auto rs = tenantChangeCollection->getRecordStore();
+            auto status = rs->rangeTruncate(opCtx, RecordId(), maxExpiredRecordIdEstimate, 0, 0);
+            invariantStatusOK(status);
+            wuow.commit();
+        });
 }
 void cleanupPreImagesCollectionAfterUncleanShutdown(OperationContext* opCtx,
                                                     boost::optional<TenantId> tenantId) {
-    const auto preImagesColl = acquireCollection(
-        opCtx,
-        CollectionAcquisitionRequest(NamespaceString::makePreImageCollectionNSS(tenantId),
-                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
-                                     repl::ReadConcernArgs::get(opCtx),
-                                     AcquisitionPrerequisites::kWrite),
-        MODE_IX);
-
-    if (!preImagesColl.exists()) {
-        LOGV2_DEBUG(
-            7803702,
-            3,
-            "Bypassing truncation of pre-images collection on startup recovery because it does "
-            "not exist");
-        return;
-    }
-
     auto currentTime = change_stream_pre_image_util::getCurrentTimeForPreImageRemoval(opCtx);
-    auto operationTimeExpirationDate =
+    auto originalExpirationDate =
         change_stream_pre_image_util::getPreImageOpTimeExpirationDate(opCtx, tenantId, currentTime);
-    if (operationTimeExpirationDate) {
+    boost::optional<Date_t> operationTimeExpirationDate = boost::none;
+    if (originalExpirationDate) {
         // Pre-image expiration is based on either 'operationTime', or '_id.ts'. However, after
         // unclean shutdown, initial truncation must be based on RecordId (which only encodes
         // '_id.ts') since truncate markers haven't been created yet. A pre-image's
@@ -504,17 +489,8 @@ void cleanupPreImagesCollectionAfterUncleanShutdown(OperationContext* opCtx,
         // To account for oplog holes, and a loss of precision converting Date_t to Timestamp,
         // truncate up to a few seconds past the expiration date to guarantee only consistent
         // data survives post crash.
-        auto newOperationTimeExpirationDate = *operationTimeExpirationDate +
+        operationTimeExpirationDate = *originalExpirationDate +
             Seconds(startup_recovery::kChangeStreamPostUncleanShutdownExpiryExtensionSeconds);
-        LOGV2_DEBUG(7803700,
-                    0,
-                    "Extending truncate range for pre-images expired by 'operationTime'",
-                    "originalExpirationDate"_attr = *operationTimeExpirationDate,
-                    "newExpirationDate"_attr = newOperationTimeExpirationDate,
-                    "expiryRangeExtensionSeconds"_attr =
-                        startup_recovery::kChangeStreamPostUncleanShutdownExpiryExtensionSeconds);
-
-        operationTimeExpirationDate = newOperationTimeExpirationDate;
     }
 
     auto operationTimeExpirationTSEstimate = operationTimeExpirationDate
@@ -522,43 +498,90 @@ void cleanupPreImagesCollectionAfterUncleanShutdown(OperationContext* opCtx,
                               std::numeric_limits<unsigned>::max())}
         : Timestamp();
 
-    if (tenantId) {
-        // Multi-tenant environment, pre-images only expire by 'operationTime'.
-        invariant(operationTimeExpirationDate);
-        LOGV2_DEBUG(7803701,
-                    0,
-                    "About to truncate pre-images for tenant after unclean shutdown",
-                    "truncateAtTimestamp"_attr = *operationTimeExpirationDate,
-                    "tenantId"_attr = tenantId);
-        change_stream_pre_image_util::truncatePreImagesByTimestampExpirationApproximation(
-            opCtx, preImagesColl.getCollectionPtr(), operationTimeExpirationTSEstimate);
-        return;
-    }
+    writeConflictRetry(
+        opCtx,
+        "cleanupPreImagesCollectionAfterUncleanShutdown",
+        NamespaceString::makePreImageCollectionNSS(tenantId),
+        [&] {
+            const auto preImagesColl =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(
+                                      NamespaceString::makePreImageCollectionNSS(tenantId),
+                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      repl::ReadConcernArgs::get(opCtx),
+                                      AcquisitionPrerequisites::kWrite),
+                                  MODE_IX);
 
-    // Pre-images expired when "_id.ts" < oldest oplog timestamp OR "_id.ts" <= the estimated
-    // timestamp for the 'operationTime' expiration date.
-    const auto oldestOplogTimestamp =
-        repl::StorageInterface::get(opCtx->getServiceContext())->getEarliestOplogTimestamp(opCtx);
-    const auto expirationTimestamp =
-        std::max(oldestOplogTimestamp, operationTimeExpirationTSEstimate);
-    LOGV2_DEBUG(7803703,
-                0,
-                "About to truncate pre-images after unclean shutdown",
-                "truncateAtTimestamp"_attr = expirationTimestamp,
-                "oldestOplogEntryTimestamp"_attr = oldestOplogTimestamp);
-    change_stream_pre_image_util::truncatePreImagesByTimestampExpirationApproximation(
-        opCtx, preImagesColl.getCollectionPtr(), expirationTimestamp);
+            if (!preImagesColl.exists()) {
+                LOGV2_DEBUG(7803702,
+                            3,
+                            "Bypassing truncation of pre-images collection on startup recovery "
+                            "because it does not exist");
+                return;
+            }
+
+            if (originalExpirationDate) {
+                LOGV2_DEBUG(
+                    7803700,
+                    0,
+                    "Extending truncate range for pre-images expired by 'operationTime'",
+                    "originalExpirationDate"_attr = *originalExpirationDate,
+                    "newExpirationDate"_attr = *operationTimeExpirationDate,
+                    "expiryRangeExtensionSeconds"_attr =
+                        startup_recovery::kChangeStreamPostUncleanShutdownExpiryExtensionSeconds);
+            }
+
+            if (tenantId) {
+                // Multi-tenant environment, pre-images only expire by 'operationTime'.
+                invariant(operationTimeExpirationDate);
+                LOGV2_DEBUG(7803701,
+                            0,
+                            "About to truncate pre-images for tenant after unclean shutdown",
+                            "truncateAtTimestamp"_attr = operationTimeExpirationTSEstimate,
+                            "tenantId"_attr = tenantId);
+                change_stream_pre_image_util::truncatePreImagesByTimestampExpirationApproximation(
+                    opCtx, preImagesColl.getCollectionPtr(), operationTimeExpirationTSEstimate);
+                return;
+            }
+
+            // Pre-images expired when "_id.ts" < oldest oplog timestamp OR "_id.ts" <= the
+            // estimated timestamp for the 'operationTime' expiration date.
+            const auto oldestOplogTimestamp =
+                repl::StorageInterface::get(opCtx->getServiceContext())
+                    ->getEarliestOplogTimestamp(opCtx);
+            const auto expirationTimestamp =
+                std::max(oldestOplogTimestamp, operationTimeExpirationTSEstimate);
+            LOGV2_DEBUG(7803703,
+                        0,
+                        "About to truncate pre-images after unclean shutdown",
+                        "truncateAtTimestamp"_attr = expirationTimestamp,
+                        "oldestOplogEntryTimestamp"_attr = oldestOplogTimestamp);
+            change_stream_pre_image_util::truncatePreImagesByTimestampExpirationApproximation(
+                opCtx, preImagesColl.getCollectionPtr(), expirationTimestamp);
+        });
 }
 
+// The optional parameter `startupTimeElapsedBuilder` is for adding time elapsed of tasks done in
+// this function into one single builder that records the time elapsed during startup. Its default
+// value is nullptr because we only want to time this function when it is called during startup.
 void reconcileCatalogAndRebuildUnfinishedIndexes(
     OperationContext* opCtx,
     StorageEngine* storageEngine,
-    StorageEngine::LastShutdownState lastShutdownState) {
+    StorageEngine::LastShutdownState lastShutdownState,
+    BSONObjBuilder* startupTimeElapsedBuilder = nullptr) {
 
-    auto reconcileResult =
-        fassert(40593,
-                storageEngine->reconcileCatalogAndIdents(
-                    opCtx, storageEngine->getStableTimestamp(), lastShutdownState));
+    StorageEngine::ReconcileResult reconcileResult;
+    {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            opCtx->getServiceContext()->getFastClockSource(),
+            "Drop abandoned idents and get back indexes that need to be rebuilt or builds that "
+            "need to be restarted",
+            startupTimeElapsedBuilder);
+        reconcileResult =
+            fassert(40593,
+                    storageEngine->reconcileCatalogAndIdents(
+                        opCtx, storageEngine->getStableTimestamp(), lastShutdownState));
+    }
 
     auto tempDir = boost::filesystem::path(storageGlobalParams.dbpath).append("_tmp");
     if (reconcileResult.indexBuildsToResume.empty() ||
@@ -606,20 +629,23 @@ void reconcileCatalogAndRebuildUnfinishedIndexes(
         ino.second.emplace_back(std::move(indexesToRebuild.second.back()));
     }
 
-    for (const auto& entry : nsToIndexNameObjMap) {
-        const auto collNss = entry.first;
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Rebuild indexes for collections",
+                                                startupTimeElapsedBuilder);
+        for (const auto& entry : nsToIndexNameObjMap) {
+            const auto collNss = entry.first;
 
-        auto collection = catalog->lookupCollectionByNamespace(opCtx, collNss);
-        for (const auto& indexName : entry.second.first) {
-            LOGV2(21004,
-                  "Rebuilding index. Collection: {collNss} Index: {indexName}",
-                  "Rebuilding index",
-                  logAttrs(collNss),
-                  "index"_attr = indexName);
+            auto collection = catalog->lookupCollectionByNamespace(opCtx, collNss);
+            for (const auto& indexName : entry.second.first) {
+                LOGV2(21004, "Rebuilding index", logAttrs(collNss), "index"_attr = indexName);
+            }
+
+            std::vector<BSONObj> indexSpecs = entry.second.second;
+            fassert(40592,
+                    rebuildIndexesOnCollection(opCtx, collection, indexSpecs, RepairData::kNo));
         }
-
-        std::vector<BSONObj> indexSpecs = entry.second.second;
-        fassert(40592, rebuildIndexesOnCollection(opCtx, collection, indexSpecs, RepairData::kNo));
     }
 
     // Two-phase index builds depend on an eventually-replicated 'commitIndexBuild' oplog entry to
@@ -671,8 +697,14 @@ void setReplSetMemberInStandaloneMode(OperationContext* opCtx, StartupRecoveryMo
 }
 
 // Perform startup procedures for --repair mode.
-void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
+// The optional parameter `startupTimeElapsedBuilder` is for adding time elapsed of tasks done in
+// this function into one single builder that records the time elapsed during startup. Its default
+// value is nullptr because we only want to time this function when it is called during startup.
+void startupRepair(OperationContext* opCtx,
+                   StorageEngine* storageEngine,
+                   BSONObjBuilder* startupTimeElapsedBuilder = nullptr) {
     invariant(!storageGlobalParams.queryableBackupMode);
+    ServiceContext* svcCtx = opCtx->getServiceContext();
 
     if (MONGO_unlikely(exitBeforeDataRepair.shouldFail())) {
         LOGV2(21006, "Exiting because 'exitBeforeDataRepair' fail point was set.");
@@ -694,14 +726,24 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
             opCtx, NamespaceString::kServerConfigurationNamespace)) {
         auto databaseHolder = DatabaseHolder::get(opCtx);
 
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(svcCtx->getFastClockSource(),
+                                                "Repair server configuration namespace",
+                                                startupTimeElapsedBuilder);
         databaseHolder->openDb(opCtx, fcvColl->ns().dbName());
         fassertNoTrace(4805000,
                        repair::repairCollection(
                            opCtx, storageEngine, NamespaceString::kServerConfigurationNamespace));
     }
-    uassertStatusOK(restoreMissingFeatureCompatibilityVersionDocument(opCtx));
-    FeatureCompatibilityVersion::initializeForStartup(opCtx);
-    abortRepairOnFCVErrors.dismiss();
+    uassertStatusOK(
+        restoreMissingFeatureCompatibilityVersionDocument(opCtx, startupTimeElapsedBuilder));
+
+    {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            svcCtx->getFastClockSource(), "Initialize FCV for startup", startupTimeElapsedBuilder);
+        FeatureCompatibilityVersion::initializeForStartup(opCtx);
+        abortRepairOnFCVErrors.dismiss();
+    }
 
     // The local database should be repaired before any other replicated collections so we know
     // whether not to rebuild unfinished two-phase index builds if this is a replica set node
@@ -709,6 +751,8 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
     auto dbNames = storageEngine->listDatabases();
     if (auto it = std::find(dbNames.begin(), dbNames.end(), DatabaseName::kLocal);
         it != dbNames.end()) {
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+            svcCtx->getFastClockSource(), "Repair the local database", startupTimeElapsedBuilder);
         fassertNoTrace(4805001, repair::repairDatabase(opCtx, storageEngine, *it));
 
         // This must be set before rebuilding index builds on replicated collections.
@@ -716,9 +760,14 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
         dbNames.erase(it);
     }
 
-    // Repair the remaining databases.
-    for (const auto& dbName : dbNames) {
-        fassertNoTrace(18506, repair::repairDatabase(opCtx, storageEngine, dbName));
+    {
+        // Repair the remaining databases.
+        auto scopedTimer = createTimeElapsedBuilderScopedTimer(svcCtx->getFastClockSource(),
+                                                               "Repair the remaining databases",
+                                                               startupTimeElapsedBuilder);
+        for (const auto& dbName : dbNames) {
+            fassertNoTrace(18506, repair::repairDatabase(opCtx, storageEngine, dbName));
+        }
     }
 
     openDatabases(opCtx, storageEngine, [&](auto dbName) {
@@ -758,22 +807,35 @@ void startupRepair(OperationContext* opCtx, StorageEngine* storageEngine) {
 }
 
 // Perform routine startup recovery procedure.
+// The optional parameter `startupTimeElapsedBuilder` is for adding time elapsed of tasks done in
+// this function into one single builder that records the time elapsed during startup. Its default
+// value is nullptr because we only want to time this function when it is called during startup.
 void startupRecovery(OperationContext* opCtx,
                      StorageEngine* storageEngine,
                      StorageEngine::LastShutdownState lastShutdownState,
-                     StartupRecoveryMode mode) {
+                     StartupRecoveryMode mode,
+                     BSONObjBuilder* startupTimeElapsedBuilder = nullptr) {
     invariant(!storageGlobalParams.repair);
+
+    ServiceContext* svcCtx = opCtx->getServiceContext();
 
     // Determine whether this is a replica set node running in standalone mode. This must be set
     // before determining whether to restart index builds.
     setReplSetMemberInStandaloneMode(opCtx, mode);
 
     // Initialize FCV before rebuilding indexes that may have features dependent on FCV.
-    FeatureCompatibilityVersion::initializeForStartup(opCtx);
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(svcCtx->getFastClockSource(),
+                                                "Initialize FCV before rebuilding indexes",
+                                                startupTimeElapsedBuilder);
+        FeatureCompatibilityVersion::initializeForStartup(opCtx);
+    }
 
     // Drops abandoned idents. Rebuilds unfinished indexes and restarts incomplete two-phase
     // index builds.
-    reconcileCatalogAndRebuildUnfinishedIndexes(opCtx, storageEngine, lastShutdownState);
+    reconcileCatalogAndRebuildUnfinishedIndexes(
+        opCtx, storageEngine, lastShutdownState, startupTimeElapsedBuilder);
 
     const bool usingReplication =
         repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
@@ -818,9 +880,13 @@ namespace startup_recovery {
 /**
  * Recovers or repairs all databases from a previous shutdown. May throw a MustDowngrade error
  * if data files are incompatible with the current binary version.
+ * The optional parameter `startupTimeElapsedBuilder` is for adding time elapsed of tasks done in
+ * this function into one single builder that records the time elapsed during startup. Its default
+ * value is nullptr because we only want to time this function when it is called during startup.
  */
 void repairAndRecoverDatabases(OperationContext* opCtx,
-                               StorageEngine::LastShutdownState lastShutdownState) {
+                               StorageEngine::LastShutdownState lastShutdownState,
+                               BSONObjBuilder* startupTimeElapsedBuilder) {
     auto const storageEngine = opCtx->getServiceContext()->getStorageEngine();
     Lock::GlobalWrite lk(opCtx);
 
@@ -839,9 +905,13 @@ void repairAndRecoverDatabases(OperationContext* opCtx,
     }
 
     if (storageGlobalParams.repair) {
-        startupRepair(opCtx, storageEngine);
+        startupRepair(opCtx, storageEngine, startupTimeElapsedBuilder);
     } else {
-        startupRecovery(opCtx, storageEngine, lastShutdownState, StartupRecoveryMode::kAuto);
+        startupRecovery(opCtx,
+                        storageEngine,
+                        lastShutdownState,
+                        StartupRecoveryMode::kAuto,
+                        startupTimeElapsedBuilder);
     }
 }
 

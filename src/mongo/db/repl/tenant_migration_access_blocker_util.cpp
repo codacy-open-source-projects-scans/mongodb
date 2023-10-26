@@ -30,7 +30,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
@@ -745,7 +744,8 @@ boost::optional<TenantId> parseTenantIdFromDatabaseName(const DatabaseName& dbNa
         return dbName.tenantId();
     }
 
-    const auto tenantStr = getTenantPrefix(DatabaseNameUtil::serialize(dbName));
+    const auto tenantStr =
+        getTenantPrefix(DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault()));
     if (tenantStr.empty()) {
         // Not a tenant database.
         return boost::none;
@@ -767,7 +767,8 @@ boost::optional<std::string> extractTenantFromDatabaseName(const DatabaseName& d
         }
     }
 
-    const auto tenantStr = getTenantPrefix(DatabaseNameUtil::serialize(dbName));
+    const auto tenantStr =
+        getTenantPrefix(DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault()));
     if (tenantStr.empty()) {
         // Not a tenant database.
         return boost::none;

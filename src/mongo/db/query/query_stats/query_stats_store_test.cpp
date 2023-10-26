@@ -57,13 +57,13 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/parsed_find_command.h"
-#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/query_stats/agg_key_generator.h"
 #include "mongo/db/query/query_stats/find_key_generator.h"
 #include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_stats/transform_algorithm_gen.h"
-#include "mongo/db/query/serialization_options.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/assert.h"
@@ -73,12 +73,6 @@
 #include "mongo/util/str.h"
 
 namespace mongo::query_stats {
-/**
- * A default hmac application strategy that generates easy to check results for testing purposes.
- */
-std::string applyHmacForTest(StringData s) {
-    return str::stream() << "HASH<" << s << ">";
-}
 
 int countAllEntries(const QueryStatsStore& store) {
     int numKeys = 0;
@@ -90,12 +84,12 @@ static const NamespaceStringOrUUID kDefaultTestNss =
     NamespaceStringOrUUID{NamespaceString::createNamespaceString_forTest("testDB.testColl")};
 class QueryStatsStoreTest : public ServiceContextTest {
 public:
-    static std::unique_ptr<const KeyGenerator> makeFindKeyGeneratorFromQuery(BSONObj filter) {
+    static std::unique_ptr<const Key> makeFindKeyFromQuery(BSONObj filter) {
         auto expCtx = make_intrusive<ExpressionContextForTest>();
         auto fcr = std::make_unique<FindCommandRequest>(kDefaultTestNss);
         fcr->setFilter(filter.getOwned());
         auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, std::move(fcr)));
-        return std::make_unique<FindKeyGenerator>(expCtx, *parsedFind, collectionType);
+        return std::make_unique<FindKey>(expCtx, *parsedFind, collectionType);
     }
 
     static constexpr auto collectionType = query_shape::CollectionType::kCollection;
@@ -104,35 +98,36 @@ public:
                                          bool applyHmac) {
         auto fcrCopy = std::make_unique<FindCommandRequest>(fcr);
         auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, std::move(fcrCopy)));
-        FindKeyGenerator findKeyGenerator(expCtx, *parsedFind, collectionType);
-        SerializationOptions opts;
-        opts.literalPolicy = LiteralSerializationPolicy::kToDebugTypeString;
-        if (applyHmac) {
-            opts.transformIdentifiers = true;
-            opts.transformIdentifiersCallback = applyHmacForTest;
+        FindKey findKey(expCtx, *parsedFind, collectionType);
+        SerializationOptions opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+        if (!applyHmac) {
+            opts.transformIdentifiers = false;
+            opts.transformIdentifiersCallback = defaultHmacStrategy;
         }
-        return findKeyGenerator.generate(expCtx->opCtx, opts);
+        return findKey.toBson(expCtx->opCtx, opts, SerializationContext::stateDefault());
     }
 
-    BSONObj makeTelemetryKeyAggregateRequest(
-        AggregateCommandRequest acr,
-        const Pipeline& pipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        bool applyHmac = false,
-        LiteralSerializationPolicy literalPolicy = LiteralSerializationPolicy::kUnchanged) {
-        auto aggKeyGenerator = std::make_unique<AggKeyGenerator>(acr,
-                                                                 pipeline,
-                                                                 expCtx,
-                                                                 pipeline.getInvolvedCollections(),
-                                                                 acr.getNamespace(),
-                                                                 collectionType);
+    BSONObj makeQueryStatsKeyAggregateRequest(AggregateCommandRequest acr,
+                                              const Pipeline& pipeline,
+                                              const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                              LiteralSerializationPolicy literalPolicy,
+                                              bool applyHmac = false) {
 
-        SerializationOptions opts{.literalPolicy = literalPolicy};
-        if (applyHmac) {
-            opts.transformIdentifiers = true;
-            opts.transformIdentifiersCallback = applyHmacForTest;
+        auto aggKey = std::make_unique<AggKey>(acr,
+                                               pipeline,
+                                               expCtx,
+                                               pipeline.getInvolvedCollections(),
+                                               acr.getNamespace(),
+                                               collectionType);
+
+        // SerializationOptions opts{.literalPolicy = literalPolicy};
+        SerializationOptions opts = SerializationOptions::kMarkIdentifiers_FOR_TEST;
+        opts.literalPolicy = literalPolicy;
+        if (!applyHmac) {
+            opts.transformIdentifiers = false;
+            opts.transformIdentifiersCallback = defaultHmacStrategy;
         }
-        return aggKeyGenerator->generate(expCtx->opCtx, opts);
+        return aggKey->toBson(expCtx->opCtx, opts, SerializationContext::stateDefault());
     }
 };
 
@@ -140,14 +135,14 @@ TEST_F(QueryStatsStoreTest, BasicUsage) {
     QueryStatsStore queryStatsStore{5000000, 1000};
 
     auto getMetrics = [&](BSONObj query) {
-        auto key = makeFindKeyGeneratorFromQuery(query);
+        auto key = makeFindKeyFromQuery(query);
         auto lookupResult = queryStatsStore.lookup(absl::HashOf(key));
         ASSERT_OK(lookupResult);
         return *lookupResult.getValue();
     };
 
     auto collectMetrics = [&](BSONObj query) {
-        auto key = makeFindKeyGeneratorFromQuery(query);
+        auto key = makeFindKeyFromQuery(query);
         auto lookupHash = absl::HashOf(key);
         auto lookupResult = queryStatsStore.lookup(lookupHash);
         if (!lookupResult.isOK()) {
@@ -174,7 +169,7 @@ TEST_F(QueryStatsStoreTest, BasicUsage) {
     ASSERT_EQ(getMetrics(query2).execCount, 1);
 
     auto collectMetricsWithLock = [&](BSONObj& filter) {
-        auto key = makeFindKeyGeneratorFromQuery(filter);
+        auto key = makeFindKeyFromQuery(filter);
         auto [lookupResult, lock] = queryStatsStore.getWithPartitionLock(absl::HashOf(key));
         ASSERT_OK(lookupResult);
         auto& metrics = *lookupResult.getValue();
@@ -197,14 +192,14 @@ TEST_F(QueryStatsStoreTest, EvictionTest) {
     // behavior with very large queries.
     // Add an entry that is smaller than the max partition size.
     auto query = BSON("query" << 1 << "xEquals" << 42);
-    auto keyGenerator = makeFindKeyGeneratorFromQuery(query);
+    auto key = makeFindKeyFromQuery(query);
 
-    const size_t cacheSize = keyGenerator->size() + sizeof(QueryStatsEntry) + 100;
+    const size_t cacheSize = key->size() + sizeof(QueryStatsEntry) + 100;
     const auto numPartitions = 1;
     QueryStatsStore queryStatsStore{cacheSize, numPartitions};
 
-    auto hash = absl::HashOf(keyGenerator);
-    queryStatsStore.put(hash, QueryStatsEntry{std::move(keyGenerator)});
+    auto hash = absl::HashOf(key);
+    queryStatsStore.put(hash, QueryStatsEntry{std::move(key)});
     ASSERT_EQ(countAllEntries(queryStatsStore), 1);
 
     // We'll do this again later so save this as a helper function.
@@ -241,10 +236,9 @@ TEST_F(QueryStatsStoreTest, EvictionTest) {
         auto&& [expCtx, parsedFind] =
             uassertStatusOK(parsed_find_command::parse(opCtx.get(), std::move(fcr)));
 
-        keyGenerator =
-            std::make_unique<query_stats::FindKeyGenerator>(expCtx, *parsedFind, collectionType);
-        auto lookupHash = absl::HashOf(keyGenerator);
-        QueryStatsEntry testMetrics{std::move(keyGenerator)};
+        key = std::make_unique<query_stats::FindKey>(expCtx, *parsedFind, collectionType);
+        auto lookupHash = absl::HashOf(key);
+        QueryStatsEntry testMetrics{std::move(key)};
         queryStatsStore.put(lookupHash, testMetrics);
     };
 
@@ -278,7 +272,6 @@ TEST_F(QueryStatsStoreTest, GenerateMaxBsonSizeQueryShape) {
     auto opCtx = makeOperationContext();
     auto parsedFindPair =
         uassertStatusOK(parsed_find_command::parse(opCtx.get(), std::move(fcrCopy)));
-    RAIIServerParameterControllerForTest controller("featureFlagQueryStats", true);
     RAIIServerParameterControllerForTest queryKnobController{"internalQueryStatsRateLimit", -1};
 
     auto&& globalQueryStatsStoreManager = queryStatsStoreDecoration(opCtx->getServiceContext());
@@ -291,14 +284,13 @@ TEST_F(QueryStatsStoreTest, GenerateMaxBsonSizeQueryShape) {
         opCtx.get(),
         nss,
         [&]() {
-            return std::make_unique<query_stats::FindKeyGenerator>(
-                parsedFindPair.first,
-                *parsedFindPair.second,
-                query_shape::CollectionType::kCollection);
+            return std::make_unique<query_stats::FindKey>(parsedFindPair.first,
+                                                          *parsedFindPair.second,
+                                                          query_shape::CollectionType::kCollection);
         },
         /*requiresFullQueryStatsFeatureFlag*/ false));
     auto& opDebug = CurOp::get(*opCtx)->debug();
-    ASSERT_EQ(opDebug.queryStatsStoreKeyHash, boost::none);
+    ASSERT_EQ(opDebug.queryStatsKeyHash, boost::none);
 }
 
 TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
@@ -512,8 +504,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
                 "HASH<z>": 1,
                 "HASH<c>": 1
             },
-            "noCursorTimeout": "?bool",
             "maxTimeMS": "?number",
+            "noCursorTimeout": false,
             "batchSize": "?number"
         })",
         key);
@@ -571,9 +563,9 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
                 "HASH<z>": 1,
                 "HASH<c>": 1
             },
-            "allowPartialResults": true,
-            "noCursorTimeout": "?bool",
             "maxTimeMS": "?number",
+            "allowPartialResults": true,
+            "noCursorTimeout": false,
             "batchSize": "?number"
         })",
         key);
@@ -625,9 +617,9 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
                 "HASH<z>": 1,
                 "HASH<c>": 1
             },
-            "allowPartialResults": false,
-            "noCursorTimeout": "?bool",
             "maxTimeMS": "?number",
+            "allowPartialResults": false,
+            "noCursorTimeout": false,
             "batchSize": "?number"
         })",
         key);
@@ -894,8 +886,8 @@ TEST_F(QueryStatsStoreTest, DefinesLetVariables) {
 }
 
 TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSimplePipeline) {
-    auto expCtx = make_intrusive<ExpressionContextForTest>();
-    AggregateCommandRequest acr(NamespaceString::createNamespaceString_forTest("testDB.testColl"));
+    auto expCtx = make_intrusive<ExpressionContextForTest>(kDefaultTestNss.nss());
+    AggregateCommandRequest acr(kDefaultTestNss.nss());
     auto matchStage = fromjson(R"({
             $match: {
                 foo: { $in: ["a", "b"] },
@@ -916,64 +908,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
     acr.setPipeline(rawPipeline);
     auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
-    auto shapified = makeTelemetryKeyAggregateRequest(acr, *pipeline, expCtx);
-    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({
-            "queryShape": {
-                "cmdNs": {
-                    "db": "testDB",
-                    "coll": "testColl"
-                },
-                "command": "aggregate",
-                "pipeline": [
-                    {
-                        "$match": {
-                            "foo": {
-                                "$in": [
-                                    "a",
-                                    "b"
-                                ]
-                            },
-                            "bar": {
-                                "$gte": {"$date":"2022-01-01T00:00:00.000Z"}
-                            }
-                        }
-                    },
-                    {
-                        "$unwind": {
-                            "path": "$x"
-                        }
-                    },
-                    {
-                        "$group": {
-                            "_id": "$_id",
-                            "c": {
-                                "$first": "$d.e"
-                            },
-                            "f": {
-                                "$sum": {
-                                    "$const": 1
-                                }
-                            }
-                        }
-                    },
-                    {
-                        "$limit": 10
-                    },
-                    {
-                        "$out": {
-                            "coll": "outColl",
-                            "db": "testDB"
-                        }
-                    }
-                ]
-            },
-            "collectionType": "collection"
-        })",
-        shapified);
-
-    shapified = makeTelemetryKeyAggregateRequest(
-        acr, *pipeline, expCtx, true, LiteralSerializationPolicy::kToDebugTypeString);
+    auto shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "queryShape": {
@@ -1036,8 +972,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
     acr.setHint(BSON("z" << 1 << "c" << 1));
     acr.setCollation(BSON("locale"
                           << "simple"));
-    shapified = makeTelemetryKeyAggregateRequest(
-        acr, *pipeline, expCtx, true, LiteralSerializationPolicy::kToDebugTypeString);
+    shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "queryShape": {
@@ -1108,8 +1044,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
                                    << "$foo")
                            << "var2"
                            << "bar"));
-    shapified = makeTelemetryKeyAggregateRequest(
-        acr, *pipeline, expCtx, true, LiteralSerializationPolicy::kToDebugTypeString);
+    shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "queryShape": {
@@ -1187,8 +1123,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
     acr.setBypassDocumentValidation(true);
     expCtx->opCtx->setComment(BSON("comment"
                                    << "note to self"));
-    shapified = makeTelemetryKeyAggregateRequest(
-        acr, *pipeline, expCtx, true, LiteralSerializationPolicy::kToDebugTypeString);
+    shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "queryShape": {
@@ -1256,22 +1192,126 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
                 "HASH<z>": 1,
                 "HASH<c>": 1
             },
+            "maxTimeMS": "?number",
+            "bypassDocumentValidation": true,
             "cursor": {
                 "batchSize": "?number"
+            }
+        })",
+        shapified);
+
+    // Test again but with the representative query shape.
+    shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToRepresentativeParseableValue, true);
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "queryShape": {
+                "cmdNs": {
+                    "db": "HASH<testDB>",
+                    "coll": "HASH<testColl>"
+                },
+                "collation": {
+                    "locale": "simple"
+                },
+                "let": {
+                    "HASH<var1>": {
+                        "$const": "?"
+                    },
+                    "HASH<var2>": {
+                        "$const": "?"
+                    }
+                },
+                "command": "aggregate",
+                "pipeline": [
+                    {
+                        "$match": {
+                            "$and": [
+                                {
+                                    "HASH<foo>": {
+                                        "$in": [
+                                            "?"
+                                        ]
+                                    }
+                                },
+                                {
+                                    "HASH<bar>": {
+                                        "$gte": {"$date":"1970-01-01T00:00:00.000Z"}
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "$unwind": {
+                            "path": "$HASH<x>"
+                        }
+                    },
+                    {
+                        "$group": {
+                            "_id": "$HASH<_id>",
+                            "HASH<c>": {
+                                "$first": "$HASH<d>.HASH<e>"
+                            },
+                            "HASH<f>": {
+                                "$sum": {
+                                    "$const": 1
+                                }
+                            }
+                        }
+                    },
+                    {
+                        "$limit": 1
+                    },
+                    {
+                        "$out": {
+                            "coll": "HASH<outColl>",
+                            "db": "HASH<testDB>"
+                        }
+                    }
+                ],
+                "explain": true,
+                "allowDiskUse": false
             },
-            "maxTimeMS": "?number",
-            "bypassDocumentValidation": "?bool"
+            "comment": "?",
+            "collectionType": "collection",
+            "hint": {
+                "HASH<z>": 1,
+                "HASH<c>": 1
+            },
+            "maxTimeMS": 1,
+            "bypassDocumentValidation": true,
+            "cursor": {
+                "batchSize": 1
+            }
         })",
         shapified);
 }
+
 TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestEmptyFields) {
-    auto expCtx = make_intrusive<ExpressionContextForTest>();
-    AggregateCommandRequest acr(NamespaceString::createNamespaceString_forTest("testDB.testColl"));
+    auto expCtx = make_intrusive<ExpressionContextForTest>(kDefaultTestNss.nss());
+    AggregateCommandRequest acr(kDefaultTestNss.nss());
     acr.setPipeline({});
     auto pipeline = Pipeline::parse({}, expCtx);
 
-    auto shapified = makeTelemetryKeyAggregateRequest(
-        acr, *pipeline, expCtx, true, LiteralSerializationPolicy::kToDebugTypeString);
+    auto shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "queryShape": {
+                "cmdNs": {
+                    "db": "HASH<testDB>",
+                    "coll": "HASH<testColl>"
+                },
+                "command": "aggregate",
+                "pipeline": []
+            },
+            "collectionType": "collection"
+        })",
+        shapified);  // NOLINT (test auto-update)
+
+    // Test again with the representative query shape.
+    shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToRepresentativeParseableValue, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "queryShape": {
@@ -1289,13 +1329,12 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestEmptyFields
 
 TEST_F(QueryStatsStoreTest,
        CorrectlyTokenizesAggregateCommandRequestPipelineWithSecondaryNamespaces) {
-    auto expCtx = make_intrusive<ExpressionContextForTest>();
+    auto expCtx = make_intrusive<ExpressionContextForTest>(kDefaultTestNss.nss());
     auto nsToUnionWith =
         NamespaceString::createNamespaceString_forTest(expCtx->ns.dbName(), "otherColl");
     expCtx->addResolvedNamespaces({nsToUnionWith});
 
-    AggregateCommandRequest acr(
-        NamespaceString::createNamespaceString_forTest(expCtx->ns.dbName(), "testColl"));
+    AggregateCommandRequest acr(kDefaultTestNss.nss());
     auto unionWithStage = fromjson(R"({
             $unionWith: {
                 coll: "otherColl",
@@ -1307,13 +1346,13 @@ TEST_F(QueryStatsStoreTest,
     acr.setPipeline(rawPipeline);
     auto pipeline = Pipeline::parse(rawPipeline, expCtx);
 
-    auto shapified = makeTelemetryKeyAggregateRequest(
-        acr, *pipeline, expCtx, true, LiteralSerializationPolicy::kToDebugTypeString);
+    auto shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
             "queryShape": {
                 "cmdNs": {
-                    "db": "HASH<test>",
+                    "db": "HASH<testDB>",
                     "coll": "HASH<testColl>"
                 },
                 "command": "aggregate",
@@ -1342,7 +1381,50 @@ TEST_F(QueryStatsStoreTest,
             "collectionType": "collection",
             "otherNss": [
                 {
-                    "db": "HASH<test>",
+                    "db": "HASH<testDB>",
+                    "coll": "HASH<otherColl>"
+                }
+            ]
+        })",
+        shapified);
+
+    // Do the same thing with the representative query shape.
+    shapified = makeQueryStatsKeyAggregateRequest(
+        acr, *pipeline, expCtx, LiteralSerializationPolicy::kToRepresentativeParseableValue, true);
+    ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
+        R"({
+            "queryShape": {
+                "cmdNs": {
+                    "db": "HASH<testDB>",
+                    "coll": "HASH<testColl>"
+                },
+                "command": "aggregate",
+                "pipeline": [
+                    {
+                        "$unionWith": {
+                            "coll": "HASH<otherColl>",
+                            "pipeline": [
+                                {
+                                    "$match": {
+                                        "HASH<val>": {
+                                            "$eq": "?"
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    {
+                        "$sort": {
+                            "HASH<age>": 1
+                        }
+                    }
+                ]
+            },
+            "collectionType": "collection",
+            "otherNss": [
+                {
+                    "db": "HASH<testDB>",
                     "coll": "HASH<otherColl>"
                 }
             ]

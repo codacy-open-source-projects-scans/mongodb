@@ -41,7 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -281,7 +280,7 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
     }
 
     if (const auto seCtx = transport::ServiceExecutorContext::get(client)) {
-        infoBuilder->append("threaded"_sd, seCtx->useDedicatedThread());
+        infoBuilder->append("threaded"_sd, seCtx->usesDedicatedThread());
     }
 
     if (clientOpCtx) {
@@ -386,18 +385,15 @@ void CurOp::setEndOfOpMetrics(long long nreturned) {
     // set with the final executionTime in completeAndLogOperation, but for query stats collection
     // we want it set before incrementing cursor metrics using OpDebug's AdditiveMetrics. The value
     // set here will be overwritten later in completeAndLogOperation.
-    if (_debug.queryStatsStoreKeyHash) {
+    if (_debug.queryStatsKeyHash) {
         _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
     }
 }
 
 void CurOp::setMessage_inlock(StringData message) {
     if (_progressMeter.isActive()) {
-        LOGV2_ERROR(20527,
-                    "Changing message from {old} to {new}",
-                    "Updating message",
-                    "old"_attr = redact(_message),
-                    "new"_attr = redact(message));
+        LOGV2_ERROR(
+            20527, "Updating message", "old"_attr = redact(_message), "new"_attr = redact(message));
         MONGO_verify(!_progressMeter.isActive());
     }
     _message = message.toString();  // copy
@@ -616,7 +612,7 @@ bool CurOp::completeAndLogOperation(logv2::LogComponent component,
 }
 
 std::string CurOp::getNS() const {
-    return NamespaceStringUtil::serialize(_nss);
+    return NamespaceStringUtil::serialize(_nss, SerializationContext::stateDefault());
 }
 
 // Failpoints after commands are logged.
@@ -1804,7 +1800,8 @@ static void appendResolvedViewsInfoImpl(
         const std::vector<BSONObj>& pipeline = kv.second.second;
 
         BSONObjBuilder aView;
-        aView.append("viewNamespace", NamespaceStringUtil::serialize(viewNss));
+        aView.append("viewNamespace",
+                     NamespaceStringUtil::serialize(viewNss, SerializationContext::stateDefault()));
 
         BSONArrayBuilder dependenciesArr(aView.subarrayStart("dependencyChain"));
         for (const auto& nss : dependencies) {

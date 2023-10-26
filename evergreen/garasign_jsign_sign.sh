@@ -1,13 +1,13 @@
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" > /dev/null 2>&1 && pwd)"
 . "$DIR/prelude.sh"
 
-GRS_CONFIG_USER1_USERNAME=${garasign_jsign_username}
-GRS_CONFIG_USER1_PASSWORD=${garasign_jsign_password}
+cd src
+
+echo "GRS_CONFIG_USER1_USERNAME=${garasign_jsign_username}" >> "signing-envfile"
+echo "GRS_CONFIG_USER1_PASSWORD=${garasign_jsign_password}" >> "signing-envfile"
 
 set -o errexit
 set -o verbose
-
-cd src
 
 msi_filename=mongodb-${push_name}-${push_arch}-${suffix}.msi
 /usr/bin/find build/ -type f | grep msi$ | xargs -I original_filename cp original_filename $msi_filename || true
@@ -28,7 +28,7 @@ sign $msi_filename
 EOF
 
 podman run \
-  --env-host \
+  --env-file=signing-envfile \
   --rm \
   -v $(pwd):$(pwd) -w $(pwd) \
   ${garasign_jsign_image} \

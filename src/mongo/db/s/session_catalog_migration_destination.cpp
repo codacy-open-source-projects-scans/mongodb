@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -291,7 +290,7 @@ void SessionCatalogMigrationDestination::join() {
  */
 void SessionCatalogMigrationDestination::_retrieveSessionStateFromSource(ServiceContext* service) {
     Client::initThread("sessionCatalogMigrationProducer-" + _migrationSessionId.toString(),
-                       service->getService(),
+                       service->getService(ClusterRole::ShardServer),
                        Client::noSession());
     bool oplogDrainedAfterCommiting = false;
     ProcessOplogResult lastResult;

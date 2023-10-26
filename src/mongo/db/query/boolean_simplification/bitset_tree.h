@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <boost/optional.hpp>
 #include <iosfwd>
 
 #include "mongo/db/query/boolean_simplification/bitset_algebra.h"
@@ -42,18 +43,13 @@ namespace mongo::boolean_simplification {
  * MQL operators are represented as:
  * - $and => BitsetTreeNode{type: And, isNegated: false}, children are not negated
  * - $or => BitsetTreeNode{type: Or, isNegated: false}, children are not negated
- * - $nor => BitsetTreeNode{type: And, isNegated: false}, children are negated
+ * - $nor => BitsetTreeNode{type: Or, isNegated: true}, children are not negated
  * - $not => child is negated
  */
 struct BitsetTreeNode {
     enum Type { Or, And };
 
-    BitsetTreeNode(Type type, bool isNegated) : type(type), isNegated(isNegated), leafChildren(0) {}
-
-    /**
-     * All bit sets must be the same size so that they can be handled.
-     */
-    void ensureBitsetSize(size_t size);
+    BitsetTreeNode(Type type, bool isNegated) : type(type), isNegated(isNegated), leafChildren() {}
 
     /**
      * Represents whether the node is conjunction (AND) or disjunction(OR) of its children.
@@ -76,14 +72,27 @@ struct BitsetTreeNode {
     std::vector<BitsetTreeNode> internalChildren{};
 
     bool operator==(const BitsetTreeNode&) const = default;
+
+    /**
+     * Return total number of the terms and predicates.
+     */
+    size_t calculateSize() const {
+        size_t result = 1 + leafChildren.mask.count();
+        for (const auto& child : internalChildren) {
+            result += child.calculateSize();
+        }
+        return result;
+    }
 };
 
 std::ostream& operator<<(std::ostream& os, const BitsetTreeNode& tree);
 
 /**
- * Converts the given bitset tree into DNF.
+ * Converts the given bitset tree into DNF. 'maximumNumberOfMinterms' specifies the limit on the
+ * number of minterms during boolean trnsformations. The boost::none will be returned if the linit
+ * is exceeded.
  */
-Maxterm convertToDNF(const BitsetTreeNode& node);
+boost::optional<Maxterm> convertToDNF(const BitsetTreeNode& node, size_t maximumNumberOfMinterms);
 
 /**
  * Converts the given Maxterm into bitset tree.

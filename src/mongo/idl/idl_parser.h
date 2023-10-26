@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <string>
 #include <type_traits>
@@ -522,5 +521,11 @@ BSONObj parseOwnedBSON(BSONElement element);
  * break because of it.
  */
 bool parseBoolean(BSONElement element);
+
+/**
+ * Generated enums specialize this with their element count.
+ */
+template <typename E>
+constexpr inline size_t idlEnumCount = 0;
 
 }  // namespace mongo

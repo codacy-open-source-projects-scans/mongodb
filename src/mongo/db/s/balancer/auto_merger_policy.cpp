@@ -198,7 +198,7 @@ void AutoMergerPolicy::applyActionResult(OperationContext* opCtx,
         return;
     }
 
-    const auto status = std::move(swResponse.getStatus());
+    const auto status = swResponse.getStatus();
     if (status.code() == ErrorCodes::ConflictingOperationInProgress) {
         // Reschedule auto-merge for <shard, nss> because commit overlapped with other chunk ops
         _rescheduledCollectionsToMergePerShard[mergeAction.shardId].push_back(mergeAction.nss);
@@ -262,12 +262,14 @@ AutoMergerPolicy::_getNamespacesWithMergeableChunksPerShard(OperationContext* op
         // {
         //     $match : {
         //         enableAutoMerge : { $ne : false },
-        //         defragmentCollection : { $ne : true }
+        //         defragmentCollection : { $ne : true },
+        //         unsplittable : { $ne : true }
         //     }
         // }
         stages.emplace_back(DocumentSourceMatch::create(
             BSON(CollectionType::kEnableAutoMergeFieldName
                  << BSON("$ne" << false) << CollectionType::kDefragmentCollectionFieldName
+                 << BSON("$ne" << true) << CollectionType::kUnsplittableFieldName
                  << BSON("$ne" << true)),
             expCtx));
 
@@ -332,8 +334,10 @@ AutoMergerPolicy::_getNamespacesWithMergeableChunksPerShard(OperationContext* op
 
         while (cursor->more()) {
             const auto doc = cursor->nextSafe();
-            const auto nss = NamespaceStringUtil::deserialize(
-                boost::none, doc.getStringField(CollectionType::kNssFieldName));
+            const auto nss =
+                NamespaceStringUtil::deserialize(boost::none,
+                                                 doc.getStringField(CollectionType::kNssFieldName),
+                                                 SerializationContext::stateDefault());
             collectionsToMerge[shard].push_back(nss);
         }
     }

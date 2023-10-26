@@ -32,7 +32,6 @@
 #include <boost/functional/hash.hpp>
 #include <boost/intrusive_ptr.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstring>
@@ -126,6 +125,7 @@ public:
     static constexpr StringData metaFieldSearchSortValues = "$searchSortValues"_sd;
     static constexpr StringData metaFieldIndexKey = "$indexKey"_sd;
     static constexpr StringData metaFieldVectorSearchScore = "$vectorSearchScore"_sd;
+    static constexpr StringData metaFieldSearchSequenceToken = "$searchSequenceToken"_sd;
 
     static const StringDataSet allMetadataFieldNames;
 
@@ -269,10 +269,10 @@ public:
     }
 
     /**
-     * Populates the internal cache by recursively walking the underlying BSON.
+     * Returns a cache-only copy of the document with no backing bson.
      */
-    void fillCache() const {
-        storage().fillCache();
+    Document shred() const {
+        return storage().shred();
     }
 
     /** Calculate a hash value.

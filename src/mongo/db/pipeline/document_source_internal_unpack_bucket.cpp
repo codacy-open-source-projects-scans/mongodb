@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -116,6 +115,9 @@ REGISTER_DOCUMENT_SOURCE(_unpackBucket,
                          AllowedWithApiStrict::kAlways);
 
 namespace {
+using timeseries::BucketSpec;
+using timeseries::BucketUnpacker;
+
 /**
  * A projection can be internalized if every field corresponds to a boolean value. Note that this
  * correctly rejects dotted fieldnames, which are mapped to objects internally.
@@ -275,7 +277,12 @@ boost::intrusive_ptr<DocumentSourceGroup> createBucketGroupForReorder(
             expCtx.get(), field.firstElement(), expCtx->variablesParseState));
     };
 
-    return DocumentSourceGroup::create(expCtx, groupByExpr, std::move(accumulators));
+    auto newGroup = DocumentSourceGroup::create(expCtx, groupByExpr, std::move(accumulators));
+
+    // The $first accumulator is compatible with SBE.
+    newGroup->setSbeCompatibility(SbeCompatibility::fullyCompatible);
+
+    return newGroup;
 }
 
 // Optimize the section of the pipeline before the $_internalUnpackBucket stage.
@@ -1031,6 +1038,12 @@ std::pair<BSONObj, bool> DocumentSourceInternalUnpackBucket::extractOrBuildProje
     }
 
     // Check for a viable inclusion $project after the $_internalUnpackBucket.
+    // Note: an $_internalUnpackBucket stage with a set of 'kInclude' fields and an event filter is
+    // equivalent to [{$_internalUnpackBucket}{$project}{$match}] -- in _this_ order. That is, if
+    // the $match is on a field that is not included by $project, the result must be an empty set.
+    // But if the stage already has an '_eventFilter', it means we started with pipeline like
+    // [{$_internalUnpackBucket}{$match}{$project}], which might return non-empty set of results, so
+    // we cannot internalize the $project.
     auto [existingProj, isInclusion] = getIncludeExcludeProjectAndType(std::next(itr)->get());
     if (!_eventFilter && isInclusion && !existingProj.isEmpty() &&
         canInternalizeProjectObj(existingProj)) {
@@ -1244,6 +1257,11 @@ bool DocumentSourceInternalUnpackBucket::enableStreamingGroupIfPossible(
         std::move(monotonicIdFields),
         std::move(groupStage->getMutableAccumulationStatements()),
         groupStage->getMaxMemoryUsageBytes());
+
+    // Streaming group isn't supported in SBE yet and we don't want to run the pipeline in hybrid
+    // mode due to potential perf impact.
+    pExpCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
+
     return true;
 }
 
@@ -1344,6 +1362,9 @@ tryRewriteGroupAsSortGroup(boost::intrusive_ptr<ExpressionContext> expCtx,
         expCtx.get(), maybeAcc->firstElement(), expCtx->variablesParseState);
     auto newGroupStage =
         DocumentSourceGroup::create(expCtx, groupStage->getIdExpression(), {newAccState});
+    // We are running the same accumulators as were present in the original group but at the bucket
+    // level, so the group compatibility with SBE should be the same.
+    newGroupStage->setSbeCompatibility(groupStage->sbeCompatibility());
     return {newSortStage, newGroupStage};
 }
 
@@ -1485,8 +1506,17 @@ bool DocumentSourceInternalUnpackBucket::optimizeLastpoint(Pipeline::SourceConta
         return true;
     };
 
-    return tryInsertBucketLevelSortAndGroup(AccumulatorDocumentsNeeded::kFirstDocument) ||
+    const bool optimized =
+        tryInsertBucketLevelSortAndGroup(AccumulatorDocumentsNeeded::kFirstDocument) ||
         tryInsertBucketLevelSortAndGroup(AccumulatorDocumentsNeeded::kLastDocument);
+
+    // If we lower the group at the bucket collection level to SBE we won't be able to unpack in
+    // SBE due to the current limitations of 'TsBucketToCellBlockStage', but we don't want to
+    // run this pipeline in hybrid mode because of the potential perf impact.
+    if (optimized) {
+        pExpCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
+    }
+    return optimized;
 }
 
 
@@ -1514,6 +1544,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     invariant(*itr == this);
 
+    // See ../query/timeseries/README.md for a description of all the rewrites implemented in this
+    // function.
     if (std::next(itr) == container->end()) {
         return container->end();
     }
@@ -1700,7 +1732,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
                                                              pExpCtx,
                                                              ExtensionsCallbackNoop(),
                                                              Pipeline::kAllowedMatcherFeatures));
-            _wholeBucketFilter = MatchExpression::optimize(std::move(_wholeBucketFilter));
+            _wholeBucketFilter = MatchExpression::optimize(std::move(_wholeBucketFilter),
+                                                           /* enableSimplification */ false);
         }
 
         if (!predicates.rewriteProvidesExactMatchPredicate) {
@@ -1711,14 +1744,13 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
                                                              pExpCtx,
                                                              ExtensionsCallbackNoop(),
                                                              Pipeline::kAllowedMatcherFeatures));
-            _eventFilter = MatchExpression::optimize(std::move(_eventFilter));
+            _eventFilter = MatchExpression::optimize(std::move(_eventFilter),
+                                                     /* enableSimplification */ false);
             _eventFilterDeps = {};
             match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
         }
 
         container->erase(std::next(itr));
-        // If the $match is not followed by other stages referencing fields (e.g. $count), we can
-        // unpack directly to BSON so that data doesn't need to be materialized to Document.
         auto deps = getRestPipelineDependencies(itr, container, false /* includeEventFilter */);
         if (deps.fields.empty()) {
             _unpackToBson = true;
@@ -1814,17 +1846,6 @@ bool DocumentSourceInternalUnpackBucket::isSbeCompatible() {
                     std::all_of(fieldSet.begin(), fieldSet.end(), [](auto&& field) {
                         return FieldPath(field).getPathLength() == 1;
                     }));
-            // If any top-level field of the 'eventFilter' is not in the bucketSpec's fieldSet, then
-            // it's a discarded field and we cannot push down the stage because the SBE filter
-            // generator cannot refer to slot(s) for the discarded field(s) which are not returned
-            // from 'block_to_row' stage.
-            //
-            // TODO SERVER-80324: Remove this restriction.
-            for (auto&& eventFilterPath : _eventFilterDeps.fields) {
-                if (!fieldSet.contains(FieldPath(eventFilterPath).front().toString())) {
-                    return false;
-                }
-            }
 
             for (auto&& computedMeta : _bucketUnpacker.bucketSpec().computedMetaProjFields()) {
                 fieldSet.erase(computedMeta);

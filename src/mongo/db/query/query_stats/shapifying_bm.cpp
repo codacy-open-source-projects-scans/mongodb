@@ -37,7 +37,7 @@
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/find_key_generator.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_stats/rate_limiting.h"
@@ -77,22 +77,22 @@ const auto kMetadataWrapper = fromjson(R"({metadata: {
     }})");
 auto kMockClientMetadataElem = kMetadataWrapper["metadata"];
 
-auto makeFindKeyGenerator(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                          const ParsedFindCommand& parsedFind) {
-    return std::make_unique<query_stats::FindKeyGenerator>(expCtx, parsedFind, kCollectionType);
+auto makeFindKey(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                 const ParsedFindCommand& parsedFind) {
+    return std::make_unique<const query_stats::FindKey>(expCtx, parsedFind, kCollectionType);
 }
 
 int shapifyAndHashRequest(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                           const ParsedFindCommand& parsedFind) {
-    auto keyGenerator = makeFindKeyGenerator(expCtx, parsedFind);
-    [[maybe_unused]] auto hash = absl::HashOf(keyGenerator);
+    auto key = makeFindKey(expCtx, parsedFind);
+    [[maybe_unused]] auto hash = absl::HashOf(key);
     return 0;
 }
 
 // Benchmark the performance of computing and hashing the query stats key for an IDHACK query.
 void BM_ShapfiyIDHack(benchmark::State& state) {
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("query_test");
+    auto client = serviceCtx->getService()->makeClient("query_test");
 
     auto opCtx = client->makeOperationContext();
     auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx.get());
@@ -110,7 +110,7 @@ void BM_ShapfiyIDHack(benchmark::State& state) {
 // Benchmark computing the query stats key and its hash for a mildly complex query predicate.
 void BM_ShapfiyMildlyComplex(benchmark::State& state) {
     auto serviceCtx = ServiceContext::make();
-    auto client = serviceCtx->makeClient("query_test");
+    auto client = serviceCtx->getService()->makeClient("query_test");
 
     auto opCtx = client->makeOperationContext();
     auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx.get());

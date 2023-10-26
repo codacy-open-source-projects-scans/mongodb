@@ -33,6 +33,7 @@
 #include "mongo/db/matcher/expression_restorer.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/query/boolean_simplification/bitset_test_util.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -47,30 +48,86 @@ inline void ASSERT_EXPR(const MatchExpression& expected,
     ASSERT_TRUE(expected.equivalent(actual.get()))
         << expected.debugString() << " != " << actual->debugString();
 }
+
+std::unique_ptr<MatchExpression> restoreMatchExpression(
+    const boolean_simplification::Maxterm& maxterm,
+    const std::vector<ExpressionBitInfo>& expressions) {
+    BitsetTreeNode root = boolean_simplification::convertToBitsetTree(maxterm);
+    return restoreMatchExpression(root, expressions);
+}
 }  // namespace
+
+DEATH_TEST_REGEX(RestoreSingleMatchExpressionTests,
+                 AssertOnRestoringNegativeNodes,
+                 "Tripwire assertion.*8163020") {
+    auto operand = BSON("$gt" << 5);
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, operand["$gt"]);
+    std::vector<ExpressionBitInfo> expressions{ExpressionBitInfo{gtExpr.get()}};
+
+    BitsetTreeNode root{BitsetTreeNode::And, /* isNegated */ true};
+    root.leafChildren.set(0, true);
+
+    restoreMatchExpression(root, expressions);
+}
 
 TEST(RestoreSingleMatchExpressionTests, AlwaysTrue) {
     std::vector<ExpressionBitInfo> expressions{};
-    Maxterm maxterm{Minterm{expressions.size()}};
+
+    BitsetTreeNode root{BitsetTreeNode::And, /* isNegated */ false};
+
     AndMatchExpression expectedExpr{};
 
-    auto expr = restoreMatchExpression(maxterm, expressions);
+    auto expr = restoreMatchExpression(root, expressions);
+    ASSERT_EXPR(expectedExpr, expr);
+}
+
+TEST(RestoreSingleMatchExpressionTests, NotAlwaysTrue) {
+    std::vector<ExpressionBitInfo> expressions{};
+
+    BitsetTreeNode root{BitsetTreeNode::And, /* isNegated */ true};
+
+    // We cannot restore negative nodes, so let's transform them first.
+    auto dnf = boolean_simplification::convertToDNF(root, 10000);
+    ASSERT_TRUE(dnf);
+    auto transformedBitsetTree = boolean_simplification::convertToBitsetTree(*dnf);
+
+    AlwaysFalseMatchExpression expectedExpr{};
+
+    auto expr = restoreMatchExpression(transformedBitsetTree, expressions);
     ASSERT_EXPR(expectedExpr, expr);
 }
 
 TEST(RestoreSingleMatchExpressionTests, AlwaysFalse) {
     std::vector<ExpressionBitInfo> expressions{};
-    Maxterm maxterm{expressions.size()};
+
+    BitsetTreeNode root{BitsetTreeNode::Or, /* isNegated */ false};
+
     AlwaysFalseMatchExpression expectedExpr{};
 
-    auto expr = restoreMatchExpression(maxterm, expressions);
+    auto expr = restoreMatchExpression(root, expressions);
+    ASSERT_EXPR(expectedExpr, expr);
+}
+
+TEST(RestoreSingleMatchExpressionTests, NotAlwaysFalse) {
+    std::vector<ExpressionBitInfo> expressions{};
+
+    BitsetTreeNode root{BitsetTreeNode::Or, /* isNegated */ true};
+
+    // We cannot restore negative nodes, so let's transform them first.
+    auto dnf = boolean_simplification::convertToDNF(root, 1000);
+    ASSERT_TRUE(dnf);
+    auto transformedBitsetTree = boolean_simplification::convertToBitsetTree(*dnf);
+
+    AndMatchExpression expectedExpr{};
+
+    auto expr = restoreMatchExpression(transformedBitsetTree, expressions);
     ASSERT_EXPR(expectedExpr, expr);
 }
 
 TEST(RestoreSingleMatchExpressionTests, GtExpression) {
     auto operand = BSON("$gt" << 5);
-    std::vector<ExpressionBitInfo> expressions{};
-    expressions.emplace_back(std::make_unique<GTMatchExpression>("a"_sd, operand["$gt"]));
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, operand["$gt"]);
+    std::vector<ExpressionBitInfo> expressions{ExpressionBitInfo{gtExpr.get()}};
 
     Maxterm maxterm{
         {"1", "1"},
@@ -85,20 +142,20 @@ TEST(RestoreSingleMatchExpressionTests, GtExpression) {
 TEST(RestoreSingleMatchExpressionTests, AndExpression) {
     auto firstOperand = BSON("$gt" << 5);
     auto secondOperand = BSON("$eq" << 10);
-    std::vector<ExpressionBitInfo> expressions{};
-    expressions.emplace_back(
-        ExpressionBitInfo{std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"])});
-    expressions.emplace_back(
-        ExpressionBitInfo{std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"])});
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
+    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
+    std::vector<ExpressionBitInfo> expressions{
+        ExpressionBitInfo{gtExpr.get()},
+        ExpressionBitInfo{eqExpr.get()},
+    };
 
     Maxterm maxterm{
         {"01", "11"},
     };
 
     AndMatchExpression expectedExpr{};
-    expectedExpr.add(std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]));
-    expectedExpr.add(std::make_unique<NotMatchExpression>(
-        std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"])));
+    expectedExpr.add(gtExpr->clone());
+    expectedExpr.add(std::make_unique<NotMatchExpression>(eqExpr->clone()));
 
     auto expr = restoreMatchExpression(maxterm, expressions);
     ASSERT_EXPR(expectedExpr, expr);
@@ -108,13 +165,14 @@ TEST(RestoreSingleMatchExpressionTests, OrExpression) {
     auto firstOperand = BSON("$gt" << 5);
     auto secondOperand = BSON("$eq" << 10);
     auto thirdOperand = BSON("$lt" << 10);
-    std::vector<ExpressionBitInfo> expressions{};
-    expressions.emplace_back(
-        ExpressionBitInfo{std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"])});
-    expressions.emplace_back(
-        ExpressionBitInfo{std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"])});
-    expressions.emplace_back(
-        ExpressionBitInfo{std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"])});
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
+    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
+    auto ltExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
+    std::vector<ExpressionBitInfo> expressions{
+        ExpressionBitInfo{gtExpr.get()},
+        ExpressionBitInfo{eqExpr.get()},
+        ExpressionBitInfo{ltExpr.get()},
+    };
 
     Maxterm maxterm{
         {"001", "011"},
@@ -122,14 +180,13 @@ TEST(RestoreSingleMatchExpressionTests, OrExpression) {
     };
 
     auto and1 = std::make_unique<AndMatchExpression>();
-    and1->add(std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]));
-    and1->add(std::make_unique<NotMatchExpression>(
-        std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"])));
+    and1->add(gtExpr->clone());
+    and1->add(std::make_unique<NotMatchExpression>(eqExpr->clone()));
 
     auto and2 = std::make_unique<AndMatchExpression>();
-    and2->add(std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]));
-    and2->add(std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]));
-    and2->add(std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]));
+    and2->add(gtExpr->clone());
+    and2->add(eqExpr->clone());
+    and2->add(ltExpr->clone());
 
     OrMatchExpression expectedExpr{};
     expectedExpr.add(std::move(and1));
@@ -147,10 +204,11 @@ TEST(RestoreSingleMatchExpressionTests, NorExpression) {
     auto firstExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
     auto secondExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
     auto thirdExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
-    std::vector<ExpressionBitInfo> expressions{};
-    expressions.emplace_back(ExpressionBitInfo{firstExpr->clone()});
-    expressions.emplace_back(ExpressionBitInfo{secondExpr->clone()});
-    expressions.emplace_back(ExpressionBitInfo{thirdExpr->clone()});
+    std::vector<ExpressionBitInfo> expressions{
+        ExpressionBitInfo{firstExpr.get()},
+        ExpressionBitInfo{secondExpr.get()},
+        ExpressionBitInfo{thirdExpr.get()},
+    };
 
     Maxterm maxterm{
         Minterm{"000", "001"},
@@ -202,8 +260,7 @@ TEST(RestoreSingleMatchExpressionTests, ElemMatch) {
     expr->add(std::make_unique<EqualityMatchExpression>(""_sd, secondOperand["$eq"]));
     expr->add(std::make_unique<LTMatchExpression>(""_sd, thirdOperand["$lt"]));
 
-    std::vector<ExpressionBitInfo> expressions{};
-    expressions.emplace_back(ExpressionBitInfo{expr->clone()});
+    std::vector<ExpressionBitInfo> expressions{ExpressionBitInfo{expr.get()}};
 
     Maxterm maxterm{
         Minterm{"1", "1"},
@@ -226,8 +283,7 @@ TEST(RestoreSingleMatchExpressionTests, ElemMatchObject) {
 
     auto expr = std::make_unique<ElemMatchObjectMatchExpression>("a"_sd, std::move(child));
 
-    std::vector<ExpressionBitInfo> expressions{};
-    expressions.emplace_back(ExpressionBitInfo{expr->clone()});
+    std::vector<ExpressionBitInfo> expressions{ExpressionBitInfo{expr.get()}};
 
     Maxterm maxterm{
         Minterm{"1", "1"},

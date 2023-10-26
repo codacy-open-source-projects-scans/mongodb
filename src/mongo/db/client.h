@@ -41,7 +41,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <string>
 #include <utility>
@@ -108,28 +107,15 @@ public:
         return {};
     }
 
-    /** Placeholder for Service argument. */
-    static Service* unspecifiedService() {
-        return getGlobalServiceContext()->getService();
-    }
-
     /**
      * Creates a Client object and stores it in TLS for the current thread.
      *
-     * A `service` of `unspecifiedService()` can be given, and will take a default.
-     *
-     * A `session` of `noSession()` can be given, to default to a null pointer.
      * If `session` is non-null, then it will be used to augment the thread name
      * and for reporting purposes. Its ref count will be bumped by this Client.
      */
     static void initThread(StringData desc,
                            Service* service,
-                           std::shared_ptr<transport::Session> session);
-
-    /** Convenience for the common case of using an unspecifiedService and noSession. */
-    static void initThread(StringData desc) {
-        return initThread(desc, unspecifiedService(), noSession());
-    }
+                           std::shared_ptr<transport::Session> session = noSession());
 
     /**
      * Moves client into the thread_local for this thread. After this call, Client::getCurrent
@@ -352,6 +338,18 @@ public:
     }
 
     /**
+     * Sets the error code that operations associated with this client will be killed with if the
+     * underlying ingress session disconnects.
+     */
+    void setDisconnectErrorCode(ErrorCodes::Error code) {
+        _disconnectErrorCode = code;
+    }
+
+    ErrorCodes::Error getDisconnectErrorCode() {
+        return _disconnectErrorCode;
+    }
+
+    /**
      * Atomically set all of the connection tags specified in the 'tagsToSet' bit field. If the
      * 'kPending' tag is set, indicating that no tags have yet been specified for the connection,
      * this function also clears that tag as part of the same atomic operation.
@@ -428,6 +426,8 @@ private:
     // Indicates that this client is internal to the cluster.
     bool _isInternalClient{false};
 
+    ErrorCodes::Error _disconnectErrorCode = ErrorCodes::ClientDisconnect;
+
     AtomicWord<TagMask> _tags;
 };
 
@@ -451,14 +451,11 @@ public:
      *     Service* service
      *     std::shared_ptr<transport::Session> session
      *
-     * However, a full set of 3 variations on this constructor are accepted.
+     * However, a full set of 2 variations on this constructor are accepted.
      *
      * A) The `desc` can be omitted, and will default to `getThreadName()`.
      *
-     * B) A `ServiceContext* sc` can be given instead of `Service*`. In
-     *    that case it behaves as if `sc->getService()` was given.
-     *
-     * C) The `session` can be omitted, and will default to `Client::noSession()`.
+     * B) The `session` can be omitted, and will default to `Client::noSession()`.
      */
     ThreadClient(StringData desc, Service* service, std::shared_ptr<transport::Session> session);
 
@@ -466,19 +463,10 @@ public:
     ThreadClient(Service* service, std::shared_ptr<transport::Session> session)
         : ThreadClient(getThreadName(), service, std::move(session)) {}
 
-    /** B) Repeat all previous constructors, accepting ServiceContext instead of Service. */
-    ThreadClient(StringData desc, ServiceContext* sc, std::shared_ptr<transport::Session> session)
-        : ThreadClient{desc, sc->getService(), std::move(session)} {}
-    ThreadClient(ServiceContext* sc, std::shared_ptr<transport::Session> session)
-        : ThreadClient(sc->getService(), std::move(session)) {}
-
-    /** C) Repeat all previous constructors, with `session` omitted. */
+    /** B) Repeat all previous constructors, with `session` omitted. */
     ThreadClient(StringData desc, Service* service)
         : ThreadClient{desc, service, Client::noSession()} {}
     explicit ThreadClient(Service* service) : ThreadClient{service, Client::noSession()} {}
-    ThreadClient(StringData desc, ServiceContext* sc)
-        : ThreadClient{desc, sc, Client::noSession()} {}
-    explicit ThreadClient(ServiceContext* sc) : ThreadClient{sc, Client::noSession()} {}
 
     ~ThreadClient();
     ThreadClient(const ThreadClient&) = delete;

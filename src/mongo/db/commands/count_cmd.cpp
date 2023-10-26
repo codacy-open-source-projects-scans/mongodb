@@ -243,12 +243,8 @@ public:
 
             // An empty PrivilegeVector is acceptable because these privileges are only checked on
             // getMore and explain will not open a cursor.
-            return runAggregate(opCtx,
-                                viewAggRequest.getNamespace(),
-                                viewAggRequest,
-                                viewAggregation.getValue(),
-                                PrivilegeVector(),
-                                result);
+            return runAggregate(
+                opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
         }
 
         const auto& collection = ctx->getCollection();
@@ -282,7 +278,6 @@ public:
                                BSONObj(),
                                SerializationContext::stateCommandReply(serializationCtx),
                                cmdObj,
-                               query_settings::QuerySettings(),
                                &bodyBuilder);
         return Status::OK();
     }
@@ -304,8 +299,11 @@ public:
         CurOpFailpointHelpers::waitWhileFailPointEnabled(
             &hangBeforeCollectionCount, opCtx, "hangBeforeCollectionCount", []() {}, nss);
 
+        auto sc = SerializationContext::stateCommandRequest();
+        sc.setTenantIdSource(auth::ValidatedTenancyScope::get(opCtx) != boost::none);
+
         auto request = CountCommandRequest::parse(
-            IDLParserContext("count", false /* apiStrict */, dbName.tenantId()), cmdObj);
+            IDLParserContext("count", false /* apiStrict */, dbName.tenantId(), sc), cmdObj);
         auto curOp = CurOp::get(opCtx);
         curOp->beginQueryPlanningTimer();
         if (shouldDoFLERewrite(request)) {
@@ -427,6 +425,7 @@ public:
             keyBob.append("hint", 1);
             keyBob.append("collation", 1);
             keyBob.append("shardVersion", 1);
+            keyBob.append("databaseVersion", 1);
             keyBob.append("encryptionInformation", 1);
 
             return keyBob.obj();
@@ -436,7 +435,7 @@ public:
         cmdObj.filterFieldsUndotted(bob, kMirrorableKeys, true);
     }
 };
-MONGO_REGISTER_COMMAND(CmdCount);
+MONGO_REGISTER_COMMAND(CmdCount).forShard();
 
 }  // namespace
 }  // namespace mongo

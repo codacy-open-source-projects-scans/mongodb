@@ -28,6 +28,8 @@
  */
 
 #include "mongo/db/commands/bulk_write_parser.h"
+#include "mongo/db/error_labels.h"
+#include "mongo/rpc/write_concern_error_detail.h"
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -403,6 +405,73 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsOrdered_RecordTargetErrors) {
                                      BulkWriteDeleteOp(0, BSON("x" << 2)),
                                      BulkWriteInsertOp(0, BSON("x" << -1))},
                                     {NamespaceInfoEntry(nss0), NamespaceInfoEntry(nss1)}));
+}
+
+// Test that we abort execution when we receive a targeting error in a transaction.
+TEST_F(BulkWriteOpTest, TargetErrorsInTxn) {
+    ShardId shardId("shard");
+    NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
+    ShardEndpoint endpoint0(
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+
+    std::vector<std::unique_ptr<NSTargeter>> targeters;
+    // Initialize the targeter so that x >= 0 values are untargetable so target call will encounter
+    // an error.
+    targeters.push_back(initTargeterHalfRange(nss0, endpoint0));
+
+    // Set up state so that the first write is targetable but the second is not.
+    auto request = BulkWriteCommandRequest(
+        {
+            BulkWriteInsertOp(0, BSON("x" << -1)),
+            BulkWriteInsertOp(0, BSON("x" << 1)),
+        },
+        {NamespaceInfoEntry(nss0)});
+
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that
+    // is how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+
+    TargetedBatchMap targeted;
+    auto targetStatus = bulkWriteOp.target(targeters, true, targeted);
+
+    // Even though the first write is targetable, we should stop immediately and report failure
+    // because we are in a transaction.
+    ASSERT_NOT_OK(targetStatus);
+    ASSERT_EQUALS(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Ready);
+    ASSERT_EQUALS(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Error);
+
+    bulkWriteOp.processTargetingError(targetStatus);
+    ASSERT(bulkWriteOp.isFinished());
+
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
+    ASSERT_EQ(numErrors, 1);
+    ASSERT_EQ(replies.size(), 1);
+    ASSERT_NOT_OK(replies[0].getStatus());
+}
+
+// Test that we abort execution and throw a top-level error when receiving a
+// TransientTransactionError while attempting to target writes in a transaction.
+TEST_F(BulkWriteOpTest, TransientTargetErrorsInTxn) {
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that
+    // is how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+
+    BulkWriteOp bulkWriteOp(_opCtx, BulkWriteCommandRequest({}, {}));
+    auto transientErrorTargetStatus =
+        StatusWith<WriteType>(ErrorCodes::StaleEpoch, "simulating error for test");
+
+    ASSERT_THROWS_CODE(bulkWriteOp.processTargetingError(transientErrorTargetStatus),
+                       DBException,
+                       ErrorCodes::StaleEpoch);
+    ASSERT(bulkWriteOp.isFinished());
 }
 
 // Test multiple ordered ops that target two different shards.
@@ -908,7 +977,7 @@ TEST_F(BulkWriteOpTest, TargetRetryableTimeseriesUpdate) {
     targeters.push_back(initTargeterFullRange(bucketNs, endpoint1));
 
     auto bucketTargeter = static_cast<BulkWriteMockNSTargeter*>(targeters[1].get());
-    bucketTargeter->setIsShardedTimeSeriesBucketsNamespace(true);
+    bucketTargeter->setIsTrackedTimeSeriesBucketsNamespace(true);
 
     BulkWriteCommandRequest request(
         {BulkWriteUpdateOp(0, BSON("x" << 1), BSON("$set" << BSON("y" << 1))),
@@ -1009,7 +1078,8 @@ TEST_F(BulkWriteOpTest, BuildChildRequestFromTargetedWriteBatch) {
 
     auto& batch = targeted.begin()->second;
 
-    auto childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    auto childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
 
     ASSERT_EQUALS(childRequest.getOrdered(), request.getOrdered());
     ASSERT_EQUALS(childRequest.getBypassDocumentValidation(),
@@ -1064,7 +1134,8 @@ TEST_F(BulkWriteOpTest, TestOrderedOpsNoExistingStmtIds) {
     ASSERT_OK(bulkWriteOp.target(targeters, false, targeted));
 
     auto* batch = targeted.begin()->second.get();
-    auto childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    auto childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     auto childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 0);
@@ -1075,7 +1146,8 @@ TEST_F(BulkWriteOpTest, TestOrderedOpsNoExistingStmtIds) {
     ASSERT_OK(bulkWriteOp.target(targeters, false, targeted));
 
     batch = targeted.begin()->second.get();
-    childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 2);
@@ -1118,7 +1190,8 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsNoExistingStmtIds) {
 
     // The batch to shard A contains op 0 and op 2.
     auto* batch = targeted[ShardId("shardA")].get();
-    auto childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    auto childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     auto childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 0);
@@ -1126,7 +1199,8 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsNoExistingStmtIds) {
 
     // The batch to shard B contains op 1 and op 3.
     batch = targeted[ShardId("shardB")].get();
-    childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 1);
@@ -1170,7 +1244,8 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdsExist) {
 
     // The batch to shard A contains op 0 and op 2.
     auto* batch = targeted[ShardId("shardA")].get();
-    auto childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    auto childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     auto childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 6);
@@ -1178,7 +1253,8 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdsExist) {
 
     // The batch to shard B contains op 1 and op 3.
     batch = targeted[ShardId("shardB")].get();
-    childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 7);
@@ -1222,7 +1298,8 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdFieldExists) {
 
     // The batch to shard A contains op 0 and op 2.
     auto* batch = targeted[ShardId("shardA")].get();
-    auto childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    auto childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     auto childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 6);
@@ -1230,7 +1307,8 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdFieldExists) {
 
     // The batch to shard B contains op 1 and op 3.
     batch = targeted[ShardId("shardB")].get();
-    childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
     childStmtIds = childRequest.getStmtIds();
     ASSERT_EQUALS(childStmtIds->size(), 2u);
     ASSERT_EQUALS(childStmtIds->at(0), 7);
@@ -1251,7 +1329,7 @@ TEST_F(BulkWriteOpTest, BuildTimeseriesChildRequest) {
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterFullRange(bucketNs, endpoint));
     auto bucketTargeter = static_cast<BulkWriteMockNSTargeter*>(targeters[0].get());
-    bucketTargeter->setIsShardedTimeSeriesBucketsNamespace(true);
+    bucketTargeter->setIsTrackedTimeSeriesBucketsNamespace(true);
 
     BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSON("x" << -1))},
                                     {NamespaceInfoEntry(ns)});
@@ -1261,7 +1339,8 @@ TEST_F(BulkWriteOpTest, BuildTimeseriesChildRequest) {
     std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
     ASSERT_OK(bulkWriteOp.target(targeters, false, targeted));
     auto* batch = targeted[ShardId("shard")].get();
-    auto childRequest = bulkWriteOp.buildBulkCommandRequest(targeters, *batch);
+    auto childRequest = bulkWriteOp.buildBulkCommandRequest(
+        targeters, *batch, /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
 
     // Test that we translate to bucket namespace and set the isTimeseriesNamespace flag.
     auto& nsInfoEntry = childRequest.getNsInfo()[0];
@@ -1287,6 +1366,171 @@ TEST_F(BulkWriteOpTest, BatchItemRefGetLet) {
     const auto& letOption = bulkWriteOp.getWriteOp_forTest(0).getWriteItem().getLet();
     ASSERT(letOption.has_value());
     ASSERT_BSONOBJ_EQ(letOption.value(), expected);
+}
+
+TEST_F(BulkWriteOpTest, NoteResponseRetriedStmtIds) {
+    ShardId shardIdA("shardA");
+    ShardId shardIdB("shardB");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
+    ShardEndpoint endpointA(
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+    ShardEndpoint endpointB(
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+
+    std::vector<std::unique_ptr<NSTargeter>> targeters;
+    targeters.push_back(initTargeterSplitRange(nss, endpointA, endpointB));
+
+    BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSON("x" << -1)),  // shard A
+                                     BulkWriteInsertOp(0, BSON("x" << -2)),  // shard A
+                                     BulkWriteInsertOp(0, BSON("x" << 1))},  // shard B
+                                    {NamespaceInfoEntry(nss)});
+    request.setOrdered(true);
+    request.setStmtIds(std::vector<StmtId>{2, 3, 4});
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+    std::map<ShardId, std::unique_ptr<TargetedWriteBatch>> targeted;
+    ASSERT_OK(bulkWriteOp.target(targeters, false, targeted));
+    ASSERT_EQUALS(targeted.size(), 1u);
+    ASSERT_EQUALS(targeted[shardIdA]->getWrites().size(), 2u);
+
+    // Test BulkWriteOp::noteChildBatchResponse with retriedStmtIds.
+    bulkWriteOp.noteChildBatchResponse(*targeted[shardIdA],
+                                       {BulkWriteReplyItem(0), BulkWriteReplyItem(1)},
+                                       std::vector<StmtId>{2, 3},
+                                       boost::none);
+
+    targeted.clear();
+    ASSERT_OK(bulkWriteOp.target(targeters, false, targeted));
+    ASSERT_EQUALS(targeted.size(), 1u);
+    ASSERT_EQUALS(targeted[shardIdB]->getWrites().size(), 1u);
+
+    // Test BulkWriteOp::noteWriteOpFinalResponse with retriedStmtIds.
+    bulkWriteOp.noteWriteOpFinalResponse(2,
+                                         BulkWriteReplyItem(2),
+                                         ShardWCError(shardIdB, WriteConcernErrorDetail()),
+                                         std::vector<StmtId>{4});
+
+    ASSERT(bulkWriteOp.isFinished());
+
+    auto replyInfo = bulkWriteOp.generateReplyInfo();
+    ASSERT_EQ(replyInfo.replyItems.size(), 3);
+    ASSERT_EQ(replyInfo.numErrors, 0);
+    ASSERT_EQ(replyInfo.wcErrors, boost::none);
+    ASSERT(replyInfo.retriedStmtIds.has_value());
+    std::vector<StmtId> expectedRetriedStmtIds = {2, 3, 4};
+    ASSERT_EQ(replyInfo.retriedStmtIds.value(), expectedRetriedStmtIds);
+}
+
+
+TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_WriteConcernError) {
+    ShardId shardIdA("shardA");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
+    BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSON("x" << 1))},
+                                    {NamespaceInfoEntry(nss)});
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+
+    BulkWriteReplyItem reply(0);
+    WriteConcernErrorDetail wce;
+    wce.setStatus(Status(ErrorCodes::UnsatisfiableWriteConcern, "Dummy WCE!"));
+
+    bulkWriteOp.noteWriteOpFinalResponse(0, reply, ShardWCError(shardIdA, wce), boost::none);
+
+    ASSERT_EQUALS(bulkWriteOp.getWriteConcernErrors().size(), 1);
+    ASSERT_EQUALS(bulkWriteOp.getWriteConcernErrors()[0].error.toStatus().code(),
+                  ErrorCodes::UnsatisfiableWriteConcern);
+
+    auto replyInfo = bulkWriteOp.generateReplyInfo();
+    ASSERT_EQ(replyInfo.replyItems.size(), 1);
+    ASSERT_EQ(replyInfo.numErrors, 0);
+    ASSERT_EQ(replyInfo.wcErrors->getCode(), ErrorCodes::UnsatisfiableWriteConcern);
+}
+
+// Test a local CallbackCanceled error received during shutdown.
+// This isn't truly a death test but is written as one in order to isolate test execution in its
+// own process. This is needed because otherwise calling shutdownNoTerminate() would lead any
+// future tests run in the same process to also have the shutdown flag set.
+DEATH_TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_ShutdownError, "8100600") {
+    ShardId shardIdA("shardA");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
+    BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSON("x" << 1))},
+                                    {NamespaceInfoEntry(nss)});
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+
+    // We have to set the shutdown flag in order for a CallbackCanceled error to be treated as a
+    // shutdown error.
+    shutdownNoTerminate();
+
+    BulkWriteReplyItem reply(0, Status(ErrorCodes::CallbackCanceled, "shutting down"));
+
+    ASSERT_THROWS_CODE(
+        bulkWriteOp.noteWriteOpFinalResponse(
+            0, reply, ShardWCError(shardIdA, WriteConcernErrorDetail()), boost::none),
+        DBException,
+        ErrorCodes::CallbackCanceled);
+
+    // Since we saw an execution-aborting error, the command should be considered finished.
+    ASSERT(bulkWriteOp.isFinished());
+
+    // Trigger abnormal exit to satisfy the DEATH_TEST checks.
+    fassertFailed(8100600);
+}
+
+
+TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_TransientTransactionError) {
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that is
+    // how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+
+    ShardId shardIdA("shardA");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
+    BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSON("x" << 1))},
+                                    {NamespaceInfoEntry(nss)});
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+    BulkWriteReplyItem reply(0, Status(ErrorCodes::NetworkTimeout, "network timeout"));
+
+    ASSERT_THROWS_CODE(
+        bulkWriteOp.noteWriteOpFinalResponse(
+            0, reply, ShardWCError(shardIdA, WriteConcernErrorDetail()), boost::none),
+        DBException,
+        ErrorCodes::NetworkTimeout);
+
+    // Since we are in a txn and we saw an error, the command should be considered finished.
+    ASSERT(bulkWriteOp.isFinished());
+}
+
+TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_NonTransientTransactionError) {
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that is
+    // how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+
+    ShardId shardIdA("shardA");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
+    BulkWriteCommandRequest request({BulkWriteInsertOp(0, BSON("x" << 1))},
+                                    {NamespaceInfoEntry(nss)});
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+    BulkWriteReplyItem reply(0, Status(ErrorCodes::Interrupted, "interrupted"));
+
+    bulkWriteOp.noteWriteOpFinalResponse(
+        0, reply, ShardWCError(shardIdA, WriteConcernErrorDetail()), boost::none);
+
+    // Since we are in a txn and we saw an error, the command should be considered finished.
+    ASSERT(bulkWriteOp.isFinished());
+
+    auto replyInfo = bulkWriteOp.generateReplyInfo();
+    ASSERT_EQ(replyInfo.replyItems.size(), 1);
+    ASSERT_EQ(replyInfo.replyItems[0].getStatus().code(), ErrorCodes::Interrupted);
+    ASSERT_EQ(replyInfo.numErrors, 1);
+    ASSERT_FALSE(replyInfo.wcErrors.has_value());
 }
 
 using BulkOp =
@@ -1476,9 +1720,50 @@ TEST_F(BulkWriteOpTest, TestBulkWriteBatchSplittingLargeBaseCommandSize) {
     ASSERT_EQ(targetedSoFar + remainingTargeted, bigReq.getOps().size());
 }
 
-class BulkWriteOpLocalErrorTest : public ServiceContextTest {
+TEST_F(BulkWriteOpTest, TestGetBaseChildBatchCommandSizeEstimate) {
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
+
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+
+    // A trivial empty bulkWrite request with a namespace.
+    BulkWriteCommandRequest request({}, {NamespaceInfoEntry(nss)});
+    request.setDbName(DatabaseName::kAdmin);
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+
+    // Get a base size estimate.
+    auto baseSizeEstimate = bulkWriteOp.getBaseChildBatchCommandSizeEstimate();
+
+    // When mongos actually sends out child batches to the shards, it may attach shardVersion,
+    // databaseVersion, timeseries bucket namespace and the `isTimeseriesCollection` field to
+    // namespace entries. And it may also attach generic fields like lsid, txnNumber and
+    // writeConcern.
+    auto& nsEntry = request.getNsInfo()[0];
+    const ShardVersion shardVersion =
+        ShardVersionFactory::make(ChunkVersion::IGNORED(), CollectionIndexes());
+    const DatabaseVersion dbVersion = DatabaseVersion(UUID::gen(), Timestamp());
+    nsEntry.setShardVersion(shardVersion);
+    nsEntry.setDatabaseVersion(dbVersion);
+    nsEntry.setNs(nss.makeTimeseriesBucketsNamespace());
+    nsEntry.setIsTimeseriesNamespace(true);
+
+    BSONObjBuilder builder;
+    request.serialize(BSONObj(), &builder);
+    // Add writeConcern and lsid/txnNumber if applicable.
+    logical_session_id_helpers::serializeLsidAndTxnNumber(_opCtx, &builder);
+    builder.append(WriteConcernOptions::kWriteConcernField, _opCtx->getWriteConcern().toBSON());
+    auto realSize = builder.obj().objsize();
+
+    // Test that our initial base estimate is conservative enough to account for the above fields.
+    ASSERT_GTE(baseSizeEstimate, realSize);
+}
+
+// Used to test cases where we get an error for an entire batch (as opposed to errors for one or
+// more individual writes within the batch.)
+class BulkWriteOpChildBatchErrorTest : public ServiceContextTest {
 protected:
-    BulkWriteOpLocalErrorTest() {
+    BulkWriteOpChildBatchErrorTest() {
         _opCtxHolder = makeOperationContext();
         _opCtx = _opCtxHolder.get();
         targeters.push_back(initTargeterFullRange(kNss1, kEndpoint1));
@@ -1533,6 +1818,32 @@ protected:
                                           ErrorCodes::Interrupted, "simulating interruption"),
                                       boost::none};
 
+    static const inline AsyncRequestsSender::Response kRemoteInterruptedResponse =
+        AsyncRequestsSender::Response{
+            kShardId1,
+            StatusWith<executor::RemoteCommandResponse>(executor::RemoteCommandResponse(
+                ErrorReply(0, ErrorCodes::Interrupted, "Interrupted", "simulating interruption")
+                    .toBSON(),
+                Microseconds(0))),
+            boost::none};
+
+    // We use a custom non-transient error code to confirm that we do not try to determine if an
+    // error is transient based on the code and that we instead defer to whether or not a shard
+    // attached the label.
+    static const inline int kCustomErrorCode = 8017400;
+    static const inline AsyncRequestsSender::Response kCustomRemoteTransientErrorResponse =
+        AsyncRequestsSender::Response{
+            kShardId1,
+            StatusWith<executor::RemoteCommandResponse>(executor::RemoteCommandResponse(
+                [] {
+                    auto error = ErrorReply(
+                        0, kCustomErrorCode, "CustomError", "simulating custom error for test");
+                    error.setErrorLabels(std::vector{ErrorLabel::kTransientTransaction});
+                    return error.toBSON();
+                }(),
+                Microseconds(1))),
+            boost::none};
+
     TargetedBatchMap targetOp(BulkWriteOp& op, bool ordered) const {
         TargetedBatchMap targeted;
         ASSERT_OK(op.target(targeters, false, targeted));
@@ -1563,7 +1874,7 @@ protected:
 };
 
 // Test a local shutdown error (i.e. because mongos is shutting down.)
-TEST_F(BulkWriteOpLocalErrorTest, LocalShutdownError) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalShutdownError) {
     BulkWriteOp bulkWriteOp(_opCtx, request);
     auto targeted = targetOp(bulkWriteOp, request.getOrdered());
 
@@ -1591,7 +1902,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalShutdownError) {
 }
 
 // Test a local CallbackCanceled error that is received when not in shutdown.
-TEST_F(BulkWriteOpLocalErrorTest, LocalCallbackCanceledErrorNotInShutdown) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalCallbackCanceledErrorNotInShutdown) {
     BulkWriteOp bulkWriteOp(_opCtx, request);
     auto targeted = targetOp(bulkWriteOp, request.getOrdered());
 
@@ -1612,7 +1923,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalCallbackCanceledErrorNotInShutdown) {
     // The error for the first op should be the cancellation error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus(),
               kCallbackCanceledResponse.swResponse.getStatus());
-    auto [replies, numErrors, _] = bulkWriteOp.generateReplyInfo();
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus(), kCallbackCanceledResponse.swResponse.getStatus());
     ASSERT_EQ(numErrors, 1);
@@ -1622,7 +1933,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalCallbackCanceledErrorNotInShutdown) {
 // This isn't truly a death test but is written as one in order to isolate test execution in its
 // own process. This is needed because otherwise calling shutdownNoTerminate() would lead any
 // future tests run in the same process to also have the shutdown flag set.
-DEATH_TEST_F(BulkWriteOpLocalErrorTest, LocalCallbackCanceledErrorInShutdown, "12345") {
+DEATH_TEST_F(BulkWriteOpChildBatchErrorTest, LocalCallbackCanceledErrorInShutdown, "12345") {
     BulkWriteOp bulkWriteOp(_opCtx, request);
     auto targeted = targetOp(bulkWriteOp, request.getOrdered());
 
@@ -1657,7 +1968,7 @@ DEATH_TEST_F(BulkWriteOpLocalErrorTest, LocalCallbackCanceledErrorInShutdown, "1
 }
 
 // Ordered bulkWrite: test handling of a local network error.
-TEST_F(BulkWriteOpLocalErrorTest, LocalNetworkErrorOrdered) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalNetworkErrorOrdered) {
     BulkWriteOp bulkWriteOp(_opCtx, request);
     auto targeted = targetOp(bulkWriteOp, true);
 
@@ -1678,14 +1989,14 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNetworkErrorOrdered) {
     // The error for the first op should be the network error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus(),
               kNetworkErrorResponse.swResponse.getStatus());
-    auto [replies, numErrors, _] = bulkWriteOp.generateReplyInfo();
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus(), kNetworkErrorResponse.swResponse.getStatus());
     ASSERT_EQ(numErrors, 1);
 }
 
 // Unordered bulkWrite: test handling of a local network error.
-TEST_F(BulkWriteOpLocalErrorTest, LocalNetworkErrorUnordered) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalNetworkErrorUnordered) {
     request.setOrdered(false);
     BulkWriteOp bulkWriteOp(_opCtx, request);
     auto targeted = targetOp(bulkWriteOp, request.getOrdered());
@@ -1705,8 +2016,10 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNetworkErrorUnordered) {
     ASSERT(!bulkWriteOp.isFinished());
 
     // Simulate successful response to the second batch.
-    bulkWriteOp.noteChildBatchResponse(
-        *targeted[kShardId2], {BulkWriteReplyItem(0), BulkWriteReplyItem(1)}, boost::none);
+    bulkWriteOp.noteChildBatchResponse(*targeted[kShardId2],
+                                       {BulkWriteReplyItem(0), BulkWriteReplyItem(1)},
+                                       boost::none,
+                                       boost::none);
 
     // We should now be finished.
     ASSERT(bulkWriteOp.isFinished());
@@ -1716,7 +2029,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNetworkErrorUnordered) {
               kNetworkErrorResponse.swResponse.getStatus());
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
               kNetworkErrorResponse.swResponse.getStatus());
-    auto [replies, numErrors, _] = bulkWriteOp.generateReplyInfo();
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
     ASSERT_EQ(replies.size(), 4);
     ASSERT_EQ(replies[0].getStatus(), kNetworkErrorResponse.swResponse.getStatus());
     ASSERT_EQ(replies[1].getStatus(), kNetworkErrorResponse.swResponse.getStatus());
@@ -1726,7 +2039,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNetworkErrorUnordered) {
 }
 
 // Ordered bulkWrite: Test handling of a local TransientTransactionError in a transaction.
-TEST_F(BulkWriteOpLocalErrorTest, LocalTransientTransactionErrorInTxnOrdered) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalTransientTransactionErrorInTxnOrdered) {
     // Set up lsid/txnNumber to simulate txn.
     _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
     _opCtx->setTxnNumber(TxnNumber(0));
@@ -1760,7 +2073,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalTransientTransactionErrorInTxnOrdered) {
 }
 
 // Ordered bulkWrite: Test handling of a local non-TransientTransactionError in a transaction.
-TEST_F(BulkWriteOpLocalErrorTest, LocalNonTransientTransactionErrorInTxnOrdered) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalNonTransientTransactionErrorInTxnOrdered) {
     // Set up lsid/txnNumber to simulate txn.
     _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
     _opCtx->setTxnNumber(TxnNumber(0));
@@ -1787,24 +2100,24 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNonTransientTransactionErrorInTxnOrdered)
     // The error for the first op should be the interruption error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus(),
               kInterruptedErrorResponse.swResponse.getStatus());
-    auto [replies, numErrors, _] = bulkWriteOp.generateReplyInfo();
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
     ASSERT_EQ(numErrors, 1);
 }
 
 // Unordered bulkWrite: Test handling of a local TransientTransactionError in a transaction.
-TEST_F(BulkWriteOpLocalErrorTest, LocalTransientTransactionErrorInTxnUnordered) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalTransientTransactionErrorInTxnUnordered) {
     // Set up lsid/txnNumber to simulate txn.
     _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
     _opCtx->setTxnNumber(TxnNumber(0));
     // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that is
     // how we set _inTransaction for a BulkWriteOp.
     RouterOperationContextSession rocs(_opCtx);
+    request.setOrdered(false);
 
     // Case 1: we receive the failed batch response with other batches outstanding.
     {
-        request.setOrdered(false);
         BulkWriteOp bulkWriteOp(_opCtx, request);
         auto targeted = targetOp(bulkWriteOp, request.getOrdered());
 
@@ -1844,6 +2157,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalTransientTransactionErrorInTxnUnordered) 
                                                BulkWriteReplyItem(0),
                                                BulkWriteReplyItem(1),
                                            },
+                                           boost::none,
                                            boost::none);
 
         // Simulate a network error (which is a transient transaction error.)
@@ -1871,7 +2185,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalTransientTransactionErrorInTxnUnordered) 
 }
 
 // Unordered bulkWrite: Test handling of a local non-TransientTransactionError in a transaction.
-TEST_F(BulkWriteOpLocalErrorTest, LocalNonTransientTransactionErrorInTxnUnordered) {
+TEST_F(BulkWriteOpChildBatchErrorTest, LocalNonTransientTransactionErrorInTxnUnordered) {
     // Set up lsid/txnNumber to simulate txn.
     _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
     _opCtx->setTxnNumber(TxnNumber(0));
@@ -1905,7 +2219,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNonTransientTransactionErrorInTxnUnordere
         ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
                   kInterruptedErrorResponse.swResponse.getStatus());
 
-        auto [replies, numErrors, _] = bulkWriteOp.generateReplyInfo();
+        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
         ASSERT_EQ(replies.size(), 2);
         ASSERT_EQ(replies[0].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
         ASSERT_EQ(replies[1].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
@@ -1924,6 +2238,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNonTransientTransactionErrorInTxnUnordere
                                                BulkWriteReplyItem(0),
                                                BulkWriteReplyItem(1),
                                            },
+                                           boost::none,
                                            boost::none);
 
         // Simulate an interruption error (which is not a TransientTransactionError.)
@@ -1944,7 +2259,7 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNonTransientTransactionErrorInTxnUnordere
         ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
                   kInterruptedErrorResponse.swResponse.getStatus());
 
-        auto [replies, numErrors, _] = bulkWriteOp.generateReplyInfo();
+        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
         ASSERT_EQ(replies.size(), 4);
         ASSERT_EQ(replies[0].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
         ASSERT_EQ(replies[1].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
@@ -1952,6 +2267,393 @@ TEST_F(BulkWriteOpLocalErrorTest, LocalNonTransientTransactionErrorInTxnUnordere
         ASSERT_OK(replies[3].getStatus());
         ASSERT_EQ(numErrors, 2);
     }
+}
+
+// Ordered bulkWrite: Test handling of a remote top-level error.
+TEST_F(BulkWriteOpChildBatchErrorTest, RemoteErrorOrdered) {
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+    auto targeted = targetOp(bulkWriteOp, true);
+
+    // Simulate receiving an interrupted error from a shard.
+    bulkWriteOp.processChildBatchResponseFromRemote(
+        *targeted[kShardId1], kRemoteInterruptedResponse, boost::none);
+
+    // For ordered writes, we will treat the batch error as a failure of the first write in the
+    // batch. The other write in the batch should have been re-set to ready.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Ready);
+    // We never targeted these so they should still be ready.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Ready);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Ready);
+
+    // Since we are ordered and we saw an error, the command should be considered finished.
+    ASSERT(bulkWriteOp.isFinished());
+
+    // The error for the first op should be the interrupted error.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus().code(),
+              ErrorCodes::Interrupted);
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
+    ASSERT_EQ(replies.size(), 1);
+    ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
+    ASSERT_EQ(numErrors, 1);
+}
+
+// Unordered bulkWrite: Test handling of a remote top-level error.
+TEST_F(BulkWriteOpChildBatchErrorTest, RemoteErrorUnordered) {
+    request.setOrdered(false);
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+    auto targeted = targetOp(bulkWriteOp, request.getOrdered());
+
+    // Simulate receiving an interrupted error from a shard.
+    bulkWriteOp.processChildBatchResponseFromRemote(
+        *targeted[kShardId1], kRemoteInterruptedResponse, boost::none);
+
+    // For unordered writes, we will treat the batch error as a failure of all the writes in the
+    // batch.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Error);
+    // These should still be pending.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Pending);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Pending);
+
+    // Since we are unordered and have outstanding responses, we should not be finished.
+    ASSERT(!bulkWriteOp.isFinished());
+
+    // Simulate successful response to the second batch.
+    bulkWriteOp.noteChildBatchResponse(*targeted[kShardId2],
+                                       {BulkWriteReplyItem(0), BulkWriteReplyItem(1)},
+                                       boost::none,
+                                       boost::none);
+
+    // We should now be finished.
+    ASSERT(bulkWriteOp.isFinished());
+
+    // The error for the first two ops should be the interrupted error.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus().code(),
+              ErrorCodes::Interrupted);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus().code(),
+              ErrorCodes::Interrupted);
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
+    ASSERT_EQ(replies.size(), 4);
+    ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
+    ASSERT_EQ(replies[1].getStatus().code(), ErrorCodes::Interrupted);
+    ASSERT_OK(replies[2].getStatus());
+    ASSERT_OK(replies[3].getStatus());
+    ASSERT_EQ(numErrors, 2);
+}
+
+// Ordered bulkWrite: Test handling of a remote top-level error that is not a
+// TransientTransactionError in a transaction.
+TEST_F(BulkWriteOpChildBatchErrorTest, RemoteNonTransientTransactionErrorInTxnOrdered) {
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that is
+    // how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+    auto targeted = targetOp(bulkWriteOp, request.getOrdered());
+
+    // Simulate a remote interrupted error (which is not a transient txn error).
+    bulkWriteOp.processChildBatchResponseFromRemote(
+        *targeted[kShardId1], kRemoteInterruptedResponse, boost::none);
+
+    // For ordered writes, we will treat the batch error as a failure of the first write in the
+    // batch. The other write in the batch should have been re-set to ready.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Ready);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Ready);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Ready);
+    // Since we are both ordered and in a txn and we saw an error, the command should be
+    // considered finished.
+    ASSERT(bulkWriteOp.isFinished());
+
+    // The error for the first op should be the interruption error.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus().code(),
+              ErrorCodes::Interrupted);
+    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
+    ASSERT_EQ(replies.size(), 1);
+    ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
+    ASSERT_EQ(numErrors, 1);
+}
+
+// Ordered bulkWrite: Test handling of a remote top-level error that is a TransientTransactionError
+// in a transaction.
+TEST_F(BulkWriteOpChildBatchErrorTest, RemoteTransientTransactionErrorInTxnOrdered) {
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that is
+    // how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+
+    BulkWriteOp bulkWriteOp(_opCtx, request);
+    auto targeted = targetOp(bulkWriteOp, request.getOrdered());
+
+    // Simulate a custom remote error that has the TransientTransactionError label attached.
+    // We expect the error to be raised as a top-level error.
+    ASSERT_THROWS_CODE(bulkWriteOp.processChildBatchResponseFromRemote(
+                           *targeted[kShardId1], kCustomRemoteTransientErrorResponse, boost::none),
+                       DBException,
+                       kCustomErrorCode);
+
+    // In practice, we expect the thrown error to propagate up past the scope where the op is
+    // created. But to be thorough the assertions below check that our bookkeeping when
+    // encountering this error is correct.
+
+    // For ordered writes, we will treat the batch error as a failure of the first write in the
+    // batch. The other write in the batch should have been re-set to ready.
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Ready);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Ready);
+    ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Ready);
+
+    // Since we are in a txn and we saw an error, the command should be considered finished.
+    ASSERT(bulkWriteOp.isFinished());
+}
+
+// Unordered bulkWrite: Test handling of a remote top-level error that is not a
+// TransientTransactionError in a transaction.
+TEST_F(BulkWriteOpChildBatchErrorTest, RemoteNonTransientTransactionErrorInTxnUnordered) {
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that is
+    // how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+
+    // Case 1: we receive the failed batch response with other batches outstanding.
+    {
+        request.setOrdered(false);
+        BulkWriteOp bulkWriteOp(_opCtx, request);
+        auto targeted = targetOp(bulkWriteOp, request.getOrdered());
+
+        // Simulate a remote interrupted error (which is not a transient txn error).
+        bulkWriteOp.processChildBatchResponseFromRemote(
+            *targeted[kShardId1], kRemoteInterruptedResponse, boost::none);
+
+        // For unordered writes, we will treat the error as a failure of all the writes in the
+        // batch.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Error);
+        // We didn't receive responses for these yet.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Pending);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Pending);
+        // However, since we are in a txn and we saw an execution-aborting error, the command should
+        // be considered finished.
+        ASSERT(bulkWriteOp.isFinished());
+
+        // The error for the first two ops should be the interruption error.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus().code(),
+                  ErrorCodes::Interrupted);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus().code(),
+                  ErrorCodes::Interrupted);
+
+        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
+        ASSERT_EQ(replies.size(), 2);
+        ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
+        ASSERT_EQ(replies[1].getStatus(), ErrorCodes::Interrupted);
+        ASSERT_EQ(numErrors, 2);
+    }
+
+    // Case 2: we receive the failed batch response after receiving successful response for other
+    // batch.
+    {
+        BulkWriteOp bulkWriteOp(_opCtx, request);
+        auto targeted = targetOp(bulkWriteOp, request.getOrdered());
+
+        // Simulate successful response to second batch.
+        bulkWriteOp.noteChildBatchResponse(*targeted[kShardId2],
+                                           {
+                                               BulkWriteReplyItem(0),
+                                               BulkWriteReplyItem(1),
+                                           },
+                                           boost::none,
+                                           boost::none);
+
+        // Simulate a remote interrupted error (which is not a transient txn error).
+        bulkWriteOp.processChildBatchResponseFromRemote(
+            *targeted[kShardId1], kRemoteInterruptedResponse, boost::none);
+
+        // For unordered writes, we will treat the error as a failure of all the writes in the
+        // batch.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Error);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Completed);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Completed);
+        // The command should be considered finished.
+        ASSERT(bulkWriteOp.isFinished());
+
+        // The error for the first two ops should be the interruption error.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus().code(),
+                  ErrorCodes::Interrupted);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
+                  ErrorCodes::Interrupted);
+
+        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo();
+        ASSERT_EQ(replies.size(), 4);
+        ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
+        ASSERT_EQ(replies[1].getStatus().code(), ErrorCodes::Interrupted);
+        ASSERT_OK(replies[2].getStatus());
+        ASSERT_OK(replies[3].getStatus());
+        ASSERT_EQ(numErrors, 2);
+    }
+}
+
+// Unordered bulkWrite: Test handling of a remote top-level error that is a
+// TransientTransactionError in a transaction.
+TEST_F(BulkWriteOpChildBatchErrorTest, RemoteTransientTransactionErrorUnordered) {
+    // Set up lsid/txnNumber to simulate txn.
+    _opCtx->setLogicalSessionId(LogicalSessionId(UUID::gen(), SHA256Block()));
+    _opCtx->setTxnNumber(TxnNumber(0));
+    // Necessary for TransactionRouter::get to be non-null for this opCtx. The presence of that is
+    // how we set _inTransaction for a BulkWriteOp.
+    RouterOperationContextSession rocs(_opCtx);
+    request.setOrdered(false);
+
+    // Case 1: we receive the failed batch response with other batches outstanding.
+    {
+        BulkWriteOp bulkWriteOp(_opCtx, request);
+        auto targeted = targetOp(bulkWriteOp, request.getOrdered());
+
+        // Simulate a custom remote error that has the TransientTransactionError label attached.
+        // We expect the error to be raised as a top-level error.
+        ASSERT_THROWS_CODE(
+            bulkWriteOp.processChildBatchResponseFromRemote(
+                *targeted[kShardId1], kCustomRemoteTransientErrorResponse, boost::none),
+            DBException,
+            kCustomErrorCode);
+
+        // In practice, we expect the thrown error to propagate up past the scope where the op is
+        // created. But to be thorough the assertions below check that our bookkeeping when
+        // encountering this error is correct.
+
+        // For unordered writes, we will treat the batch error as a failure of all of the writes
+        // in the batch.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Error);
+        // Since these were targeted but we didn't receive a response yet they should still be
+        // Pending.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Pending);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Pending);
+
+        // Since we saw an execution-aborting error, the command should be considered finished.
+        ASSERT(bulkWriteOp.isFinished());
+    }
+
+    // Case 2: we receive the failed batch response after receiving successful response for other
+    // batch.
+    {
+        BulkWriteOp bulkWriteOp(_opCtx, request);
+        auto targeted = targetOp(bulkWriteOp, request.getOrdered());
+
+        // Simulate successful response to second batch.
+        bulkWriteOp.noteChildBatchResponse(*targeted[kShardId2],
+                                           {
+                                               BulkWriteReplyItem(0),
+                                               BulkWriteReplyItem(1),
+                                           },
+                                           boost::none,
+                                           boost::none);
+
+        // Simulate a custom remote error that has the TransientTransactionError label attached.
+        // We expect the error to be raised as a top-level error.
+        ASSERT_THROWS_CODE(
+            bulkWriteOp.processChildBatchResponseFromRemote(
+                *targeted[kShardId1], kCustomRemoteTransientErrorResponse, boost::none),
+            DBException,
+            kCustomErrorCode);
+
+        // In practice, we expect the thrown error to propagate up past the scope where the op is
+        // created. But to be thorough the assertions below check that our bookkeeping when
+        // encountering this error is correct.
+
+        // For unordered writes, we will treat the batch error as a failure of all of the writes
+        // in the batch.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getWriteState(), WriteOpState_Error);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getWriteState(), WriteOpState_Error);
+        // We already received successful responses for these writes.
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(2).getWriteState(), WriteOpState_Completed);
+        ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(3).getWriteState(), WriteOpState_Completed);
+
+        // The command should be considered finished.
+        ASSERT(bulkWriteOp.isFinished());
+    }
+}
+
+// Test that if we receive a mix of success/failure from shards and have to partially retarget that
+// the success result(s) from the first round of targeting are factored into the op's final reply.
+TEST_F(BulkWriteOpTest, SuccessfulShardRepliesAreSavedAfterRetargeting) {
+    // Set up an op that will target both shards.
+    auto multiDelete = BulkWriteDeleteOp(0, BSON("x" << BSON("$gte" << -5 << "$lt" << 5)));
+    multiDelete.setMulti(true);
+    NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
+    auto request = BulkWriteCommandRequest({multiDelete}, {NamespaceInfoEntry(nss0)});
+    BulkWriteOp op(_opCtx, request);
+
+    ShardId shardIdA("shardA");
+    ShardId shardIdB("shardB");
+    ShardEndpoint endpointA0(
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+    ShardEndpoint endpointB0(
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+
+    std::vector<std::unique_ptr<NSTargeter>> targeters;
+    targeters.push_back(initTargeterSplitRange(nss0, endpointA0, endpointB0));
+
+    TargetedBatchMap targeted;
+    ASSERT_OK(op.target(targeters, false, targeted));
+
+    // We should initially target writes to be sent in parallel to both shards.
+    ASSERT_EQUALS(targeted.size(), 2);
+    ASSERT_EQUALS(targeted[shardIdA]->getWrites().size(), 1u);
+    ASSERT_EQUALS(targeted[shardIdB]->getWrites().size(), 1u);
+    ASSERT_EQ(op.getWriteOp_forTest(0).getWriteState(), WriteOpState_Pending);
+
+    // Simulate OK response from first shard.
+    auto reply1 = BulkWriteReplyItem(0);
+    reply1.setN(2);
+    op.noteChildBatchResponse(*targeted[shardIdA], {reply1}, boost::none, boost::none);
+
+    // The write should still be pending.
+    ASSERT_EQ(op.getWriteOp_forTest(0).getWriteState(), WriteOpState_Pending);
+
+    // Simulate StaleConfig from second shard.
+    auto error =
+        Status{StaleConfigInfo(nss0,
+                               ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
+                               boost::none,
+                               shardIdB),
+               "Mock error: shard version mismatch"};
+    op.noteChildBatchError(*targeted[shardIdB], error);
+
+    // We should have marked the write as ready so we can retarget as needed.
+    ASSERT_EQ(op.getWriteOp_forTest(0).getWriteState(), WriteOpState_Ready);
+
+    // Clear targeting map for a new round of targeting.
+    targeted.clear();
+
+    // We should have retargeted only the write to shardB, since we already succeeded on sharda
+    ASSERT_OK(op.target(targeters, false, targeted));
+    ASSERT_EQUALS(targeted.size(), 1);
+    ASSERT_EQUALS(targeted[shardIdB]->getWrites().size(), 1u);
+    ASSERT_EQ(op.getWriteOp_forTest(0).getWriteState(), WriteOpState_Pending);
+
+    // Simulate OK response from second shard.
+    auto reply2 = BulkWriteReplyItem(0);
+    reply2.setN(0);
+    op.noteChildBatchResponse(*targeted[shardIdB], {reply2}, boost::none, boost::none);
+
+    // We should now be done.
+    ASSERT(op.isFinished());
+
+    auto [replies, numErrors, _, __] = op.generateReplyInfo();
+    ASSERT_EQ(replies.size(), 1);
+    ASSERT_EQ(numErrors, 0);
+    ASSERT_OK(replies[0].getStatus());
+    // Seeing n: 2 here proves we saved the success reply from the first round of targeting.
+    ASSERT_EQ(replies[0].getN(), 2);
 }
 
 /**
@@ -2028,7 +2730,7 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // succeed without errors. But bulk_write_exec::execute would retry on targeting errors and
         // try to refresh the targeters upon targeting errors.
         request.setOrdered(false);
-        auto [replyItems, numErrors, _] =
+        auto [replyItems, numErrors, _, __] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 2u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
@@ -2052,7 +2754,7 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // Test ordered operations. This is mostly the same as the test case above except that we
         // should only return the first error for ordered operations.
         request.setOrdered(true);
-        auto [replyItems, numErrors, _] =
+        auto [replyItems, numErrors, _, __] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 1u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
@@ -2095,7 +2797,7 @@ TEST_F(BulkWriteExecTest, CollectionDroppedBeforeRefreshingTargeters) {
 
     // After the targeting error from the first op, targeter refresh will throw a StaleEpoch
     // exception which should abort the entire bulkWrite.
-    auto [replyItems, numErrors, _] =
+    auto [replyItems, numErrors, _, __] =
         bulk_write_exec::execute(operationContext(), targeters, request);
     ASSERT_EQUALS(replyItems.size(), 2u);
     ASSERT_EQUALS(replyItems[0].getStatus().code(), ErrorCodes::StaleEpoch);
@@ -2118,7 +2820,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
 
     LOGV2(7695401, "Case 1) WCE with successful op.");
     auto future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError] =
+        auto [replyItems, numErrors, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 1u);
         ASSERT_OK(replyItems[0].getStatus());
@@ -2136,7 +2838,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
     // occurs should be returned to the user.
     LOGV2(7695402, "Case 2) WCE with unsuccessful op (BadValue).");
     future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError] =
+        auto [replyItems, numErrors, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 1u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
@@ -2179,7 +2881,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
 
     LOGV2(7695403, "Case 1) WCE in ordered case.");
     auto future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError] =
+        auto [replyItems, numErrors, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         // Both operations executed, therefore the size of reply items is 2.
         ASSERT_EQUALS(replyItems.size(), 2u);
@@ -2210,7 +2912,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
     unorderedReq.setOrdered(false);
 
     future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError] =
+        auto [replyItems, numErrors, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, unorderedReq);
         ASSERT_EQUALS(replyItems.size(), 2u);
         ASSERT_OK(replyItems[0].getStatus());
@@ -2239,7 +2941,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
     oneErrorReq.setOrdered(false);
 
     future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError] =
+        auto [replyItems, numErrors, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, oneErrorReq);
         ASSERT_EQUALS(replyItems.size(), 2u);
         // We don't really know which of the two mock responses below will be used for

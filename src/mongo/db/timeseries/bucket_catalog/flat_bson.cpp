@@ -33,7 +33,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstring>
 
 #include <boost/optional/optional.hpp>
@@ -106,6 +105,11 @@ void FlatBSONStore<Element, Value>::Data::setValue(const BSONElement& elem) {
     _value.set(elem);
     _type = Type::kValue;
     _updated = true;
+}
+
+template <class Element, class Value>
+int64_t FlatBSONStore<Element, Value>::Data::calculateMemUsage() const {
+    return sizeof(Value) + _value.size();
 }
 
 template <class Element, class Value>
@@ -323,6 +327,16 @@ FlatBSONStore<Element, Value>::Obj::insert(FlatBSONStore<Element, Value>::Iterat
 }
 
 template <class Element, class Value>
+int64_t FlatBSONStore<Element, Value>::calculateMemUsage() const {
+    auto memUsage = entries.capacity() * sizeof(Entry);
+    for (auto&& entry : entries) {
+        // TODO SERVER-81405: Actually account for the memory allocated in _fieldNameToIndex
+        memUsage += entry._element.calculateMemUsage();
+    }
+    return memUsage;
+}
+
+template <class Element, class Value>
 typename FlatBSONStore<Element, Value>::Iterator FlatBSONStore<Element, Value>::Obj::begin() {
     return {_pos + 1};
 }
@@ -376,6 +390,11 @@ typename FlatBSON<Derived, Element, Value>::UpdateStatus FlatBSON<Derived, Eleme
     return _updateObj(obj, doc, {}, stringComparator, [&omitField](StringData fieldName) {
         return omitField && fieldName == omitField;
     });
+}
+
+template <class Derived, class Element, class Value>
+int64_t FlatBSON<Derived, Element, Value>::calculateMemUsage() {
+    return sizeof(FlatBSONStore<Element, Value>) + _store.calculateMemUsage();
 }
 
 template <class Derived, class Element, class Value>
@@ -720,6 +739,10 @@ BSONType BSONElementValueBuffer::type() const {
     return (BSONType)_buffer[0];
 }
 
+int64_t BSONElementValueBuffer::size() const {
+    return _size;
+}
+
 BSONElement BSONTypeValue::get() const {
     MONGO_UNREACHABLE;
 }
@@ -730,6 +753,10 @@ void BSONTypeValue::set(const BSONElement& elem) {
 
 BSONType BSONTypeValue::type() const {
     return _type;
+}
+
+int64_t BSONTypeValue::size() const {
+    return 0;
 }
 
 StringData Element::fieldName() const {
@@ -747,6 +774,10 @@ bool Element::isArrayFieldName() const {
 void Element::claimArrayFieldNameForObject(std::string name) {
     invariant(isArrayFieldName());
     _fieldName = std::move(name);
+}
+
+int64_t Element::calculateMemUsage() const {
+    return _fieldName.capacity();
 }
 
 void MinMaxElement::initializeRoot() {
@@ -768,6 +799,10 @@ MinMaxStore::Data& MinMaxElement::max() {
 
 const MinMaxStore::Data& MinMaxElement::max() const {
     return _max;
+}
+
+int64_t MinMaxElement::calculateMemUsage() const {
+    return Element::calculateMemUsage() + _min.calculateMemUsage() + _max.calculateMemUsage();
 }
 
 std::pair<MinMax::UpdateStatus, MinMaxElement::UpdateContext> MinMax::_shouldUpdateObj(
@@ -904,6 +939,10 @@ SchemaStore::Data& SchemaElement::data() {
 
 const SchemaStore::Data& SchemaElement::data() const {
     return _data;
+}
+
+int64_t SchemaElement::calculateMemUsage() const {
+    return Element::calculateMemUsage() + _data.calculateMemUsage();
 }
 
 Schema Schema::parseFromBSON(const BSONObj& min,

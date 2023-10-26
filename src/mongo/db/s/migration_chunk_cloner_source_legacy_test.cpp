@@ -30,7 +30,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
@@ -564,6 +563,11 @@ public:
         return _coll->addCollationDefaultsToIndexSpecsForCreate(opCtx, indexSpecs);
     }
 
+    StatusWith<BSONObj> addCollationDefaultsToIndexSpecsForCreate(OperationContext* opCtx,
+                                                                  const BSONObj& indexSpecs) const {
+        return _coll->addCollationDefaultsToIndexSpecsForCreate(opCtx, indexSpecs);
+    }
+
     void indexBuildSuccess(OperationContext* opCtx, IndexCatalogEntry* index) override {
         MONGO_UNREACHABLE;
     }
@@ -701,7 +705,7 @@ protected:
                 kNss,
                 uuid,
                 kShardKeyPattern,
-                false, /*unsplittable*/
+                false, /* unsplittable */
                 nullptr,
                 false,
                 epoch,

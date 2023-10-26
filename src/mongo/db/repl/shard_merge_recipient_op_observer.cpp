@@ -41,7 +41,6 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #include "mongo/base/error_codes.h"
@@ -99,7 +98,7 @@ void runOnAlternateClient(const std::string& name, Func func) {
         return !cc().canKillSystemOperationInStepdown(WithLock::withoutLock());
     }();
 
-    auto client = getGlobalServiceContext()->makeClient(name);
+    auto client = getGlobalServiceContext()->getService(ClusterRole::ShardServer)->makeClient(name);
     AlternativeClientRegion acr(client);
 
     if (parentClientUnkillableByStepDown) {
@@ -167,7 +166,7 @@ void deleteTenantDataWhenMergeAborts(const ShardMergeRecipientDocument& doc) {
 
         UnreplicatedWritesBlock writeBlock{opCtx};
 
-        writeConflictRetry(opCtx, "dropShardMergeDonorTenantColls", NamespaceString(), [&] {
+        writeConflictRetry(opCtx, "dropShardMergeDonorTenantColls", NamespaceString::kEmpty, [&] {
             WriteUnitOfWork wuow(opCtx);
 
             for (const auto& tenantId : doc.getTenantIds()) {
@@ -182,8 +181,10 @@ void deleteTenantDataWhenMergeAborts(const ShardMergeRecipientDocument& doc) {
                                  [tenant = tenantId.toString() + "_"](const DatabaseName& db) {
                                      // In non multitenacy environment, check if the db has a
                                      // matched tenant prefix.
-                                     return StringData{DatabaseNameUtil::serialize(db)}.startsWith(
-                                         tenant);
+                                     return StringData{
+                                         DatabaseNameUtil::serialize(
+                                             db, SerializationContext::stateDefault())}
+                                         .startsWith(tenant);
                                  });
                 }
 

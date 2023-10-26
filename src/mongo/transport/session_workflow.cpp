@@ -39,7 +39,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -390,13 +389,9 @@ public:
     Impl(SessionWorkflow* workflow, ServiceContext::UniqueClient client)
         : _workflow{workflow},
           _serviceContext{client->getServiceContext()},
-          _sep{_serviceContext->getServiceEntryPoint()},
+          _sep{client->getService()->getServiceEntryPoint()},
           _sessionManager{_serviceContext->getSessionManager()},
           _clientStrand{ClientStrand::make(std::move(client))} {}
-
-    ~Impl() {
-        _sessionManager->onEndSession(session());
-    }
 
     Client* client() const {
         return _clientStrand->getClientPointer();
@@ -430,8 +425,8 @@ public:
         return seCtx()->getServiceExecutor();
     }
 
-    bool useDedicatedThread() {
-        return seCtx()->useDedicatedThread();
+    bool usesDedicatedThread() {
+        return seCtx()->usesDedicatedThread();
     }
 
     std::shared_ptr<ServiceExecutor::TaskRunner> taskRunner() {
@@ -496,7 +491,7 @@ private:
         invariant(!_work);
         if (_nextWork)
             return Future{std::move(_nextWork)};  // Already have one ready.
-        if (useDedicatedThread()) {
+        if (usesDedicatedThread()) {
             // Yield here to avoid pinning the CPU. Give other threads some CPU
             // time to avoid a spiky latency distribution (BF-27452). Even if
             // this client can run continuously and receive another command
@@ -662,13 +657,11 @@ std::unique_ptr<SessionWorkflow::Impl::WorkItem> SessionWorkflow::Impl::_receive
         const auto& status = ex.toStatus();
         if (ErrorCodes::isInterruption(status.code()) ||
             ErrorCodes::isNetworkError(status.code())) {
-            LOGV2_DEBUG(
-                22986,
-                2,
-                "Session from {remote} encountered a network error during SourceMessage: {error}",
-                "Session from remote encountered a network error during SourceMessage",
-                "remote"_attr = remote,
-                "error"_attr = status);
+            LOGV2_DEBUG(22986,
+                        2,
+                        "Session from remote encountered a network error during SourceMessage",
+                        "remote"_attr = remote,
+                        "error"_attr = status);
         } else if (status == TransportLayer::TicketSessionClosedStatus) {
             // Our session may have been closed internally.
             LOGV2_DEBUG(22987,
@@ -810,7 +803,7 @@ void SessionWorkflow::Impl::_scheduleIteration() try {
             _cleanupSession(status);
             return;
         }
-        if (useDedicatedThread()) {
+        if (usesDedicatedThread()) {
             try {
                 _doOneIteration().get();
                 _scheduleIteration();
@@ -878,7 +871,7 @@ void SessionWorkflow::Impl::_cleanupSession(const Status& status) {
     }
     _cleanupExhaustResources();
     _taskRunner = {};
-    _sessionManager->onClientDisconnect(client());
+    _sessionManager->endSessionByClient(client());
 }
 
 SessionWorkflow::SessionWorkflow(PassKeyTag, ServiceContext::UniqueClient client)

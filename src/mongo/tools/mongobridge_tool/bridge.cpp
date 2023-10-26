@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -71,9 +70,11 @@
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/service_entry_point_impl.h"
+#include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
@@ -331,13 +332,12 @@ Future<DbResponse> ServiceEntryPointBridge::handleRequest(OperationContext* opCt
             auto now = getGlobalServiceContext()->getFastClockSource()->now();
             const auto connectExpiration = now + kConnectTimeout;
             while (now < connectExpiration) {
-                auto tl = getGlobalServiceContext()->getTransportLayer();
-                auto sws =
-                    tl->connect(destAddr, transport::kGlobalSSLMode, connectExpiration - now);
+                auto tl = getGlobalServiceContext()->getTransportLayerManager();
+                auto sws = tl->getEgressLayer()->connect(
+                    destAddr, transport::kGlobalSSLMode, connectExpiration - now);
                 auto status = sws.getStatus();
                 if (!status.isOK()) {
                     LOGV2_WARNING(22924,
-                                  "Unable to establish connection to {remoteAddress}: {error}",
                                   "Unable to establish connection",
                                   "remoteAddress"_attr = destAddr,
                                   "error"_attr = status);
@@ -362,7 +362,9 @@ Future<DbResponse> ServiceEntryPointBridge::handleRequest(OperationContext* opCt
 
     boost::optional<OpMsgRequest> cmdRequest;
     if ((request.operation() == dbQuery &&
-         NamespaceStringUtil::deserialize(boost::none, DbMessage(request).getns()).isCommand()) ||
+         NamespaceStringUtil::deserialize(
+             boost::none, DbMessage(request).getns(), SerializationContext::stateDefault())
+             .isCommand()) ||
         request.operation() == dbMsg) {
         cmdRequest = rpc::opMsgRequestFromAnyProtocol(request, opCtx->getClient());
 
@@ -370,8 +372,6 @@ Future<DbResponse> ServiceEntryPointBridge::handleRequest(OperationContext* opCt
 
         LOGV2_DEBUG(22917,
                     1,
-                    "Received \"{commandName}\" command with arguments "
-                    "{arguments} from {remote}",
                     "Received command",
                     "commandName"_attr = cmdRequest->getCommandName(),
                     "arguments"_attr = cmdRequest->body,
@@ -403,7 +403,6 @@ Future<DbResponse> ServiceEntryPointBridge::handleRequest(OperationContext* opCt
         // Close the connection to 'dest'.
         case HostSettings::State::kHangUp:
             LOGV2(22918,
-                  "Rejecting connection from {remote}, end connection {source}",
                   "Rejecting connection",
                   "remote"_attr = dest,
                   "source"_attr = source->remote().toString());
@@ -415,15 +414,12 @@ Future<DbResponse> ServiceEntryPointBridge::handleRequest(OperationContext* opCt
                 std::string hostName = dest.toString();
                 if (cmdRequest) {
                     LOGV2(22919,
-                          "Discarding \"{commandName}\" command with arguments "
-                          "{arguments} from {hostName}",
                           "Discarding command from host",
                           "commandName"_attr = cmdRequest->getCommandName(),
                           "arguments"_attr = cmdRequest->body,
                           "hostName"_attr = hostName);
                 } else {
                     LOGV2(22920,
-                          "Discarding {operation} from {hostName}",
                           "Discarding operation from host",
                           "operation"_attr = networkOpToString(request.operation()),
                           "hostName"_attr = hostName);
@@ -472,7 +468,6 @@ Future<DbResponse> ServiceEntryPointBridge::handleRequest(OperationContext* opCt
         // connections from 'host', then do so now.
         if (hostSettings.state == HostSettings::State::kHangUp) {
             LOGV2(22921,
-                  "Closing connection from {remote}, end connection {source}",
                   "Closing connection",
                   "remote"_attr = dest,
                   "source"_attr = source->remote());
@@ -512,8 +507,8 @@ int bridgeMain(int argc, char** argv) {
         // existence of threads.
         if (hasGlobalServiceContext()) {
             auto sc = getGlobalServiceContext();
-            if (sc->getTransportLayer())
-                sc->getTransportLayer()->shutdown();
+            if (sc->getTransportLayerManager())
+                sc->getTransportLayerManager()->shutdown();
 
             if (auto mgr = sc->getSessionManager()) {
                 mgr->endAllSessions(Client::kEmptyTagMask);
@@ -530,7 +525,7 @@ int bridgeMain(int argc, char** argv) {
     setGlobalServiceContext(std::move(serviceContextHolder));
     auto serviceContext = getGlobalServiceContext();
 
-    serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointBridge>());
+    serviceContext->getService()->setServiceEntryPoint(std::make_unique<ServiceEntryPointBridge>());
     serviceContext->setSessionManager(std::make_unique<SessionManagerBridge>(serviceContext));
 
     {
@@ -540,19 +535,24 @@ int bridgeMain(int argc, char** argv) {
 
         auto tl = std::make_unique<mongo::transport::AsioTransportLayer>(
             opts, serviceContext->getSessionManager());
-        serviceContext->setTransportLayer(std::move(tl));
+
+        serviceContext->setTransportLayerManager(
+            std::make_unique<transport::TransportLayerManagerImpl>(std::move(tl)));
     }
+
+    transport::ServiceExecutor::startupAll(serviceContext);
 
     if (auto status = serviceContext->getSessionManager()->start(); !status.isOK()) {
-        LOGV2(4907203, "Error starting service entry point", "error"_attr = status);
+        LOGV2(4907203, "Error starting session manager", "error"_attr = status);
+        return static_cast<int>(ExitCode::netError);
     }
 
-    if (auto status = serviceContext->getTransportLayer()->setup(); !status.isOK()) {
+    if (auto status = serviceContext->getTransportLayerManager()->setup(); !status.isOK()) {
         LOGV2(22922, "Error setting up transport layer", "error"_attr = status);
         return static_cast<int>(ExitCode::netError);
     }
 
-    if (auto status = serviceContext->getTransportLayer()->start(); !status.isOK()) {
+    if (auto status = serviceContext->getTransportLayerManager()->start(); !status.isOK()) {
         LOGV2(22923, "Error starting transport layer", "error"_attr = status);
         return static_cast<int>(ExitCode::netError);
     }

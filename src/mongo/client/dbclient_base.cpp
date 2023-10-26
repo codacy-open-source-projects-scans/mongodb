@@ -33,7 +33,6 @@
 
 
 #include <boost/cstdint.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <limits>
 #include <ostream>
 #include <utility>
@@ -359,7 +358,7 @@ auth::RunCommandHook DBClientBase::_makeAuthRunCommandHook() {
             if (!status.isOK()) {
                 return status;
             }
-            return Future<BSONObj>::makeReady(std::move(ret->getCommandReply()));
+            return Future<BSONObj>::makeReady(ret->getCommandReply());
         } catch (const DBException& e) {
             return Future<BSONObj>::makeReady(e.toStatus());
         }
@@ -443,8 +442,8 @@ void DBClientBase::auth(const DatabaseName& dbname, StringData username, StringD
     auth(authParams);
 }
 
-void DBClientBase::logout(const string& dbname, BSONObj& info) {
-    runCommand(DatabaseNameUtil::deserialize(boost::none, dbname), BSON("logout" << 1), info);
+void DBClientBase::logout(const DatabaseName& dbName, BSONObj& info) {
+    runCommand(dbName, BSON("logout" << 1), info);
 }
 
 bool DBClientBase::isPrimary(bool& isPrimary, BSONObj* info) {
@@ -506,8 +505,8 @@ list<BSONObj> DBClientBase::getCollectionInfos(const DatabaseName& dbName, const
         const long long id = cursorObj["id"].Long();
 
         if (id != 0) {
-            const NamespaceString nss =
-                NamespaceStringUtil::deserialize(dbName.tenantId(), cursorObj["ns"].String());
+            const NamespaceString nss = NamespaceStringUtil::deserialize(
+                dbName.tenantId(), cursorObj["ns"].String(), SerializationContext::stateDefault());
             unique_ptr<DBClientCursor> cursor = getMore(nss, id);
             while (cursor->more()) {
                 infos.push_back(cursor->nextSafe().getOwned());
@@ -788,8 +787,8 @@ std::list<BSONObj> DBClientBase::_getIndexSpecs(const NamespaceStringOrUUID& nsO
 
         const long long id = cursorObj["id"].Long();
         if (id != 0) {
-            const auto cursorNs =
-                NamespaceStringUtil::deserialize(dbName.tenantId(), cursorObj["ns"].String());
+            const auto cursorNs = NamespaceStringUtil::deserialize(
+                dbName.tenantId(), cursorObj["ns"].String(), SerializationContext::stateDefault());
             if (nsOrUuid.isNamespaceString()) {
                 invariant(nsOrUuid.nss() == cursorNs);
             }
@@ -836,11 +835,7 @@ void DBClientBase::dropIndex(const NamespaceString& nss,
 
     BSONObj info;
     if (!runCommand(nss.dbName(), cmdBuilder.obj(), info)) {
-        LOGV2_DEBUG(20118,
-                    _logLevel.toInt(),
-                    "dropIndex failed: {info}",
-                    "dropIndex failed",
-                    "info"_attr = info);
+        LOGV2_DEBUG(20118, _logLevel.toInt(), "dropIndex failed", "info"_attr = info);
         uassert(10007, "dropIndex failed", 0);
     }
 }

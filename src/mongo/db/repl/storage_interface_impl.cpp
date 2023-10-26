@@ -32,7 +32,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <limits>
 #include <mutex>
 #include <utility>
@@ -221,11 +220,8 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
     const BSONObj idIndexSpec,
     const std::vector<BSONObj>& secondaryIndexSpecs) {
 
-    LOGV2_DEBUG(21753,
-                2,
-                "StorageInterfaceImpl::createCollectionForBulkLoading called for ns: {namespace}",
-                "StorageInterfaceImpl::createCollectionForBulkLoading called",
-                logAttrs(nss));
+    LOGV2_DEBUG(
+        21753, 2, "StorageInterfaceImpl::createCollectionForBulkLoading called", logAttrs(nss));
 
     class StashClient {
     public:
@@ -246,8 +242,12 @@ StorageInterfaceImpl::createCollectionForBulkLoading(
     private:
         ServiceContext::UniqueClient _stashedClient;
     } stash;
-    Client::setCurrent(getGlobalServiceContext()->makeClient(
-        str::stream() << NamespaceStringUtil::serialize(nss) << " loader"));
+    Client::setCurrent(getGlobalServiceContext()
+                           ->getService(ClusterRole::ShardServer)
+                           ->makeClient(str::stream()
+                                        << NamespaceStringUtil::serialize(
+                                               nss, SerializationContext::stateDefault())
+                                        << " loader"));
     auto opCtx = cc().makeOperationContext();
     opCtx->setEnforceConstraints(false);
 
@@ -415,7 +415,6 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
         opCtx->getServiceContext()->getStorageEngine()->listDatabases();
     invariant(!dbNames.empty());
     LOGV2(21754,
-          "dropReplicatedDatabases - dropping {numDatabases} databases",
           "dropReplicatedDatabases - dropping databases",
           "numDatabases"_attr = dbNames.size());
 
@@ -439,18 +438,14 @@ Status StorageInterfaceImpl::dropReplicatedDatabases(OperationContext* opCtx) {
                 // fixed.
                 LOGV2(21755,
                       "dropReplicatedDatabases - database disappeared after retrieving list of "
-                      "database names but before drop: {dbName}",
-                      "dropReplicatedDatabases - database disappeared after retrieving list of "
                       "database names but before drop",
                       "dbName"_attr = dbName);
             }
         });
     }
     invariant(hasLocalDatabase, "local database missing");
-    LOGV2(21756,
-          "dropReplicatedDatabases - dropped {numDatabases} databases",
-          "dropReplicatedDatabases - dropped databases",
-          "numDatabases"_attr = dbNames.size());
+    LOGV2(
+        21756, "dropReplicatedDatabases - dropped databases", "numDatabases"_attr = dbNames.size());
 
     return Status::OK();
 }
@@ -1292,8 +1287,14 @@ Timestamp StorageInterfaceImpl::getEarliestOplogTimestamp(OperationContext* opCt
         return optime.getValue().getTimestamp();
     }
 
+    // The oplog can be empty when an initial syncing node crashes before the oplog application
+    // phase.
+    if (statusWithTimestamp.getStatus() == ErrorCodes::CollectionIsEmpty) {
+        return Timestamp::min();
+    }
+
     tassert(5869102,
-            str::stream() << "Expected oplog entries to exist: " << statusWithTimestamp.getStatus(),
+            str::stream() << "Unexpected status: " << statusWithTimestamp.getStatus(),
             statusWithTimestamp.isOK());
 
     return statusWithTimestamp.getValue();

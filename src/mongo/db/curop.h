@@ -35,7 +35,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <cstdint>
@@ -329,9 +328,9 @@ public:
     boost::optional<uint32_t> queryHash;
     // The shape of the original query serialized with readConcern, application name, and namespace.
     // If boost::none, query stats should not be collected for this operation.
-    boost::optional<std::size_t> queryStatsStoreKeyHash;
-    // The KeyGenerator used by query stats to generate the query stats store key.
-    std::unique_ptr<query_stats::KeyGenerator> queryStatsKeyGenerator;
+    boost::optional<std::size_t> queryStatsKeyHash;
+    // The Key used by query stats to generate the query stats store key.
+    std::unique_ptr<query_stats::Key> queryStatsKey;
 
     // The query framework that this operation used. Will be unknown for non query operations.
     PlanExecutor::QueryFramework queryFramework{PlanExecutor::QueryFramework::kUnknown};

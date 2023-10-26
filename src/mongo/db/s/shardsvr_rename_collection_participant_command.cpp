@@ -161,7 +161,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardsvrRenameCollectionParticipantCommand);
+MONGO_REGISTER_COMMAND(ShardsvrRenameCollectionParticipantCommand).forShard();
 
 class ShardsvrRenameCollectionUnblockParticipantCommand final
     : public TypedCommand<ShardsvrRenameCollectionUnblockParticipantCommand> {
@@ -210,7 +210,8 @@ public:
             const auto& req = request();
 
             const auto service = RenameCollectionParticipantService::getService(opCtx);
-            const auto id = BSON("_id" << NamespaceStringUtil::serialize(fromNss));
+            const auto id = BSON("_id" << NamespaceStringUtil::serialize(
+                                     fromNss, SerializationContext::stateDefault()));
             const auto [optRenameCollectionParticipant, _] =
                 RenameParticipantInstance::lookup(opCtx, service, id);
             if (optRenameCollectionParticipant) {
@@ -252,7 +253,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(ShardsvrRenameCollectionUnblockParticipantCommand);
+MONGO_REGISTER_COMMAND(ShardsvrRenameCollectionUnblockParticipantCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

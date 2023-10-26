@@ -36,7 +36,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -459,7 +458,7 @@ private:
         return hash;
     }
 };
-MONGO_REGISTER_COMMAND(DBHashCmd);
+MONGO_REGISTER_COMMAND(DBHashCmd).forShard();
 
 }  // namespace
 }  // namespace mongo

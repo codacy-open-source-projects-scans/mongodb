@@ -53,10 +53,10 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/query_stats/key_generator.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_stats/transform_algorithm_gen.h"
-#include "mongo/db/query/serialization_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/producer_consumer_queue.h"
@@ -158,7 +158,8 @@ private:
           _algorithm(algorithm),
           _hmacKey(hmacKey) {}
 
-    BSONObj computeQueryStatsKey(std::shared_ptr<const KeyGenerator> keyGenerator) const;
+    BSONObj computeQueryStatsKey(std::shared_ptr<const Key> key,
+                                 const SerializationContext& serializationContext) const;
 
     GetNextResult doGetNext() final;
 

@@ -30,7 +30,6 @@
 
 #include <string>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -104,10 +103,7 @@ Status ShardingLogging::logAction(OperationContext* opCtx,
         if (result.isOK()) {
             _actionLogCollectionCreated.store(1);
         } else {
-            LOGV2(22078,
-                  "Couldn't create config.actionlog collection: {error}",
-                  "Couldn't create config.actionlog collection",
-                  "error"_attr = result);
+            LOGV2(22078, "Couldn't create config.actionlog collection", "error"_attr = result);
             return result;
         }
     }
@@ -149,10 +145,7 @@ Status ShardingLogging::logChangeChecked(OperationContext* opCtx,
         if (result.isOK()) {
             _changeLogCollectionCreated.store(1);
         } else {
-            LOGV2(22079,
-                  "Couldn't create config.changelog collection: {error}",
-                  "Couldn't create config.changelog collection",
-                  "error"_attr = result);
+            LOGV2(22079, "Couldn't create config.changelog collection", "error"_attr = result);
             return result;
         }
     }
@@ -171,9 +164,9 @@ Status ShardingLogging::_log(OperationContext* opCtx,
     Date_t now = Grid::get(opCtx)->getNetwork()->now();
 
     const auto& session = opCtx->getClient()->session();
-    const int port = session ? session->local().port() : serverGlobalParams.port;
+    const std::string sessionStr = session ? fmt::format(":{}", session->toBSON().toString()) : "";
     const std::string serverName = str::stream()
-        << Grid::get(opCtx)->getNetwork()->getHostName() << ":" << port;
+        << Grid::get(opCtx)->getNetwork()->getHostName() << sessionStr;
     const std::string changeId = str::stream()
         << serverName << "-" << now.toString() << "-" << OID::gen();
 
@@ -195,7 +188,6 @@ Status ShardingLogging::_log(OperationContext* opCtx,
 
     BSONObj changeLogBSON = changeLog.toBSON();
     LOGV2(22080,
-          "About to log metadata event into {namespace}: {event}",
           "About to log metadata event",
           "namespace"_attr = logCollName,
           "event"_attr = redact(changeLogBSON));

@@ -41,7 +41,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
@@ -306,7 +305,12 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx, BSON
         uassert(ErrorCodes::IllegalOperation,
                 "Request sent without attaching database version",
                 clientDbVersion);
-        DatabaseShardingState::assertIsPrimaryShardForDb(opCtx, nss.dbName());
+        {
+            Lock::DBLock dbLock(opCtx, nss.dbName(), MODE_IS);
+            const auto scopedDss =
+                DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
+            scopedDss->assertIsPrimaryShardForDb(opCtx);
+        }
         coorMetadata.setDatabaseVersion(clientDbVersion);
     }
 

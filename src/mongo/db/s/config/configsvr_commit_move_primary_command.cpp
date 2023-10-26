@@ -85,7 +85,8 @@ public:
                 opCtx,
                 request().getCommandParameter(),
                 request().getExpectedDatabaseVersion(),
-                request().getTo());
+                request().getTo(),
+                request().getSerializationContext());
         }
 
     private:
@@ -122,7 +123,7 @@ private:
         return AllowedOnSecondary::kNever;
     }
 };
-MONGO_REGISTER_COMMAND(ConfigsvrCommitMovePrimaryCommand);
+MONGO_REGISTER_COMMAND(ConfigsvrCommitMovePrimaryCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

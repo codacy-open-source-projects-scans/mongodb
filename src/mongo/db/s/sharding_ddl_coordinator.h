@@ -37,7 +37,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -234,6 +233,8 @@ private:
     std::unique_ptr<Locker> _locker;
 
     std::stack<DDLLockManager::ScopedBaseDDLLock> _scopedLocks;
+
+    friend class ShardingDDLCoordinatorTest;
 };
 
 template <class StateDoc>
@@ -276,7 +277,9 @@ protected:
 
         // Append static info
         bob.append("type", "op");
-        bob.append("ns", NamespaceStringUtil::serialize(originalNss()));
+        bob.append(
+            "ns",
+            NamespaceStringUtil::serialize(originalNss(), SerializationContext::stateDefault()));
         bob.append("desc", _coordinatorName);
         bob.append("op", "command");
         bob.append("active", true);
@@ -286,7 +289,9 @@ protected:
             stdx::lock_guard lk{_docMutex};
             if (const auto& bucketNss = _doc.getBucketNss()) {
                 // Bucket namespace is only present in case the collection is a sharded timeseries
-                bob.append("bucketNamespace", NamespaceStringUtil::serialize(bucketNss.get()));
+                bob.append("bucketNamespace",
+                           NamespaceStringUtil::serialize(bucketNss.get(),
+                                                          SerializationContext::stateDefault()));
             }
         }
 

@@ -143,10 +143,7 @@ public:
              const DatabaseName&,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
-        LOGV2(21573,
-              "replSetTest command received: {cmdObj}",
-              "replSetTest command received",
-              "cmdObj"_attr = cmdObj);
+        LOGV2(21573, "replSetTest command received", "cmdObj"_attr = cmdObj);
 
         auto replCoord = ReplicationCoordinator::get(getGlobalServiceContext());
 
@@ -164,7 +161,6 @@ public:
             uassertStatusOK(status);
             Milliseconds timeout(timeoutMillis);
             LOGV2(21574,
-                  "replSetTest: waiting {timeout} for member state to become {expectedState}",
                   "replSetTest: waiting for member state to become expected state",
                   "timeout"_attr = timeout,
                   "expectedState"_attr = expectedState);
@@ -217,7 +213,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(CmdReplSetTest).testOnly();
+MONGO_REGISTER_COMMAND(CmdReplSetTest).testOnly().forShard();
 
 /** get rollback id.  used to check if a rollback happened during some interval of time.
     as consumed, the rollback id is not in any particular order, it simply changes on each rollback.
@@ -237,7 +233,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetGetRBID);
+MONGO_REGISTER_COMMAND(CmdReplSetGetRBID).forShard();
 
 class CmdReplSetGetConfig : public ReplSetCommand {
 public:
@@ -280,7 +276,7 @@ private:
         return ActionSet{ActionType::replSetGetConfig};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetGetConfig);
+MONGO_REGISTER_COMMAND(CmdReplSetGetConfig).forShard();
 
 namespace {
 HostAndPort someHostAndPortForMe() {
@@ -357,11 +353,7 @@ void parseReplSetSeedList(ReplicationCoordinatorExternalState* externalState,
         seedSet.insert(m);
         // uassert(13101, "can't use localhost in replset host list", !m.isLocalHost());
         if (externalState->isSelf(m, getGlobalServiceContext())) {
-            LOGV2_DEBUG(21576,
-                        1,
-                        "ignoring seed {seed} (=self)",
-                        "Ignoring seed (=self)",
-                        "seed"_attr = m.toString());
+            LOGV2_DEBUG(21576, 1, "Ignoring seed (=self)", "seed"_attr = m.toString());
         } else {
             seeds->push_back(m);
         }
@@ -440,10 +432,7 @@ public:
             }
             b.appendArray("members", members.obj());
             configObj = b.obj();
-            LOGV2(21578,
-                  "created this configuration for initiation : {config}",
-                  "Created configuration for initiation",
-                  "config"_attr = configObj);
+            LOGV2(21578, "Created configuration for initiation", "config"_attr = configObj);
         }
 
         if (configObj.getField("version").eoo()) {
@@ -464,7 +453,7 @@ private:
         return ActionSet{ActionType::replSetConfigure};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetInitiate);
+MONGO_REGISTER_COMMAND(CmdReplSetInitiate).forShard();
 
 class CmdReplSetReconfig : public ReplSetCommand {
 public:
@@ -532,7 +521,7 @@ private:
         return ActionSet{ActionType::replSetConfigure};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetReconfig);
+MONGO_REGISTER_COMMAND(CmdReplSetReconfig).forShard();
 
 class CmdReplSetFreeze : public ReplSetCommand {
 public:
@@ -564,7 +553,7 @@ private:
         return ActionSet{ActionType::replSetStateChange};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetFreeze);
+MONGO_REGISTER_COMMAND(CmdReplSetFreeze).forShard();
 
 class CmdReplSetStepDown : public ReplSetCommand {
 public:
@@ -655,7 +644,7 @@ private:
         return ActionSet{ActionType::replSetStateChange};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetStepDown);
+MONGO_REGISTER_COMMAND(CmdReplSetStepDown).forShard();
 
 class CmdReplSetMaintenance : public ReplSetCommand {
 public:
@@ -681,7 +670,7 @@ private:
         return ActionSet{ActionType::replSetStateChange};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetMaintenance);
+MONGO_REGISTER_COMMAND(CmdReplSetMaintenance).forShard();
 
 class CmdReplSetSyncFrom : public ReplSetCommand {
 public:
@@ -712,7 +701,7 @@ private:
         return ActionSet{ActionType::replSetStateChange};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetSyncFrom);
+MONGO_REGISTER_COMMAND(CmdReplSetSyncFrom).forShard();
 
 class CmdReplSetUpdatePosition : public ReplSetCommand {
 public:
@@ -760,7 +749,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetUpdatePosition);
+MONGO_REGISTER_COMMAND(CmdReplSetUpdatePosition).forShard();
 
 namespace {
 /**
@@ -804,7 +793,6 @@ public:
 
         LOGV2_FOR_HEARTBEATS(24095,
                              2,
-                             "Received heartbeat request from {from}, {cmdObj}",
                              "Received heartbeat request",
                              "from"_attr = cmdObj.getStringField("from"),
                              "cmdObj"_attr = cmdObj);
@@ -822,7 +810,6 @@ public:
 
         LOGV2_FOR_HEARTBEATS(24096,
                              2,
-                             "Processing heartbeat request from {from}, {cmdObj}",
                              "Processing heartbeat request",
                              "from"_attr = cmdObj.getStringField("from"),
                              "cmdObj"_attr = cmdObj);
@@ -833,7 +820,6 @@ public:
 
         LOGV2_FOR_HEARTBEATS(24097,
                              2,
-                             "Generated heartbeat response to {from}, {response}",
                              "Generated heartbeat response",
                              "from"_attr = cmdObj.getStringField("from"),
                              "response"_attr = response);
@@ -841,7 +827,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetHeartbeat);
+MONGO_REGISTER_COMMAND(CmdReplSetHeartbeat).forShard();
 
 class CmdReplSetStepUp : public ReplSetCommand {
 public:
@@ -860,10 +846,7 @@ public:
         status = ReplicationCoordinator::get(opCtx)->stepUpIfEligible(skipDryRun);
 
         if (!status.isOK()) {
-            LOGV2(21582,
-                  "replSetStepUp request failed {error}",
-                  "replSetStepUp request failed",
-                  "error"_attr = causedBy(status));
+            LOGV2(21582, "replSetStepUp request failed", "error"_attr = causedBy(status));
         }
 
         uassertStatusOK(status);
@@ -875,7 +858,7 @@ private:
         return ActionSet{ActionType::replSetStateChange};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetStepUp);
+MONGO_REGISTER_COMMAND(CmdReplSetStepUp).forShard();
 
 class CmdReplSetAbortPrimaryCatchUp : public ReplSetCommand {
 public:
@@ -900,7 +883,6 @@ public:
                 kFailedWithReplSetAbortPrimaryCatchUpCmd);
         if (!status.isOK()) {
             LOGV2(21584,
-                  "replSetAbortPrimaryCatchUp request failed {error}",
                   "replSetAbortPrimaryCatchUp request failed",
                   "error"_attr = causedBy(status));
         }
@@ -913,7 +895,7 @@ private:
         return ActionSet{ActionType::replSetStateChange};
     }
 };
-MONGO_REGISTER_COMMAND(CmdReplSetAbortPrimaryCatchUp);
+MONGO_REGISTER_COMMAND(CmdReplSetAbortPrimaryCatchUp).forShard();
 
 }  // namespace repl
 }  // namespace mongo

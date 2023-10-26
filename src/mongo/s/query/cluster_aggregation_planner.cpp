@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <cstddef>
 #include <list>
@@ -70,7 +69,6 @@
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_skip.h"
 #include "mongo/db/pipeline/search_helper.h"
-#include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collation_spec.h"
@@ -136,6 +134,7 @@ MONGO_FAIL_POINT_DEFINE(shardedAggregateFailToEstablishMergingShardCursor);
 MONGO_FAIL_POINT_DEFINE(shardedAggregateHangBeforeDispatchMergingPipeline);
 
 using sharded_agg_helpers::DispatchShardPipelineResults;
+using sharded_agg_helpers::PipelineDataSource;
 using sharded_agg_helpers::SplitPipeline;
 
 namespace {
@@ -179,14 +178,20 @@ AsyncRequestsSender::Response establishMergingShardCursor(OperationContext* opCt
 
 ShardId pickMergingShard(OperationContext* opCtx,
                          bool needsPrimaryShardMerge,
+                         const boost::optional<ShardId>& pipelineMergeShardId,
                          const std::vector<ShardId>& targetedShards,
                          ShardId primaryShard) {
     auto& prng = opCtx->getClient()->getPrng();
     // If we cannot merge on mongoS, establish the merge cursor on a shard. Perform the merging
-    // command on random shard, unless the pipeline dictates that it needs to be run on the primary
+    // command on random shard, unless the pipeline dictates that it needs to be run on a specific
     // shard for the database.
-    return needsPrimaryShardMerge ? primaryShard
-                                  : targetedShards[prng.nextInt32(targetedShards.size())];
+    if (needsPrimaryShardMerge) {
+        return primaryShard;
+    } else if (pipelineMergeShardId) {
+        return *pipelineMergeShardId;
+    } else {
+        return targetedShards[prng.nextInt32(targetedShards.size())];
+    }
 }
 
 BSONObj createCommandForMergingShard(Document serializedCommand,
@@ -280,8 +285,11 @@ Status dispatchMergingPipeline(const boost::intrusive_ptr<ExpressionContext>& ex
     // therefore must have a valid routing table.
     invariant(cri);
 
-    const ShardId mergingShardId = pickMergingShard(
-        opCtx, shardDispatchResults.needsPrimaryShardMerge, targetedShards, cri->cm.dbPrimary());
+    const ShardId mergingShardId = pickMergingShard(opCtx,
+                                                    shardDispatchResults.needsPrimaryShardMerge,
+                                                    mergePipeline->needsSpecificShardMerger(),
+                                                    targetedShards,
+                                                    cri->cm.dbPrimary());
     const bool mergingShardContributesData =
         std::find(targetedShards.begin(), targetedShards.end(), mergingShardId) !=
         targetedShards.end();
@@ -437,7 +445,7 @@ BSONObj establishMergingMongosCursor(OperationContext* opCtx,
     opDebug.additiveMetrics.nBatches = 1;
     CurOp::get(opCtx)->setEndOfOpMetrics(responseBuilder.numDocs());
     if (exhausted) {
-        collectQueryStatsMongos(opCtx, ccc->getKeyGenerator());
+        collectQueryStatsMongos(opCtx, ccc->getKey());
     } else {
         collectQueryStatsMongos(opCtx, ccc);
     }
@@ -664,8 +672,7 @@ AggregationTargeter AggregationTargeter::make(
     OperationContext* opCtx,
     const std::function<std::unique_ptr<Pipeline, PipelineDeleter>()> buildPipelineFn,
     boost::optional<CollectionRoutingInfo> cri,
-    bool hasChangeStream,
-    bool startsWithDocuments,
+    PipelineDataSource pipelineDataSource,
     bool perShardCursor) {
     if (perShardCursor) {
         return {TargetingPolicy::kSpecificShardOnly, nullptr, cri};
@@ -674,10 +681,16 @@ AggregationTargeter AggregationTargeter::make(
     tassert(7972401,
             "Aggregation did not have a routing table and does not feature either a $changeStream "
             "or a $documents stage",
-            cri || hasChangeStream || startsWithDocuments);
+            cri || pipelineDataSource == PipelineDataSource::kChangeStream ||
+                pipelineDataSource == PipelineDataSource::kQueue);
     auto pipeline = buildPipelineFn();
     auto policy = pipeline->requiredToRunOnMongos() ? TargetingPolicy::kMongosRequired
                                                     : TargetingPolicy::kAnyShard;
+    if (!cri && pipelineDataSource == PipelineDataSource::kQueue) {
+        // If we don't have a routing table and there is a $documents stage, we must run on
+        // mongos.
+        policy = TargetingPolicy::kMongosRequired;
+    }
     return AggregationTargeter{policy, std::move(pipeline), cri};
 }
 
@@ -717,15 +730,13 @@ Status dispatchPipelineAndMerge(OperationContext* opCtx,
                                 const ClusterAggregate::Namespaces& namespaces,
                                 const PrivilegeVector& privileges,
                                 BSONObjBuilder* result,
-                                bool hasChangeStream,
-                                bool startsWithDocuments,
+                                PipelineDataSource pipelineDataSource,
                                 bool eligibleForSampling) {
     auto expCtx = targeter.pipeline->getContext();
     // If not, split the pipeline as necessary and dispatch to the relevant shards.
     auto shardDispatchResults =
         sharded_agg_helpers::dispatchShardPipeline(serializedCommand,
-                                                   hasChangeStream,
-                                                   startsWithDocuments,
+                                                   pipelineDataSource,
                                                    eligibleForSampling,
                                                    std::move(targeter.pipeline),
                                                    expCtx->explain);
@@ -792,7 +803,7 @@ Status dispatchPipelineAndMerge(OperationContext* opCtx,
                                    std::move(shardDispatchResults),
                                    result,
                                    privileges,
-                                   hasChangeStream);
+                                   pipelineDataSource == PipelineDataSource::kChangeStream);
 }
 
 std::pair<BSONObj, boost::optional<UUID>> getCollationAndUUID(
@@ -868,13 +879,8 @@ Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionConte
 
     // Format the command for the shard. This wraps the command as an explain if necessary, and
     // rewrites the result into a format safe to forward to shards.
-    BSONObj cmdObj = sharded_agg_helpers::createPassthroughCommandForShard(expCtx,
-                                                                           serializedCommand,
-                                                                           explain,
-                                                                           nullptr, /* pipeline */
-                                                                           BSONObj(),
-                                                                           boost::none,
-                                                                           overrideBatchSize);
+    BSONObj cmdObj = sharded_agg_helpers::createPassthroughCommandForShard(
+        expCtx, serializedCommand, explain, nullptr /* pipeline */, boost::none, overrideBatchSize);
 
     if (eligibleForSampling) {
         if (auto sampleId = analyze_shard_key::tryGenerateSampleId(

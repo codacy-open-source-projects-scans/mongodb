@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
 #include <tuple>
@@ -120,8 +119,8 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
     if (collectionUUID) {
         // The multi-document remove command cannot be run in  transactions, so run it using
         // an alternative client.
-        auto newClient = opCtx->getServiceContext()->makeClient("removeRangeDeletions-" +
-                                                                collectionUUID->toString());
+        auto newClient =
+            opCtx->getService()->makeClient("removeRangeDeletions-" + collectionUUID->toString());
         AlternativeClientRegion acr{newClient};
         auto executor =
             Grid::get(opCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -291,7 +290,7 @@ void DropCollectionCoordinator::_commitDropCollection(
     sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(
         opCtx,
         BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName
-             << NamespaceStringUtil::serialize(nss())));
+             << NamespaceStringUtil::serialize(nss(), SerializationContext::stateDefault())));
 
     if (collIsSharded) {
         invariant(_doc.getCollInfo());

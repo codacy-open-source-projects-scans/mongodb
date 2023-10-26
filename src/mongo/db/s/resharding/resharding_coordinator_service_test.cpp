@@ -29,7 +29,6 @@
 
 #include <absl/container/node_hash_map.h>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -133,7 +132,7 @@ public:
         return std::make_shared<ReshardingCoordinator>(
             this,
             ReshardingCoordinatorDocument::parse(IDLParserContext("ReshardingCoordinatorStateDoc"),
-                                                 std::move(initialState)),
+                                                 initialState),
             std::make_shared<ExternalStateForTest>(),
             _serviceContext);
     }

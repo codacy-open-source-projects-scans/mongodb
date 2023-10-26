@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -481,13 +480,6 @@ public:
         for (auto& o : _observers)
             o->postRenameCollection(
                 opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
-    }
-    void onApplyOps(OperationContext* const opCtx,
-                    const DatabaseName& dbName,
-                    const BSONObj& applyOpCmd) override {
-        ReservedTimes times{opCtx};
-        for (auto& o : _observers)
-            o->onApplyOps(opCtx, dbName, applyOpCmd);
     }
 
     void onEmptyCapped(OperationContext* const opCtx,

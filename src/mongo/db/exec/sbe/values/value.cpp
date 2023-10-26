@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/numeric/conversion/converter_policies.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cmath>
 
 #include "mongo/base/compare_numbers.h"
@@ -230,6 +229,9 @@ void releaseValueDeep(TypeTags tag, Value val) noexcept {
         case TypeTags::ArraySet:
             delete getArraySetView(val);
             break;
+        case TypeTags::ArrayMultiSet:
+            delete getArrayMultiSetView(val);
+            break;
         case TypeTags::Object:
             delete getObjectView(val);
             break;
@@ -331,6 +333,8 @@ BSONType tagToType(TypeTags tag) noexcept {
         case TypeTags::Array:
             return BSONType::Array;
         case TypeTags::ArraySet:
+            return BSONType::Array;
+        case TypeTags::ArrayMultiSet:
             return BSONType::Array;
         case TypeTags::Object:
             return BSONType::Object;
@@ -438,6 +442,7 @@ std::size_t hashValue(TypeTags tag, Value val, const CollatorInterface* collator
             return getKeyStringView(val)->hash();
         case TypeTags::Array:
         case TypeTags::ArraySet:
+        case TypeTags::ArrayMultiSet:
         case TypeTags::bsonArray: {
             auto arr = ArrayEnumerator{tag, val};
             auto res = hashInit();
@@ -605,16 +610,27 @@ std::pair<TypeTags, Value> compareValue(TypeTags lhsTag,
     } else if (lhsTag == TypeTags::bsonUndefined && rhsTag == TypeTags::bsonUndefined) {
         return {TypeTags::NumberInt32, bitcastFrom<int32_t>(0)};
     } else if (isArray(lhsTag) && isArray(rhsTag)) {
-        // ArraySets carry semantics of an unordered set, so we cannot define a deterministic
-        // less or greater operations on them, but only compare for equality. Comparing an
-        // ArraySet with a regular Array is equivalent of converting the ArraySet to an Array
-        // and them comparing the two Arrays, so we can simply use a generic algorithm below.
+        // ArraySets and ArrayMultiSet carry semantics of an unordered set, so we cannot define a
+        // deterministic less or greater operations on them, but only compare for equality.
+        // Comparing an ArraySet or ArrayMultiSet with a regular Array is equivalent of converting
+        // the ArraySet/ArrayMultiSet to an Array and them comparing the two Arrays, so we can
+        // simply use a generic algorithm below.
         if (lhsTag == TypeTags::ArraySet && rhsTag == TypeTags::ArraySet) {
             auto lhsArr = getArraySetView(lhsValue);
             auto rhsArr = getArraySetView(rhsValue);
             if (*lhsArr == *rhsArr) {
                 return {TypeTags::NumberInt32, bitcastFrom<int32_t>(0)};
             }
+            return {TypeTags::Nothing, 0};
+        }
+
+        if (lhsTag == TypeTags::ArrayMultiSet && rhsTag == TypeTags::ArrayMultiSet) {
+            auto lhsArr = getArrayMultiSetView(lhsValue);
+            auto rhsArr = getArrayMultiSetView(rhsValue);
+            if (*lhsArr == *rhsArr) {
+                return {TypeTags::NumberInt32, bitcastFrom<int32_t>(0)};
+            }
+            // If they are not equal then we cannot say if one is smaller than the other.
             return {TypeTags::Nothing, 0};
         }
 
@@ -788,7 +804,9 @@ std::pair<TypeTags, Value> ArrayEnumerator::getViewOfValue() const {
     if (_array) {
         return _array->getAt(_index);
     } else if (_arraySet) {
-        return {_iter->first, _iter->second};
+        return {_arraySetIter->first, _arraySetIter->second};
+    } else if (_arrayMultiSet) {
+        return {_arrayMultiSetIter->first, _arrayMultiSetIter->second};
     } else {
         return bson::convertFrom<true>(_arrayCurrent, _arrayEnd, _fieldNameSize);
     }
@@ -802,11 +820,17 @@ bool ArrayEnumerator::advance() {
 
         return _index < _array->size();
     } else if (_arraySet) {
-        if (_iter != _arraySet->values().end()) {
-            ++_iter;
+        if (_arraySetIter != _arraySet->values().end()) {
+            ++_arraySetIter;
         }
 
-        return _iter != _arraySet->values().end();
+        return _arraySetIter != _arraySet->values().end();
+    } else if (_arrayMultiSet) {
+        if (_arrayMultiSetIter != _arrayMultiSet->values().end()) {
+            ++_arrayMultiSetIter;
+        }
+
+        return _arrayMultiSetIter != _arrayMultiSet->values().end();
     } else {
         if (_arrayCurrent != _arrayEnd - 1) {
             _arrayCurrent = bson::advance(_arrayCurrent, _fieldNameSize);

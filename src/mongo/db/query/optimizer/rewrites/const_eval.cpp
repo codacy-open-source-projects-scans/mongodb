@@ -30,7 +30,6 @@
 #include "mongo/db/query/optimizer/rewrites/const_eval.h"
 
 #include <absl/meta/type_traits.h>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -42,6 +41,7 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/optimizer/algebra/operator.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
+#include "mongo/db/query/optimizer/utils/abt_compare.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/util/assert_util.h"
 
@@ -358,13 +358,9 @@ void ConstEval::transport(ABT& n, const BinaryOp& op, ABT& lhs, ABT& rhs) {
         }
 
         case Operations::Eq: {
-            if (lhs == rhs) {
-                // If the subtrees are equal, we can conclude that their result is equal because we
-                // have only pure functions.
-                swapAndUpdate(n, Constant::boolean(true));
-            } else if (lhs.is<Constant>() && rhs.is<Constant>()) {
-                // We have two constants which are not equal.
-                swapAndUpdate(n, Constant::boolean(false));
+            auto cmpVal = cmpEqFast(lhs, rhs);
+            if (cmpVal != CmpResult::kIncomparable) {
+                swapAndUpdate(n, Constant::boolean(cmpVal == CmpResult::kTrue));
             }
             break;
         }
@@ -374,98 +370,12 @@ void ConstEval::transport(ABT& n, const BinaryOp& op, ABT& lhs, ABT& rhs) {
         case Operations::Gt:
         case Operations::Gte:
         case Operations::Cmp3w: {
-            const auto lhsConst = lhs.cast<Constant>();
-            const auto rhsConst = rhs.cast<Constant>();
-
-            if (lhsConst) {
-                const auto [lhsTag, lhsVal] = lhsConst->get();
-
-                if (rhsConst) {
-                    const auto [rhsTag, rhsVal] = rhsConst->get();
-
-                    const auto [compareTag, compareVal] =
-                        sbe::value::compareValue(lhsTag, lhsVal, rhsTag, rhsVal);
-                    uassert(7086701,
-                            "Invalid comparison result",
-                            compareTag == sbe::value::TypeTags::NumberInt32);
-                    const auto cmpVal = sbe::value::bitcastTo<int32_t>(compareVal);
-
-                    switch (op.op()) {
-                        case Operations::Lt:
-                            swapAndUpdate(n, Constant::boolean(cmpVal < 0));
-                            break;
-                        case Operations::Lte:
-                            swapAndUpdate(n, Constant::boolean(cmpVal <= 0));
-                            break;
-                        case Operations::Gt:
-                            swapAndUpdate(n, Constant::boolean(cmpVal > 0));
-                            break;
-                        case Operations::Gte:
-                            swapAndUpdate(n, Constant::boolean(cmpVal >= 0));
-                            break;
-                        case Operations::Cmp3w:
-                            swapAndUpdate(n, Constant::int32(cmpVal));
-                            break;
-
-                        default:
-                            MONGO_UNREACHABLE;
-                    }
+            auto cmpVal = cmp3wFast(op.op(), lhs, rhs);
+            if (cmpVal != CmpResult::kIncomparable) {
+                if (op.op() == Operations::Cmp3w) {
+                    swapAndUpdate(n, Constant::int32(static_cast<int32_t>(cmpVal)));
                 } else {
-                    if (lhsTag == sbe::value::TypeTags::MinKey) {
-                        switch (op.op()) {
-                            case Operations::Lte:
-                                swapAndUpdate(n, Constant::boolean(true));
-                                break;
-                            case Operations::Gt:
-                                swapAndUpdate(n, Constant::boolean(false));
-                                break;
-
-                            default:
-                                break;
-                        }
-                    } else if (lhsTag == sbe::value::TypeTags::MaxKey) {
-                        switch (op.op()) {
-                            case Operations::Lt:
-                                swapAndUpdate(n, Constant::boolean(false));
-                                break;
-                            case Operations::Gte:
-                                swapAndUpdate(n, Constant::boolean(true));
-                                break;
-
-                            default:
-                                break;
-                        }
-                    }
-                }
-            } else if (rhsConst) {
-                const auto [rhsTag, rhsVal] = rhsConst->get();
-
-                if (rhsTag == sbe::value::TypeTags::MinKey) {
-                    switch (op.op()) {
-                        case Operations::Lt:
-                            swapAndUpdate(n, Constant::boolean(false));
-                            break;
-
-                        case Operations::Gte:
-                            swapAndUpdate(n, Constant::boolean(true));
-                            break;
-
-                        default:
-                            break;
-                    }
-                } else if (rhsTag == sbe::value::TypeTags::MaxKey) {
-                    switch (op.op()) {
-                        case Operations::Lte:
-                            swapAndUpdate(n, Constant::boolean(true));
-                            break;
-
-                        case Operations::Gt:
-                            swapAndUpdate(n, Constant::boolean(false));
-                            break;
-
-                        default:
-                            break;
-                    }
+                    swapAndUpdate(n, Constant::boolean(cmpVal == CmpResult::kTrue));
                 }
             }
             break;
@@ -526,8 +436,8 @@ void ConstEval::transport(ABT& n, const FunctionCall& op, std::vector<ABT>& args
     } else if (op.name() == "isArray") {
         if (args.size() == 1 && args[0].is<Constant>()) {
             const auto tag = args[0].cast<Constant>()->get().first;
-            const bool v =
-                tag == sbe::value::TypeTags::Array || tag == sbe::value::TypeTags::ArraySet;
+            const bool v = tag == sbe::value::TypeTags::Array ||
+                tag == sbe::value::TypeTags::ArraySet || tag == sbe::value::TypeTags::ArrayMultiSet;
             swapAndUpdate(n, Constant::boolean(v));
         }
     }

@@ -38,7 +38,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -63,7 +62,9 @@
 #include "mongo/transport/service_executor_synchronous.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_workflow_test_util.h"
+#include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -240,8 +241,8 @@ public:
         return std::make_shared<Session>(this);
     }
 
-    MockSessionManager* sessionManager() {
-        return checked_cast<MockSessionManager*>(_sc->getSessionManager());
+    SessionManagerCommon* sessionManager() {
+        return checked_cast<SessionManagerCommon*>(_sc->getSessionManager());
     }
 
 private:
@@ -282,9 +283,12 @@ public:
         setGlobalServiceContext(ServiceContext::make());
         auto sc = getGlobalServiceContext();
         _coordinator = std::make_unique<MockCoordinator>(sc, exhaustRounds + 1);
-        sc->setServiceEntryPoint(std::make_unique<MockCoordinator::Sep>(_coordinator.get()));
-        sc->setSessionManager(std::make_unique<MockSessionManager>(sc));
-        sc->setTransportLayer(std::make_unique<TransportLayerMockWithReactor>());
+        sc->getService()->setServiceEntryPoint(
+            std::make_unique<MockCoordinator::Sep>(_coordinator.get()));
+        sc->setSessionManager(std::make_unique<SessionManagerCommon>(sc));
+        auto tl = std::make_unique<TransportLayerMockWithReactor>();
+        sc->setTransportLayerManager(
+            std::make_unique<transport::TransportLayerManagerImpl>(std::move(tl)));
         LOGV2_DEBUG(7015136, 3, "About to start sep");
         invariant(_coordinator->sessionManager()->start());
     }

@@ -41,6 +41,25 @@ variables:
         variant: compile-amazon2-streams
       - name: schedule_global_auto_tasks
         variant: task_generation
+  _real_compile_al2023_arm64: &_compile_al2023_arm64
+      - name: compile
+        variant: compile-al2023-arm64
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+  _real_compile_al2023_arm64_with_mongocrypt_shlib: &_compile_al2023_arm64_with_mongocrypt_shlib
+      - name: compile
+        variant: compile-al2023-arm64
+      - name: compile_mongocrypt_shlib
+        variant: compile-al2023-arm64-mongocrypt-shlib
+      - name: schedule_global_auto_tasks
+        variant: task_generation
+  _real_compile_mixed_amazon_linux2_al2023_arm64: &_compile_mixed_amazon_linux2_al2023_arm64
+      - name: compile
+        variant: compile-amazon-linux2-arm64
+      - name: compile
+        variant: compile-al2023-arm64
+      - name: schedule_global_auto_tasks
+        variant: task_generation
 
   _real_expansions: &_expansion_updates
       []
@@ -61,6 +80,9 @@ variables:
 #     - name: schedule_global_auto_tasks
 #       variant: task_generation
 #  _skip_compile_amazon2_streams: &_compile_amazon2_streams
+#     - name: schedule_global_auto_tasks
+#       variant: task_generation
+#  _skip_compile_al2023_arm64: &_compile_al2023_arm64
 #     - name: schedule_global_auto_tasks
 #       variant: task_generation
 #  _skip_expansions: &_expansion_updates
@@ -384,6 +406,21 @@ functions:
               set -o igncr
             fi;
 
+            export cleanup=false
+
+            # install go for tools if required (al2023 for now).
+            if [ ! -d "/opt/golang/go1.19" ]; then
+              cleanup=true
+              echo -n "go-lang missing downloading ..."
+              go_file=./go1.19.8.tar.gz
+              wget --quiet https://go.dev/dl/go1.19.8.linux$(echo ${compile_variant} | sed 's/^-al202.//').tar.gz -O "$go_file"
+              echo -n " installing ..."
+              sudo mkdir -p /opt/golang/go1.19
+              sudo tar -C /opt/golang/go1.19 -xzf "$go_file" --strip-components=1
+              [ -e "$go_file" ] && rm -f "$go_file"
+              echo  "done"
+            fi
+
             # set_goenv provides set_goenv()
             . ./set_goenv.sh
             GOROOT="" set_goenv || exit
@@ -397,6 +434,9 @@ functions:
                 go build -o "../../../../../mongodb/bin/$i${exe|}" $i/main/$i.go
                 "../../../../../mongodb/bin/$i${exe|}" --version
             done
+            if "$cleanup"; then
+              sudo rm -rf "/opt/golang/go1.19"
+            fi
           fi
     - command: shell.exec
       params:
@@ -571,6 +611,12 @@ tasks:
       - func: f_run_dsi_workload
         vars:
           test_control: short
+  - name: canaries_only
+    priority: 5
+    commands:
+      - func: f_run_dsi_workload
+        vars:
+          test_control: canaries
   - name: smoke_test_ssl
     priority: 5
     commands:
@@ -1179,13 +1225,13 @@ tasks:
         vars:
           test_control: medical_workload_diagnosis_50_50
           auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/medical_workload-diagnosis-50-50.yml
-  - name: ycsb_like_queryable_encrypt1_cfdefault_sharded_high_value
+  - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
     priority: 5
     commands:
       - func: f_run_dsi_workload
         vars:
-          test_control: ycsb_like_queryable_encrypt1_cfdefault_sharded
-          auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/YCSBLikeQueryableEncrypt1CfdefaultSharded.yml
+          test_control: ycsb_like_queryable_encrypt1_cfdefault
+          auto_workload_path: ./src/genny/dist/etc/genny/workloads/encrypted/YCSBLikeQueryableEncrypt1Cfdefault.yml
   - name: filter_with_complex_logical_expression_high_value
     priority: 5
     commands:
@@ -1739,6 +1785,11 @@ tasks:
              exclude_filter: none,
              threads: "1 2 4 8",
              read_cmd: 'true'}
+  - name: stream_workloads
+    commands:
+    - func: f_run_dsi_workload
+      vars:
+        test_control: streams.2023-10
 
 buildvariants:
   - name: task_generation
@@ -1784,6 +1835,7 @@ buildvariants:
     cron: "0 0 * * *"  # Everyday at 00:00
     expansions:
       <<: *compile-expansions
+      compile_variant: -stream-x86_64
       compile_flags: >-
         --ssl
         --separate-debug
@@ -1836,6 +1888,58 @@ buildvariants:
     tasks:
       - name: compile_mongocrypt_shlib
 
+  - &compile-al2023-arm64
+    name: compile-al2023-arm64
+    display_name: Compile for Al2023 arm64
+    modules: *modules
+    cron: "0 0 * * *"  # Everyday at 00:00
+    expansions: &compile-al2023-expansions
+      platform: linux
+      project_dir: *project_dir
+      tooltags: ""
+      use_scons_cache: true
+      compile_flags: >-
+        --ssl
+        --separate-debug
+        MONGO_DISTMOD=rhel82
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --release
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --use-diagnostic-latches=off
+        install-mongocryptd
+      compile_variant: -al2023-arm64
+    run_on:
+      - "amazon2023.0-arm64-large"
+    tasks:
+      - name: compile
+
+  - name: compile-al2023-arm64-mongocrypt-shlib
+    display_name: Compile mongo_crypt_v1.so for Al2023 arm64
+    modules: *modules
+    cron: "0 0 * * 4"  # 00:00 on Thursday
+    expansions:
+      <<: *compile-al2023-expansions
+      compile_variant: -al2023-arm64
+      compile_flags: >-
+        --separate-debug
+        MONGO_DISTMOD=rhel82
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --release
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --use-diagnostic-latches=off
+        --allocator=system
+        --enterprise-features=fle,search,vector_search
+        --js-engine=none
+        --link-model=dynamic-sdk
+        --enable-http-client=off
+        --ssl=off
+        SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
+        CCFLAGS="-fno-gnu-unique"
+    run_on:
+      - "amazon2023.0-arm64-large"
+    tasks:
+      - name: compile_mongocrypt_shlib
+
   - name: linux-intel-standalone-classic-query-engine
     display_name: Linux Intel Standalone (Classic Query Engine)
     cron: &cron_query_perf_schedule "0 0 * * 4"  # 00:00 on Thursday
@@ -1873,6 +1977,7 @@ buildvariants:
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
+      - name: canaries_only
 
   - name: linux-intel-standalone-sbe
     display_name: Linux Intel Standalone (SBE)
@@ -1916,6 +2021,7 @@ buildvariants:
       - name: linkbench
       - name: linkbench2
       - name: snapshot_reads
+      - name: canaries_only
 
   - name: linux-intel-1-node-replSet-sbe
     display_name: Linux Intel 1-Node ReplSet (SBE)
@@ -2012,6 +2118,36 @@ buildvariants:
       - name: ycsb_60GB
       - name: tpcc
       - name: tpcc_majority
+      - name: linkbench
+      - name: linkbench2
+
+  - name: m60-like-al2023-3-node-replSet.arm.aws.2023-09
+    display_name: M60-like AL2023 3-Node ReplSet ARM AWS 2023-09
+    cron: "0 0 * * 0,4"  # 00:00 on Sunday, Thursday
+    modules: *modules
+    expansions:
+      mongodb_setup: atlas-like-replica.2023-09
+      infrastructure_provisioning: M60-like-replica.2023-09
+      infrastructure_provisioning_release: 2022-11
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      client_compile_variant: "-al2023-arm64"
+      compile_variant: "-al2023-arm64"
+      canaries: none # Packages required for the canaries are missing.
+    run_on:
+      - "rhel70-perf-M60-like"
+    depends_on: *_compile_al2023_arm64
+    tasks:
+      - name: schedule_patch_auto_tasks
+      - name: schedule_variant_auto_tasks
+      - name: industry_benchmarks
+      - name: ycsb_60GB
+      # TODO: Turn on with Python3 py-tpcc support (PERF-4758)
+      # - name: tpcc
+      # - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
 
@@ -2213,6 +2349,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: dsi_integ_test_run_command_simple
       - name: smoke_test
+      - name: canaries_only
       - name: industry_benchmarks
       - name: ycsb_60GB
       - name: ycsb_60GB.long
@@ -2285,15 +2422,17 @@ buildvariants:
       - name: column_store_tpch_10_denormalized_unindexed
       - name: ssb_column_store_comparison
 
-  - name: linux-standalone-streams.2023-09
-    display_name: Linux Standalone (Streams) 2023-09
+  - name: streams-single.intel.2023-10
+    display_name: Streams-Single Intel 2023-10
     cron: "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
     modules: *modules
     expansions:
+      compile_variant: -stream-x86_64
+      requires_mongostream: true
       mongodb_setup_release: 2022-11
-      mongodb_setup: standalone-streams
+      mongodb_setup: streams-single.2023-10
       infrastructure_provisioning_release: 2022-11
-      infrastructure_provisioning: single-intel
+      infrastructure_provisioning: streams-single.intel.2023-10
       workload_setup: 2022-11
       platform: linux
       project_dir: *project_dir
@@ -2305,6 +2444,7 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
+      - name: stream_workloads
 
   - name: linux-standalone-classic-query-engine.2022-11
     display_name: Linux Standalone (Classic Query Engine) 2022-11
@@ -2575,6 +2715,10 @@ buildvariants:
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
       - name: tpcc
+      - name: tpch_1_normalized
+      - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
 
   - name: linux-standalone-limited-query-stats
     display_name: Linux Standalone 2022-11 (Rate Limited QueryStats)
@@ -2651,6 +2795,7 @@ buildvariants:
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
+      - name: canaries_only
       - name: non_sharded_workloads
       - name: bestbuy_agg
       - name: bestbuy_agg_merge_different_db
@@ -2673,6 +2818,27 @@ buildvariants:
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
+
+  - name: perf-1-node-replSet.arm.aws.2023-09
+    display_name: PERF 1-Node ReplSet ARM AWS 2023-09
+    # Leave off for now
+    activate: false
+    modules: *modules
+    expansions:
+      mongodb_setup_release: 2022-11
+      mongodb_setup: single-replica
+      infrastructure_provisioning_release: 2023-09
+      infrastructure_provisioning: single
+      workload_setup: 2022-11
+      platform: linux
+      project_dir: *project_dir
+      authentication: enabled
+      storageEngine: wiredTiger
+      compile_variant: "-arm64"
+    run_on:
+      - "rhel70-perf-single"
+    depends_on: *_compile_amazon_linux2_arm64
+    tasks: *1nodetasks
 
   - name: linux-1-node-replSet-test-commands.2022-11
     display_name: Linux 1-Node ReplSet With Test Commands 2022-11
@@ -2790,6 +2956,14 @@ buildvariants:
       - name: tpcc
       - name: linkbench
       - name: linkbench2
+      - name: tpch_1_normalized
+      - name: tpch_1_denormalized
+      - name: tpch_10_normalized
+      - name: tpch_10_denormalized
+      - name: tsbs_query
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
 
   - name: linux-shard-lite-fle.2022-11
     display_name: Linux Shard Lite FLE 2022-11
@@ -2815,7 +2989,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: medical_workload_diagnosis_50_50_high_value
         cron: *high-value-workload-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_sharded_high_value
+      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
         cron: *high-value-workload-cron
 
   - name: linux-1-node-replSet-audit-log-encryption-compression.2022-11
@@ -2998,6 +3172,7 @@ buildvariants:
       - name: misc_workloads
       - name: map_reduce_workloads
       - name: smoke_test
+      - name: canaries_only
       - name: mongos_workloads
         cron: *high-value-workload-cron
       - name: mongos_large_catalog_workloads
@@ -3703,8 +3878,8 @@ buildvariants:
       infrastructure_provisioning_release: 2022-11
       infrastructure_provisioning: initialsync-logkeeper
       workload_setup: 2022-11
-      # EBS logkeeper snapshot with FCV set to 7.1
-      snapshotId: snap-063661c31a4e4b812
+      # EBS logkeeper snapshot with FCV set to 7.2
+      snapshotId: snap-042ca2a003313ebc2
       platform: linux
       authentication: disabled
       storageEngine: wiredTiger
@@ -3721,29 +3896,29 @@ buildvariants:
 
   # Uncomment this to run logkeeper FCV updates automatically. This is only intended to be run in
   # patch builds.
-  #- name: linux-replSet-initialsync-logkeeper-snapshot-update
-  #  display_name: Linux ReplSet Initial Sync LogKeeper Snapshot Update
-  #  cron: "0 0 * * 4"  # 00:00 on Thursday
-  #  modules: *modules
-  #  expansions:
-  #    mongodb_setup_release: 2022-11
-  #    mongodb_setup: initialsync-logkeeper-snapshot-update
-  #    infrastructure_provisioning_release: 2022-11
-  #    infrastructure_provisioning: initialsync-logkeeper-snapshot-update
-  #    # Update this to latest snapshot after each LTS release.
-  #    snapshotId: snap-063661c31a4e4b812
-  #    platform: linux
-  #    authentication: disabled
-  #    storageEngine: wiredTiger
-  #    project_dir: *project_dir
-  #    compile_variant: "-arm64"
-  #  run_on:
-  #    - "rhel70-perf-initialsync-logkeeper"
-  #  depends_on: *_compile_amazon_linux2_arm64
-  #  tasks:
-  #    - name: schedule_patch_auto_tasks
-  #    - name: schedule_variant_auto_tasks
-  #    - name: initialsync-logkeeper-snapshot-update
+  # - name: linux-replSet-initialsync-logkeeper-snapshot-update
+  #   display_name: Linux ReplSet Initial Sync LogKeeper Snapshot Update
+  #   cron: "0 0 * * 4"  # 00:00 on Thursday
+  #   modules: *modules
+  #   expansions:
+  #     mongodb_setup_release: 2022-11
+  #     mongodb_setup: initialsync-logkeeper-snapshot-update
+  #     infrastructure_provisioning_release: 2022-11
+  #     infrastructure_provisioning: initialsync-logkeeper-snapshot-update
+  #     # Update this to latest snapshot after each LTS release.
+  #     snapshotId: snap-042ca2a003313ebc2
+  #     platform: linux
+  #     authentication: disabled
+  #     storageEngine: wiredTiger
+  #     project_dir: *project_dir
+  #     compile_variant: "-arm64"
+  #   run_on:
+  #     - "rhel70-perf-initialsync-logkeeper"
+  #   depends_on: *_compile_amazon_linux2_arm64
+  #   tasks:
+  #     - name: schedule_patch_auto_tasks
+  #     - name: schedule_variant_auto_tasks
+  #     - name: initialsync-logkeeper-snapshot-update
 
   - name: linux-replSet-audit.2022-11
     display_name: Linux 3-Node ReplSet Audit 2022-11
@@ -3834,6 +4009,16 @@ buildvariants:
         cron: *high-value-workload-cron
       - name: expressive_queries_high_value
         cron: *high-value-workload-cron
+      - name: tpch_1_normalized
+      - name: tpch_1_denormalized
+      # TODO: Enable in SERVER-66572.
+      # - name: tpch_10_normalized
+      # - name: tpch_10_denormalized
+      - name: tsbs_query
+        cron: *high-value-workload-cron
+      - name: tsbs_query_finance
+      - name: tsbs_query_manual_bucketing
+      - name: tsbs_query_fixed_bucketing
 
   - name: linux-3-node-replSet-250mbwtcache.2023-05
     display_name: Linux 3-Node ReplSet 250 MB WiredTiger Cache 2023-05

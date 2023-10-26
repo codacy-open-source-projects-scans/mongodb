@@ -33,7 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <fmt/printf.h>  // IWYU pragma: keep
 #include <memory>
@@ -882,9 +881,9 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
         auto futureColl = db ? catalog->lookupCollectionByNamespace(opCtx, newCollName) : nullptr;
         bool needsRenaming(futureColl);
         invariant(!needsRenaming || allowRenameOutOfTheWay,
-                  str::stream() << "Current collection name: " << currentName->toStringForErrorMsg()
-                                << ", UUID: " << uuid << ". Future collection name: "
-                                << newCollName.toStringForErrorMsg());
+                  str::stream() << "Name already exists. Collection name: "
+                                << newCollName.toStringForErrorMsg() << ", UUID: " << uuid
+                                << ", Future collection UUID: " << futureColl->uuid());
 
         for (int tries = 0; needsRenaming && tries < 10; ++tries) {
             auto tmpNameResult = makeUniqueCollectionName(opCtx, dbName, "tmp%%%%%.create");
@@ -917,11 +916,11 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
                     Status status = db->renameCollection(opCtx, newCollName, tmpName, stayTemp);
                     if (!status.isOK())
                         return status;
-                    auto uuid = futureColl->uuid();
+                    auto futureCollUuid = futureColl->uuid();
                     opObserver->onRenameCollection(opCtx,
                                                    newCollName,
                                                    tmpName,
-                                                   uuid,
+                                                   futureCollUuid,
                                                    /*dropTargetUUID*/ {},
                                                    /*numRecords*/ 0U,
                                                    stayTemp,
@@ -929,7 +928,8 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
 
                     wuow.commit();
                     // Re-fetch collection after commit to get a valid pointer
-                    futureColl = CollectionCatalog::get(opCtx)->lookupCollectionByUUID(opCtx, uuid);
+                    futureColl = CollectionCatalog::get(opCtx)->lookupCollectionByUUID(
+                        opCtx, futureCollUuid);
                     return Status::OK();
                 });
 

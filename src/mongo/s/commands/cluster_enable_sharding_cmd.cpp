@@ -121,7 +121,8 @@ public:
         DatabaseName getDbName() const {
             const auto& cmd = request();
             return DatabaseNameUtil::deserialize(cmd.getDbName().tenantId(),
-                                                 cmd.getCommandParameter());
+                                                 cmd.getCommandParameter(),
+                                                 cmd.getSerializationContext());
         }
         NamespaceString ns() const override {
             return NamespaceString(getDbName());
@@ -141,7 +142,7 @@ public:
         }
     };
 };
-MONGO_REGISTER_COMMAND(EnableShardingCmd);
+MONGO_REGISTER_COMMAND(EnableShardingCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

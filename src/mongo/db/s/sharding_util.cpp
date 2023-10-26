@@ -36,7 +36,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
@@ -204,8 +203,8 @@ Status createIndexOnCollection(OperationContext* opCtx,
         auto indexSpecs = indexCatalog->removeExistingIndexes(
             opCtx,
             CollectionPtr(collection),
-            uassertStatusOK(
-                collection->addCollationDefaultsToIndexSpecsForCreate(opCtx, {index.toBSON()})),
+            uassertStatusOK(collection->addCollationDefaultsToIndexSpecsForCreate(
+                opCtx, std::vector<BSONObj>{index.toBSON()})),
             removeIndexBuildsToo);
 
         if (indexSpecs.empty()) {
@@ -333,7 +332,9 @@ void retryIdempotentWorkAsPrimaryUntilSuccessOrStepdown(
                 initialTerm == repl::ReplicationCoordinator::get(opCtx)->getTerm());
 
         try {
-            auto newClient = opCtx->getServiceContext()->makeClient(newClientName);
+            auto newClient = opCtx->getServiceContext()
+                                 ->getService(ClusterRole::ShardServer)
+                                 ->makeClient(newClientName);
             auto newOpCtx = newClient->makeOperationContext();
             AlternativeClientRegion altClient(newClient);
 

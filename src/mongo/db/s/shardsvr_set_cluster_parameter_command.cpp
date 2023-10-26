@@ -120,7 +120,7 @@ public:
 
     private:
         NamespaceString ns() const override {
-            return NamespaceString();
+            return NamespaceString::kEmpty;
         }
 
         bool supportsWriteConcern() const override {
@@ -154,7 +154,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(ShardsvrSetClusterParameterCommand);
+MONGO_REGISTER_COMMAND(ShardsvrSetClusterParameterCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

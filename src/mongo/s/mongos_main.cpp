@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
@@ -116,6 +115,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
 #include "mongo/s/client/sharding_connection_hook.h"
+#include "mongo/s/client_transport_observer_mongos.h"
 #include "mongo/s/commands/kill_sessions_remote.h"
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/grid.h"
@@ -129,7 +129,6 @@
 #include "mongo/s/read_write_concern_defaults_cache_lookup_mongos.h"
 #include "mongo/s/service_entry_point_mongos.h"
 #include "mongo/s/session_catalog_router.h"
-#include "mongo/s/session_manager_mongos.h"
 #include "mongo/s/sessions_collection_sharded.h"
 #include "mongo/s/sharding_initialization.h"
 #include "mongo/s/sharding_uptime_reporter.h"
@@ -139,8 +138,9 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
 #include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
-#include "mongo/transport/transport_layer_manager.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
 #include "mongo/util/clock_source.h"
@@ -248,7 +248,6 @@ public:
         } catch (const DBException& ex) {
             LOGV2_DEBUG(22849,
                         2,
-                        "Unable to update sharding state with possible replica set due to {error}",
                         "Unable to update sharding state with possible replica set",
                         "error"_attr = ex);
         }
@@ -287,8 +286,6 @@ private:
         if (ErrorCodes::isCancellationError(schedStatus.code())) {
             LOGV2_DEBUG(22848,
                         2,
-                        "Unable to schedule updating sharding state with confirmed replica set due"
-                        " to {error}",
                         "Unable to schedule updating sharding state with confirmed replica set",
                         "error"_attr = schedStatus);
             return;
@@ -389,16 +386,12 @@ Status waitForSigningKeys(OperationContext* opCtx) {
                 return Status::OK();
             }
             LOGV2(22842,
-                  "Waiting for signing keys, sleeping for {signingKeysCheckInterval} and then"
-                  " checking again",
                   "Waiting for signing keys, sleeping before checking again",
                   "signingKeysCheckInterval"_attr = Seconds(kSignKeysRetryInterval));
             sleepFor(kSignKeysRetryInterval);
             continue;
         } catch (const DBException& ex) {
             LOGV2_WARNING(22853,
-                          "Error while waiting for signing keys, sleeping for"
-                          " {signingKeysCheckInterval} and then checking again {error}",
                           "Error while waiting for signing keys, sleeping before checking again",
                           "signingKeysCheckInterval"_attr = Seconds(kSignKeysRetryInterval),
                           "error"_attr = ex);
@@ -443,7 +436,9 @@ void implicitlyAbortAllTransactions(OperationContext* opCtx) {
                             session.kill(ErrorCodes::InterruptedAtShutdown));
     });
 
-    auto newClient = opCtx->getServiceContext()->makeClient("ImplicitlyAbortTxnAtShutdown");
+    auto newClient = opCtx->getServiceContext()
+                         ->getService(ClusterRole::RouterServer)
+                         ->makeClient("ImplicitlyAbortTxnAtShutdown");
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
     {
         stdx::lock_guard<mongo::Client> lk(*newClient.get());
@@ -485,7 +480,8 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         // This client initiation pattern is only to be used here, with plans to eliminate this
         // pattern down the line.
         if (!haveClient()) {
-            Client::initThread(getThreadName());
+            Client::initThread(getThreadName(),
+                               serviceContext->getService(ClusterRole::RouterServer));
 
             // TODO(SERVER-74658): Please revisit if this thread could be made killable.
             {
@@ -516,7 +512,7 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         }
 
         // Shutdown the TransportLayer so that new connections aren't accepted
-        if (auto tl = serviceContext->getTransportLayer()) {
+        if (auto tl = serviceContext->getTransportLayerManager()) {
             LOGV2_OPTIONS(
                 22843, {LogComponent::kNetwork}, "shutdown: going to close all sockets...");
 
@@ -533,10 +529,7 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             // Abort transactions while we can still send remote commands.
             implicitlyAbortAllTransactions(opCtx);
         } catch (const DBException& excep) {
-            LOGV2_WARNING(22854,
-                          "Encountered {error} while trying to abort all active transactions",
-                          "Error aborting all active transactions",
-                          "error"_attr = excep);
+            LOGV2_WARNING(22854, "Error aborting all active transactions", "error"_attr = excep);
         }
 
         if (auto lsc = LogicalSessionCache::get(serviceContext)) {
@@ -609,7 +602,7 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         }
 
         // Shutdown Full-Time Data Capture
-        stopMongoSFTDC();
+        stopMongoSFTDC(serviceContext);
     }
 
     audit::logShutdown(Client::getCurrent());
@@ -753,7 +746,7 @@ ServiceContext::ConstructorActionRegisterer registerWireSpec{
 }
 
 ExitCode runMongosServer(ServiceContext* serviceContext) {
-    ThreadClient tc("mongosMain", serviceContext);
+    ThreadClient tc("mongosMain", serviceContext->getService(ClusterRole::RouterServer));
 
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
     {
@@ -774,8 +767,10 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     CertificateExpirationMonitor::get()->start(serviceContext);
 #endif
 
-    serviceContext->setSessionManager(std::make_unique<SessionManagerMongos>(serviceContext));
-    serviceContext->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongos>());
+    serviceContext->setSessionManager(std::make_unique<transport::SessionManagerCommon>(
+        serviceContext, std::make_unique<ClientTransportObserverMongos>()));
+    serviceContext->getService(ClusterRole::RouterServer)
+        ->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongos>());
 
     const auto loadBalancerPort = load_balancer_support::getLoadBalancerPort();
     if (loadBalancerPort && *loadBalancerPort == serverGlobalParams.port) {
@@ -785,17 +780,14 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         quickExit(ExitCode::badOptions);
     }
 
-    auto tl = transport::TransportLayerManager::createWithConfig(
+    auto tl = transport::TransportLayerManagerImpl::createWithConfig(
         &serverGlobalParams, serviceContext, loadBalancerPort);
     auto res = tl->setup();
     if (!res.isOK()) {
-        LOGV2_ERROR(22856,
-                    "Error setting up listener: {error}",
-                    "Error setting up listener",
-                    "error"_attr = res);
+        LOGV2_ERROR(22856, "Error setting up listener", "error"_attr = res);
         return ExitCode::netError;
     }
-    serviceContext->setTransportLayer(std::move(tl));
+    serviceContext->setTransportLayerManager(std::move(tl));
 
     auto unshardedHookList = std::make_unique<rpc::EgressMetadataHookList>();
     unshardedHookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(serviceContext));
@@ -831,10 +823,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
             return ExitCode::clean;
         }
 
-        LOGV2_ERROR(22857,
-                    "Error initializing sharding system: {error}",
-                    "Error initializing sharding system",
-                    "error"_attr = redact(ex));
+        LOGV2_ERROR(22857, "Error initializing sharding system", "error"_attr = redact(ex));
         return ExitCode::shardingError;
     }
 
@@ -854,7 +843,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     CommandInvocationHooks::set(serviceContext,
                                 std::make_unique<transport::IngressHandshakeMetricsCommandHooks>());
 
-    startMongoSFTDC();
+    startMongoSFTDC(serviceContext);
 
     if (mongosGlobalParams.scriptingEnabled) {
         ScriptEngine::setup();
@@ -862,10 +851,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     Status status = AuthorizationManager::get(serviceContext)->initialize(opCtx);
     if (!status.isOK()) {
-        LOGV2_ERROR(22858,
-                    "Error initializing authorization data: {error}",
-                    "Error initializing authorization data",
-                    "error"_attr = status);
+        LOGV2_ERROR(22858, "Error initializing authorization data", "error"_attr = status);
         return ExitCode::shardingError;
     }
 
@@ -889,10 +875,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     status =
         process_health::FaultManager::get(serviceContext)->startPeriodicHealthChecks().getNoThrow();
     if (!status.isOK()) {
-        LOGV2_ERROR(5936510,
-                    "Error completing initial health check: {error}",
-                    "Error completing initial health check",
-                    "error"_attr = redact(status));
+        LOGV2_ERROR(
+            5936510, "Error completing initial health check", "error"_attr = redact(status));
         return ExitCode::processHealthCheck;
     }
 
@@ -907,18 +891,17 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                                                   std::make_unique<SessionsCollectionSharded>(),
                                                   RouterSessionCatalog::reapSessionsOlderThan));
 
+    transport::ServiceExecutor::startupAll(serviceContext);
+
     status = serviceContext->getSessionManager()->start();
     if (!status.isOK()) {
         LOGV2_ERROR(22860, "Error starting session manager", "error"_attr = redact(status));
         return ExitCode::netError;
     }
 
-    status = serviceContext->getTransportLayer()->start();
+    status = serviceContext->getTransportLayerManager()->start();
     if (!status.isOK()) {
-        LOGV2_ERROR(22861,
-                    "Error starting transport layer: {error}",
-                    "Error starting transport layer",
-                    "error"_attr = redact(status));
+        LOGV2_ERROR(22861, "Error starting transport layer", "error"_attr = redact(status));
         return ExitCode::netError;
     }
 
@@ -1038,7 +1021,6 @@ ExitCode mongos_main(int argc, char* argv[]) {
         LOGV2_FATAL_OPTIONS(
             22865,
             logv2::LogOptions(logv2::LogComponent::kDefault, logv2::FatalMode::kContinue),
-            "Error during global initialization: {error}",
             "Error during global initialization",
             "error"_attr = status);
         return ExitCode::abrupt;
@@ -1051,7 +1033,6 @@ ExitCode mongos_main(int argc, char* argv[]) {
         LOGV2_FATAL_OPTIONS(
             22866,
             logv2::LogOptions(logv2::LogComponent::kDefault, logv2::FatalMode::kContinue),
-            "Error creating service context: {error}",
             "Error creating service context",
             "error"_attr = redact(cause));
         return ExitCode::abrupt;
@@ -1094,16 +1075,11 @@ ExitCode mongos_main(int argc, char* argv[]) {
 
         return main(service);
     } catch (const DBException& e) {
-        LOGV2_ERROR(22862,
-                    "uncaught DBException in mongos main: {error}",
-                    "uncaught DBException in mongos main",
-                    "error"_attr = redact(e));
+        LOGV2_ERROR(22862, "uncaught DBException in mongos main", "error"_attr = redact(e));
         return ExitCode::uncaught;
     } catch (const std::exception& e) {
-        LOGV2_ERROR(22863,
-                    "uncaught std::exception in mongos main: {error}",
-                    "uncaught std::exception in mongos main",
-                    "error"_attr = redact(e.what()));
+        LOGV2_ERROR(
+            22863, "uncaught std::exception in mongos main", "error"_attr = redact(e.what()));
         return ExitCode::uncaught;
     } catch (...) {
         LOGV2_ERROR(22864, "uncaught unknown exception in mongos main");

@@ -251,7 +251,7 @@ public:
             // An empty PrivilegeVector is acceptable because these privileges are only checked
             // on getMore and explain will not open a cursor.
             return runAggregate(
-                opCtx, nss, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
+                opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
         }
 
         const auto& collection = collectionOrView->getCollectionPtr();
@@ -266,8 +266,6 @@ public:
                                BSONObj(),
                                SerializationContext::stateCommandReply(serializationCtx),
                                cmdObj,
-                               // TODO: SERVER-79230 Apply QuerySettings for distinct commands.
-                               query_settings::QuerySettings(),
                                &bodyBuilder);
         return Status::OK();
     }
@@ -480,6 +478,7 @@ public:
             keyBob.append("hint", 1);
             keyBob.append("collation", 1);
             keyBob.append("shardVersion", 1);
+            keyBob.append("databaseVersion", 1);
             return keyBob.obj();
         }();
 
@@ -487,7 +486,7 @@ public:
         cmdObj.filterFieldsUndotted(bob, kMirrorableKeys, true);
     }
 };
-MONGO_REGISTER_COMMAND(DistinctCommand);
+MONGO_REGISTER_COMMAND(DistinctCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

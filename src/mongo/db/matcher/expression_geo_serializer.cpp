@@ -31,7 +31,6 @@
 
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -179,7 +178,8 @@ void appendGeometrySubObject(BSONObjBuilder* bob,
 
 void geoCustomSerialization(BSONObjBuilder* bob,
                             const BSONObj& obj,
-                            const SerializationOptions& opts) {
+                            const SerializationOptions& opts,
+                            bool includePath) {
     BSONElement outerElem = obj.firstElement();
 
     // Legacy GeoNear query.

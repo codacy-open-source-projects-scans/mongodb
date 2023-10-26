@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <mutex>
 #include <string>
@@ -972,7 +971,7 @@ AutoGetCollectionForReadCommandBase<AutoGetCollectionForReadType>::
       _statsTracker(boost::in_place_init_if,
                     nsOrUUID.isNamespaceString(),
                     opCtx,
-                    nsOrUUID.isNamespaceString() ? nsOrUUID.nss() : NamespaceString(),
+                    nsOrUUID.isNamespaceString() ? nsOrUUID.nss() : NamespaceString::kEmpty,
                     Top::LockType::ReadLocked,
                     logMode,
                     CollectionCatalog::get(opCtx)->getDatabaseProfileLevel(nsOrUUID.dbName()),

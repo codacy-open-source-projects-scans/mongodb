@@ -33,7 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/numeric/conversion/converter_policies.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cmath>
@@ -1251,14 +1250,17 @@ ostream& operator<<(ostream& out, const Value& val) {
     MONGO_verify(false);
 }
 
-void Value::fillCache() const {
+Value Value::shred() const {
     if (isObject()) {
-        getDocument().fillCache();
+        return Value(getDocument().shred());
     } else if (isArray()) {
+        std::vector<Value> values;
         for (auto&& val : getArray()) {
-            val.fillCache();
+            values.push_back(val.shred());
         }
+        return Value(values);
     }
+    return Value(*this);
 }
 
 void Value::serializeForSorter(BufBuilder& buf) const {

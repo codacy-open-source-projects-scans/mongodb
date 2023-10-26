@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -412,7 +411,7 @@ private:
     executor::ThreadPoolMock::Options makeThreadPoolMockOptions() const override {
         executor::ThreadPoolMock::Options options;
         options.onCreateThread = []() {
-            Client::initThread("OplogFetcherTest");
+            Client::initThread("OplogFetcherTest", getGlobalServiceContext()->getService());
         };
         return options;
     };

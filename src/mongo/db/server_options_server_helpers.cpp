@@ -161,10 +161,7 @@ void printCommandLineOpts(std::ostream* os) {
                       tojson(serverGlobalParams.parsedOpts, ExtendedRelaxedV2_0_0, true))
             << std::endl;
     } else {
-        LOGV2(21951,
-              "Options set by command line: {options}",
-              "Options set by command line",
-              "options"_attr = serverGlobalParams.parsedOpts);
+        LOGV2(21951, "Options set by command line", "options"_attr = serverGlobalParams.parsedOpts);
     }
 }
 
@@ -470,16 +467,6 @@ Status storeServerOptions(const moe::Environment& params) {
             return ret;
         }
     }
-
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
-#ifdef MONGO_CONFIG_GRPC
-    if (params.count("net.grpc.port")) {
-        serverGlobalParams.grpcPort = params["net.grpc.port"].as<int>();
-    }
-    if (params.count("net.grpc.serverMaxThreads")) {
-        serverGlobalParams.grpcServerMaxThreads = params["net.grpc.serverMaxThreads"].as<int>();
-    }
-#endif
 
     return Status::OK();
 }

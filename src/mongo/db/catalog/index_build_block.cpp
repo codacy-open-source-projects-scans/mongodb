@@ -28,7 +28,6 @@
  */
 
 
-#include <boost/preprocessor/control/iif.hpp>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -87,16 +86,11 @@ void IndexBuildBlock::_completeInit(OperationContext* opCtx, Collection* collect
     // occurring while an index is being build in the background will be aware of whether or not
     // they need to modify any indexes.
     auto desc = getEntry(opCtx, CollectionPtr(collection))->descriptor();
-    CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, CollectionPtr(collection));
-    CollectionIndexUsageTrackerDecoration::get(collection->getSharedDecorations())
+    CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
+    CollectionIndexUsageTrackerDecoration::write(collection)
         .registerIndex(desc->indexName(),
                        desc->keyPattern(),
                        IndexFeatures::make(desc, collection->ns().isOnInternalDb()));
-    opCtx->recoveryUnit()->onRollback([collectionDecorations = collection->getSharedDecorations(),
-                                       indexName = _indexName](OperationContext*) {
-        CollectionIndexUsageTrackerDecoration::get(collectionDecorations)
-            .unregisterIndex(indexName);
-    });
 }
 
 Status IndexBuildBlock::initForResume(OperationContext* opCtx,
@@ -267,7 +261,6 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
             // collection. This means that any snapshot created after this must include the full
             // index, and no one can try to read this index before we set the visibility.
             LOGV2(20345,
-                  "Index build: done building index {indexName} on ns {nss}",
                   "Index build: done building",
                   "buildUUID"_attr = buildUUID,
                   "collectionUUID"_attr = coll->uuid(),

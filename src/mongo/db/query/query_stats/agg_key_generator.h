@@ -48,7 +48,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/key_generator.h"
 
 namespace mongo::query_stats {
@@ -69,10 +69,15 @@ struct AggCmdComponents : public SpecificKeyComponents {
 
     int64_t size() const;
 
-    // TODO SERVER-76330 owned here for now, duplicating memory... This is not really accounted for
-    // right now but we should fix it soon.
-    AggregateCommandRequest request;
     stdx::unordered_set<NamespaceString> involvedNamespaces;
+    bool _bypassDocumentValidation;
+
+    // This anonymous struct represents the presence of the member variables as C++ bit fields.
+    // In doing so, each of these boolean values takes up 1 bit instead of 1 byte.
+    struct HasField {
+        bool batchSize : 1 = false;
+        bool bypassDocumentValidation : 1 = false;
+    } _hasField;
 };
 
 /**
@@ -80,19 +85,31 @@ struct AggCmdComponents : public SpecificKeyComponents {
  * avoid parsing the raw pipeline multiple times, but users should be sure to provide a
  * non-optimized pipeline.
  */
-class AggKeyGenerator final : public KeyGenerator {
+class AggKey final : public Key {
 public:
-    AggKeyGenerator(
-        AggregateCommandRequest request,
-        const Pipeline& pipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        stdx::unordered_set<NamespaceString> involvedNamespaces,
-        const NamespaceString& origNss,
-        query_shape::CollectionType collectionType = query_shape::CollectionType::kUnknown);
+    AggKey(AggregateCommandRequest request,
+           const Pipeline& pipeline,
+           const boost::intrusive_ptr<ExpressionContext>& expCtx,
+           stdx::unordered_set<NamespaceString> involvedNamespaces,
+           const NamespaceString& origNss,
+           query_shape::CollectionType collectionType = query_shape::CollectionType::kUnknown);
 
     const SpecificKeyComponents& specificComponents() const final {
         return _components;
     }
+
+    // The default implementation of hashing for smart pointers is not a good one for our purposes.
+    // Here we overload them to actually take the hash of the object, rather than hashing the
+    // pointer itself.
+    template <typename H>
+    friend H AbslHashValue(H h, const std::unique_ptr<const AggKey>& key) {
+        return H::combine(std::move(h), *key);
+    }
+    template <typename H>
+    friend H AbslHashValue(H h, const std::shared_ptr<const AggKey>& key) {
+        return H::combine(std::move(h), *key);
+    }
+
 
 protected:
     void appendCommandSpecificComponents(BSONObjBuilder& bob,

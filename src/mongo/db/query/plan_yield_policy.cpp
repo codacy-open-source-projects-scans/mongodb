@@ -31,7 +31,6 @@
 #include <boost/optional/optional.hpp>
 #include <utility>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -140,11 +139,7 @@ Status PlanYieldPolicy::yieldOrInterrupt(OperationContext* opCtx,
             // Saving and restoring can modify '_yieldable', so we make a copy before we start.
             const auto yieldable = _yieldable;
 
-            try {
-                saveState(opCtx);
-            } catch (const StorageUnavailableException&) {
-                MONGO_UNREACHABLE;
-            }
+            saveState(opCtx);
 
             boost::optional<ScopeGuard<std::function<void()>>> exitGuard;
             if (useExperimentalCommitTxnBehavior()) {
@@ -187,7 +182,7 @@ Status PlanYieldPolicy::yieldOrInterrupt(OperationContext* opCtx,
                 _callbacks->handledWriteConflict(opCtx);
             }
             logWriteConflictAndBackoff(
-                attempt, "query yield", e.reason(), NamespaceStringOrUUID(NamespaceString()));
+                attempt, "query yield", e.reason(), NamespaceStringOrUUID(NamespaceString::kEmpty));
             // Retry the yielding process.
         } catch (...) {
             // Errors other than write conflicts don't get retried, and should instead result in

@@ -69,6 +69,7 @@ public:
             std::vector<mongo::ShardKeyRange> destinationShard = {request().getToShard()};
             reshardCollectionRequest.setShardDistribution(destinationShard);
             reshardCollectionRequest.setForceRedistribution(true);
+            reshardCollectionRequest.setNumInitialChunks(1);
 
             shardsvrReshardCollection.setReshardCollectionRequest(
                 std::move(reshardCollectionRequest));
@@ -126,7 +127,8 @@ public:
 };
 
 MONGO_REGISTER_COMMAND(ClusterMoveCollectionCmd)
-    .requiresFeatureFlag(&resharding::gFeatureFlagMoveCollection);
+    .requiresFeatureFlag(&resharding::gFeatureFlagMoveCollection)
+    .forRouter();
 
 }  // namespace
 }  // namespace mongo

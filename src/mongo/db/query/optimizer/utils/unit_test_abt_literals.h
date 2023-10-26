@@ -118,14 +118,27 @@ inline auto _cnull() {
     return ExprHolder{Constant::null()};
 }
 
+// Nothing constant.
+inline auto _cnothing() {
+    return ExprHolder{Constant::nothing()};
+}
+
 // Boolean constant.
 inline auto _cbool(const bool val) {
     return ExprHolder{Constant::boolean(val)};
 }
 
-// Array constant.
+// Array constant. We expect the arguments to be Constants.
 inline auto _carray(auto&&... elements) {
-    return ExprHolder{Constant::array(std::forward<decltype(elements)>(elements)...)};
+    using namespace sbe::value;
+
+    auto [tag, val] = makeNewArray();
+    auto arr = getArrayView(val);
+    (arr->push_back(copyValue(elements._n.template cast<Constant>()->get().first,
+                              elements._n.template cast<Constant>()->get().second)),
+     ...);
+
+    return ExprHolder{make<Constant>(tag, val)};
 }
 
 // Empty Array constant.

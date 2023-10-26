@@ -127,10 +127,10 @@ ReshardingCollectionCloner::ReshardingCollectionCloner(ReshardingMetrics* metric
                                                        Timestamp atClusterTime,
                                                        NamespaceString outputNss)
     : _metrics(metrics),
-      _reshardingUUID(std::move(reshardingUUID)),
+      _reshardingUUID(reshardingUUID),
       _newShardKeyPattern(std::move(newShardKeyPattern)),
       _sourceNss(std::move(sourceNss)),
-      _sourceUUID(std::move(sourceUUID)),
+      _sourceUUID(sourceUUID),
       _recipientShard(std::move(recipientShard)),
       _atClusterTime(atClusterTime),
       _outputNss(std::move(outputNss)) {}
@@ -149,7 +149,8 @@ ReshardingCollectionCloner::makeRawPipeline(
     auto tempNss =
         resharding::constructTemporaryReshardingNss(_sourceNss.db_forSharding(), _sourceUUID);
     auto tempCacheChunksNss = NamespaceString::makeGlobalConfigCollection(
-        "cache.chunks." + NamespaceStringUtil::serialize(tempNss));
+        "cache.chunks." +
+        NamespaceStringUtil::serialize(tempNss, SerializationContext::stateDefault()));
     resolvedNamespaces[tempCacheChunksNss.coll()] = {tempCacheChunksNss, std::vector<BSONObj>{}};
 
     // Pipeline::makePipeline() ignores the collation set on the AggregationRequest (or lack
@@ -219,7 +220,8 @@ ReshardingCollectionCloner::makeRawNaturalOrderPipeline(
     auto tempNss =
         resharding::constructTemporaryReshardingNss(_sourceNss.db_forSharding(), _sourceUUID);
     auto tempCacheChunksNss = NamespaceString::makeGlobalConfigCollection(
-        "cache.chunks." + NamespaceStringUtil::serialize(tempNss));
+        "cache.chunks." +
+        NamespaceStringUtil::serialize(tempNss, SerializationContext::stateDefault()));
     resolvedNamespaces[tempCacheChunksNss.coll()] = {tempCacheChunksNss, std::vector<BSONObj>{}};
 
     auto expCtx = make_intrusive<ExpressionContext>(opCtx,
@@ -274,6 +276,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_targetAg
                                 << repl::readConcernLevels::kSnapshotName
                                 << repl::ReadConcernArgs::kAtClusterTimeFieldName
                                 << _atClusterTime));
+
     // The read preference on the request is merely informational (e.g. for profiler entries) -- the
     // pipeline's opCtx setting is actually used when sending the request.
     auto readPref = ReadPreferenceSetting{ReadPreference::Nearest};
@@ -288,7 +291,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_targetAg
                                  // We use the hint as an implied sort for $mergeCursors because
                                  // the aggregation pipeline synthesizes the necessary $sortKeys
                                  // fields in the result set.
-                                 return Pipeline::makePipeline(request, std::move(expCtx), hint);
+                                 return Pipeline::makePipeline(request, expCtx, hint);
                              });
 }
 
@@ -354,13 +357,13 @@ public:
                         // This loop will end by interrupt when the producer end closes.
                         while (true) {
                             auto qData = _queues[i]->pop(opCtx.get());
-                            auto cursorResponse = uassertStatusOK(
-                                CursorResponse::parseFromBSON(std::move(qData.data)));
+                            auto cursorResponse =
+                                uassertStatusOK(CursorResponse::parseFromBSON(qData.data));
                             cb(opCtx.get(),
                                cursorResponse,
                                txnNumber,
                                _shardIds[qData.donorIndex],
-                               std::move(qData.donorHost));
+                               qData.donorHost);
                         }
                     })
                     .thenRunOn(_cleanupExecutor)
@@ -470,11 +473,7 @@ public:
                         // future-enabled scheduleRemoteExhaustCommand works -- the future will be
                         // fulfilled when there are no more responses forthcoming.  When we enable
                         // exhaust we can remove the AsyncTry.
-                        return AsyncTry([this,
-                                         &cursor,
-                                         &cursorHost,
-                                         i,
-                                         cmdObj = std::move(cmdObj)] {
+                        return AsyncTry([this, &cursor, &cursorHost, i, cmdObj = cmdObj] {
                                    auto opCtx = cc().makeOperationContext();
                                    executor::RemoteCommandRequest request(
                                        cursorHost,
@@ -482,8 +481,7 @@ public:
                                        cmdObj,
                                        opCtx.get());
                                    return _executor
-                                       ->scheduleRemoteCommand(std::move(request),
-                                                               _cancelSource.token())
+                                       ->scheduleRemoteCommand(request, _cancelSource.token())
                                        .then([this, &cursorHost, i](
                                                  executor::TaskExecutor::ResponseStatus response) {
                                            response.moreToCome = response.status.isOK() &&
@@ -621,12 +619,13 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
     request.setRequestResumeToken(true);
     request.setHint(BSON("$natural" << 1));
 
-    auto pipeline = Pipeline::makePipeline(rawPipeline, std::move(expCtx), pipelineOpts);
+    auto pipeline = Pipeline::makePipeline(rawPipeline, expCtx, pipelineOpts);
 
     const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(request);
     auto readConcern = BSON(repl::ReadConcernArgs::kLevelFieldName
                             << repl::readConcernLevels::kSnapshotName
-                            << repl::ReadConcernArgs::kAtClusterTimeFieldName << _atClusterTime);
+                            << repl::ReadConcernArgs::kAtClusterTimeFieldName << _atClusterTime
+                            << repl::ReadConcernArgs::kWaitLastStableRecoveryTimestamp << true);
     request.setReadConcern(readConcern);
 
     // The read preference on the request is merely informational (e.g. for profiler entries) -- the
@@ -637,8 +636,7 @@ void ReshardingCollectionCloner::_runOnceWithNaturalOrder(
 
     auto dispatchResults =
         sharded_agg_helpers::dispatchShardPipeline(serializedCommand,
-                                                   false /* hasChangeStream */,
-                                                   false /* startsWithDocuments */,
+                                                   sharded_agg_helpers::PipelineDataSource::kNormal,
                                                    false /* eligibleForSampling */,
                                                    std::move(pipeline),
                                                    boost::none /* explain */,
@@ -904,8 +902,9 @@ SemiFuture<void> ReshardingCollectionCloner::run(
         // been destructed.
         .onCompletion([chainCtx](Status status) {
             if (chainCtx->pipeline) {
-                auto client =
-                    cc().getServiceContext()->makeClient("ReshardingCollectionClonerCleanupClient");
+                auto client = cc().getServiceContext()
+                                  ->getService(ClusterRole::ShardServer)
+                                  ->makeClient("ReshardingCollectionClonerCleanupClient");
 
                 // TODO(SERVER-74658): Please revisit if this thread could be made killable.
                 {

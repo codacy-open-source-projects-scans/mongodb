@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <wiredtiger.h>
 // IWYU pragma: no_include "cxxabi.h"
@@ -226,7 +225,6 @@ WiredTigerRecordStore::OplogTruncateMarkers::createOplogTruncateMarkers(Operatio
         },
         numTruncateMarkersToKeep);
     LOGV2(22382,
-          "WiredTiger record store oplog processing took {duration}ms",
           "WiredTiger record store oplog processing finished",
           "duration"_attr = duration_cast<Milliseconds>(initialSetOfMarkers.timeTaken));
     return std::make_shared<WiredTigerRecordStore::OplogTruncateMarkers>(
@@ -464,12 +462,7 @@ public:
 
     void save() final {
         if (_cursor) {
-            try {
-                _cursor->reset(_cursor);
-            } catch (const StorageUnavailableException&) {
-                // Ignore since this is only called when we are about to kill our transaction
-                // anyway.
-            }
+            invariantWTOK(WT_READ_CHECK(_cursor->reset(_cursor)), _cursor->session);
         }
     }
 
@@ -708,7 +701,7 @@ WiredTigerRecordStore::~WiredTigerRecordStore() {
 NamespaceString WiredTigerRecordStore::ns(OperationContext* opCtx) const {
     auto nss = namespaceForUUID(opCtx, _uuid);
 
-    return nss ? *nss : NamespaceString();
+    return nss ? *nss : NamespaceString::kEmpty;
 }
 
 void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
@@ -1568,7 +1561,8 @@ Status WiredTigerRecordStore::doRangeTruncate(OperationContext* opCtx,
     return Status::OK();
 }
 
-Status WiredTigerRecordStore::doCompact(OperationContext* opCtx) {
+Status WiredTigerRecordStore::doCompact(OperationContext* opCtx,
+                                        boost::optional<int64_t> freeSpaceTargetMB) {
     dassert(opCtx->lockState()->isWriteLocked());
 
     WiredTigerSessionCache* cache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
@@ -1580,7 +1574,11 @@ Status WiredTigerRecordStore::doCompact(OperationContext* opCtx) {
         // check for interrupts.
         SessionDataRAII sessionRaii(s, opCtx);
 
-        int ret = s->compact(s, getURI().c_str(), "timeout=0");
+        std::string config = "timeout=0";
+        if (freeSpaceTargetMB) {
+            config += ",free_space_target=" + std::to_string(*freeSpaceTargetMB) + "MB";
+        }
+        int ret = s->compact(s, getURI().c_str(), config.c_str());
         if (ret == WT_ERROR && !opCtx->checkForInterruptNoAssert().isOK()) {
             return Status(ErrorCodes::Interrupted,
                           str::stream()
@@ -2277,16 +2275,14 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekNear(const RecordId
 }
 
 void WiredTigerRecordStoreCursorBase::save() {
-    try {
-        if (_cursor)
-            _cursor->reset();
-        _oplogVisibleTs = boost::none;
-        _cappedSnapshot = boost::none;
-        _readTimestampForOplog = boost::none;
-        _hasRestored = false;
-    } catch (const StorageUnavailableException&) {
-        // Ignore since this is only called when we are about to kill our transaction anyway.
+    if (_cursor) {
+        WT_CURSOR* wtCur = _cursor->get();
+        invariantWTOK(WT_READ_CHECK(wtCur->reset(wtCur)), wtCur->session);
     }
+    _oplogVisibleTs = boost::none;
+    _cappedSnapshot = boost::none;
+    _readTimestampForOplog = boost::none;
+    _hasRestored = false;
 }
 
 bool WiredTigerRecordStoreCursorBase::isVisible(const RecordId& id) {

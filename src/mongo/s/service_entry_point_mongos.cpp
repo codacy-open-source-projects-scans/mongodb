@@ -39,7 +39,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 
 #include "mongo/base/error_codes.h"
@@ -108,7 +107,8 @@ struct HandleRequest : public std::enable_shared_from_this<HandleRequest> {
     static NamespaceString getNamespaceString(const DbMessage& dbmsg) {
         if (!dbmsg.messageShouldHaveNs())
             return {};
-        return NamespaceStringUtil::deserialize(boost::none, dbmsg.getns());
+        return NamespaceStringUtil::deserialize(
+            boost::none, dbmsg.getns(), SerializationContext::stateDefault());
     }
 
     const std::shared_ptr<RequestExecutionContext> rec;

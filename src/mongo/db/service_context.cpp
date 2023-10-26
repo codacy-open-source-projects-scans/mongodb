@@ -32,7 +32,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 #include <exception>
 #include <list>
@@ -54,7 +53,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
-#include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
@@ -137,6 +136,9 @@ private:
     std::unique_ptr<Service> _router;
 };
 
+Service::~Service() = default;
+Service::Service(ServiceContext* sc, ClusterRole role) : _sc{sc}, _role{role} {}
+
 ServiceContext::ServiceContext()
     : _opIdRegistry(UniqueOperationIdRegistry::create()),
       _tickSource(makeSystemTickSource()),
@@ -149,7 +151,6 @@ ServiceContext::~ServiceContext() {
     stdx::lock_guard<Latch> lk(_mutex);
     for (const auto& client : _clients) {
         LOGV2_ERROR(23828,
-                    "{client} exists while destroying {serviceContext}",
                     "Non-empty client list when destroying service context",
                     "client"_attr = client->desc(),
                     "serviceContext"_attr = reinterpret_cast<uint64_t>(this));
@@ -166,6 +167,10 @@ Service* ServiceContext::getService() const {
         if (auto p = getService(role))
             return p;
     MONGO_UNREACHABLE;
+}
+
+void Service::setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep) {
+    _serviceEntryPoint = std::move(sep);
 }
 
 namespace {
@@ -220,11 +225,6 @@ void onCreate(T* object, const ObserversContainer& observers) {
 
 }  // namespace
 
-ServiceContext::UniqueClient ServiceContext::makeClient(
-    std::string desc, std::shared_ptr<transport::Session> session) {
-    return getService()->makeClient(std::move(desc), std::move(session));
-}
-
 ServiceContext::UniqueClient ServiceContext::makeClientForService(
     std::string desc, std::shared_ptr<transport::Session> session, Service* service) {
     std::unique_ptr<Client> client(new Client(std::move(desc), service, std::move(session)));
@@ -245,12 +245,8 @@ PeriodicRunner* ServiceContext::getPeriodicRunner() const {
     return _runner.get();
 }
 
-transport::TransportLayer* ServiceContext::getTransportLayer() const {
-    return _transportLayer.get();
-}
-
-ServiceEntryPoint* ServiceContext::getServiceEntryPoint() const {
-    return _serviceEntryPoint.get();
+transport::TransportLayerManager* ServiceContext::getTransportLayerManager() const {
+    return _transportLayerManager.get();
 }
 
 transport::SessionManager* ServiceContext::getSessionManager() const {
@@ -283,12 +279,9 @@ void ServiceContext::setSessionManager(std::unique_ptr<transport::SessionManager
     _sessionManager = std::move(sm);
 }
 
-void ServiceContext::setServiceEntryPoint(std::unique_ptr<ServiceEntryPoint> sep) {
-    _serviceEntryPoint = std::move(sep);
-}
-
-void ServiceContext::setTransportLayer(std::unique_ptr<transport::TransportLayer> tl) {
-    _transportLayer = std::move(tl);
+void ServiceContext::setTransportLayerManager(
+    std::unique_ptr<transport::TransportLayerManager> tl) {
+    _transportLayerManager = std::move(tl);
 }
 
 void ServiceContext::ClientDeleter::operator()(Client* client) const {
@@ -330,8 +323,8 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
                                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     }
     // The baton must be attached before attaching to a client
-    if (_transportLayer) {
-        _transportLayer->makeBaton(opCtx.get());
+    if (_transportLayerManager) {
+        _transportLayerManager->getEgressLayer()->makeBaton(opCtx.get());
     } else {
         makeBaton(opCtx.get());
     }

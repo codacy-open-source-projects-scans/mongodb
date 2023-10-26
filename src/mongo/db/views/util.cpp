@@ -29,7 +29,6 @@
 
 #include "mongo/db/views/util.h"
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -58,7 +57,8 @@ void validateViewDefinitionBSON(OperationContext* opCtx,
     auto viewNameElem = viewDefinition["_id"];
     valid &= viewNameElem && viewNameElem.type() == BSONType::String;
 
-    auto viewName = NamespaceStringUtil::deserialize(dbName.tenantId(), viewNameElem.str());
+    auto viewName = NamespaceStringUtil::deserialize(
+        dbName.tenantId(), viewNameElem.str(), SerializationContext::stateDefault());
 
     bool viewNameIsValid = NamespaceString::validCollectionComponent(viewName) &&
         NamespaceString::validDBName(viewName.dbName());

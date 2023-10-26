@@ -41,11 +41,17 @@ using mongo::boolean_simplification::makeBitsetTerm;
 using mongo::boolean_simplification::Minterm;
 
 namespace {
+BitsetTreeTransformResult transformToBitsetTreeTest(const MatchExpression* root) {
+    auto result = transformToBitsetTree(root, std::numeric_limits<size_t>::max());
+    ASSERT_TRUE(result.has_value());
+    return std::move(*result);
+}
+
 inline void assertExprInfo(const std::vector<ExpressionBitInfo>& expected,
                            const std::vector<ExpressionBitInfo>& actual) {
     ASSERT_EQ(expected.size(), actual.size());
     for (size_t i = 0; i < expected.size(); ++i) {
-        ASSERT_TRUE(expected[i].expression->equivalent(actual[i].expression.get()))
+        ASSERT_TRUE(expected[i].expression->equivalent(actual[i].expression))
             << expected[i].expression->debugString()
             << " != " << actual[i].expression->debugString();
     }
@@ -58,11 +64,11 @@ TEST(BitsetTreeConverterTests, AlwaysTrue) {
     std::vector<ExpressionBitInfo> expectedExpressions{};
 
     BitsetTreeNode expectedTree{BitsetTreeNode::And, false};
-    expectedTree.leafChildren.resize(expectedExpressions.size());
 
-    const auto& [tree, expressions] = transformToBitsetTree(&expr);
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(1, result.expressionSize);
 }
 
 TEST(BitsetTreeConverterTests, AlwaysFalse) {
@@ -72,24 +78,112 @@ TEST(BitsetTreeConverterTests, AlwaysFalse) {
 
     BitsetTreeNode expectedTree{BitsetTreeNode::Or, false};
 
-    const auto& [tree, expressions] = transformToBitsetTree(&expr);
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(1, result.expressionSize);
+}
+
+TEST(BitsetTreeConverterTests, NorOfAlwaysFalse) {
+    NorMatchExpression expr{};
+    expr.add(std::make_unique<AlwaysFalseMatchExpression>());
+
+    std::vector<ExpressionBitInfo> expectedExpressions{};
+
+    BitsetTreeNode expectedTree{BitsetTreeNode::Or, true};
+
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(2, result.expressionSize);
+}
+
+TEST(BitsetTreeConverterTests, NorOfAlwaysTrue) {
+    NorMatchExpression expr{};
+    expr.add(std::make_unique<AlwaysTrueMatchExpression>());
+
+    std::vector<ExpressionBitInfo> expectedExpressions{};
+
+    BitsetTreeNode expectedTree{BitsetTreeNode::Or, false};
+
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(2, result.expressionSize);
+}
+
+TEST(BitsetTreeConverterTests, AlwaysTrueNorAlwaysFalse) {
+    NorMatchExpression expr{};
+    expr.add(std::make_unique<AlwaysTrueMatchExpression>());
+    expr.add(std::make_unique<AlwaysFalseMatchExpression>());
+
+    std::vector<ExpressionBitInfo> expectedExpressions{};
+
+    BitsetTreeNode expectedTree{BitsetTreeNode::Or, false};
+
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(2, result.expressionSize);  // finish earlier
+}
+
+// [$nor: {a: 1}, {a: {$ne: 1}}] == always false
+TEST(BitsetTreeConverterTests, NeNorEq) {
+    auto operand = BSON("$eq" << 1);
+    auto eq = std::make_unique<EqualityMatchExpression>("a"_sd, operand["$eq"]);
+    NorMatchExpression expr{};
+    expr.add(eq->clone());
+    expr.add(std::make_unique<NotMatchExpression>(eq->clone()));
+
+    std::vector<ExpressionBitInfo> expectedExpressions{ExpressionBitInfo{eq.get()}};
+
+    BitsetTreeNode expectedTree{BitsetTreeNode::Or, false};
+
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(3, result.expressionSize);
+}
+
+TEST(BitsetTreeConverterTests, NotAlwaysTrue) {
+    NotMatchExpression expr{std::make_unique<AlwaysTrueMatchExpression>()};
+
+    std::vector<ExpressionBitInfo> expectedExpressions{};
+
+    BitsetTreeNode expectedTree{BitsetTreeNode::Or, false};
+
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(1, result.expressionSize);
+}
+
+TEST(BitsetTreeConverterTests, NotAlwaysFalse) {
+    NotMatchExpression expr{std::make_unique<AlwaysFalseMatchExpression>()};
+
+    std::vector<ExpressionBitInfo> expectedExpressions{};
+
+    BitsetTreeNode expectedTree{BitsetTreeNode::And, false};
+
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(1, result.expressionSize);
 }
 
 TEST(BitsetTreeConverterTests, GtExpression) {
     auto operand = BSON("$gt" << 5);
     GTMatchExpression expr{"a"_sd, operand["$gt"]};
 
-    std::vector<ExpressionBitInfo> expectedExpressions{};
-    expectedExpressions.emplace_back(expr.clone());
+    std::vector<ExpressionBitInfo> expectedExpressions{ExpressionBitInfo{&expr}};
 
     BitsetTreeNode expectedTree{BitsetTreeNode::And, false};
     expectedTree.leafChildren = makeBitsetTerm("1", "1");
 
-    const auto& [tree, expressions] = transformToBitsetTree(&expr);
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(1, result.expressionSize);
 }
 
 TEST(BitsetTreeConverterTests, AndExpression) {
@@ -97,20 +191,22 @@ TEST(BitsetTreeConverterTests, AndExpression) {
     auto secondOperand = BSON("$eq" << 10);
     auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
     auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
-    std::vector<ExpressionBitInfo> expectedExpressions{};
-    expectedExpressions.emplace_back(gtExpr->clone());
-    expectedExpressions.emplace_back(eqExpr->clone());
+    std::vector<ExpressionBitInfo> expectedExpressions{
+        ExpressionBitInfo{gtExpr.get()},
+        ExpressionBitInfo{eqExpr.get()},
+    };
 
     AndMatchExpression expr{};
-    expr.add(std::move(gtExpr));
-    expr.add(std::make_unique<NotMatchExpression>(std::move(eqExpr)));
+    expr.add(gtExpr->clone());
+    expr.add(std::make_unique<NotMatchExpression>(eqExpr->clone()));
 
     BitsetTreeNode expectedTree{BitsetTreeNode::And, false};
     expectedTree.leafChildren = makeBitsetTerm("01", "11");
 
-    const auto& [tree, expressions] = transformToBitsetTree(&expr);
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(&expr);
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(3, result.expressionSize);
 }
 
 TEST(BitsetTreeConverterTests, OrExpression) {
@@ -121,10 +217,11 @@ TEST(BitsetTreeConverterTests, OrExpression) {
     auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
     auto ltExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
 
-    std::vector<ExpressionBitInfo> expectedExpressions{};
-    expectedExpressions.emplace_back(gtExpr->clone());
-    expectedExpressions.emplace_back(eqExpr->clone());
-    expectedExpressions.emplace_back(ltExpr->clone());
+    std::vector<ExpressionBitInfo> expectedExpressions{
+        ExpressionBitInfo{gtExpr.get()},
+        ExpressionBitInfo{eqExpr.get()},
+        ExpressionBitInfo{ltExpr.get()},
+    };
 
     auto expr = std::make_unique<OrMatchExpression>();
     {
@@ -154,9 +251,10 @@ TEST(BitsetTreeConverterTests, OrExpression) {
         expectedTree.internalChildren.emplace_back(std::move(orOperand));
     }
 
-    const auto& [tree, expressions] = transformToBitsetTree(expr.get());
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(expr.get());
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(8, result.expressionSize);
 }
 
 TEST(BitsetTreeConverterTests, NorExpression) {
@@ -167,10 +265,11 @@ TEST(BitsetTreeConverterTests, NorExpression) {
     auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
     auto ltExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
 
-    std::vector<ExpressionBitInfo> expectedExpressions{};
-    expectedExpressions.emplace_back(gtExpr->clone());
-    expectedExpressions.emplace_back(eqExpr->clone());
-    expectedExpressions.emplace_back(ltExpr->clone());
+    std::vector<ExpressionBitInfo> expectedExpressions{
+        ExpressionBitInfo{gtExpr.get()},
+        ExpressionBitInfo{eqExpr.get()},
+        ExpressionBitInfo{ltExpr.get()},
+    };
 
     auto expr = std::make_unique<NorMatchExpression>();
     {
@@ -187,22 +286,23 @@ TEST(BitsetTreeConverterTests, NorExpression) {
         expr->add(std::move(andExpr));
     }
 
-    BitsetTreeNode expectedTree{BitsetTreeNode::And, false};
+    BitsetTreeNode expectedTree{BitsetTreeNode::Or, true};
     expectedTree.leafChildren = makeBitsetTerm("000", "000");
     {
-        BitsetTreeNode orOperand{BitsetTreeNode::And, true};
+        BitsetTreeNode orOperand{BitsetTreeNode::And, false};
         orOperand.leafChildren = makeBitsetTerm("001", "011");
         expectedTree.internalChildren.emplace_back(std::move(orOperand));
     }
     {
-        BitsetTreeNode orOperand{BitsetTreeNode::And, true};
+        BitsetTreeNode orOperand{BitsetTreeNode::And, false};
         orOperand.leafChildren = makeBitsetTerm("111", "111");
         expectedTree.internalChildren.emplace_back(std::move(orOperand));
     }
 
-    const auto& [tree, expressions] = transformToBitsetTree(expr.get());
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(expr.get());
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(8, result.expressionSize);
 }
 
 // {a: $elemMatch: {$gt: 5, $eq: 10, $lt: 10}}
@@ -216,15 +316,15 @@ TEST(BitsetTreeConverterTests, ElemMatch) {
     expr->add(std::make_unique<EqualityMatchExpression>(""_sd, secondOperand["$eq"]));
     expr->add(std::make_unique<LTMatchExpression>(""_sd, thirdOperand["$lt"]));
 
-    std::vector<ExpressionBitInfo> expectedExpressions{};
-    expectedExpressions.emplace_back(expr->clone());
+    std::vector<ExpressionBitInfo> expectedExpressions{ExpressionBitInfo{expr.get()}};
 
     BitsetTreeNode expectedTree{BitsetTreeNode::And, false};
     expectedTree.leafChildren = makeBitsetTerm("1", "1");
 
-    const auto& [tree, expressions] = transformToBitsetTree(expr.get());
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(expr.get());
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(1, result.expressionSize);
 }
 
 // {$and: [{a: {$elemMatch: {$not: {$gt: 21}}}}, {a: {$not: {$elemMatch: {$lt: 21}}}}]}
@@ -245,15 +345,45 @@ TEST(BitsetTreeConverterTests, TwoElemMatches) {
     expr->add(elemMatchGt->clone());
     expr->add(notElemMatchLt->clone());
 
-    std::vector<ExpressionBitInfo> expectedExpressions{};
-    expectedExpressions.emplace_back(elemMatchGt->clone());
-    expectedExpressions.emplace_back(elemMatchLt->clone());
+    std::vector<ExpressionBitInfo> expectedExpressions{
+        ExpressionBitInfo{elemMatchGt.get()},
+        ExpressionBitInfo{elemMatchLt.get()},
+    };
 
     BitsetTreeNode expectedTree{BitsetTreeNode::And, false};
     expectedTree.leafChildren = makeBitsetTerm("01", "11");
 
-    const auto& [tree, expressions] = transformToBitsetTree(expr.get());
-    ASSERT_EQ(expectedTree, tree);
-    assertExprInfo(expectedExpressions, expressions);
+    const auto result = transformToBitsetTreeTest(expr.get());
+    ASSERT_EQ(expectedTree, result.bitsetTree);
+    assertExprInfo(expectedExpressions, result.expressions);
+    ASSERT_EQ(3, result.expressionSize);
+}
+
+TEST(BitsetTreeConverterTests, TooManyPredicates) {
+    auto firstOperand = BSON("$gt" << 5);
+    auto secondOperand = BSON("$eq" << 10);
+    auto thirdOperand = BSON("$lt" << 10);
+    auto gtExpr = std::make_unique<GTMatchExpression>("a"_sd, firstOperand["$gt"]);
+    auto eqExpr = std::make_unique<EqualityMatchExpression>("b"_sd, secondOperand["$eq"]);
+    auto ltExpr = std::make_unique<LTMatchExpression>("c"_sd, thirdOperand["$lt"]);
+
+
+    auto expr = std::make_unique<OrMatchExpression>();
+    {
+        auto andExpr = std::make_unique<AndMatchExpression>();
+        andExpr->add(gtExpr->clone());
+        andExpr->add(std::make_unique<NotMatchExpression>(eqExpr->clone()));
+        expr->add(std::move(andExpr));
+    }
+    {
+        auto andExpr = std::make_unique<AndMatchExpression>();
+        andExpr->add(gtExpr->clone());
+        andExpr->add(eqExpr->clone());
+        andExpr->add(ltExpr->clone());
+        expr->add(std::move(andExpr));
+    }
+
+    const auto result = transformToBitsetTree(expr.get(), 2);
+    ASSERT_FALSE(result.has_value());
 }
 }  // namespace mongo

@@ -63,6 +63,7 @@ struct BulkWriteReplyInfo {
     std::vector<BulkWriteReplyItem> replyItems;
     int numErrors = 0;
     boost::optional<BulkWriteWriteConcernError> wcErrors;
+    boost::optional<std::vector<StmtId>> retriedStmtIds;
 };
 
 /**
@@ -148,7 +149,8 @@ public:
      */
     BulkWriteCommandRequest buildBulkCommandRequest(
         const std::vector<std::unique_ptr<NSTargeter>>& targeters,
-        const TargetedWriteBatch& targetedBatch) const;
+        const TargetedWriteBatch& targetedBatch,
+        boost::optional<bool> allowShardKeyUpdatesWithoutFullShardKeyInQuery) const;
 
     /**
      * Returns false if the bulk write op needs more processing.
@@ -164,6 +166,19 @@ public:
      * be concatenated into a single error when mongos responds to the client.
      */
     void saveWriteConcernError(ShardId shardId, BulkWriteWriteConcernError wcError);
+    void saveWriteConcernError(ShardWCError shardWCError);
+    std::vector<ShardWCError> getWriteConcernErrors() const {
+        return _wcErrors;
+    }
+
+    /**
+     * Marks this bulkWrite request as aborted if the error falls under one of the following cases:
+     * 1. A shutdown error and the router/mongos is shutting down.
+     * 2. The bulkWrite request is part of a transaction and we get an error.
+     *
+     * This may also throw if the bulkWrite request should fail with a top-level error code.
+     */
+    void abortIfNeeded(const Status& error);
 
     /**
      * Marks any further writes for this BulkWriteOp as failed with the provided error status. There
@@ -178,8 +193,14 @@ public:
     void noteChildBatchResponse(
         const TargetedWriteBatch& targetedBatch,
         const std::vector<BulkWriteReplyItem>& replyItems,
+        const boost::optional<std::vector<StmtId>>& retriedStmtIds,
         boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace);
 
+
+    void processChildBatchResponseFromRemote(
+        const TargetedWriteBatch& writeBatch,
+        const AsyncRequestsSender::Response& response,
+        boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace);
 
     /**
      * Records the error contained in the given status for write(s) in the given targetedBatch.
@@ -198,16 +219,26 @@ public:
     void processLocalChildBatchError(const TargetedWriteBatch& batch,
                                      const AsyncRequestsSender::Response& response);
 
+
+    /**
+     * Processes an error encountered while trying to target writes in this BulkWriteOp.
+     */
+    void processTargetingError(const StatusWith<WriteType>& targetStatus);
+
     /**
      * Processes the response to a single WriteOp at index opIdx directly and cleans up all
-     * associated childOps. The response is captured by the BulkWriteReplyItem. We don't expect
-     * sharding related stale version/db errors because response set by this method should be final
-     * (i.e. not retryable).
+     * associated childOps. The response is captured by the BulkWriteReplyItem. It also captures the
+     * writeConcern from ShardWCError if the WriteConcernErrorDetail inside is non-OK. We don't
+     * expect sharding related stale version/db errors because response set by this method should be
+     * final (i.e. not retryable).
      *
      * This is currently used by retryable timeseries updates and writes without shard key because
      * those operations are processed individually with the use of internal transactions.
      */
-    void noteWriteOpFinalResponse(size_t opIdx, const BulkWriteReplyItem& reply);
+    void noteWriteOpFinalResponse(size_t opIdx,
+                                  const BulkWriteReplyItem& reply,
+                                  const ShardWCError& shardWCError,
+                                  const boost::optional<std::vector<StmtId>>& retriedStmtIds);
 
     /**
      * Mark the corresponding targeter stale based on errorsPerNamespace.
@@ -256,6 +287,10 @@ private:
     WriteConcernOptions _writeConcern;
     // A list of write concern errors from all shards.
     std::vector<ShardWCError> _wcErrors;
+
+    // Statement ids for the ops that had already been executed, thus were not executed in this
+    // bulkWrite.
+    boost::optional<std::vector<StmtId>> _retriedStmtIds;
 
     // Set to true if this write is part of a transaction.
     const bool _inTransaction{false};

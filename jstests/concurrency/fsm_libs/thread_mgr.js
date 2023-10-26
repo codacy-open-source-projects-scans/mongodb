@@ -1,4 +1,3 @@
-import {getGlobalAssertLevel} from "jstests/concurrency/fsm_libs/assert.js";
 import {workerThread} from "jstests/concurrency/fsm_libs/worker_thread.js";
 import {Thread} from "jstests/libs/parallelTester.js";
 
@@ -119,7 +118,6 @@ export const ThreadManager = function(clusterOptions, executionMode = {
                     cluster: cluster.getSerializedCluster(),
                     clusterOptions: clusterOptions,
                     seed: Random.randInt(1e13),  // contains range of Date.getTime()
-                    globalAssertLevel: getGlobalAssertLevel(),
                     errorLatch: errorLatch,
                     sessionOptions: options.sessionOptions
                 };
@@ -201,10 +199,10 @@ workerThread.fsm = async function(workloads, args, options) {
     const {workerThread} = await import("jstests/concurrency/fsm_libs/worker_thread.js");
     const {fsm} = await import("jstests/concurrency/fsm_libs/fsm.js");
 
-    return workerThread.main(workloads, args, function(configs) {
+    return workerThread.main(workloads, args, async function(configs) {
         var workloads = Object.keys(configs);
         assert.eq(1, workloads.length);
-        fsm.run(configs[workloads[0]]);
+        await fsm.run(configs[workloads[0]]);
     });
 };
 

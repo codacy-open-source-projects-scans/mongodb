@@ -31,7 +31,6 @@
 
 #include <boost/exception/diagnostic_information.hpp>
 #include <boost/exception/exception.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
@@ -386,7 +385,6 @@ void setupSynchronousSignalHandlers() {
         if (sigaction(spec.signal, &sa, nullptr) != 0) {
             int savedErr = errno;
             LOGV2_FATAL(31334,
-                        "Failed to install sigaction for signal {signal}: {error}",
                         "Failed to install sigaction for signal",
                         "signal"_attr = spec.signal,
                         "error"_attr = strerror(savedErr));

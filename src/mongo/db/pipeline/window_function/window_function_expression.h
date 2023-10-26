@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <functional>
@@ -75,7 +74,7 @@
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/serialization_options.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
@@ -432,7 +431,8 @@ public:
                                              "$push",
                                              "$stdDevSamp",
                                              "$stdDevPop",
-                                             "$avg"};
+                                             "$avg",
+                                             "$addToSet"};
         if (compatibleAccumulators.count(_accumulatorName)) {
             expCtx->sbeWindowCompatibility =
                 std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
@@ -930,7 +930,8 @@ public:
                     boost::intrusive_ptr<::mongo::Expression> input,
                     WindowBounds bounds)
         : Expression(expCtx, "$first", std::move(input), std::move(bounds)) {
-        expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+        expCtx->sbeWindowCompatibility =
+            std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
     }
 
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
@@ -954,7 +955,8 @@ public:
                    boost::intrusive_ptr<::mongo::Expression> input,
                    WindowBounds bounds)
         : Expression(expCtx, "$last", std::move(input), std::move(bounds)) {
-        expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+        expCtx->sbeWindowCompatibility =
+            std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
     }
 
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,

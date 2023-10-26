@@ -135,12 +135,7 @@ public:
                 "Cannot drop indexes in 'admin' database in sharded cluster",
                 nss.dbName() != DatabaseName::kAdmin);
 
-        LOGV2_DEBUG(22751,
-                    1,
-                    "dropIndexes: {namespace} cmd: {command}",
-                    "CMD: dropIndexes",
-                    logAttrs(nss),
-                    "command"_attr = redact(cmdObj));
+        LOGV2_DEBUG(22751, 1, "CMD: dropIndexes", logAttrs(nss), "command"_attr = redact(cmdObj));
 
         ShardsvrDropIndexes shardsvrDropIndexCmd(nss);
         shardsvrDropIndexCmd.setDropIndexesRequest(requestParser.request().getDropIndexesRequest());
@@ -166,7 +161,7 @@ public:
         return &::mongo::DropIndexes::kAuthorizationContract;
     }
 };
-MONGO_REGISTER_COMMAND(DropIndexesCmd);
+MONGO_REGISTER_COMMAND(DropIndexesCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

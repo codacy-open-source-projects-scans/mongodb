@@ -39,7 +39,7 @@
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/query/cursor_response.h"
-#include "mongo/db/query/query_shape.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/find_key_generator.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/stats/counters.h"
@@ -113,10 +113,7 @@ public:
     class Invocation final : public CommandInvocation {
     public:
         Invocation(const ClusterFindCmdBase* definition, const OpMsgRequest& request)
-            : CommandInvocation(definition),
-              _request(request),
-              _dbName(DatabaseNameUtil::deserialize(request.getValidatedTenantId(),
-                                                    request.getDatabase())) {}
+            : CommandInvocation(definition), _request(request), _dbName(request.getDbName()) {}
 
     private:
         bool supportsWriteConcern() const override {
@@ -227,11 +224,14 @@ public:
                     [&]() {
                         // This callback is either never invoked or invoked immediately within
                         // registerRequest, so use-after-move of parsedFind isn't an issue.
-                        return std::make_unique<query_stats::FindKeyGenerator>(expCtx, *parsedFind);
+                        return std::make_unique<query_stats::FindKey>(expCtx, *parsedFind);
                     },
                     /*requiresFullQueryStatsFeatureFlag*/ false);
             }
-            auto cq = uassertStatusOK(CanonicalQuery::canonicalize(expCtx, std::move(parsedFind)));
+
+            // TODO: SERVER-77469 Propagate QueryShapeHash/QuerySettings from mongos to the shards.
+            auto cq = uassertStatusOK(CanonicalQuery::canonicalize(
+                expCtx, std::move(parsedFind), query_settings::QuerySettings()));
 
             try {
                 // Do the work to generate the first batch of results. This blocks waiting to get

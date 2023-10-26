@@ -64,6 +64,7 @@ public:
 
             ConfigsvrAbortReshardCollection configsvrAbortReshardCollection(nss);
             configsvrAbortReshardCollection.setDbName(request().getDbName());
+            configsvrAbortReshardCollection.setProvenance(ProvenanceEnum::kUnshardCollection);
 
             auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
             auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
@@ -109,7 +110,8 @@ public:
 };
 
 MONGO_REGISTER_COMMAND(ClusterAbortUnshardCollectionCmd)
-    .requiresFeatureFlag(&resharding::gFeatureFlagUnshardCollection);
+    .requiresFeatureFlag(&resharding::gFeatureFlagUnshardCollection)
+    .forRouter();
 
 }  // namespace
 }  // namespace mongo

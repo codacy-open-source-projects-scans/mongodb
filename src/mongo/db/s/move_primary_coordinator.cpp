@@ -32,7 +32,6 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
 #include <iterator>
@@ -101,7 +100,8 @@ MovePrimaryCoordinator::MovePrimaryCoordinator(ShardingDDLCoordinatorService* se
       _csReason([&] {
           BSONObjBuilder builder;
           builder.append("command", "movePrimary");
-          builder.append("db", DatabaseNameUtil::serialize(_dbName));
+          builder.append(
+              "db", DatabaseNameUtil::serialize(_dbName, SerializationContext::stateDefault()));
           builder.append("to", _doc.getToShardId());
           return builder.obj();
       }()) {}
@@ -338,7 +338,7 @@ ExecutorFuture<void> MovePrimaryCoordinator::runMovePrimaryWorkflow(
 }
 
 void MovePrimaryCoordinator::cloneData(OperationContext* opCtx) {
-    const auto& collectionsToClone = getUnshardedCollections(opCtx);
+    const auto& collectionsToClone = getCollectionsToClone(opCtx);
     assertNoOrphanedDataOnRecipient(opCtx, collectionsToClone);
 
     _doc.setCollectionsToClone(collectionsToClone);
@@ -416,7 +416,7 @@ void MovePrimaryCoordinator::logChange(OperationContext* opCtx,
         opCtx, "movePrimary.{}"_format(what), NamespaceString(_dbName), details.obj());
 }
 
-std::vector<NamespaceString> MovePrimaryCoordinator::getUnshardedCollections(
+std::vector<NamespaceString> MovePrimaryCoordinator::getCollectionsToClone(
     OperationContext* opCtx) const {
     const auto allCollections = [&] {
         DBDirectClient dbClient(opCtx);
@@ -439,22 +439,35 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getUnshardedCollections(
         return colls;
     }();
 
-    const auto shardedCollections = [&] {
-        auto colls = Grid::get(opCtx)->catalogClient()->getCollectionNamespacesForDb(
+    const auto collectionsToIgnore = [&] {
+        auto colls = Grid::get(opCtx)->catalogClient()->getShardedCollectionNamespacesForDb(
             opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
+        auto unshardedCollsOutsideDbPrimary =
+            Grid::get(opCtx)
+                ->catalogClient()
+                ->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
+                    opCtx,
+                    _dbName,
+                    {ShardingState::get(opCtx)->shardId().toString()},
+                    repl::ReadConcernLevel::kMajorityReadConcern);
+
+        std::move(unshardedCollsOutsideDbPrimary.begin(),
+                  unshardedCollsOutsideDbPrimary.end(),
+                  std::back_inserter(colls));
 
         std::sort(colls.begin(), colls.end());
+
         return colls;
     }();
 
-    std::vector<NamespaceString> unshardedCollections;
+    std::vector<NamespaceString> unshardedCollectionsOnDbPrimary;
     std::set_difference(allCollections.cbegin(),
                         allCollections.cend(),
-                        shardedCollections.cbegin(),
-                        shardedCollections.cend(),
-                        std::back_inserter(unshardedCollections));
+                        collectionsToIgnore.cbegin(),
+                        collectionsToIgnore.cend(),
+                        std::back_inserter(unshardedCollectionsOnDbPrimary));
 
-    return unshardedCollections;
+    return unshardedCollectionsOnDbPrimary;
 }
 
 void MovePrimaryCoordinator::assertNoOrphanedDataOnRecipient(
@@ -512,7 +525,9 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(
 
     const auto cloneCommand = [&] {
         BSONObjBuilder commandBuilder;
-        commandBuilder.append("_shardsvrCloneCatalogData", DatabaseNameUtil::serialize(_dbName));
+        commandBuilder.append(
+            "_shardsvrCloneCatalogData",
+            DatabaseNameUtil::serialize(_dbName, SerializationContext::stateDefault()));
         commandBuilder.append("from", fromShard->getConnString().toString());
         return CommandHelpers::appendMajorityWriteConcern(commandBuilder.obj());
     }();
@@ -533,7 +548,8 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(
         std::vector<NamespaceString> colls;
         for (const auto& bsonElem : cloneResponse.getValue().response["clonedColls"].Obj()) {
             if (bsonElem.type() == String) {
-                colls.push_back(NamespaceStringUtil::deserialize(boost::none, bsonElem.String()));
+                colls.push_back(NamespaceStringUtil::deserialize(
+                    boost::none, bsonElem.String(), SerializationContext::stateDefault()));
             }
         }
 
@@ -588,7 +604,8 @@ void MovePrimaryCoordinator::assertChangedMetadataOnConfig(
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
             repl::ReadConcernLevel::kMajorityReadConcern,
             NamespaceString::kConfigDatabasesNamespace,
-            BSON(DatabaseType::kDbNameFieldName << DatabaseNameUtil::serialize(_dbName)),
+            BSON(DatabaseType::kDbNameFieldName
+                 << DatabaseNameUtil::serialize(_dbName, SerializationContext::stateDefault())),
             BSONObj(),
             1));
 
@@ -618,21 +635,37 @@ void MovePrimaryCoordinator::dropStaleDataOnDonor(OperationContext* opCtx) const
     // Enable write blocking bypass to allow cleaning of stale data even if writes are disallowed.
     WriteBlockBypass::get(opCtx).set(true);
 
-    DBDirectClient dbClient(opCtx);
     invariant(_doc.getCollectionsToClone());
-    for (const auto& nss : *_doc.getCollectionsToClone()) {
+
+    auto trackedUnsplittableCollections =
+        Grid::get(opCtx)->catalogClient()->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
+            opCtx,
+            _dbName,
+            {ShardingState::get(opCtx)->shardId().toString()},
+            repl::ReadConcernLevel::kMajorityReadConcern);
+
+    DBDirectClient dbClient(opCtx);
+
+    const auto dropColl = [&](const NamespaceString& nssToDrop) {
         const auto dropStatus = [&] {
             BSONObj dropResult;
-            dbClient.runCommand(_dbName, BSON("drop" << nss.coll()), dropResult);
+            dbClient.runCommand(_dbName, BSON("drop" << nssToDrop.coll()), dropResult);
             return getStatusFromCommandResult(dropResult);
         }();
 
         if (!dropStatus.isOK()) {
             LOGV2_WARNING(7120210,
                           "Failed to drop stale collection on donor",
-                          logAttrs(nss),
+                          logAttrs(nssToDrop),
                           "error"_attr = redact(dropStatus));
         }
+    };
+
+    for (const auto& nss : *_doc.getCollectionsToClone()) {
+        dropColl(nss);
+    }
+    for (const auto& nss : trackedUnsplittableCollections) {
+        dropColl(nss);
     }
 }
 

@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <memory>
 #include <utility>
@@ -150,8 +149,8 @@ void onConfigDeleteInvalidateCachedCollectionMetadataAndNotify(OperationContext*
     std::string deletedCollection;
     fassert(40479,
             bsonExtractStringField(query, ShardCollectionType::kNssFieldName, &deletedCollection));
-    const NamespaceString deletedNss =
-        NamespaceStringUtil::deserialize(boost::none, deletedCollection);
+    const NamespaceString deletedNss = NamespaceStringUtil::deserialize(
+        boost::none, deletedCollection, SerializationContext::stateDefault());
 
     // Need the WUOW to retain the lock for CollectionPlacementVersionLogOpHandler::commit().
     // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can block.
@@ -203,7 +202,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                 if (idElem.str() == ShardIdentityType::IdName) {
                     auto shardIdentityDoc =
                         uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(insertedDoc));
-                    uassertStatusOK(shardIdentityDoc.validate());
+                    uassertStatusOK(shardIdentityDoc.validate(
+                        true /* fassert cluster role matches shard identity document */));
                     /**
                      * Perform shard identity initialization once we are certain that the document
                      * is committed.
@@ -243,7 +243,7 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
             opCtx->recoveryUnit()->onCommit(
                 [insertedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                     OperationContext* opCtx, boost::optional<Timestamp>) {
-                    if (nsIsDbOnly(NamespaceStringUtil::serialize(insertedNss))) {
+                    if (insertedNss.isDbOnly()) {
                         boost::optional<AutoGetDb> lockDbIfNotPrimary;
                         if (!isStandaloneOrPrimary(opCtx)) {
                             lockDbIfNotPrimary.emplace(opCtx, insertedNss.dbName(), MODE_IX);
@@ -313,7 +313,8 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
             fassert(40477,
                     bsonExtractStringField(
                         args.updateArgs->criteria, ShardCollectionType::kNssFieldName, &coll));
-            return NamespaceStringUtil::deserialize(boost::none, coll);
+            return NamespaceStringUtil::deserialize(
+                boost::none, coll, SerializationContext::stateDefault());
         }());
 
         auto enterCriticalSectionFieldNewVal = update_oplog_entry::extractNewValueForField(
@@ -374,7 +375,8 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
             // block.
             AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
 
-            DatabaseName dbName = DatabaseNameUtil::deserialize(boost::none, db);
+            DatabaseName dbName = DatabaseNameUtil::deserialize(
+                boost::none, db, SerializationContext::stateDefault());
             AutoGetDb autoDb(opCtx, dbName, MODE_X);
             auto scopedDss =
                 DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
@@ -391,7 +393,7 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx,
         opCtx->recoveryUnit()->onCommit(
             [updatedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                 OperationContext* opCtx, boost::optional<Timestamp>) {
-                if (nsIsDbOnly(NamespaceStringUtil::serialize(updatedNss))) {
+                if (updatedNss.isDbOnly()) {
                     boost::optional<AutoGetDb> lockDbIfNotPrimary;
                     if (!isStandaloneOrPrimary(opCtx)) {
                         lockDbIfNotPrimary.emplace(opCtx, updatedNss.dbName(), MODE_IX);
@@ -592,7 +594,8 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         // TODO SERVER-58223: evaluate whether this is safe or whether acquiring the lock can block.
         AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(opCtx->lockState());
 
-        DatabaseName dbName = DatabaseNameUtil::deserialize(boost::none, deletedDatabase);
+        DatabaseName dbName = DatabaseNameUtil::deserialize(
+            boost::none, deletedDatabase, SerializationContext::stateDefault());
         AutoGetDb autoDb(opCtx, dbName, MODE_X);
         auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireExclusive(opCtx, dbName);
         scopedDss->clearDbInfo(opCtx);
@@ -624,7 +627,7 @@ void ShardServerOpObserver::onDelete(OperationContext* opCtx,
         opCtx->recoveryUnit()->onCommit(
             [deletedNss = collCSDoc.getNss(), reason = collCSDoc.getReason().getOwned()](
                 OperationContext* opCtx, boost::optional<Timestamp>) {
-                if (nsIsDbOnly(NamespaceStringUtil::serialize(deletedNss))) {
+                if (deletedNss.isDbOnly()) {
                     boost::optional<AutoGetDb> lockDbIfNotPrimary;
                     if (!isStandaloneOrPrimary(opCtx)) {
                         lockDbIfNotPrimary.emplace(opCtx, deletedNss.dbName(), MODE_IX);

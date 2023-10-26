@@ -292,7 +292,7 @@ void EvalFilterLowering::transport(ABT& n, const PathCompare& cmp, ABT& c) {
         n = make<LambdaAbstraction>(
             name,
             make<If>(make<FunctionCall>("isArray", makeSeq(c)),
-                     make<FunctionCall>("isMember", makeSeq(make<Variable>(name), c)),
+                     make<BinaryOp>(Operations::EqMember, make<Variable>(name), c),
                      make<BinaryOp>(Operations::Eq,
                                     make<BinaryOp>(Operations::Cmp3w, make<Variable>(name), c),
                                     Constant::int64(0))));
@@ -441,14 +441,6 @@ bool PathLowering::optimize(ABT& n) {
     _changed = false;
 
     algebra::transport<true>(n, *this);
-
-    // During PathLowering we may call EvalPathLowering or EvalFilterLowering. These each may call
-    // rebuild on a subset of the ABT, which will produce invalid references for refs that point to
-    // definitions outside of that subset. Rebuild the tree to avoid leaving those free variables
-    // for the caller.
-    if (_changed) {
-        _env.rebuild(n);
-    }
 
     return _changed;
 }

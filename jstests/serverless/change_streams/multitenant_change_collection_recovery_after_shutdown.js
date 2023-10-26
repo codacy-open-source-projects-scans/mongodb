@@ -2,20 +2,15 @@
 // Ensures the periodic change collection entry remover is disabled for the duration of the test to
 // isolate startup recovery behavior.
 // @tags: [
-//   requires_fcv_71,
-//   featureFlagUseUnreplicatedTruncatesForDeletions,
+//  requires_fcv_72,
+//  # Not suitable for inMemory variants given data must persist across shutdowns.
+//  requires_persistence,
 // ]
 
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {
     ChangeStreamMultitenantReplicaSetTest
 } from "jstests/serverless/libs/change_collection_util.js";
-
-// Skip dbHash checks. Only one node faces an unclean shutdown - thus, change collection entries on
-// the shutdown node are removed when they remain on the other node.
-//
-// TODO SERVER-81025: Re-enable dbHash.
-TestData.skipCheckDBHashes = true;
 
 const replSetTest = new ChangeStreamMultitenantReplicaSetTest({
     nodes: 2,
@@ -43,7 +38,10 @@ const stockPriceNs = `${testDBName}.${stockPriceCollName}`;
 const kExpireAfterSeconds = 1;
 
 const establishTenant = function(tenantId, host = primaryHost) {
-    return ChangeStreamMultitenantReplicaSetTest.getTenantConnection(host, tenantId);
+    // Explicitly pass the 'user' to getTenantConnection to avoid creating a user for each call.
+    // This is specially important given that we call this function in standalone mode, which would
+    // introduce inconsistencies in 'system.users'.
+    return ChangeStreamMultitenantReplicaSetTest.getTenantConnection(host, tenantId, tenantId.str);
 };
 
 // Fetches the tenant's change collection entries tied to the 'stockPrice' collection.

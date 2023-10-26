@@ -42,6 +42,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/oid.h"
+#include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
@@ -66,7 +67,7 @@
 namespace mongo::timeseries::bucket_catalog {
 namespace {
 
-class BucketStateRegistryTest : public BucketCatalog, public unittest::Test {
+class BucketStateRegistryTest : public BucketCatalog, public CatalogTestFixture {
 public:
     BucketStateRegistryTest() {}
 
@@ -93,7 +94,8 @@ public:
     }
 
     Bucket& createBucket(const internal::CreationInfo& info) {
-        auto ptr = &internal::allocateBucket(*this, stripes[info.stripe], withLock, info);
+        auto ptr = &internal::allocateBucket(
+            operationContext(), *this, stripes[info.stripe], withLock, info);
         ASSERT_FALSE(hasBeenCleared(*ptr));
         return *ptr;
     }
@@ -617,8 +619,12 @@ TEST_F(BucketStateRegistryTest, ArchivingBucketPreservesState) {
     auto bucketId = bucket.bucketId;
 
     ClosedBuckets closedBuckets;
-    internal::archiveBucket(
-        *this, stripes[info1.stripe], WithLock::withoutLock(), bucket, closedBuckets);
+    internal::archiveBucket(operationContext(),
+                            *this,
+                            stripes[info1.stripe],
+                            WithLock::withoutLock(),
+                            bucket,
+                            closedBuckets);
     auto state = getBucketState(bucketStateRegistry, bucketId);
     ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kNormal));
 }
@@ -629,7 +635,7 @@ TEST_F(BucketStateRegistryTest, AbortingBatchRemovesBucketState) {
 
     auto stats = internal::getOrInitializeExecutionStats(*this, info1.key.ns);
     auto batch = std::make_shared<WriteBatch>(
-        BucketHandle{bucketId, info1.stripe}, 0, stats, bucket.timeField);
+        BucketHandle{bucketId, info1.stripe}, info1.key, 0, stats, bucket.timeField);
 
     internal::abort(*this, stripes[info1.stripe], WithLock::withoutLock(), batch, Status::OK());
     ASSERT(getBucketState(bucketStateRegistry, bucketId) == boost::none);
@@ -643,7 +649,7 @@ TEST_F(BucketStateRegistryTest, ClosingBucketGoesThroughPendingCompressionState)
 
     auto stats = internal::getOrInitializeExecutionStats(*this, info1.key.ns);
     auto batch = std::make_shared<WriteBatch>(
-        BucketHandle{bucketId, info1.stripe}, 0, stats, bucket.timeField);
+        BucketHandle{bucketId, info1.stripe}, info1.key, 0, stats, bucket.timeField);
     ASSERT(claimWriteBatchCommitRights(*batch));
     ASSERT_OK(prepareCommit(*this, batch));
     ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kPrepared));
@@ -653,7 +659,7 @@ TEST_F(BucketStateRegistryTest, ClosingBucketGoesThroughPendingCompressionState)
         // this and closes the bucket.
         bucket.rolloverAction = RolloverAction::kHardClose;
         CommitInfo commitInfo{};
-        auto closedBucket = finish(*this, batch, commitInfo);
+        auto closedBucket = finish(operationContext(), *this, batch, commitInfo);
         ASSERT(closedBucket.has_value());
         ASSERT_EQ(closedBucket.value().bucketId.oid, bucketId.oid);
 

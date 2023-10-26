@@ -40,7 +40,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/query/cost_model/cost_model_gen.h"
@@ -1062,7 +1061,7 @@ TEST(IntervalSimplification, SimplifyMinKey) {
 
 TEST(IntervalSimplification, IsIntervalEmpty) {
     auto isEmpty = [&](IntervalRequirement interval) {
-        return isIntervalEmpty(interval, ConstEval::constFold);
+        return isIntervalEmpty(interval);
     };
     // Equality intervals are never empty.
     ASSERT_FALSE(isEmpty({{true, Constant::minKey()}, {true, Constant::minKey()}}));

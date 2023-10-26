@@ -33,7 +33,6 @@
 #include <array>
 #include <boost/cstdint.hpp>
 #include <boost/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 #include <string_view>
 
@@ -100,7 +99,8 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
         gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
         nss.tenantId()->serializeToBSON(OplogEntryBase::kTidFieldName, &builder);
     }
-    builder.append(OplogEntryBase::kNssFieldName, NamespaceStringUtil::serialize(nss));
+    builder.append(OplogEntryBase::kNssFieldName,
+                   NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     builder.append(OplogEntryBase::kWallClockTimeFieldName, wallClockTime);
     if (uuid) {
         uuid->appendToBuilder(&builder, OplogEntryBase::kUuidFieldName);
@@ -567,7 +567,9 @@ bool DurableOplogEntry::isSingleOplogEntryTransactionWithCommand() const {
                 ? boost::none
                 : boost::make_optional<TenantId>(TenantId::parseFromBSON(tid));
 
-            if (NamespaceStringUtil::deserialize(tenantId, ns.String()).isCommand()) {
+            if (NamespaceStringUtil::deserialize(
+                    tenantId, ns.String(), SerializationContext::stateDefault())
+                    .isCommand()) {
                 return true;
             }
         }

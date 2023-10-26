@@ -53,7 +53,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -531,7 +530,7 @@ MongoURI MongoURI::parseImpl(StringData url) {
                     username,
                     password,
                     database,
-                    std::move(retryWrites),
+                    retryWrites,
                     tlsMode,
                     helloOk,
 // TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants

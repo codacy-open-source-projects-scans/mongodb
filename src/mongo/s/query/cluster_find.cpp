@@ -45,7 +45,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -235,6 +234,20 @@ std::vector<std::pair<ShardId, BSONObj>> constructRequestsForShards(
     const auto sampleShardId = sampleId
         ? boost::make_optional(analyze_shard_key::getRandomShardId(shardIds))
         : boost::none;
+
+    // Replace the letParams expressions with their values.
+    if (auto letParams = findCommandToForward->getLet()) {
+        BSONObjBuilder result;
+
+        const auto& vars = query.getExpCtx()->variables;
+        const auto& vps = query.getExpCtx()->variablesParseState;
+        for (BSONElement elem : *letParams) {
+            StringData name = elem.fieldNameStringData();
+            result << name << vars.getUserDefinedValue(vps.getVariable(name));
+        }
+
+        findCommandToForward->setLet(result.obj());
+    }
 
     auto shardRegistry = Grid::get(opCtx)->shardRegistry();
     std::vector<std::pair<ShardId, BSONObj>> requests;
@@ -510,7 +523,7 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
         if (shardIds.size() > 0) {
             updateNumHostsTargetedMetrics(opCtx, cm, shardIds.size());
         }
-        collectQueryStatsMongos(opCtx, ccc->getKeyGenerator());
+        collectQueryStatsMongos(opCtx, ccc->getKey());
         return CursorId(0);
     }
 
@@ -625,6 +638,12 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
     // since it is incorrect to generate multiple sample ids for a single query.
     const auto sampleId = analyze_shard_key::tryGenerateSampleId(
         opCtx, query.nss(), analyze_shard_key::SampledCommandNameEnum::kFind);
+
+    // Evaluate let params once: not per shard, and not per retry.
+    if (auto letParams = findCommand.getLet()) {
+        auto* expCtx = query.getExpCtx().get();
+        expCtx->variables.seedVariablesWithLetParameters(expCtx, *letParams);
+    }
 
     // Re-target and re-send the initial find command to the shards until we have established the
     // shard version.

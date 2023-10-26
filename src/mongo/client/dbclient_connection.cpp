@@ -28,7 +28,6 @@
  */
 
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -73,6 +72,7 @@
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/database_name_util.h"
@@ -113,11 +113,12 @@ StatusWith<std::shared_ptr<transport::Session>> DBClientConnection::_makeSession
     transport::ConnectSSLMode sslMode,
     Milliseconds timeout,
     boost::optional<TransientSSLParams> transientSSLParams) {
-    auto swSession = getGlobalServiceContext()->getTransportLayer()->connect(
-        host,
-        transientSSLParams ? transport::kEnableSSL : getURI().getSSLMode(),
-        _socketTimeout.value_or(Milliseconds(5000)),
-        transientSSLParams);
+    auto swSession =
+        getGlobalServiceContext()->getTransportLayerManager()->getEgressLayer()->connect(
+            host,
+            transientSSLParams ? transport::kEnableSSL : getURI().getSSLMode(),
+            _socketTimeout.value_or(Milliseconds(5000)),
+            transientSSLParams);
     return swSession;
 }
 
@@ -126,7 +127,11 @@ void DBClientConnection::_auth(const BSONObj& params) {
         /* note we remember the auth info before we attempt to auth -- if the connection is broken,
          * we will then have it for the next autoreconnect attempt.
          */
-        authCache[params[auth::getSaslCommandUserDBFieldName()].str()] = params.getOwned();
+        const DatabaseName dbName = DatabaseNameUtil::deserialize(
+            boost::none,
+            params[auth::getSaslCommandUserDBFieldName()].valueStringDataSafe(),
+            SerializationContext::stateAuthPrevalidated());
+        authCache[dbName] = params.getOwned();
     }
 
     DBClientBase::_auth(params);
@@ -141,10 +146,10 @@ void DBClientConnection::authenticateInternalUser(auth::StepDownBehavior stepDow
     return DBClientBase::authenticateInternalUser(stepDownBehavior);
 }
 
-void DBClientConnection::logout(const string& dbname, BSONObj& info) {
-    authCache.erase(dbname);
+void DBClientConnection::logout(const DatabaseName& dbName, BSONObj& info) {
+    authCache.erase(dbName);
     _internalAuthOnReconnect = false;
-    runCommand(DatabaseNameUtil::deserialize(boost::none, dbname), BSON("logout" << 1), info);
+    runCommand(dbName, BSON("logout" << 1), info);
 }
 
 std::pair<rpc::UniqueReply, DBClientBase*> DBClientConnection::runCommandWithTarget(
@@ -176,7 +181,7 @@ std::pair<rpc::UniqueReply, std::shared_ptr<DBClientBase>> DBClientConnection::r
 rpc::UniqueReply DBClientConnection::parseCommandReplyMessage(const std::string& host,
                                                               const Message& replyMsg) {
     try {
-        return DBClientBase::parseCommandReplyMessage(host, std::move(replyMsg));
+        return DBClientBase::parseCommandReplyMessage(host, replyMsg);
     } catch (const DBException& ex) {
         if (ErrorCodes::isConnectionFatalMessageParseError(ex.code())) {
             _markFailed(kEndSession);

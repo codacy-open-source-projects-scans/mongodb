@@ -32,12 +32,15 @@
 #include <sys/stat.h>
 #include <vector>
 
+#include <boost/filesystem.hpp>
+
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/grpc/grpc_session.h"
-#include "mongo/transport/grpc/grpc_transport_layer.h"
+#include "mongo/transport/grpc/grpc_transport_layer_impl.h"
 #include "mongo/transport/grpc/test_fixtures.h"
 #include "mongo/transport/grpc/wire_version_provider.h"
+#include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/unittest.h"
@@ -70,23 +73,10 @@ public:
         return makePeriodicRunner(getServiceContext());
     }
 
-    static GRPCTransportLayer::Options makeTLOptions() {
-        GRPCTransportLayer::Options options{};
-        options.bindIpList = {};
-        options.bindPort = CommandServiceTestFixtures::kBindPort;
-        options.maxServerThreads = CommandServiceTestFixtures::kMaxThreads;
-        options.useUnixDomainSockets = false;
-        options.unixDomainSocketPermissions = DEFAULT_UNIX_PERMS;
-        options.enableEgress = true;
-        options.clientMetadata = makeClientMetadataDocument();
-
-        return options;
-    }
-
     std::unique_ptr<GRPCTransportLayer> makeTL(
         CommandService::RPCHandler serverCb = makeNoopRPCHandler(),
-        GRPCTransportLayer::Options options = makeTLOptions()) {
-        auto tl = std::make_unique<GRPCTransportLayer>(getServiceContext(), std::move(options));
+        GRPCTransportLayer::Options options = CommandServiceTestFixtures::makeTLOptions()) {
+        auto tl = std::make_unique<GRPCTransportLayerImpl>(getServiceContext(), std::move(options));
         uassertStatusOK(tl->registerService(std::make_unique<CommandService>(
             tl.get(), std::move(serverCb), std::make_unique<WireVersionProvider>())));
         return tl;
@@ -194,7 +184,8 @@ public:
 
     void setUp() override {
         GRPCTransportLayerTest::setUp();
-        _tl = std::make_unique<GRPCTransportLayer>(getServiceContext(), makeTLOptions());
+        _tl = std::make_unique<GRPCTransportLayerImpl>(getServiceContext(),
+                                                       CommandServiceTestFixtures::makeTLOptions());
         uassertStatusOK(_tl->setup());
     }
 
@@ -239,7 +230,7 @@ TEST_F(IdleChannelPrunerTest, StopsWithTransportLayer) {
 
 TEST_F(GRPCTransportLayerTest, ConnectAndListen) {
     unittest::threadAssertionMonitoredTest([&](unittest::ThreadAssertionMonitor& monitor) {
-        auto options = makeTLOptions();
+        auto options = CommandServiceTestFixtures::makeTLOptions();
         options.bindIpList = {"localhost", "127.0.0.1", "::1"};
         options.bindPort = CommandServiceTestFixtures::kBindPort;
         options.useUnixDomainSockets = true;
@@ -268,7 +259,7 @@ TEST_F(GRPCTransportLayerTest, ConnectAndListen) {
 }
 
 TEST_F(GRPCTransportLayerTest, UnixDomainSocketPermissions) {
-    auto options = makeTLOptions();
+    auto options = CommandServiceTestFixtures::makeTLOptions();
     auto permissions = S_IRWXO & S_IRWXG & S_IRWXU;
     options.useUnixDomainSockets = true;
     options.unixDomainSocketPermissions = permissions;
@@ -322,7 +313,7 @@ TEST_F(GRPCTransportLayerTest, ConnectionError) {
             // Ensure second attempt on already created channel object also gracefully fails.
             tryConnect();
         },
-        makeTLOptions());
+        CommandServiceTestFixtures::makeTLOptions());
 }
 
 TEST_F(GRPCTransportLayerTest, GRPCTransportLayerShutdown) {
@@ -338,8 +329,9 @@ TEST_F(GRPCTransportLayerTest, GRPCTransportLayerShutdown) {
         ON_BLOCK_EXIT([&] { tl->shutdown(); });
 
 
-        auto session = client->connect(
-            CommandServiceTestFixtures::defaultServerAddress(), Milliseconds(50), {});
+        auto session = client->connect(CommandServiceTestFixtures::defaultServerAddress(),
+                                       CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                       {});
         ASSERT_OK(session->finish());
         session.reset();
     }
@@ -361,7 +353,7 @@ TEST_F(GRPCTransportLayerTest, Unary) {
             assertEchoSucceeds(*session);
             ASSERT_OK(session->finish());
         },
-        makeTLOptions());
+        CommandServiceTestFixtures::makeTLOptions());
 }
 
 TEST_F(GRPCTransportLayerTest, Exhaust) {
@@ -403,7 +395,7 @@ TEST_F(GRPCTransportLayerTest, Exhaust) {
             }
             ASSERT_OK(session->finish());
         },
-        makeTLOptions());
+        CommandServiceTestFixtures::makeTLOptions());
 }
 
 TEST_F(GRPCTransportLayerTest, Awaitable) {
@@ -444,7 +436,7 @@ TEST_F(GRPCTransportLayerTest, Awaitable) {
             }
             session->end();
         },
-        makeTLOptions());
+        CommandServiceTestFixtures::makeTLOptions());
 }
 
 TEST_F(GRPCTransportLayerTest, Unacknowledged) {
@@ -478,7 +470,141 @@ TEST_F(GRPCTransportLayerTest, Unacknowledged) {
 
             ASSERT_OK(session->finish());
         },
-        makeTLOptions());
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
+class RotateCertificatesGRPCTransportLayerTest : public GRPCTransportLayerTest {
+public:
+    void setUp() override {
+        GRPCTransportLayerTest::setUp();
+        _tempDir =
+            test::copyCertsToTempDir(grpc::CommandServiceTestFixtures::kCAFile,
+                                     grpc::CommandServiceTestFixtures::kServerCertificateKeyFile,
+                                     "grpc");
+
+        sslGlobalParams.sslCAFile = _tempDir->getCAFile().toString();
+        sslGlobalParams.sslPEMKeyFile = _tempDir->getPEMKeyFile().toString();
+    }
+
+    StringData getFilePathCA() {
+        return _tempDir->getCAFile();
+    }
+
+    StringData getFilePathPEM() {
+        return _tempDir->getPEMKeyFile();
+    }
+
+private:
+    std::unique_ptr<test::TempCertificatesDir> _tempDir;
+};
+
+TEST_F(RotateCertificatesGRPCTransportLayerTest, RotateCertificatesSucceeds) {
+    // Ceritificates that we wil rotate to.
+    const std::string kTrustedCAFile = "jstests/libs/trusted-ca.pem";
+    const std::string kTrustedPEMFile = "jstests/libs/trusted-server.pem";
+    const std::string kTrustedClientFile = "jstests/libs/trusted-client.pem";
+
+    runWithTL(
+        makeNoopRPCHandler(),
+        [&](auto& tl) {
+            auto initialGoodStub = CommandServiceTestFixtures::makeStubWithCerts(
+                CommandServiceTestFixtures::kCAFile,
+                CommandServiceTestFixtures::kClientCertificateKeyFile);
+            auto initialBadStub =
+                CommandServiceTestFixtures::makeStubWithCerts(kTrustedCAFile, kTrustedClientFile);
+
+            initialGoodStub.assertConnected();
+            initialBadStub.assertNotConnected();
+
+            // Overwrite the tmp files to hold new certs.
+            boost::filesystem::copy_file(kTrustedCAFile,
+                                         getFilePathCA().toString(),
+                                         boost::filesystem::copy_options::overwrite_existing);
+            boost::filesystem::copy_file(kTrustedPEMFile,
+                                         getFilePathPEM().toString(),
+                                         boost::filesystem::copy_options::overwrite_existing);
+
+            ASSERT_OK(tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false));
+
+            initialGoodStub.assertConnected();
+            initialBadStub.assertConnected();
+        },
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(RotateCertificatesGRPCTransportLayerTest, RotateCertificatesSucceedsWhenUnchanged) {
+    runWithTL(
+        makeNoopRPCHandler(),
+        [&](auto& tl) {
+            // Connect using the existing certs.
+            auto stub = CommandServiceTestFixtures::makeStubWithCerts(
+                CommandServiceTestFixtures::kCAFile,
+                CommandServiceTestFixtures::kClientCertificateKeyFile);
+            stub.assertConnected();
+
+            ASSERT_OK(tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false));
+
+            auto stub2 = CommandServiceTestFixtures::makeStubWithCerts(
+                CommandServiceTestFixtures::kCAFile,
+                CommandServiceTestFixtures::kClientCertificateKeyFile);
+            stub2.assertConnected();
+        },
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(RotateCertificatesGRPCTransportLayerTest, RotateCertificatesThrowsAndUsesOldCertsWhenEmpty) {
+    runWithTL(
+        makeNoopRPCHandler(),
+        [&](auto& tl) {
+            // Connect using the existing certs.
+            auto stub = CommandServiceTestFixtures::makeStubWithCerts(
+                CommandServiceTestFixtures::kCAFile,
+                CommandServiceTestFixtures::kClientCertificateKeyFile);
+            stub.assertConnected();
+
+            boost::filesystem::resize_file(getFilePathCA().toString(), 0);
+
+            ASSERT_EQ(
+                tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false).code(),
+                ErrorCodes::InvalidSSLConfiguration);
+
+            auto stub2 = CommandServiceTestFixtures::makeStubWithCerts(
+                CommandServiceTestFixtures::kCAFile,
+                CommandServiceTestFixtures::kClientCertificateKeyFile);
+            stub2.assertConnected();
+        },
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(RotateCertificatesGRPCTransportLayerTest,
+       RotateCertificatesUsesOldCertsWithNewInvalidCerts) {
+    const std::string kInvalidPEMFile = "jstests/libs/ecdsa-ca-ocsp.crt";
+
+    runWithTL(
+        makeNoopRPCHandler(),
+        [&](auto& tl) {
+            // Connect using the existing certs.
+            auto stub = CommandServiceTestFixtures::makeStubWithCerts(
+                CommandServiceTestFixtures::kCAFile,
+                CommandServiceTestFixtures::kClientCertificateKeyFile);
+            stub.assertConnected();
+
+            // Overwrite the tmp files to hold new, invalid certs.
+            boost::filesystem::copy_file(kInvalidPEMFile,
+                                         getFilePathPEM().toString(),
+                                         boost::filesystem::copy_options::overwrite_existing);
+
+            ASSERT_EQ(
+                tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false).code(),
+                ErrorCodes::InvalidSSLConfiguration);
+
+            // Make sure we can still connect with the initial certs used before the bad rotation.
+            auto stub2 = CommandServiceTestFixtures::makeStubWithCerts(
+                CommandServiceTestFixtures::kCAFile,
+                CommandServiceTestFixtures::kClientCertificateKeyFile);
+            stub2.assertConnected();
+        },
+        CommandServiceTestFixtures::makeTLOptions());
 }
 
 }  // namespace

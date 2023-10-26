@@ -37,7 +37,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -783,7 +782,7 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulatorTopBottomN(
 
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
     aggs.push_back(makeFunction(isAccumulatorTopN(expr) ? "aggTopN" : "aggBottomN",
-                                std::move(key),
+                                makeFunction("setToArray", std::move(key)),
                                 std::move(value),
                                 std::move(sortSpec)));
     return aggs;
@@ -907,11 +906,13 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulatorMinMaxN(
     std::vector<std::unique_ptr<sbe::EExpression>> aggs;
     auto aggExprName = expr.name == AccumulatorMaxN::kName ? "aggMaxN" : "aggMinN";
     if (collatorSlot) {
-        aggs.push_back(
-            makeFunction(std::move(aggExprName), std::move(arg), makeVariable(*collatorSlot)));
+        aggs.push_back(makeFunction(std::move(aggExprName),
+                                    makeFunction("setToArray", std::move(arg)),
+                                    makeVariable(*collatorSlot)));
 
     } else {
-        aggs.push_back(makeFunction(std::move(aggExprName), std::move(arg)));
+        aggs.push_back(
+            makeFunction(std::move(aggExprName), makeFunction("setToArray", std::move(arg))));
     }
     return aggs;
 }
@@ -1146,7 +1147,7 @@ std::vector<std::unique_ptr<sbe::EExpression>> buildAccumulatorDerivative(
     boost::optional<sbe::value::SlotId> collatorSlot,
     sbe::value::FrameIdGenerator& frameIdGenerator) {
     std::vector<std::unique_ptr<sbe::EExpression>> exprs;
-    exprs.push_back(nullptr);
+    exprs.push_back(makeFunction("sum", makeInt64Constant(1)));
     return exprs;
 }
 
@@ -1157,6 +1158,7 @@ std::unique_ptr<sbe::EExpression> buildFinalizeDerivative(
     StringDataMap<std::unique_ptr<sbe::EExpression>> args,
     boost::optional<sbe::value::SlotId> collatorSlot,
     sbe::value::FrameIdGenerator& frameIdGenerator) {
+    tassert(8085504, "Expected a single slot", slots.size() == 1);
     auto it = args.find(AccArgs::kUnit);
     tassert(7993403,
             str::stream() << "Window function expects '" << AccArgs::kUnit << "' argument",
@@ -1191,12 +1193,18 @@ std::unique_ptr<sbe::EExpression> buildFinalizeDerivative(
             it != args.end());
     auto sortByLast = std::move(it->second);
 
-    return makeFunction("aggDerivativeFinalize",
-                        std::move(unit),
-                        std::move(inputFirst),
-                        std::move(sortByFirst),
-                        std::move(inputLast),
-                        std::move(sortByLast));
+    return sbe::makeE<sbe::EIf>(
+        makeBinaryOp(
+            sbe::EPrimBinary::logicAnd,
+            makeFunction("exists", makeVariable(slots[0])),
+            makeBinaryOp(sbe::EPrimBinary::greater, makeVariable(slots[0]), makeInt64Constant(0))),
+        makeFunction("aggDerivativeFinalize",
+                     std::move(unit),
+                     std::move(inputFirst),
+                     std::move(sortByFirst),
+                     std::move(inputLast),
+                     std::move(sortByLast)),
+        makeNullConstant());
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildInitializeLinearFill(
@@ -1258,7 +1266,6 @@ std::unique_ptr<sbe::EExpression> buildFinalizeLinearFill(
 
     return makeFunction("aggLinearFillFinalize", std::move(inputVar), std::move(sortBy));
 }
-
 
 template <int N>
 std::vector<std::unique_ptr<sbe::EExpression>> emptyInitializer(

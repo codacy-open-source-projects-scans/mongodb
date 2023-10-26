@@ -70,7 +70,6 @@
 #include "mongo/rpc/unique_message.h"
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/transport/session.h"
-#include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/str.h"
@@ -331,7 +330,7 @@ public:
      * 'info': The result object for the logout command (provided for backwards compatibility with
      *         mongo shell).
      */
-    virtual void logout(const std::string& dbname, BSONObj& info);
+    virtual void logout(const DatabaseName& dbname, BSONObj& info);
 
     virtual bool authenticatedDuringConnect() const {
         return false;
@@ -773,8 +772,8 @@ public:
                                   rpc::RequestMetadataWriter writer,
                                   rpc::ReplyMetadataReader reader)
         : _conn(conn),
-          _oldWriter(std::move(conn->getRequestMetadataWriter())),
-          _oldReader(std::move(conn->getReplyMetadataReader())) {
+          _oldWriter(conn->getRequestMetadataWriter()),
+          _oldReader(conn->getReplyMetadataReader()) {
         _conn->setRequestMetadataWriter(std::move(writer));
         _conn->setReplyMetadataReader(std::move(reader));
     }

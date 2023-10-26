@@ -34,7 +34,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <memory>
 #include <utility>
 
@@ -780,6 +779,25 @@ private:
     void decrementLockFreeReadOpCount() {
         --_lockFreeReadOpCount;
     }
+
+    /**
+     * Schedule the client to be checked every second. If the client has disconnected, the operation
+     * will be killed. Periodic checks are not needed if the client's session is compatible with the
+     * networking baton associated with this opCtx.
+     *
+     * If there is no associated baton or it is not a networking baton, this method has no effect.
+     */
+    void _schedulePeriodicClientConnectedCheck();
+
+    /**
+     * If the client is networked, check that its underlying session is still connected. If the
+     * session is not connected, kill the operation. The status used to kill the operation will be
+     * returned.
+     *
+     * This will only actually check the underlying session every 500ms regardless of how often this
+     * is called, since doing so may be expensive.
+     */
+    Status _checkClientConnected();
 
     friend class WriteUnitOfWork;
     friend class repl::UnreplicatedWritesBlock;

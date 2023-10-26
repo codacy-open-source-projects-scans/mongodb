@@ -39,7 +39,6 @@
 #include <absl/container/node_hash_set.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/error_codes.h"
@@ -224,7 +223,8 @@ TEST_F(CursorManagerTest, ShouldBeAbleToKillPinnedCursorMultiClient) {
     auto cursorId = cursorPin.getCursor()->cursorid();
 
     // Set up another client to kill the cursor.
-    auto killCursorClientOwned = getGlobalServiceContext()->makeClient("killCursorClient");
+    auto killCursorClientOwned =
+        getGlobalServiceContext()->getService()->makeClient("killCursorClient");
     // Keep around a raw pointer for when we transfer ownership of killingClientOwned to the global
     // current client.
     Client* killCursorClient = killCursorClientOwned.get();

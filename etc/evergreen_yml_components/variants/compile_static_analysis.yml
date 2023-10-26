@@ -192,8 +192,6 @@ buildvariants:
       archive-mongocryptd
       archive-mongocryptd-debug
       msi
-      archive-mh
-      archive-mh-debug
     content_type: application/zip
     compile_flags: >-
       --ssl
@@ -229,6 +227,8 @@ buildvariants:
     compile_variant: *ubuntu2204-arm64-bazel-compile
   tasks:
     - name: compile_bazel_dist_test_TG
+    - name: compile_bazel_c_and_asm_targets_TG
+    - name: compile_bazel_libunwind_TG
 
 - <<: *linux-arm64-dynamic-compile-params
   name: &amazon-linux2-arm64-compile amazon-linux2-arm64-compile
@@ -294,6 +294,8 @@ buildvariants:
     test_flags: >-
       --mongosSetParameters="{featureFlagGRPC: true}"
       --mongodSetParameters="{featureFlagGRPC: true}"
+      --excludeWithAnyTags=requires_external_data_source
+
   tasks:
     - name: compile_ninja_quick_TG
     - name: compile_test_parallel_unittest_stream_TG

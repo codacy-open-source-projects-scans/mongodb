@@ -40,7 +40,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -313,7 +312,7 @@ std::vector<BSONObj> resolveDefaultsAndRemoveExistingIndexes(OperationContext* o
                                                              const CollectionPtr& collection,
                                                              std::vector<BSONObj> indexSpecs) {
     // Normalize the specs' collations, wildcard projections, and partial filters as applicable.
-    auto normalSpecs = IndexBuildsCoordinator::normalizeIndexSpecs(opCtx, collection, indexSpecs);
+    auto normalSpecs = IndexCatalog::normalizeIndexSpecs(opCtx, collection, indexSpecs);
 
     return collection->getIndexCatalog()->removeExistingIndexes(
         opCtx, collection, normalSpecs, false /*removeIndexBuildsToo*/);
@@ -658,7 +657,9 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
             {
                 // The current OperationContext may be interrupted, which would prevent us from
                 // taking locks. Use a new OperationContext to abort the index build.
-                auto newClient = opCtx->getServiceContext()->makeClient("abort-index-build");
+                auto newClient = opCtx->getServiceContext()
+                                     ->getService(ClusterRole::ShardServer)
+                                     ->makeClient("abort-index-build");
                 AlternativeClientRegion acr(newClient);
                 const auto abortCtx = cc().makeOperationContext();
 
@@ -796,18 +797,13 @@ public:
                         throw;
                     }
                     if (shouldLogMessageOnAlreadyBuildingError) {
-                        LOGV2(
-                            20450,
-                            "Received a request to create indexes: '{indexesFieldName}', but found "
-                            "that at least one of the indexes is already being built, '{error}'. "
-                            "This request will wait for the pre-existing index build to finish "
-                            "before proceeding",
-                            "Received a request to create indexes, "
-                            "but found that at least one of the indexes is already being built."
-                            "This request will wait for the pre-existing index build to finish "
-                            "before proceeding",
-                            "indexesFieldName"_attr = cmd->getIndexes(),
-                            "error"_attr = ex);
+                        LOGV2(20450,
+                              "Received a request to create indexes, "
+                              "but found that at least one of the indexes is already being built."
+                              "This request will wait for the pre-existing index build to finish "
+                              "before proceeding",
+                              "indexesFieldName"_attr = cmd->getIndexes(),
+                              "error"_attr = ex);
                         shouldLogMessageOnAlreadyBuildingError = false;
                     }
                     // Reset the snapshot because we have released locks and need a fresh snapshot
@@ -834,7 +830,7 @@ public:
         return true;
     }
 };
-MONGO_REGISTER_COMMAND(CmdCreateIndexes);
+MONGO_REGISTER_COMMAND(CmdCreateIndexes).forShard();
 
 }  // namespace
 }  // namespace mongo

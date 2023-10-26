@@ -32,7 +32,6 @@
 #include <string>
 #include <vector>
 
-#include <boost/preprocessor/control/iif.hpp>
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -90,6 +89,8 @@ int main(int argc, char** argv) {
     std::string fileNameFilter;
     std::string internalRunDeathTest;
     mongo::unittest::AutoUpdateConfig autoUpdateConfig;
+    autoUpdateConfig.executablePath =
+        boost::filesystem::canonical(boost::filesystem::path(argVec[0]));
 
     // "list", "repeat", and "autoUpdateAsserts" will be assigned with default values, if
     // not present.

@@ -34,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
@@ -145,7 +144,8 @@ BSONObj createRequestWithSessionId(StringData commandName,
                                    const MigrationSessionId& sessionId,
                                    bool waitForSteadyOrDone = false) {
     BSONObjBuilder builder;
-    builder.append(commandName, NamespaceStringUtil::serialize(nss));
+    builder.append(commandName,
+                   NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
     builder.append("waitForSteadyOrDone", waitForSteadyOrDone);
     sessionId.append(&builder);
     return builder.obj();
@@ -456,7 +456,8 @@ StatusWith<BSONObj> MigrationChunkClonerSource::commitClone(OperationContext* op
 
     auto responseStatus = _callRecipient(opCtx, [&] {
         BSONObjBuilder builder;
-        builder.append(kRecvChunkCommit, NamespaceStringUtil::serialize(nss()));
+        builder.append(kRecvChunkCommit,
+                       NamespaceStringUtil::serialize(nss(), SerializationContext::stateDefault()));
         _sessionId.append(&builder);
         return builder.obj();
     }());
@@ -493,10 +494,7 @@ void MigrationChunkClonerSource::cancelClone(OperationContext* opCtx) noexcept {
                                createRequestWithSessionId(kRecvChunkAbort, nss(), _sessionId))
                     .getStatus();
             if (!status.isOK()) {
-                LOGV2(21991,
-                      "Failed to cancel migration: {error}",
-                      "Failed to cancel migration",
-                      "error"_attr = redact(status));
+                LOGV2(21991, "Failed to cancel migration", "error"_attr = redact(status));
             }
             [[fallthrough]];
         }
@@ -516,8 +514,6 @@ void MigrationChunkClonerSource::onInsertOp(OperationContext* opCtx,
     BSONElement idElement = insertedDoc["_id"];
     if (idElement.eoo()) {
         LOGV2_WARNING(21995,
-                      "logInsertOp received a document without an _id field, ignoring inserted "
-                      "document: {insertedDoc}",
                       "logInsertOp received a document without an _id field and will ignore that "
                       "document",
                       "insertedDoc"_attr = redact(insertedDoc));
@@ -546,8 +542,6 @@ void MigrationChunkClonerSource::onUpdateOp(OperationContext* opCtx,
     if (idElement.eoo()) {
         LOGV2_WARNING(
             21996,
-            "logUpdateOp received a document without an _id field, ignoring the updated document: "
-            "{postImageDoc}",
             "logUpdateOp received a document without an _id field and will ignore that document",
             "postImageDoc"_attr = redact(postImageDoc));
         return;
@@ -583,8 +577,6 @@ void MigrationChunkClonerSource::onDeleteOp(OperationContext* opCtx,
     if (idElement.eoo()) {
         LOGV2_WARNING(
             21997,
-            "logDeleteOp received a document without an _id field, ignoring deleted doc: "
-            "{shardKeyAndId}",
             "logDeleteOp received a document without an _id field and will ignore that document",
             "deletedDocShardKeyAndId"_attr = redact(shardKeyAndId));
         return;
@@ -1230,9 +1222,6 @@ Status MigrationChunkClonerSource::_checkRecipientCloningStatus(OperationContext
 
         if (_forceJumbo && _jumboChunkCloneState) {
             LOGV2(21992,
-                  "moveChunk data transfer progress: {response} mem used: {memoryUsedBytes} "
-                  "documents cloned so far: {docsCloned} remaining amount: "
-                  "{untransferredModsSizeBytes}",
                   "moveChunk data transfer progress",
                   "response"_attr = redact(res),
                   "memoryUsedBytes"_attr = _memoryUsed,
@@ -1240,9 +1229,6 @@ Status MigrationChunkClonerSource::_checkRecipientCloningStatus(OperationContext
                   "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes);
         } else {
             LOGV2(21993,
-                  "moveChunk data transfer progress: {response} mem used: {memoryUsedBytes} "
-                  "documents remaining to clone: {docsRemainingToClone} estimated remaining size "
-                  "{untransferredModsSizeBytes}",
                   "moveChunk data transfer progress",
                   "response"_attr = redact(res),
                   "memoryUsedBytes"_attr = _memoryUsed,
@@ -1317,7 +1303,8 @@ Status MigrationChunkClonerSource::_checkRecipientCloningStatus(OperationContext
                                   << migrationSessionIdStatus.getStatus().toString()};
         }
 
-        if (res["ns"].str() != NamespaceStringUtil::serialize(nss()) ||
+        if (NamespaceStringUtil::deserialize(
+                boost::none, res["ns"].str(), SerializationContext::stateDefault()) != nss() ||
             (res.hasField("fromShardId")
                  ? (res["fromShardId"].str() != _args.getFromShard().toString())
                  : (res["from"].str() != _donorConnStr.toString())) ||

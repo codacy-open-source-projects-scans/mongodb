@@ -106,7 +106,7 @@ public:
                     shardRegistry->getShard(opCtx, toShardId),
                     "requested primary shard {} does not exist"_format(toShardId.toString()));
 
-                const auto coordinatorDoc = [&] {
+                auto coordinatorDoc = [&] {
                     MovePrimaryCoordinatorDocument doc;
                     doc.setShardingDDLCoordinatorMetadata(
                         {{dbNss, DDLCoordinatorTypeEnum::kMovePrimary}});
@@ -162,7 +162,7 @@ private:
         return "Internal command. Do not call directly.";
     }
 };
-MONGO_REGISTER_COMMAND(ShardsvrMovePrimaryCommand);
+MONGO_REGISTER_COMMAND(ShardsvrMovePrimaryCommand).forShard();
 
 }  // namespace
 }  // namespace mongo

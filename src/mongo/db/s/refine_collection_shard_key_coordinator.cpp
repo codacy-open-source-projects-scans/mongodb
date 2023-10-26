@@ -31,7 +31,6 @@
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
 
 #include <boost/none.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr.hpp>
 #include <string>
 #include <tuple>
@@ -84,12 +83,13 @@ void notifyChangeStreamsOnRefineCollectionShardKeyComplete(OperationContext* opC
                                                            const KeyPattern& oldShardKey,
                                                            const UUID& collUUID) {
 
+    const auto collNssStr =
+        NamespaceStringUtil::serialize(collNss, SerializationContext::stateDefault());
     const std::string oMessage = str::stream()
-        << "Refine shard key for collection " << NamespaceStringUtil::serialize(collNss) << " with "
-        << shardKey.toString();
+        << "Refine shard key for collection " << collNssStr << " with " << shardKey.toString();
 
     BSONObjBuilder cmdBuilder;
-    cmdBuilder.append("refineCollectionShardKey", NamespaceStringUtil::serialize(collNss));
+    cmdBuilder.append("refineCollectionShardKey", collNssStr);
     cmdBuilder.append("shardKey", shardKey.toBSON());
     cmdBuilder.append("oldShardKey", oldShardKey.toBSON());
 
@@ -138,7 +138,9 @@ RefineCollectionShardKeyCoordinator::RefineCollectionShardKeyCoordinator(
       _request(_doc.getRefineCollectionShardKeyRequest()),
       _critSecReason(BSON("command"
                           << "refineCollectionShardKey"
-                          << "ns" << NamespaceStringUtil::serialize(nss()))) {}
+                          << "ns"
+                          << NamespaceStringUtil::serialize(
+                                 nss(), SerializationContext::stateDefault()))) {}
 
 void RefineCollectionShardKeyCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     // If we have two refine collections on the same namespace, then the arguments must be the same.
@@ -201,8 +203,9 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
                                                                                           nss());
                     auto metadata = scopedCsr->getCurrentMetadataIfKnown();
                     uassert(ErrorCodes::NamespaceNotSharded,
-                            str::stream() << "refineCollectionShardKey namespace "
-                                          << nss().toStringForErrorMsg() << " is not sharded",
+                            str::stream()
+                                << "Can't execute refineCollectionShardKey on unsharded collection "
+                                << nss().toStringForErrorMsg(),
                             metadata && metadata->isSharded());
                     _doc.setOldKey(
                         metadata->getChunkManager()->getShardKeyPattern().getKeyPattern());
@@ -485,6 +488,11 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinatorPre71Compatible::_runImp
                         ->catalogCache()
                         ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss()));
 
+                uassert(ErrorCodes::NamespaceNotSharded,
+                        str::stream() << "refineCollectionShardKey namespace "
+                                      << nss().toStringForErrorMsg() << " is not sharded",
+                        cm.isSharded());
+
                 _oldShardKey = cm.getShardKeyPattern().getKeyPattern();
                 _collectionUUID = cm.getUUID();
 
@@ -505,7 +513,7 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinatorPre71Compatible::_runImp
                         configsvrRefineCollShardKey.toBSON({}), opCtx->getWriteConcern()),
                     Shard::RetryPolicy::kIdempotent));
 
-                uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));
+                uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(cmdResponse));
             }))
         .onCompletion([this, anchor = shared_from_this()](const Status& status) {
             auto opCtxHolder = cc().makeOperationContext();

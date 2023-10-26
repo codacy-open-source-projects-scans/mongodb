@@ -41,7 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/preprocessor/control/iif.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/base/string_data.h"
@@ -380,7 +379,7 @@ SbExpr evaluateProjection(StageBuilderState& state,
     using Node = PathTreeNode<boost::optional<ProjectionNode>>;
 
     auto tree = buildPathTree<boost::optional<ProjectionNode>>(
-        std::move(paths), std::move(nodes), BuildPathTreeMode::AssertNoConflictingPaths);
+        paths, std::move(nodes), BuildPathTreeMode::AssertNoConflictingPaths);
 
     ProjectionVisitorContext context{state, type, std::move(inputExpr), slots};
 
@@ -426,7 +425,7 @@ SbExpr evaluateSliceOps(StageBuilderState& state,
     using Node = PathTreeNode<boost::optional<ProjectionNode>>;
 
     auto tree = buildPathTree<boost::optional<ProjectionNode>>(
-        std::move(paths), std::move(nodes), BuildPathTreeMode::AssertNoConflictingPaths);
+        paths, std::move(nodes), BuildPathTreeMode::AssertNoConflictingPaths);
 
     // We want to keep the entire input document as-is except for applying the $slice ops, so
     // we use the 'kExclusion' projection type.

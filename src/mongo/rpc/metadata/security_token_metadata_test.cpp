@@ -65,13 +65,15 @@ constexpr auto kPingFieldName = "ping"_sd;
 
 std::string makeSecurityToken(const UserName& userName) {
     using VTS = auth::ValidatedTenancyScope;
-    return VTS(userName, "secret"_sd, VTS::TokenForTestingTag{}).getOriginalToken().toString();
+    return VTS(userName, "secret"_sd, VTS::TenantProtocol::kDefault, VTS::TokenForTestingTag{})
+        .getOriginalToken()
+        .toString();
 }
 
 class SecurityTokenMetadataTest : public ServiceContextTest {
 protected:
     void setUp() final {
-        client = getServiceContext()->makeClient("test");
+        client = getServiceContext()->getService()->makeClient("test");
     }
 
     ServiceContext::UniqueClient client;
