@@ -76,6 +76,15 @@ TEST(ProcessInfo, TestSysInfo) {
     ASSERT_KEY("cpuString");
 
 #if defined(__linux__)
+
+#if defined(__aarch64__) || defined(__arm__)
+    ASSERT_KEY("cpuImplementer");
+    ASSERT_KEY("cpuArchitecture");
+    ASSERT_KEY("cpuVariant");
+    ASSERT_KEY("cpuPart");
+    ASSERT_KEY("cpuRevision");
+#endif
+
     ASSERT_KEY("mountInfo");
 
     BSONElement mountInfoArray = obj.getField("mountInfo");

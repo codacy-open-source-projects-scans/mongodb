@@ -166,10 +166,6 @@ NamespaceString NamespaceStringUtil::deserialize(boost::optional<TenantId> tenan
 }
 
 NamespaceString NamespaceStringUtil::deserialize(const DatabaseName& dbName, StringData coll) {
-    // TODO SERVER-78534: if gMultitenancySupport is false, create a NamespaceString object
-    // directly. Otherwise, check the tenant id, db name and collection name before creating a
-    // NamespaceString object, because We allow only specific global internal collections to be
-    // created without a tenantId.
     return NamespaceString{dbName, coll};
 }
 
@@ -267,6 +263,10 @@ NamespaceString NamespaceStringUtil::deserialize(const boost::optional<TenantId>
                                                  const SerializationContext& context) {
     if (coll.empty())
         return deserialize(tenantId, db, context);
+
+    // if db is empty, we can never have a prefixed tenantId so we don't need to call deserialize
+    if (db.empty() && tenantId)
+        return NamespaceString(tenantId, db, coll);
 
     // TODO SERVER-80361: Pass both StringDatas down to nss constructor to make this more performant
     return deserialize(tenantId, str::stream() << db << "." << coll, context);

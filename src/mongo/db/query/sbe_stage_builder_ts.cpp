@@ -65,7 +65,8 @@ struct CellPathReqsRet {
 // bucket-level processing _and_ unpacking of this bucket is done. This means that it includes the
 // fields that are computed from the 'metaField' before unpacking but these fields don't correspond
 // to any cell paths, even if they have the same names, and we must exclude them from the cell path
-// requirements.
+// requirements. Note, that the 'metaField' itself is never included into the bucket spec's
+// fieldSet, its usage is tracked by 'unpackNode->includeMeta' instead.
 CellPathReqsRet getCellPathReqs(const UnpackTsBucketNode* unpackNode) {
     const auto& fieldSet = unpackNode->bucketSpec.fieldSet();
     const auto& computedFromMeta = unpackNode->bucketSpec.computedMetaProjFields();
@@ -77,7 +78,6 @@ CellPathReqsRet getCellPathReqs(const UnpackTsBucketNode* unpackNode) {
         if (computedFromMeta.find(field) == computedFromMeta.end()) {
             // For each path requested by the query we generate a 'topLevelPath' version, which is
             // just the value of the top level field, with no traversal.
-
             ret.topLevelPaths.emplace_back(
                 sv::CellBlock::PathRequest{{sv::CellBlock::Get{field}, sv::CellBlock::Id{}}});
         }
@@ -166,7 +166,7 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
 
     // Setup the request for the child stage that should place the bucket to be unpacked into the
     // kResult slot.
-    PlanStageReqs childReqs = reqs.copy().clearAllFields().set(kResult);
+    PlanStageReqs childReqs = reqs.copy().clearAllFields().clearMRInfo().setResult();
     // Computing fields from 'meta' should have been pushed below unpacking as projection stages
     // over the buckets collection, so the child stage must be able to publish the slots.
     for (const auto& fieldName : unpackNode->bucketSpec.computedMetaProjFields()) {
@@ -217,10 +217,26 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
     allReqs.insert(allReqs.end(), traverseReqs.begin(), traverseReqs.end());
 
     auto allCellSlots = _slotIdGenerator.generateMultiple(allReqs.size());
-    auto topLevelSlots =
-        sbe::value::SlotVector(allCellSlots.begin(), allCellSlots.begin() + topLevelReqs.size());
     auto traversedCellSlots =
         sbe::value::SlotVector(allCellSlots.begin() + topLevelReqs.size(), allCellSlots.end());
+
+    MatchExpression* eventFilter = unpackNode->eventFilter.get();
+
+    // If there are no required paths, that is if 'topLevelReqs' is empty, the parent is expecting
+    // the unpacking to produce the same number of results as there are events in the bucket but it
+    // doesn't care about the result's shape. For example, this comes up with "count-like" queries
+    // that for some reason failed to optimize unpacking away completely. Ideally, we would check
+    // the bucket's count and produce that many empty objects, but the block stages aren't setup to
+    // do this easily so we will instead unpack the known-to-always-exist 'timeField' from the
+    // bucket without adding it to the outputs.
+    if (topLevelReqs.empty()) {
+        tassert(8032300,
+                "The set of required paths cannot be empty if there is an event filter",
+                !eventFilter);
+        allReqs.push_back(sv::CellBlock::PathRequest{
+            {sv::CellBlock::Get{unpackNode->bucketSpec.timeField()}, sv::CellBlock::Id{}}});
+        allCellSlots.push_back(_slotIdGenerator.generate());
+    }
 
     std::unique_ptr<sbe::PlanStage> stage =
         std::make_unique<sbe::TsBucketToCellBlockStage>(std::move(childStage),
@@ -248,22 +264,22 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
         }
     }
 
-    boost::optional<sbe::value::SlotId> bitmapSlotId;
-    MatchExpression* eventFilter = unpackNode->eventFilter.get();
-
     // It's possible for the event filter to be applied on fields that aren't being unpacked (the
     // simplest case of such pipeline: [{$project: {x: 1}},{$match: {y: 42}}]). We'll stub out the
     // non-produced fields with the 'Nothing' slot.
-    DepsTracker eventFilterDeps = {};
-    match_expression::addDependencies(eventFilter, &eventFilterDeps);
-    for (const std::string& eventFilterPath : eventFilterDeps.fields) {
-        const auto& name =
-            std::pair(PlanStageSlots::kField, FieldPath(eventFilterPath).front().toString());
-        if (!outputs.has(name)) {
-            outputs.set(name, _state.env->getSlot(kNothingEnvSlotName));
+    {
+        DepsTracker eventFilterDeps = {};
+        match_expression::addDependencies(eventFilter, &eventFilterDeps);
+        for (const std::string& eventFilterPath : eventFilterDeps.fields) {
+            const auto& name =
+                std::pair(PlanStageSlots::kField, FieldPath(eventFilterPath).front().toString());
+            if (!outputs.has(name)) {
+                outputs.set(name, _state.env->getSlot(kNothingEnvSlotName));
+            }
         }
     }
 
+    boost::optional<sbe::value::SlotId> bitmapSlotId;
     if (eventFilter) {
         auto eventFilterSbExpr =
             generateFilter(_state, eventFilter, /*rootSlot*/ boost::none, &outputs);
@@ -271,11 +287,13 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
             auto abt = abt::unwrap(eventFilterSbExpr.extractABT());
             // Prepare a temporary object to expose the block variables as scalar types.
             VariableTypes varTypes;
-            outputs.forEachSlot([&](const TypedSlot& slot) {
+
+            for (const TypedSlot& slot : outputs.getAllSlotsInOrder()) {
                 varTypes.emplace(getABTVariableName(slot.slotId),
                                  slot.typeSignature.exclude(TypeSignature::kBlockType)
                                      .exclude(TypeSignature::kCellType));
-            });
+            }
+
             constantFold(abt, _state, &varTypes);
 
             if (abt.is<optimizer::Constant>()) {
@@ -295,10 +313,12 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
             } else {
                 Vectorizer vectorizer(_state.frameIdGenerator, Vectorizer::Purpose::Filter);
                 Vectorizer::VariableTypes bindings;
-                outputs.forEachSlot([&bindings](const TypedSlot& slot) {
+
+                for (const TypedSlot& slot : outputs.getAllSlotsInOrder()) {
                     bindings.emplace(getABTVariableName(slot.slotId),
                                      std::make_pair(slot.typeSignature, boost::none));
-                });
+                }
+
                 Vectorizer::Tree blockABT = vectorizer.vectorize(abt, bindings);
 
                 if (blockABT.expr.has_value() &&
@@ -330,10 +350,14 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
         auto field = getFullPath(traverseReqs[i]);
         outputs.clear(std::make_pair(PlanStageSlots::kFilterCellField, field));
     }
-    auto unpackedSlots = _slotIdGenerator.generateMultiple(topLevelReqs.size());
+
+    auto unpackedSlots =
+        _slotIdGenerator.generateMultiple(std::max<size_t>(topLevelReqs.size(), 1));
 
     // Adds the BlockToRowStage.
     // For this stage we output the 'topLevelSlots' and NOT the 'traversedSlots'.
+    auto topLevelSlots =
+        sbe::value::SlotVector(allCellSlots.begin(), allCellSlots.begin() + unpackedSlots.size());
     stage = std::make_unique<sbe::BlockToRowStage>(std::move(stage),
                                                    topLevelSlots,
                                                    unpackedSlots,
@@ -391,15 +415,18 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
     }
 
     // If the parent wants us to materialize kResult, create an object with all published fields.
-    if (reqs.has(PlanStageSlots::kResult)) {
+    if (reqs.hasResultOrMRInfo()) {
         std::vector<std::string> fieldNames;
         sbe::value::SlotVector fieldSlots;
-        outputs.forEachSlot([&](const PlanStageSlots::Name& name, const TypedSlot& slot) {
+
+        for (auto&& p : outputs.getAllNamedSlotsInOrder()) {
+            auto& name = p.first;
+            auto& slot = p.second;
             if (name.first == PlanStageSlots::kField) {
                 fieldNames.push_back(std::string{name.second});
                 fieldSlots.push_back(slot.slotId);
             }
-        });
+        }
 
         auto resultSlot = _slotIdGenerator.generate();
         outputs.set(kResult, resultSlot);
@@ -418,11 +445,11 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
         // As we are not producing a result record, we must fulfill all reqs in a way that would be
         // equivalent to fetching the same fields from 'kResult', that is, we'll map the fields to
         // the environtment's 'Nothing' slot.
-        reqs.forEachReq([&](const std::pair<PlanStageReqs::Type, StringData>& name) {
-            if (!outputs.has(name)) {
-                outputs.set(name, _state.env->getSlot(kNothingEnvSlotName));
-            }
-        });
+        auto nothingSlot =
+            TypedSlot{_state.env->getSlot(kNothingEnvSlotName), TypeSignature::kAnyScalarType};
+
+        auto reqsWithoutMakeResultInfo = reqs.copy().clearMRInfo().setResult();
+        outputs.setMissingRequiredNamedSlots(reqsWithoutMakeResultInfo, nothingSlot);
     }
 
     return {std::move(stage), std::move(outputs)};

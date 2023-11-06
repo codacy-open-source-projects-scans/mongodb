@@ -27,29 +27,18 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "mongo/db/replica_set_endpoint_util.h"
 
-#include "mongo/transport/session_manager.h"
+#include "mongo/db/s/replica_set_endpoint_feature_flag_gen.h"
 
 namespace mongo {
+namespace replica_set_endpoint {
 
-class SessionManagerEmbedded final : public transport::SessionManager {
-public:
-    SessionManagerEmbedded() = default;
+bool isFeatureFlagEnabled() {
+    return serverGlobalParams.featureCompatibility.isVersionInitialized() &&
+        feature_flags::gFeatureFlagReplicaSetEndpoint.isEnabled(
+            serverGlobalParams.featureCompatibility);
+}
 
-    void startSession(std::shared_ptr<transport::Session> session) override {}
-    void endAllSessions(Client::TagMask tags) override {}
-    void endSessionByClient(Client* client) override {}
-    Status start() override {
-        return Status::OK();
-    }
-    bool shutdown(Milliseconds timeout) override {
-        return true;
-    }
-    void appendStats(BSONObjBuilder* bob) const override {}
-    std::size_t numOpenSessions() const override {
-        return 0;
-    }
-};
-
+}  // namespace replica_set_endpoint
 }  // namespace mongo

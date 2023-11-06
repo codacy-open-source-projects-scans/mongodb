@@ -152,6 +152,39 @@ T preparsedValue(A&&... args) {
     return idlPreparsedValue(stdx::type_identity<T>{}, std::forward<A>(args)...);
 }
 
+enum DebugEnabled : bool {};
+
+constexpr inline DebugEnabled kIsDebug{kDebugBuild};
+
+/**
+ * HasMembers tracks the presence of required fields in debug mode, and is a noop class in
+ * production builds.
+ */
+template <size_t N, DebugEnabled = kIsDebug>
+class HasMembers;
+
+template <size_t N>
+class HasMembers<N, DebugEnabled{false}> {
+public:
+    void required() const {}
+    void markPresent(size_t pos) {}
+};
+
+template <size_t N>
+class HasMembers<N, DebugEnabled{true}> {
+public:
+    void required() const {
+        invariant(_hasField.all());
+    }
+
+    void markPresent(size_t pos) {
+        _hasField.set(pos, true);
+    }
+
+private:
+    std::bitset<N> _hasField;
+};
+
 /** Support routines for IDL-generated comparison operators */
 namespace relop {
 
@@ -349,15 +382,10 @@ public:
     MONGO_COMPILER_NORETURN void throwUnknownField(StringData fieldName) const;
 
     /**
-     * Throw an error message about an array field name not being a valid unsigned integer.
-     */
-    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberValue(StringData value) const;
-
-    /**
      * Throw an error message about the array field name not being the next number in the sequence.
      */
-    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberSequence(
-        std::uint32_t actualValue, std::uint32_t expectedValue) const;
+    MONGO_COMPILER_NORETURN void throwBadArrayFieldNumberSequence(StringData actualValue,
+                                                                  StringData expectedValue) const;
 
     /**
      * Throw an error message about an unrecognized enum value.

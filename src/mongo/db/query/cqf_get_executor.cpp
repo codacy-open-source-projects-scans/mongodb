@@ -78,6 +78,7 @@
 #include "mongo/db/query/ce/heuristic_estimator.h"
 #include "mongo/db/query/ce/histogram_estimator.h"
 #include "mongo/db/query/ce/sampling_estimator.h"
+#include "mongo/db/query/ce/sampling_executor.h"
 #include "mongo/db/query/ce_mode_parameter.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/cost_model/cost_estimator_impl.h"
@@ -361,6 +362,8 @@ QueryHints getHintsFromQueryKnobs() {
     hints._minIndexEqPrefixes = internalCascadesOptimizerMinIndexEqPrefixes.load();
     hints._maxIndexEqPrefixes = internalCascadesOptimizerMaxIndexEqPrefixes.load();
     hints._numSamplingChunks = internalCascadesOptimizerSampleChunks.load();
+    hints._forceSamplingCEFallBackForFilterNode =
+        internalCascadesOptimizerSamplingCEFallBackForFilterNode.load();
 
     return hints;
 }
@@ -755,14 +758,17 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                 DebugInfo::kDefaultForProd,
                 {._numSamplingChunks = hints._numSamplingChunks} /*hints*/};
 
+            auto samplingEstimator = std::make_unique<SamplingEstimator>(
+                std::move(phaseManagerForSampling),
+                collectionSize,
+                std::make_unique<HeuristicEstimator>(),
+                std::make_unique<ce::SBESamplingExecutor>(opCtx));
+
             return {OptPhaseManager::getAllProdRewrites(),
                     prefixId,
                     requireRID,
                     std::move(metadata),
-                    std::make_unique<SamplingEstimator>(opCtx,
-                                                        std::move(phaseManagerForSampling),
-                                                        collectionSize,
-                                                        std::make_unique<HeuristicEstimator>()),
+                    std::move(samplingEstimator),
                     std::make_unique<HeuristicEstimator>(),
                     std::make_unique<CostEstimatorImpl>(costModel),
                     defaultConvertPathToInterval,

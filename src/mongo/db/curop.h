@@ -75,7 +75,7 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/attribute_storage.h"
-#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/message.h"
 #include "mongo/util/assert_util_core.h"
@@ -267,6 +267,11 @@ public:
      * Make object from $search stats with non-populated values omitted.
      */
     BSONObj makeMongotDebugStatsObject() const;
+
+    /**
+     * Gets the type of the namespace on which the current operation operates.
+     */
+    std::string getCollectionType(const NamespaceString& nss) const;
 
     /**
      * Accumulate resolved views.
@@ -516,7 +521,7 @@ public:
      * to file under the given LogComponent. Returns 'true' if, in addition to being logged, this
      * operation should also be profiled.
      */
-    bool completeAndLogOperation(logv2::LogComponent logComponent,
+    bool completeAndLogOperation(const logv2::LogOptions& logOptions,
                                  std::shared_ptr<const ProfileFilter> filter,
                                  boost::optional<size_t> responseLength = boost::none,
                                  boost::optional<long long> slowMsOverride = boost::none,

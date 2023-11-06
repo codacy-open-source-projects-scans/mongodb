@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2023-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,29 +27,35 @@
  *    it in the license file.
  */
 
-#pragma once
-
-#include <cstddef>
-
-#include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/db/s/primary_only_service_helpers/cancel_state.h"
 
 namespace mongo {
+namespace primary_only_service_helpers {
 
-/**
- * Compares and hashes strings using simple binary comparisons.
- */
-class SimpleStringDataComparator final : public StringData::ComparatorInterface {
-public:
-    // Global comparator for performing simple binary string comparisons. String comparisons that
-    // require database logic, such as collations, must instantiate their own comparator.
-    static const SimpleStringDataComparator kInstance;
+CancelState::CancelState(const CancellationToken& stepdownToken)
+    : _stepdownToken{stepdownToken},
+      _abortOrStepdownSource{stepdownToken},
+      _abortOrStepdownToken{_abortOrStepdownSource.token()} {}
 
-    SimpleStringDataComparator() = default;
+const CancellationToken& CancelState::getStepdownToken() const {
+    return _stepdownToken;
+}
 
-    int compare(StringData left, StringData right) const override;
+const CancellationToken& CancelState::getAbortOrStepdownToken() const {
+    return _abortOrStepdownToken;
+}
 
-    void hash_combine(size_t& seed, StringData stringToHash) const override;
-};
+bool CancelState::isSteppingDown() const {
+    return _stepdownToken.isCanceled();
+}
 
+bool CancelState::isAbortedOrSteppingDown() const {
+    return _abortOrStepdownToken.isCanceled();
+}
+
+void CancelState::abort() {
+    _abortOrStepdownSource.cancel();
+}
+
+}  // namespace primary_only_service_helpers
 }  // namespace mongo

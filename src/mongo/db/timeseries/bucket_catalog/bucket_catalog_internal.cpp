@@ -231,7 +231,7 @@ StripeNumber getStripeNumber(const BucketKey& key, size_t numberOfStripes) {
 
 StatusWith<std::pair<BucketKey, Date_t>> extractBucketingParameters(
     const NamespaceString& ns,
-    const StringData::ComparatorInterface* comparator,
+    const StringDataComparator* comparator,
     const TimeseriesOptions& options,
     const BSONObj& doc) {
     Date_t time;
@@ -400,15 +400,14 @@ Bucket* useAlternateBucket(BucketCatalog& catalog,
     return nullptr;
 }
 
-StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(
-    OperationContext* opCtx,
-    BucketStateRegistry& registry,
-    const NamespaceString& ns,
-    const StringData::ComparatorInterface* comparator,
-    const TimeseriesOptions& options,
-    const BucketToReopen& bucketToReopen,
-    const uint64_t catalogEra,
-    const BucketKey* expectedKey) {
+StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
+                                                    BucketStateRegistry& registry,
+                                                    const NamespaceString& ns,
+                                                    const StringDataComparator* comparator,
+                                                    const TimeseriesOptions& options,
+                                                    const BucketToReopen& bucketToReopen,
+                                                    const uint64_t catalogEra,
+                                                    const BucketKey* expectedKey) {
     const auto& [bucketDoc, validator] = bucketToReopen;
     if (catalogEra < getCurrentEra(registry)) {
         return {ErrorCodes::WriteConflict, "Bucket is from an earlier era, may be outdated"};
@@ -711,7 +710,7 @@ stdx::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
 StatusWith<InsertResult> insert(OperationContext* opCtx,
                                 BucketCatalog& catalog,
                                 const NamespaceString& ns,
-                                const StringData::ComparatorInterface* comparator,
+                                const StringDataComparator* comparator,
                                 const TimeseriesOptions& options,
                                 const BSONObj& doc,
                                 CombineWithInsertsFromOtherClients combine,
@@ -1189,7 +1188,7 @@ void expireIdleBuckets(OperationContext* opCtx,
     int32_t numExpired = 0;
 
     while (!stripe.idleBuckets.empty() &&
-           catalog.memoryUsage.load() > getTimeseriesIdleBucketExpiryMemoryUsageThresholdBytes() &&
+           catalog.memoryUsage.load() > catalog.memoryUsageThreshold() &&
            numExpired <= gTimeseriesIdleBucketExpiryMaxCountPerAttempt) {
         Bucket* bucket = stripe.idleBuckets.back();
 
@@ -1210,7 +1209,7 @@ void expireIdleBuckets(OperationContext* opCtx,
     }
 
     while (!stripe.archivedBuckets.empty() &&
-           catalog.memoryUsage.load() > getTimeseriesIdleBucketExpiryMemoryUsageThresholdBytes() &&
+           catalog.memoryUsage.load() > catalog.memoryUsageThreshold() &&
            numExpired <= gTimeseriesIdleBucketExpiryMaxCountPerAttempt) {
 
         auto& [hash, archivedSet] = *stripe.archivedBuckets.begin();
@@ -1579,7 +1578,7 @@ void runPostCommitDebugChecks(OperationContext* opCtx,
         client.findOne(batch.bucketHandle.bucketId.ns.makeTimeseriesBucketsNamespace(),
                        BSON("_id" << batch.bucketHandle.bucketId.oid));
     if (!queriedBucket.isEmpty()) {
-        uint32_t memCount = bucket.numCommittedMeasurements;
+        uint32_t memCount = batch.numPreviouslyCommittedMeasurements + batch.measurements.size();
         uint32_t diskCount = isCompressedBucket(queriedBucket)
             ? static_cast<uint32_t>(queriedBucket.getObjectField(kBucketControlFieldName)
                                         .getIntField(kBucketControlCountFieldName))

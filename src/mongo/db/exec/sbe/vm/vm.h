@@ -48,14 +48,16 @@
 #include "mongo/base/compare_numbers.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator_interface.h"
+#include "mongo/base/string_data_comparator.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/sort_spec.h"
+#include "mongo/db/exec/sbe/values/column_op.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/datetime.h"
 #include "mongo/db/exec/sbe/vm/label.h"
+#include "mongo/db/exec/sbe/vm/makeobj_cursors.h"
 #include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
@@ -80,7 +82,7 @@ std::pair<value::TypeTags, value::Value> genericCompare(
     value::Value lhsValue,
     value::TypeTags rhsTag,
     value::Value rhsValue,
-    const StringData::ComparatorInterface* comparator = nullptr,
+    const StringDataComparator* comparator = nullptr,
     Op op = {}) {
     if (value::isNumber(lhsTag) && value::isNumber(rhsTag)) {
         switch (getWidestNumericalType(lhsTag, rhsTag)) {
@@ -258,8 +260,7 @@ std::pair<value::TypeTags, value::Value> genericCompare(value::TypeTags lhsTag,
         return {value::TypeTags::Nothing, 0};
     }
 
-    auto comparator =
-        static_cast<StringData::ComparatorInterface*>(value::getCollatorView(collValue));
+    auto comparator = static_cast<StringDataComparator*>(value::getCollatorView(collValue));
 
     return genericCompare(lhsTag, lhsValue, rhsTag, rhsValue, comparator, op);
 }
@@ -283,6 +284,12 @@ size_t writeToMemory(uint8_t* ptr, const T val) noexcept {
 }
 }  // namespace
 
+/**
+ * Enumeration of built-in VM instructions. These are implemented in vm.cpp ByteCode::runInternal.
+ *
+ * See also enum class Builtin for built-in functions, like 'addToArray', that are implemented as
+ * C++ rather than VM instructions.
+ */
 struct Instruction {
     enum Tags {
         pushConstVal,
@@ -342,7 +349,7 @@ struct Instruction {
         // Iterates the column index cell and returns values representing the types of cell's
         // content, including arrays and nested objects. Skips contents of nested arrays.
         traverseCsiCellTypes,
-        setField,
+        setField,      // add or overwrite a field in a document
         getArraySize,  // number of elements
 
         aggSum,
@@ -628,13 +635,21 @@ struct Instruction {
 };
 static_assert(sizeof(Instruction) == sizeof(uint8_t));
 
-// Builtins which can fit into one byte and have small arity are encoded using a special instruction
-// tag, functionSmall.
+/**
+ * Enumeration of SBE VM built-in functions. These are dispatched by ByteCode::dispatchBuiltin() in
+ * vm.cpp. An enum value 'foo' refers to a C++ implementing function named builtinFoo().
+ *
+ * See also struct Instruction for "functions" like 'setField' that are implemented as single VM
+ * instructions.
+ *
+ * Builtins which can fit into one byte and have small arity are encoded using a special instruction
+ * tag, functionSmall.
+ */
 using SmallBuiltinType = uint8_t;
 enum class Builtin : uint16_t {
     split,
     regexMatch,
-    replaceOne,
+    replaceOne,  // replace first occurrence of a specified substring with a diffferent substring
     dateDiff,
     dateParts,
     dateToParts,
@@ -647,10 +662,10 @@ enum class Builtin : uint16_t {
     dateFromString,
     dateFromStringNoThrow,
     dropFields,
-    newArray,
+    newArray,  // create a new array from the top 'arity' values on the stack
     keepFields,
     newArrayFromRange,
-    newObj,
+    newObj,      // create a new object from 'arity' alternating field names and values on the stack
     ksToString,  // KeyString to string
     newKs,       // new KeyString
     collNewKs,   // new KeyString (with collation)
@@ -991,6 +1006,11 @@ struct ValueCompare {
 
 private:
     const CollatorInterface* _collator;
+};
+
+struct MakeObjStackOffsets {
+    int fieldsStackOffset = 0;
+    int argsStackOffset = 0;
 };
 
 /**
@@ -1388,6 +1408,7 @@ class ByteCode {
 
 public:
     struct InvokeLambdaFunctor;
+    struct GetFromStackFunctor;
 
     ByteCode() {
         _argStack = reinterpret_cast<uint8_t*>(mongoMalloc(sizeOfElement * 4));
@@ -1411,9 +1432,13 @@ private:
 
     MONGO_COMPILER_NORETURN void runFailInstruction();
 
+    /**
+     * Run a usually Boolean check against the tag of the item on top of the stack and add its
+     * result to the stack as a TypeTags::Boolean value. However, if the stack item to be checked
+     * itself has a tag of TagTypes::Nothing, this instead pushes a result of TagTypes::Nothing.
+     */
     template <typename T>
     void runTagCheck(const uint8_t*& pcPointer, T&& predicate);
-
     void runTagCheck(const uint8_t*& pcPointer, value::TypeTags tagRhs);
 
     MONGO_COMPILER_ALWAYS_INLINE
@@ -1460,7 +1485,7 @@ private:
         value::Value lhsValue,
         value::TypeTags rhsTag,
         value::Value rhsValue,
-        const StringData::ComparatorInterface* comparator = nullptr);
+        const StringDataComparator* comparator = nullptr);
 
     std::pair<value::TypeTags, value::Value> compare3way(value::TypeTags lhsTag,
                                                          value::Value lhsValue,
@@ -1735,30 +1760,59 @@ private:
      * values, and then it returns the output object. (Note the computed input values are not
      * directly passed in as C++ parameters -- instead the computed input values are passed via
      * the VM's stack.)
-     *
-     * 'spec' provides two lists of field names: "keepOrDrop" fields and "computed" fields. These
-     * lists are disjoint and do not contain duplicates. The number of computed input values passed
-     * in by the caller on the VM stack must match the number of fields in the "computed" list.
-     *
-     * For each field F in the "computed" list, this method will retrieve the corresponding computed
-     * input value V from the VM stack and add {F,V} to the output object.
-     *
-     * If 'root' is not an object, it is ignored. Otherwise, for each field F in 'root' with value V
-     * that does not appear in the "computed" list, this method will copy {F,V} to the output object
-     * if either: (1) field F appears in the "keepOrDrop" list and 'spec->fieldBehavior == keep'; or
-     * (2) field F does _not_ appear in the "keepOrDrop" list and 'spec->fieldBehavior == drop'. If
-     * neither of these conditions are met, field F in 'root' will be ignored.
-     *
-     * For any two distinct fields F1 and F2 in the output object, if F1 is in 'root' and F2 does
-     * not appear before F1 in 'root', -OR- if both F1 and F2 are not in 'root' and F2 does not
-     * appear before F1 in the "computed" list, then F2 will appear after F1 in the output object.
      */
     void produceBsonObject(const MakeObjSpec* spec,
-                           value::TypeTags rootTag,
-                           value::Value rootVal,
-                           int stackOffset,
+                           MakeObjStackOffsets stackOffsets,
                            const CodeFragment* code,
-                           UniqueBSONObjBuilder& bob);
+                           UniqueBSONObjBuilder& bob,
+                           value::TypeTags rootTag,
+                           value::Value rootVal) {
+        using TypeTags = value::TypeTags;
+
+        const auto& fields = spec->fields;
+        const auto& actions = spec->actions;
+        const auto defActionType = spec->fieldsScopeIsClosed() ? MakeObjSpec::ActionType::kDrop
+                                                               : MakeObjSpec::ActionType::kKeep;
+
+        // Invoke the produceBsonObject() lambda with the appropriate iterator type.
+        switch (rootTag) {
+            case TypeTags::bsonObject: {
+                // For BSON objects, use BsonObjCursor.
+                auto cursor = BsonObjCursor(
+                    fields, actions, defActionType, value::bitcastTo<const char*>(rootVal));
+                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
+                break;
+            }
+            case TypeTags::Object: {
+                // For SBE objects, use ObjectCursor.
+                auto cursor =
+                    ObjectCursor(fields, actions, defActionType, value::getObjectView(rootVal));
+                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
+                break;
+            }
+            default: {
+                // For all other types, use BsonObjCursor initialized with an empty object.
+                auto cursor =
+                    BsonObjCursor(fields, actions, defActionType, BSONObj::kEmptyObject.objdata());
+                produceBsonObject(spec, stackOffsets, code, bob, std::move(cursor));
+                break;
+            }
+        }
+    }
+
+    void produceBsonObjectWithInputFields(const MakeObjSpec* spec,
+                                          MakeObjStackOffsets stackOffsets,
+                                          const CodeFragment* code,
+                                          UniqueBSONObjBuilder& bob,
+                                          value::TypeTags objTag,
+                                          value::Value objVal);
+
+    template <typename CursorT>
+    void produceBsonObject(const MakeObjSpec* spec,
+                           MakeObjStackOffsets stackOffsets,
+                           const CodeFragment* code,
+                           UniqueBSONObjBuilder& bob,
+                           CursorT cursor);
 
     /**
      * This struct is used by traverseAndProduceBsonObj() to hold args that stay the same across
@@ -1768,7 +1822,7 @@ private:
      */
     struct TraverseAndProduceBsonObjContext {
         const MakeObjSpec* spec;
-        int stackStartOffset;
+        MakeObjStackOffsets stackOffsets;
         const CodeFragment* code;
     };
 
@@ -2052,7 +2106,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
 
-    template <class Cmp>
+    template <class Cmp, value::ColumnOpType::Flags AddFlags = value::ColumnOpType::kNoFlags>
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmpScalar(ArityType arity);
 
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockGtScalar(ArityType arity);
@@ -2074,6 +2128,9 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinCellBlockGetFlatValuesBlock(
         ArityType arity);
 
+    /**
+     * Dispatcher for calls to VM built-in C++ functions enumerated by enum class Builtin.
+     */
     FastTuple<bool, value::TypeTags, value::Value> dispatchBuiltin(Builtin f,
                                                                    ArityType arity,
                                                                    const CodeFragment* code);
@@ -2218,6 +2275,75 @@ struct ByteCode::InvokeLambdaFunctor {
     const CodeFragment* const code;
     const int64_t lamPos;
 };
+
+struct ByteCode::GetFromStackFunctor {
+    GetFromStackFunctor(ByteCode& bytecode, int stackStartOffset)
+        : bytecode(&bytecode), stackStartOffset(stackStartOffset) {}
+
+    FastTuple<bool, value::TypeTags, value::Value> operator()(size_t idx) const {
+        return bytecode->getFromStack(stackStartOffset + idx);
+    }
+
+    ByteCode* bytecode;
+    const int stackStartOffset;
+};
+
+class MakeObjCursorInputFields {
+public:
+    MakeObjCursorInputFields(ByteCode& bytecode, int startOffset, size_t numFields)
+        : _getFieldFn(bytecode, startOffset), _numFields(numFields) {}
+
+    size_t size() const {
+        return _numFields;
+    }
+
+    FastTuple<bool, value::TypeTags, value::Value> operator[](size_t idx) const {
+        return _getFieldFn(idx);
+    }
+
+private:
+    ByteCode::GetFromStackFunctor _getFieldFn;
+    size_t _numFields;
+};
+
+class InputFieldsOnlyCursor;
+class BsonObjWithInputFieldsCursor;
+class ObjWithInputFieldsCursor;
+
+// There are five instantiations of the templated produceBsonObject() method, one for each
+// type of MakeObj input cursor.
+extern template void ByteCode::produceBsonObject<BsonObjCursor>(const MakeObjSpec* spec,
+                                                                MakeObjStackOffsets stackOffsets,
+                                                                const CodeFragment* code,
+                                                                UniqueBSONObjBuilder& bob,
+                                                                BsonObjCursor cursor);
+
+extern template void ByteCode::produceBsonObject<ObjectCursor>(const MakeObjSpec* spec,
+                                                               MakeObjStackOffsets stackOffsets,
+                                                               const CodeFragment* code,
+                                                               UniqueBSONObjBuilder& bob,
+                                                               ObjectCursor cursor);
+
+extern template void ByteCode::produceBsonObject<InputFieldsOnlyCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    InputFieldsOnlyCursor cursor);
+
+extern template void ByteCode::produceBsonObject<BsonObjWithInputFieldsCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    BsonObjWithInputFieldsCursor cursor);
+
+extern template void ByteCode::produceBsonObject<ObjWithInputFieldsCursor>(
+    const MakeObjSpec* spec,
+    MakeObjStackOffsets stackOffsets,
+    const CodeFragment* code,
+    UniqueBSONObjBuilder& bob,
+    ObjWithInputFieldsCursor cursor);
 }  // namespace vm
 }  // namespace sbe
 }  // namespace mongo

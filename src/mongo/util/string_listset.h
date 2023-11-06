@@ -44,7 +44,7 @@
 #include "mongo/util/string_map.h"
 
 namespace mongo {
-class IndexedStringVector {
+class StringListSet {
 public:
     static constexpr size_t npos = std::numeric_limits<size_t>::max();
 
@@ -76,16 +76,16 @@ private:
     }
 
 public:
-    explicit IndexedStringVector(std::vector<std::string> strings)
+    explicit StringListSet(std::vector<std::string> strings)
         : _strings(std::move(strings)), _stringToIndexMap(), _fastHt(buildFastHash()) {}
 
-    IndexedStringVector(const IndexedStringVector& other)
+    StringListSet(const StringListSet& other)
         : _strings(other._strings), _stringToIndexMap(), _fastHt(buildFastHash()) {}
 
-    IndexedStringVector(IndexedStringVector&& other)
+    StringListSet(StringListSet&& other)
         : _strings(std::move(other._strings)), _stringToIndexMap(), _fastHt(buildFastHash()) {}
 
-    IndexedStringVector& operator=(const IndexedStringVector& other) {
+    StringListSet& operator=(const StringListSet& other) {
         if (&other != this) {
             _strings = other._strings;
             _fastHt = buildFastHash();
@@ -93,7 +93,7 @@ public:
         return *this;
     }
 
-    IndexedStringVector& operator=(IndexedStringVector&& other) {
+    StringListSet& operator=(StringListSet&& other) {
         if (&other != this) {
             _strings = std::move(other._strings);
             _fastHt = buildFastHash();
@@ -101,6 +101,16 @@ public:
         return *this;
     }
 
+    bool operator==(const StringListSet& other) const {
+        if (this == &other) {
+            return true;
+        }
+        return _strings == other._strings;
+    }
+
+    inline bool empty() const {
+        return _strings.empty();
+    }
     inline size_t size() const {
         return _strings.size();
     }
@@ -173,6 +183,13 @@ public:
         auto pos = findPos(str);
         return pos != npos ? _strings.cbegin() + pos : _strings.cend();
     }
+
+    inline size_t count(StringData str) const {
+        auto pos = findPos(str);
+        return pos != npos ? 1 : 0;
+    }
+
+    std::string toString() const;
 
     const auto& getUnderlyingVector() const {
         return _strings;

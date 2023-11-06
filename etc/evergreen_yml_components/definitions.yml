@@ -1094,7 +1094,7 @@ functions:
       env:
         OTEL_TRACE_ID: ${otel_trace_id}
         OTEL_PARENT_ID: ${otel_parent_id}
-        OTEL_COLLECTOR_ENDPOINT: ${otel_collector_endpoint}
+        OTEL_COLLECTOR_DIR: "../build/OTelTraces/"
 
   "retrieve generated test configuration": &retrieve_generated_test_configuration
     command: s3.get
@@ -1489,7 +1489,7 @@ functions:
       env:
         OTEL_TRACE_ID: ${otel_trace_id}
         OTEL_PARENT_ID: ${otel_parent_id}
-        OTEL_COLLECTOR_ENDPOINT: ${otel_collector_endpoint}
+        OTEL_COLLECTOR_DIR: "../build/OTelTraces/"
 
   "archive resmoke constants": &archive_resmoke_constants
     command: archive.targz_pack
@@ -2692,6 +2692,19 @@ functions:
       content_type: application/gzip
       display_name: Docker Compose
 
+  "attach task errors":
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/task_errors.txt
+      remote_file: ${project}/${build_variant}/${revision}/task-errors-${task_id}-${execution}.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: text/plain
+      display_name: Task Errors
+
   "attach local resmoke invocation":
     command: s3.put
     params:
@@ -2739,6 +2752,7 @@ post:
 - func: "attach local resmoke invocation"
 - func: "attach multiversion exclude tags"
 - func: "attach report"
+- func: "attach task errors"
 - func: "attach artifacts"
 - func: "save ec2 task artifacts"
 - func: "attach wiki page"
@@ -2808,6 +2822,7 @@ tasks:
       # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
+        BAZEL_INTEGRATION_DEBUG=1
         BAZEL_FLAGS=--config=local
         ICECC=
         --build-profile=fast
@@ -2856,10 +2871,11 @@ tasks:
   - func: "scons compile"
     vars:
       targets: >-
-        build/fast/mongo/db/commands/libfsync_locked.a
+        build/fast/third_party/unwind/libunwind.a
       # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
+        BAZEL_INTEGRATION_DEBUG=1
         BAZEL_FLAGS=--config=local
         ICECC=
         --build-profile=fast
@@ -2870,6 +2886,34 @@ tasks:
   - func: "verify build output present"
     vars:
       output: build/fast/third_party/unwind/libunwind.a
+
+- name: compile_bazel_program
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
+  - func: "fetch bazel"
+  - func: "scons compile"
+    vars:
+      targets: >-
+        build/fast/mongo/platform/visibility_test1
+      separate_debug: off
+      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
+      task_compile_flags: >-
+        BAZEL_BUILD_ENABLED=1
+        BAZEL_INTEGRATION_DEBUG=1
+        BAZEL_FLAGS=--config=local
+        ICECC=
+        --build-profile=fast
+        --ninja=disabled
+        --link-model=dynamic
+        --use-libunwind=off
+        --modules=
+  - func: "verify build output present"
+    vars:
+      output: build/fast/mongo/platform/visibility_test1
 
 ## compile - build all scons targets except unittests ##
 - name: compile_dist_test_half
@@ -3795,6 +3839,26 @@ tasks:
       binary: bash
       args:
       - "src/evergreen/crypt_run_tests.sh"
+
+- name: daily_task_scanner
+  tags: []
+  commands:
+  - *f_expansions_write
+  - command: manifest.load
+  - func: "git get project and add git tag"
+  - *f_expansions_write
+  - *kill_processes
+  - *cleanup_environment
+  - func: "set up venv"
+  - func: "upload pip requirements"
+  - func: "configure evergreen api credentials"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+        - "src/evergreen/run_python_script.sh"
+        - "buildscripts/daily_task_scan.py"
+        - "-f=task_errors.txt"
 
 ## lint ##
 - name: lint_pylinters
@@ -6105,13 +6169,6 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
-- <<: *task_template
-  name: replica_sets_jscore_passthrough
-  tags: ["replica_sets", "common", "san", "large", "ignore_non_generated_replica_sets_jscore_passthrough"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
 - <<: *gen_task_template
   name: replica_sets_reconfig_jscore_passthrough_gen
   tags: []
@@ -6166,7 +6223,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_jscore_passthrough_gen
-  tags: []
+  tags: ["replica_sets", "common", "san", "large"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -6383,12 +6440,11 @@ tasks:
       suite: sharded_collections_jscore_passthrough
       run_no_feature_flag_tests: "true"
 
-- <<: *task_template
-  name: sharding_jscore_passthrough
+- <<: *gen_task_template
+  name: sharding_jscore_passthrough_gen
   tags: ["sharding", "jscore", "common"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
   name: sharding_jscore_passthrough_with_auto_bootstrap_gen
@@ -6769,6 +6825,22 @@ tasks:
 
 - <<: *gen_task_template
   name: multitenancy_with_atlas_proxy_jscore_passthrough_gen
+  tags: ["serverless"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: multitenancy_shard_merge_jscore_passthrough_gen
+  tags: ["serverless"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: multitenancy_shard_merge_multi_stmt_txn_jscore_passthrough_gen
   tags: ["serverless"]
   commands:
   - func: "generate resmoke tasks"
@@ -8148,7 +8220,7 @@ tasks:
   - name: package
   - name: jsCore
   - name: run_dbtest
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -8193,7 +8265,7 @@ tasks:
   - name: package
   - name: jsCore
   - name: run_dbtest
-  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_gen
   stepback: false
   commands:
   - command: manifest.load
@@ -8969,6 +9041,15 @@ tasks:
       suite: cqf_experimental_sharding_passthrough
       use_large_distro: "true"
 
+- <<: *gen_task_template
+  name: cqf_experimental_sharded_collections_jscore_passthrough_gen
+  tags: [cqf]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      suite: cqf_experimental_sharded_collections_jscore_passthrough
+      use_large_distro: "true"
+
 - <<: *task_template
   name: streams
   tags: []
@@ -9285,19 +9366,12 @@ task_groups:
   - compile_dist_test
 
 - <<: *compile_bazel_task_group_template
-  name: compile_bazel_dist_test_TG
+  name: compile_bazel_TG
   tasks:
   - compile_bazel_dist_test
-
-- <<: *compile_bazel_task_group_template
-  name: compile_bazel_c_and_asm_targets_TG
-  tasks:
   - compile_bazel_c_and_asm_targets
-
-- <<: *compile_bazel_task_group_template
-  name: compile_bazel_libunwind_TG
-  tasks:
   - compile_bazel_libunwind
+  - compile_bazel_program
 
 - <<: *compile_task_group_template
   name: compile_upload_benchmarks_TG

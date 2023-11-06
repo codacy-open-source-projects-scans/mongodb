@@ -74,7 +74,6 @@ class OpObserver;
 class ServiceEntryPoint;
 
 namespace transport {
-class SessionManager;
 class TransportLayerManager;
 }  // namespace transport
 
@@ -509,6 +508,14 @@ public:
                        ErrorCodes::Error killCode = ErrorCodes::Interrupted);
 
     /**
+     * Delists the operation by removing it from "_clientByOperationId" and its client. Both
+     * "opCtx->getClient()->getServiceContext()" and "this" must point to the same instance of
+     * ServiceContext. Also, "opCtx" should never be deleted before this method returns. Finally,
+     * the thread invoking this method must not hold the client and the service context locks.
+     */
+    void delistOperation(OperationContext* opCtx) noexcept;
+
+    /**
      * Kills the operation "opCtx" with the code "killCode", if opCtx has not already been killed,
      * and delists the operation by removing it from "_clientByOperationId" and its client. Both
      * "opCtx->getClient()->getServiceContext()" and "this" must point to the same instance of
@@ -557,11 +564,6 @@ public:
      * See TransportLayerManager for more details.
      */
     transport::TransportLayerManager* getTransportLayerManager() const;
-
-    /**
-     * Get the SessionManager.
-     */
-    transport::SessionManager* getSessionManager() const;
 
     /**
      * Waits for the ServiceContext to be fully initialized and for all TransportLayers to have been
@@ -639,11 +641,6 @@ public:
      * may be expensive to call.
      */
     void setPreciseClockSource(std::unique_ptr<ClockSource> newSource);
-
-    /**
-     * Binds the session manager implementation to the service context.
-     */
-    void setSessionManager(std::unique_ptr<transport::SessionManager> sm);
 
     /**
      * Binds the TransportLayerManager to the service context. The TransportLayerManager should have
@@ -737,11 +734,6 @@ private:
      * The periodic runner.
      */
     SyncUnique<PeriodicRunner> _runner;
-
-    /**
-     * The SessionManager.
-     */
-    SyncUnique<transport::SessionManager> _sessionManager;
 
     /**
      * The TransportLayer.
@@ -891,5 +883,10 @@ ServiceContext* getCurrentServiceContext();
  * Takes ownership of 'serviceContext'.
  */
 void setGlobalServiceContext(ServiceContext::UniqueServiceContext&& serviceContext);
+
+/**
+ * Maps `service`'s ClusterRole (or ClusterRole::None if `service` is nullptr) to a LogService.
+ */
+logv2::LogService toLogService(Service* service);
 
 }  // namespace mongo

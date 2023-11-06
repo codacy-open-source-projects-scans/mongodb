@@ -915,6 +915,8 @@ env.Library(
     target='shard_role_api',
     source=[
         'catalog/collection_operation_source.cpp',
+        'replica_set_endpoint_sharding_state.cpp',
+        'replica_set_endpoint_util.cpp',
         's/collection_metadata.cpp',
         's/collection_sharding_state.cpp',
         's/collection_sharding_state_factory_standalone.cpp',
@@ -934,6 +936,7 @@ env.Library(
         'transaction_resources.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/s/replica_set_endpoint_feature_flag',
         '$BUILD_DIR/mongo/s/grid',
         'concurrency/lock_manager',
         'index/index_access_method',
@@ -971,6 +974,18 @@ env.Library(
         'server_base',
         'storage/capped_snapshots',
         'storage/snapshot_helper',
+    ],
+)
+
+env.CppUnitTest(
+    target='replica_set_endpoint_test',
+    source=[
+        'replica_set_endpoint_sharding_state_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
+        'shard_role_api',
     ],
 )
 
@@ -1602,6 +1617,7 @@ execEnv.Library(
         '$BUILD_DIR/mongo/scripting/scripting',
         '$BUILD_DIR/mongo/util/background_job',
         '$BUILD_DIR/mongo/util/elapsed_tracker',
+        '$BUILD_DIR/mongo/util/field_set',
         '$BUILD_DIR/third_party/s2/s2',
         'audit',
         'bson/dotted_path_support',
@@ -1655,6 +1671,7 @@ execEnv.Library(
         '$BUILD_DIR/mongo/db/query/ce/query_ce_heuristic',
         '$BUILD_DIR/mongo/db/query/ce/query_ce_histogram',
         '$BUILD_DIR/mongo/db/query/ce/query_ce_sampling',
+        '$BUILD_DIR/mongo/db/query/ce/query_ce_sampling_executor',
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
         '$BUILD_DIR/mongo/db/repl/wait_for_majority_service',
         '$BUILD_DIR/mongo/db/session/kill_sessions',
@@ -1699,8 +1716,8 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/bson/util/bson_column',
-        '$BUILD_DIR/mongo/util/indexed_string_vector',
         '$BUILD_DIR/mongo/util/pcre_util',
+        '$BUILD_DIR/mongo/util/string_listset',
         '$BUILD_DIR/mongo/util/summation',
         'exec/js_function',
         'query/collation/collator_interface',
@@ -1802,6 +1819,7 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'query/query_knobs',
+        'query/query_settings',
         'query/query_shape/query_shape_common',
         'sbe_values',
         'stats/counters',

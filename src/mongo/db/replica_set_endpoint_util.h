@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2023-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,19 +27,12 @@
  *    it in the license file.
  */
 
-#include "mongo/base/simple_string_data_comparator.h"
-#include "mongo/util/murmur3.h"
+#pragma once
 
 namespace mongo {
+namespace replica_set_endpoint {
 
-const SimpleStringDataComparator SimpleStringDataComparator::kInstance{};
+bool isFeatureFlagEnabled();
 
-int SimpleStringDataComparator::compare(StringData left, StringData right) const {
-    return left.compare(right);
-}
-
-void SimpleStringDataComparator::hash_combine(size_t& seed, StringData stringToHash) const {
-    seed = murmur3<sizeof(size_t)>(stringToHash, seed);
-}
-
+}  // namespace replica_set_endpoint
 }  // namespace mongo

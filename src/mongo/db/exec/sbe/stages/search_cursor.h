@@ -105,9 +105,9 @@ private:
     const boost::optional<UUID> _collUuid;
     // Output slots.
     const boost::optional<value::SlotId> _resultSlot;
-    const IndexedStringVector _metadataNames;
+    const StringListSet _metadataNames;
     const value::SlotVector _metadataSlots;
-    const IndexedStringVector _fieldNames;
+    const StringListSet _fieldNames;
     const value::SlotVector _fieldSlots;
 
     // Input search query info.
@@ -147,5 +147,8 @@ private:
     // skip the docs that been filtered out.
     // TODO: SERVER-80648 to have a better way to track count of idx scan stage.
     const CommonStats* _docsReturnedStats;
+    // Store the cursorId for logging purpose. We need to store it because the id on the
+    // TaskExecutorCursor will be set to zero after the final getMore after the cursor is exhausted.
+    boost::optional<CursorId> _cursorId;
 };
 }  // namespace mongo::sbe

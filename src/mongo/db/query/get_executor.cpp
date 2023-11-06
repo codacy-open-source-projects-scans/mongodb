@@ -383,7 +383,7 @@ bool applyQuerySettings(const CollectionPtr& collection,
                         QueryPlannerParams* plannerParams) {
     // If 'querySettings' has no index hints specified, then there are no settings to be applied to
     // this query.
-    auto indexHintSpecs = canonicalQuery.getQuerySettings().getIndexHints();
+    auto indexHintSpecs = canonicalQuery.getExpCtx()->getQuerySettings().getIndexHints();
     if (!indexHintSpecs) {
         return false;
     }
@@ -1695,7 +1695,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
     std::function<void(CanonicalQuery*, bool)> extractAndAttachPipelineStages,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     const QueryPlannerParams& plannerParams) {
-    auto& querySettings = canonicalQuery->getQuerySettings();
+    auto& querySettings = canonicalQuery->getExpCtx()->getQuerySettings();
     auto exec = [&]() {
         invariant(canonicalQuery);
         const auto& mainColl = collections.getMainCollection();
@@ -2611,23 +2611,22 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
     findCommand->setCollation(collation);
     findCommand->setHint(request.getHint());
 
-    auto statusWithCQ = CanonicalQuery::canonicalize(
-        opCtx,
-        std::move(findCommand),
-        explain,
-        expCtx,
-        collection ? static_cast<const ExtensionsCallback&>(
-                         ExtensionsCallbackReal(opCtx, &collection->ns()))
-                   : static_cast<const ExtensionsCallback&>(ExtensionsCallbackNoop()),
-        MatchExpressionParser::kAllowAllSpecialFeatures,
-        ProjectionPolicies::findProjectionPolicies(),
-        {} /* empty pipeline */,
-        true /* isCountLike */);
-
+    auto& extensionsCallback = collection
+        ? static_cast<const ExtensionsCallback&>(ExtensionsCallbackReal(opCtx, &collection->ns()))
+        : static_cast<const ExtensionsCallback&>(ExtensionsCallbackNoop());
+    auto statusWithCQ = CanonicalQuery::make(
+        {.expCtx = expCtx,
+         .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand),
+                                               .extensionsCallback = std::move(extensionsCallback),
+                                               .allowedFeatures =
+                                                   MatchExpressionParser::kAllowAllSpecialFeatures},
+         .explain = explain,
+         .isCountLike = true});
     if (!statusWithCQ.isOK()) {
         return statusWithCQ.getStatus();
     }
-    std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+
+    auto cq = std::move(statusWithCQ.getValue());
 
     const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
 
@@ -3108,17 +3107,14 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorWith
     auto findCommand = std::make_unique<FindCommandRequest>(cq->getFindCommandRequest());
     findCommand->setProjection(BSONObj());
 
-    const boost::intrusive_ptr<ExpressionContext> expCtx;
-    const ExtensionsCallbackReal extensionsCallback(opCtx, &collectionPtr->ns());
-
-    auto cqWithoutProjection = uassertStatusOKWithContext(
-        CanonicalQuery::canonicalize(opCtx,
-                                     std::move(findCommand),
-                                     cq->getExplain(),
-                                     expCtx,
-                                     extensionsCallback,
-                                     MatchExpressionParser::kAllowAllSpecialFeatures),
-        "Unable to canonicalize query");
+    auto cqWithoutProjection = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+        .expCtx = makeExpressionContext(opCtx, *findCommand),
+        .parsedFind =
+            ParsedFindCommandParams{
+                .findCommand = std::move(findCommand),
+                .extensionsCallback = ExtensionsCallbackReal(opCtx, &collectionPtr->ns()),
+                .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures},
+        .explain = cq->getExplain()});
 
     return getExecutor(opCtx,
                        coll,

@@ -373,6 +373,62 @@ boost::intrusive_ptr<Expression> handleDateTruncRewrite(
                                                dateExprChildren[4 /* _kStartOfWeek */].get());
 }
 
+// Returns true if all the field paths contained in the expression only reference the metaField or
+// some subfield(s) of the metaField.
+bool fieldPathsAccessOnlyMetaField(boost::intrusive_ptr<Expression> expr,
+                                   const boost::optional<std::string>& metaField) {
+    auto deps = expression::getDependencies(expr.get());
+    if (deps.needWholeDocument) {
+        return false;
+    }
+
+    if (!deps.fields.empty() && !metaField) {
+        return false;
+    }
+
+    for (auto&& path : deps.fields) {
+        FieldPath idPath(path);
+        if (idPath.getPathLength() < 1 || idPath.getFieldName(0) != metaField.value()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Rewrites all the fields paths in the given expression that contain the metafield to use
+// kBucketMetaFieldName instead.
+boost::intrusive_ptr<Expression> rewriteMetaFieldPaths(
+    boost::intrusive_ptr<ExpressionContext> pExpCtx,
+    const boost::optional<std::string>& metaField,
+    boost::intrusive_ptr<Expression> expr) {
+    if (!metaField) {
+        return expr;
+    }
+
+    // We need to clone here to avoid corrupting the original expression if the optimization cannot
+    // be made. E.g., if a subsequent group by element contains a field path that references a time
+    // series field.
+    //
+    // Clone by serializing and reparsing. There does not seem to be a more idiomatic way to do this
+    // at the moment.
+    auto serialized = expr->serialize(SerializationOptions{});
+    auto obj = BSON("f" << serialized);
+    auto clonedExpr =
+        Expression::parseOperand(pExpCtx.get(), obj.firstElement(), pExpCtx->variablesParseState);
+
+    auto renameMap =
+        StringMap<std::string>{{metaField.value(), timeseries::kBucketMetaFieldName.toString()}};
+    SubstituteFieldPathWalker walker{renameMap};
+    auto mutatedExpr = expression_walker::walk<Expression>(clonedExpr.get(), &walker);
+    if (!mutatedExpr) {
+        // mutatedExpr may be null if the root of the expression tree was not updated, but
+        // clonedExpr will still have been updated in-place.
+        return clonedExpr;
+    }
+
+    return mutatedExpr.release();
+}
+
 boost::intrusive_ptr<Expression> rewriteGroupByElement(
     boost::intrusive_ptr<ExpressionContext> pExpCtx,
     boost::intrusive_ptr<Expression> expr,
@@ -383,7 +439,7 @@ boost::intrusive_ptr<Expression> rewriteGroupByElement(
     bool usesExtendedRange) {
     // We allow the $group stage to be rewritten if the _id field only consists of these 3 options:
     // 1. If the _id field is constant.
-    // 2. If the _id field is a fieldPath on the meta field.
+    // 2. If the _id field is an expression whose fieldPaths are at or under the metaField.
     // 3. For fixed buckets collection, if the _id field is a $dateTrunc expressions on the
     // timeField.
     if (ExpressionConstant::isConstant(expr)) {
@@ -391,27 +447,12 @@ boost::intrusive_ptr<Expression> rewriteGroupByElement(
     }
 
     // Option 2: The only field path supported is at or under the metaField.
-    const auto* exprIdPath = dynamic_cast<const ExpressionFieldPath*>(expr.get());
-    if (exprIdPath) {
-        // {The path must be at or under the metaField for this re-write to be correct (and
-        // the zero component is always CURRENT).}
-        const auto& idPath = exprIdPath->getFieldPath();
-        if (!metaField || idPath.getPathLength() < 2 ||
-            idPath.getFieldName(1) != metaField.value()) {
-            return {};
-        }
-
-        std::ostringstream os;
-        os << timeseries::kBucketMetaFieldName;
-        for (size_t index = 2; index < idPath.getPathLength(); index++) {
-            os << "." << idPath.getFieldName(index);
-        }
-        return ExpressionFieldPath::createPathFromString(
-            pExpCtx.get(), os.str(), pExpCtx->variablesParseState);
+    if (fieldPathsAccessOnlyMetaField(expr, metaField)) {
+        return rewriteMetaFieldPaths(pExpCtx, metaField, expr);
     }
 
-    // Option 3: The only expression currently allowed is $dateTrunc on the timeField if the buckets
-    // are fixed and do not use an extended range.
+    // Option 3: Currently the only allowed field path not on the metaField is $dateTrunc on the
+    // timeField if the buckets are fixed and do not use an extended range.
     if (fixedBuckets && !usesExtendedRange) {
         return handleDateTruncRewrite(pExpCtx, expr, timeField, bucketMaxSpanSeconds);
     }
@@ -594,14 +635,9 @@ DocumentSourceInternalUnpackBucket::DocumentSourceInternalUnpackBucket(
                                          assumeNoMixedSchemaData,
                                          fixedBuckets) {
     if (eventFilterBson) {
-        _eventFilterBson = eventFilterBson->getOwned();
-        _eventFilter =
-            uassertStatusOK(MatchExpressionParser::parse(_eventFilterBson,
-                                                         pExpCtx,
-                                                         ExtensionsCallbackNoop(),
-                                                         Pipeline::kAllowedMatcherFeatures));
-        _eventFilterDeps = {};
-        match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
+        // Optimizing '_eventFilter' here duplicates predicates in $expr expressions.
+        // TODO SERVER-79692 remove the 'shouldOptimize' boolean.
+        setEventFilter(eventFilterBson.get(), false /* shouldOptimize */);
     }
     if (wholeBucketFilterBson) {
         _wholeBucketFilterBson = wholeBucketFilterBson->getOwned();
@@ -1011,6 +1047,33 @@ bool DocumentSourceInternalUnpackBucket::pushDownComputedMetaProjection(
         }
     }
     return nextStageWasRemoved;
+}
+
+void DocumentSourceInternalUnpackBucket::setEventFilter(BSONObj eventFilterBson,
+                                                        bool shouldOptimize) {
+    _eventFilterBson = eventFilterBson.getOwned();
+
+    // Having an '_eventFilter' might make the unpack stage incompatible with SBE. Rather
+    // than tracking the specific exprs, we temporarily reset the context to be fully SBE
+    // compatible and check after parsing if the '_eventFilter' made the unpack stage
+    // incompatible.
+    auto originalSbeCompatibility = pExpCtx->sbeCompatibility;
+    pExpCtx->sbeCompatibility = SbeCompatibility::fullyCompatible;
+
+    _eventFilter = uassertStatusOK(MatchExpressionParser::parse(
+        _eventFilterBson, pExpCtx, ExtensionsCallbackNoop(), Pipeline::kAllowedMatcherFeatures));
+    if (shouldOptimize) {
+        _eventFilter =
+            MatchExpression::optimize(std::move(_eventFilter), /* enableSimplification */ false);
+    }
+    _isEventFilterSbeCompatible.emplace(pExpCtx->sbeCompatibility);
+
+    // Reset the sbeCompatibility taking _eventFilter into account.
+    pExpCtx->sbeCompatibility =
+        std::min(originalSbeCompatibility, _isEventFilterSbeCompatible.get());
+
+    _eventFilterDeps = {};
+    match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
 }
 
 void DocumentSourceInternalUnpackBucket::internalizeProject(const BSONObj& project,
@@ -1738,16 +1801,7 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
 
         if (!predicates.rewriteProvidesExactMatchPredicate) {
             // Push the original event predicate into the unpacking stage.
-            _eventFilterBson = nextMatch->getQuery().getOwned();
-            _eventFilter =
-                uassertStatusOK(MatchExpressionParser::parse(_eventFilterBson,
-                                                             pExpCtx,
-                                                             ExtensionsCallbackNoop(),
-                                                             Pipeline::kAllowedMatcherFeatures));
-            _eventFilter = MatchExpression::optimize(std::move(_eventFilter),
-                                                     /* enableSimplification */ false);
-            _eventFilterDeps = {};
-            match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
+            setEventFilter(nextMatch->getQuery(), true /* shouldOptimize */);
         }
 
         container->erase(std::next(itr));
@@ -1820,43 +1874,21 @@ bool DocumentSourceInternalUnpackBucket::isSbeCompatible() {
     if (!_isSbeCompatible) {
         _isSbeCompatible.emplace([&] {
             // Just in case that the event filter or the whole bucket filter is incompatible with
-            // SBE. Here's what may happen:
-            //
-            // While optimizing pipeline, we may end up with pushing SBE-incompatible filters down
-            // to the '$_internalUnpackBucket' stage. But before trying to pushing down stages to
-            // SBE, we set the expCtx->sbeCompatibility to 'fullyCompatible' and we forget the the
-            // whole SBE compatibility status for pipeline. And we examine each stage one by one
-            // while pushding down them. So, we need to remember the SBE compatibility at this
-            // point.
-            //
-            // This is overly conservative but we don't have a way to check which stage or
-            // expression is individually incompatible with SBE.
-            if (pExpCtx->sbeCompatibility < SbeCompatibility::fullyCompatible) {
-                return false;
+            // SBE. While optimizing pipeline, we may end up with pushing SBE-incompatible filters
+            // down to the '$_internalUnpackBucket' stage. We've stored the sbeCompatibility of
+            // '_eventFilter' in '_isEventFilterSbeCompatible'.
+            if (_eventFilter) {
+                tassert(8062700,
+                        "If _eventFilter is set, we must have determined if it is compatible with "
+                        "SBE or not.",
+                        _isEventFilterSbeCompatible);
+                if (_isEventFilterSbeCompatible.get() < SbeCompatibility::fullyCompatible) {
+                    return false;
+                }
             }
 
             // Currently we only support in SBE unpacking with a statically known set of fields.
             if (_bucketUnpacker.bucketSpec().behavior() != BucketSpec::Behavior::kInclude) {
-                return false;
-            }
-
-            auto fieldSet = _bucketUnpacker.bucketSpec().fieldSet();
-            tassert(7969801,
-                    "All fields must be top-level ones",
-                    std::all_of(fieldSet.begin(), fieldSet.end(), [](auto&& field) {
-                        return FieldPath(field).getPathLength() == 1;
-                    }));
-
-            for (auto&& computedMeta : _bucketUnpacker.bucketSpec().computedMetaProjFields()) {
-                fieldSet.erase(computedMeta);
-            }
-            if (fieldSet.empty()) {
-                // If the bucket spec has no measurement fields, then the stage cannot be pushed
-                // down because if the 'block_to_row' / 'ts_bucket_to_cell_block' stages in the SBE
-                // do not have any fields to unpack, then they can't know how many rows to produce
-                // according to the current implementation.
-                //
-                // TODO SERVER-80323: Remove this restriction.
                 return false;
             }
 

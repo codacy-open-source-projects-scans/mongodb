@@ -170,9 +170,13 @@ public:
     static BucketCatalog& get(ServiceContext* svcCtx);
     static BucketCatalog& get(OperationContext* opCtx);
 
-    BucketCatalog() : stripes(numberOfStripes) {}
-    BucketCatalog(size_t numberOfStripes)
-        : numberOfStripes(numberOfStripes), stripes(numberOfStripes){};
+    BucketCatalog()
+        : stripes(numberOfStripes),
+          memoryUsageThreshold(getTimeseriesIdleBucketExpiryMemoryUsageThresholdBytes) {}
+    BucketCatalog(size_t numberOfStripes, std::function<uint64_t()> memoryUsageThreshold)
+        : numberOfStripes(numberOfStripes),
+          stripes(numberOfStripes),
+          memoryUsageThreshold(memoryUsageThreshold) {}
     BucketCatalog(const BucketCatalog&) = delete;
     BucketCatalog operator=(const BucketCatalog&) = delete;
 
@@ -196,6 +200,9 @@ public:
 
     // Approximate memory usage of the bucket catalog across all stripes.
     AtomicWord<uint64_t> memoryUsage;
+
+    // Memory usage threshold in bytes after which idle buckets will be expired.
+    std::function<uint64_t()> memoryUsageThreshold;
 
     // Cardinality of opened and archived buckets managed across all stripes.
     AtomicWord<uint32_t> numberOfActiveBuckets;
@@ -234,7 +241,7 @@ BSONObj getMetadata(BucketCatalog& catalog, const BucketHandle& bucket);
 StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
                                    BucketCatalog& catalog,
                                    const NamespaceString& ns,
-                                   const StringData::ComparatorInterface* comparator,
+                                   const StringDataComparator* comparator,
                                    const TimeseriesOptions& options,
                                    const BSONObj& doc,
                                    CombineWithInsertsFromOtherClients combine);
@@ -251,7 +258,7 @@ StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
 StatusWith<InsertResult> insert(OperationContext* opCtx,
                                 BucketCatalog& catalog,
                                 const NamespaceString& ns,
-                                const StringData::ComparatorInterface* comparator,
+                                const StringDataComparator* comparator,
                                 const TimeseriesOptions& options,
                                 const BSONObj& doc,
                                 CombineWithInsertsFromOtherClients combine,
@@ -337,5 +344,15 @@ void resetBucketOIDCounter();
 void appendExecutionStats(const BucketCatalog& catalog,
                           const NamespaceString& ns,
                           BSONObjBuilder& builder);
+
+/**
+ * Reports a number of measurements inserted that were committed by a different thread than the one
+ * that initially staged them. These measurements are considered to have benefitted from "group
+ * commit".
+ */
+void reportMeasurementsGroupCommitted(BucketCatalog& catalog,
+                                      const NamespaceString& ns,
+                                      int64_t count);
+
 
 }  // namespace mongo::timeseries::bucket_catalog

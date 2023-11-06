@@ -1047,7 +1047,7 @@ void updateRetryStats(OperationContext* opCtx, bool containsRetry) {
 
 void logOperationAndProfileIfNeeded(OperationContext* opCtx, CurOp* curOp) {
     const bool shouldProfile = curOp->completeAndLogOperation(
-        MONGO_LOGV2_DEFAULT_COMPONENT,
+        {MONGO_LOGV2_DEFAULT_COMPONENT},
         CollectionCatalog::get(opCtx)->getDatabaseProfileSettings(curOp->getNSS().dbName()).filter);
 
     if (shouldProfile) {
@@ -1496,8 +1496,8 @@ WriteResult performUpdates(OperationContext* opCtx,
     auto ns = wholeOp.getNamespace();
     NamespaceString originalNs;
     if (source == OperationSource::kTimeseriesUpdate) {
+        originalNs = ns;
         if (!ns.isTimeseriesBucketsCollection()) {
-            originalNs = ns;
             ns = ns.makeTimeseriesBucketsNamespace();
         }
 
@@ -2780,10 +2780,21 @@ std::vector<size_t> performUnorderedTimeseriesWrites(
     bool canContinue = true;
     std::vector<size_t> docsToRetry;
 
+    stdx::unordered_set<timeseries::bucket_catalog::WriteBatch*> handledHere;
+    int64_t handledElsewhere = 0;
+    auto guard = ScopeGuard([&handledElsewhere, &request, opCtx]() {
+        if (handledElsewhere > 0) {
+            auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
+            timeseries::bucket_catalog::reportMeasurementsGroupCommitted(
+                bucketCatalog, request.getNamespace(), handledElsewhere);
+        }
+    });
+
     size_t itr = 0;
     for (; itr < batches.size(); ++itr) {
         auto& [batch, index] = batches[itr];
         if (timeseries::bucket_catalog::claimWriteBatchCommitRights(*batch)) {
+            handledHere.insert(batch.get());
             auto stmtIds = isTimeseriesWriteRetryable(opCtx)
                 ? std::move(bucketStmtIds[batch->bucketHandle.bucketId.oid])
                 : std::vector<StmtId>{};
@@ -2803,6 +2814,8 @@ std::vector<size_t> performUnorderedTimeseriesWrites(
             if (!canContinue) {
                 break;
             }
+        } else if (!handledHere.contains(batch.get())) {
+            ++handledElsewhere;
         }
     }
 

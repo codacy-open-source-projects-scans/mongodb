@@ -76,7 +76,7 @@
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_workflow.h"
-#include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
@@ -390,7 +390,6 @@ public:
         : _workflow{workflow},
           _serviceContext{client->getServiceContext()},
           _sep{client->getService()->getServiceEntryPoint()},
-          _sessionManager{_serviceContext->getSessionManager()},
           _clientStrand{ClientStrand::make(std::move(client))} {}
 
     Client* client() const {
@@ -547,7 +546,6 @@ private:
     SessionWorkflow* const _workflow;
     ServiceContext* const _serviceContext;
     ServiceEntryPoint* _sep;
-    SessionManager* _sessionManager;
     RunnerAndSource _taskRunner;
 
     AtomicWord<bool> _isTerminated{false};
@@ -728,14 +726,15 @@ Future<DbResponse> SessionWorkflow::Impl::_dispatchWork() {
 
 void SessionWorkflow::Impl::_acceptResponse(DbResponse response) {
     auto&& work = *_work;
-    // opCtx must be killed and delisted here so that the operation cannot show up in
-    // currentOp results after the response reaches the client. Destruction of the already
-    // killed opCtx is postponed for later (i.e., after completion of the future-chain) to
+    // opCtx must be delisted here so that the operation cannot show up in currentOp results after
+    // the response reaches the client. We are assuming that the operation has already been killed
+    // once we are accepting the response here, so delisting is sufficient. Destruction of the
+    // already killed opCtx is postponed for later (i.e., after completion of the future-chain) to
     // mitigate its performance impact on the critical path of execution.
     // Note that destroying futures after execution, rather that postponing the destruction
     // until completion of the future-chain, would expose the cost of destroying opCtx to
     // the critical path and result in serious performance implications.
-    _serviceContext->killAndDelistOperation(work.opCtx(), ErrorCodes::OperationIsKilledAndDelisted);
+    _serviceContext->delistOperation(work.opCtx());
     // Format our response, if we have one
     Message& toSink = response.response;
     if (toSink.empty())
@@ -871,7 +870,7 @@ void SessionWorkflow::Impl::_cleanupSession(const Status& status) {
     }
     _cleanupExhaustResources();
     _taskRunner = {};
-    _sessionManager->endSessionByClient(client());
+    client()->session()->getTransportLayer()->getSessionManager()->endSessionByClient(client());
 }
 
 SessionWorkflow::SessionWorkflow(PassKeyTag, ServiceContext::UniqueClient client)

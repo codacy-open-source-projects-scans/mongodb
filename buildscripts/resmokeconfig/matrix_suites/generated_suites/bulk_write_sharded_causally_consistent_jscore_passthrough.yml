@@ -22,8 +22,6 @@ executor:
         ; await import(''jstests/libs/override_methods/single_crud_op_as_bulk_write.js'');'
   fixture:
     class: ShardedClusterFixture
-    enable_sharding:
-    - test
     mongod_options:
       enableMajorityReadConcern: ''
       set_parameters:
@@ -75,7 +73,6 @@ selector:
   - jstests/core/**/geo_2d_explain.js
   - jstests/core/**/geo_s2explain.js
   - jstests/core/**/geo_s2sparse.js
-  - jstests/core/**/or_to_in.js
   - jstests/core/**/bad_index_plugin.js
   - jstests/core/**/create_indexes.js
   - jstests/core/**/list_indexes_non_existent_ns.js

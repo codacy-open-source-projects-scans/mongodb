@@ -38,6 +38,7 @@
 
 namespace mongo {
 class InListData;
+class StringListSet;
 
 namespace stage_builder {
 struct Environment;
@@ -143,6 +144,6 @@ struct StageBuilderState {
 
     StringMap<sbe::value::SlotId> stringConstantToSlotMap;
     SimpleBSONObjMap<sbe::value::SlotId> keyPatternToSlotMap;
-};
+};  // struct StageBuilderState
 }  // namespace stage_builder
 }  // namespace mongo

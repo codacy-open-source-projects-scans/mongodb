@@ -62,6 +62,7 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_manager.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
@@ -76,6 +77,7 @@ MONGO_FAIL_POINT_DEFINE(finishedDropConnections);
 void FcvOpObserver::_setVersion(OperationContext* opCtx,
                                 multiversion::FeatureCompatibilityVersion newVersion,
                                 bool onRollback,
+                                bool withinRecoveryUnit,
                                 boost::optional<Timestamp> commitTs) {
     // We set the last FCV update timestamp before setting the new FCV, to make sure we never
     // read an FCV that is not stable.  We might still read a stale one.
@@ -97,8 +99,11 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
         // minWireVersion == maxWireVersion on kLatest FCV or upgrading/downgrading FCV.
         // Close all incoming connections from internal clients with binary versions lower than
         // ours.
-        opCtx->getServiceContext()->getSessionManager()->endAllSessions(
-            Client::kLatestVersionInternalClientKeepOpen | Client::kExternalClientKeepOpen);
+        if (auto tlm = opCtx->getServiceContext()->getTransportLayerManager()) {
+            tlm->endAllSessions(Client::kLatestVersionInternalClientKeepOpen |
+                                Client::kExternalClientKeepOpen);
+        }
+
         // Close all outgoing connections to servers with binary versions lower than ours.
         pauseBeforeCloseCxns.pauseWhileSet();
 
@@ -115,10 +120,19 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
     // rather than waiting for the transactions to complete. FCV changes take the global S lock when
     // in the upgrading/downgrading state.
     // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-    if (serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading()) {
-        SessionKiller::Matcher matcherAllSessions(
-            KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
-        killSessionsAbortUnpreparedTransactions(opCtx, matcherAllSessions);
+    try {
+        if (serverGlobalParams.featureCompatibility.isUpgradingOrDowngrading()) {
+            SessionKiller::Matcher matcherAllSessions(
+                KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
+            killSessionsAbortUnpreparedTransactions(opCtx, matcherAllSessions);
+        }
+    } catch (const DBException&) {
+        // Swallow the error when running within a recovery unit to avoid process termination.
+        // The failure can be ignored here, assuming that the setFCV command will also be
+        // interrupted on _prepareToUpgrade/Downgrade() or earlier.
+        if (!withinRecoveryUnit) {
+            throw;
+        }
     }
 
     const auto replCoordinator = repl::ReplicationCoordinator::get(opCtx);
@@ -176,7 +190,7 @@ void FcvOpObserver::_onInsertOrUpdate(OperationContext* opCtx, const BSONObj& do
 
     opCtx->recoveryUnit()->onCommit(
         [newVersion](OperationContext* opCtx, boost::optional<Timestamp> ts) {
-            _setVersion(opCtx, newVersion, false /*onRollback*/, ts);
+            _setVersion(opCtx, newVersion, false /*onRollback*/, true /*withinRecoveryUnit*/, ts);
         });
 }
 
@@ -240,7 +254,7 @@ void FcvOpObserver::onReplicationRollback(OperationContext* opCtx,
                   "Setting featureCompatibilityVersion as part of rollback",
                   "newVersion"_attr = multiversion::toString(diskFcv),
                   "oldVersion"_attr = multiversion::toString(memoryFcv));
-            _setVersion(opCtx, diskFcv, true /*onRollback*/);
+            _setVersion(opCtx, diskFcv, true /*onRollback*/, false /*withinRecoveryUnit*/);
             // The rollback FCV is already in the stable snapshot.
             FeatureCompatibilityVersion::clearLastFCVUpdateTimestamp();
         }

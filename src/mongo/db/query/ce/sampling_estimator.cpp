@@ -41,13 +41,6 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/db/exec/sbe/abt/abt_lower.h"
-#include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
-#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
-#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/ce/sel_tree_utils.h"
 #include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/optimizer/algebra/operator.h"
@@ -65,7 +58,6 @@
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -152,17 +144,18 @@ private:
 };
 
 class SamplingChunksTransport {
-
 public:
-    SamplingChunksTransport(NodeToGroupPropsMap& propsMap, const OptPhaseManager& phaseManager)
-        : _propsMap(propsMap), _phaseManager(phaseManager) {}
+    SamplingChunksTransport(NodeToGroupPropsMap& propsMap,
+                            const int64_t numChunks,
+                            const RIDProjectionsMap& ridProjections)
+        : _propsMap(propsMap), _numChunks(numChunks), _ridProjections(ridProjections) {}
 
     void transport(ABT& n, const LimitSkipNode& limit, ABT& child) {
         if (limit.getProperty().getSkip() != 0) {
             return;
         }
         const PhysicalScanNode& physicalScan = *child.cast<PhysicalScanNode>();
-        const auto& ridProj = _phaseManager.getRIDProjections().at(physicalScan.getScanDefName());
+        const auto& ridProj = _ridProjections.at(physicalScan.getScanDefName());
 
         ABT newPhysicalScan =
             make<PhysicalScanNode>(FieldProjectionMap{._ridProjection = ProjectionName{ridProj}},
@@ -178,9 +171,9 @@ public:
             ridProj, physicalScan.getFieldProjectionMap(), physicalScan.getScanDefName());
         _propsMap.emplace(seekNode.cast<Node>(), props);
 
-        const int32_t limitSize = limit.getProperty().getLimit();
-        const int32_t numChunks = std::min(_phaseManager.getHints()._numSamplingChunks, limitSize);
-        const int32_t chunkSize = limitSize / numChunks;
+        const int64_t limitSize = limit.getProperty().getLimit();
+        const int64_t numChunks = std::min(_numChunks, limitSize);
+        const int64_t chunkSize = limitSize / numChunks;
 
         ABT outerNode = make<LimitSkipNode>(properties::LimitSkipRequirement(numChunks, 0),
                                             std::move(newPhysicalScan));
@@ -226,21 +219,22 @@ public:
 
 private:
     NodeToGroupPropsMap& _propsMap;
-    const OptPhaseManager& _phaseManager;
+    const int64_t _numChunks;
+    const RIDProjectionsMap& _ridProjections;
 };
 
 class SamplingTransport {
     static constexpr size_t kMaxSampleSize = 1000;
 
 public:
-    SamplingTransport(OperationContext* opCtx,
-                      OptPhaseManager phaseManager,
+    SamplingTransport(OptPhaseManager phaseManager,
                       const int64_t numRecords,
-                      std::unique_ptr<cascades::CardinalityEstimator> fallbackCE)
+                      std::unique_ptr<cascades::CardinalityEstimator> fallbackCE,
+                      std::unique_ptr<SamplingExecutor> executor)
         : _phaseManager(std::move(phaseManager)),
-          _opCtx(opCtx),
           _sampleSize(std::min<int64_t>(numRecords, kMaxSampleSize)),
-          _fallbackCE(std::move(fallbackCE)) {}
+          _fallbackCE(std::move(fallbackCE)),
+          _executor(std::move(executor)) {}
 
     CEType transport(const ABT::reference_type n,
                      const FilterNode& node,
@@ -249,7 +243,8 @@ public:
                      const properties::LogicalProps& logicalProps,
                      CEType childResult,
                      CEType /*exprResult*/) {
-        if (!properties::hasProperty<properties::IndexingAvailability>(logicalProps)) {
+        if (_phaseManager.getHints()._forceSamplingCEFallBackForFilterNode ||
+            !properties::hasProperty<properties::IndexingAvailability>(logicalProps)) {
             return _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
         }
 
@@ -272,6 +267,9 @@ public:
             return _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
         }
 
+        const ScanDefinition& scanDef = getScanDefFromIndexingAvailability(
+            metadata, properties::getPropertyConst<properties::IndexingAvailability>(logicalProps));
+
         SamplingPlanExtractor planExtractor(memo, _phaseManager, _sampleSize);
         ABT extracted = planExtractor.extract(n.copy());
 
@@ -293,8 +291,13 @@ public:
                     boost::none /*residualCE*/,
                     lowered);
                 uassert(6624243, "Expected a filter node", lowered._node.is<FilterNode>());
-                const CEType filterCE = estimateFilterCE(
-                    metadata, memo, logicalProps, n, std::move(lowered._node), childResult);
+                // Continue the sampling estimation only if the field from the partial schema is
+                // indexed.
+                const bool isPartialSchemaKeyIndexed = isFieldPathIndexed(key, scanDef);
+                const CEType filterCE = isPartialSchemaKeyIndexed
+                    ? estimateFilterCE(
+                          metadata, memo, logicalProps, n, std::move(lowered._node), childResult)
+                    : _fallbackCE->deriveCE(metadata, memo, logicalProps, n);
                 const SelectivityType sel =
                     childResult > 0.0 ? (filterCE / childResult) : SelectivityType{0.0};
                 selTreeBuilder.atom(sel);
@@ -375,9 +378,10 @@ private:
         PlanAndProps planAndProps = _phaseManager.optimizeAndReturnProps(std::move(abt));
 
         // If internalCascadesOptimizerSampleChunks is a positive integer, sample by chunks using
-        // that value as the number of chunks. Otherwise perform fully randomized sample.
-        if (_phaseManager.getHints()._numSamplingChunks > 0) {
-            SamplingChunksTransport instance{planAndProps._map, _phaseManager};
+        // that value as the number of chunks. Otherwise, perform fully randomized sample.
+        if (const int64_t numChunks = _phaseManager.getHints()._numSamplingChunks; numChunks > 0) {
+            SamplingChunksTransport instance{
+                planAndProps._map, numChunks, _phaseManager.getRIDProjections()};
             algebra::transport<true>(planAndProps._node, instance);
 
             OPTIMIZER_DEBUG_LOG(6264807,
@@ -386,52 +390,26 @@ private:
                                 "explain"_attr = ExplainGenerator::explainV2(planAndProps._node));
         }
 
-        auto env = VariableEnvironment::build(planAndProps._node);
-        SlotVarMap slotMap;
-        auto runtimeEnvironment = std::make_unique<sbe::RuntimeEnvironment>();  // TODO Use factory
-        boost::optional<sbe::value::SlotId> ridSlot;
-        sbe::value::SlotIdGenerator ids;
-        sbe::InputParamToSlotMap inputParamToSlotMap;
+        return _executor->estimateSelectivity(
+            _phaseManager.getMetadata(), _sampleSize, planAndProps);
+    }
 
-        SBENodeLowering g{env,
-                          *runtimeEnvironment,
-                          ids,
-                          inputParamToSlotMap,
-                          _phaseManager.getMetadata(),
-                          planAndProps._map,
-                          internalCascadesOptimizerSamplingCEScanStartOfColl.load()
-                              ? ScanOrder::Forward
-                              : ScanOrder::Random};
-        auto sbePlan = g.optimize(planAndProps._node, slotMap, ridSlot);
-        tassert(6624261, "Unexpected rid slot", !ridSlot);
+    const ScanDefinition& getScanDefFromIndexingAvailability(
+        const Metadata& metadata,
+        const properties::IndexingAvailability& indexingAvalability) const {
+        auto scanDefIter = metadata._scanDefs.find(indexingAvalability.getScanDefName());
+        uassert(8073400,
+                "Scan def of indexing avalability is not found",
+                scanDefIter != metadata._scanDefs.cend());
+        return scanDefIter->second;
+    }
 
-        // TODO: return errors instead of exceptions?
-        uassert(6624244, "Lowering failed", sbePlan != nullptr);
-        uassert(6624245, "Invalid slot map size", slotMap.size() == 1);
-
-        sbePlan->attachToOperationContext(_opCtx);
-        sbe::CompileCtx ctx(std::move(runtimeEnvironment));
-        sbePlan->prepare(ctx);
-
-        std::vector<sbe::value::SlotAccessor*> accessors;
-        for (auto& [name, slot] : slotMap) {
-            accessors.emplace_back(sbePlan->getAccessor(ctx, slot));
-        }
-
-        sbePlan->open(false);
-        ON_BLOCK_EXIT([&] { sbePlan->close(); });
-
-        while (sbePlan->getNext() != sbe::PlanState::IS_EOF) {
-            const auto [tag, value] = accessors.at(0)->getViewOfValue();
-            if (tag == sbe::value::TypeTags::NumberInt64) {
-                // TODO: check if we get exactly one result from the groupby?
-                return {{static_cast<double>(value) / _sampleSize}};
-            }
-            return boost::none;
-        };
-
-        // If nothing passes the filter, estimate 0.0 selectivity. HashGroup will return 0 results.
-        return {{0.0}};
+    /**
+     * Returns true if the field path from the partial schema entry is indexed.
+     */
+    inline bool isFieldPathIndexed(const PartialSchemaKey& key,
+                                   const ScanDefinition& scanDef) const {
+        return scanDef.getIndexedFieldPaths().isIndexed(key._path);
     }
 
     struct NodeRefHash {
@@ -451,19 +429,17 @@ private:
 
     OptPhaseManager _phaseManager;
 
-    // We don't own this.
-    OperationContext* _opCtx;
-
     const int64_t _sampleSize;
     std::unique_ptr<cascades::CardinalityEstimator> _fallbackCE;
+    std::unique_ptr<SamplingExecutor> _executor;
 };
 
-SamplingEstimator::SamplingEstimator(OperationContext* opCtx,
-                                     OptPhaseManager phaseManager,
+SamplingEstimator::SamplingEstimator(OptPhaseManager phaseManager,
                                      const int64_t numRecords,
-                                     std::unique_ptr<cascades::CardinalityEstimator> fallbackCE)
+                                     std::unique_ptr<cascades::CardinalityEstimator> fallbackCE,
+                                     std::unique_ptr<SamplingExecutor> executor)
     : _transport(std::make_unique<SamplingTransport>(
-          opCtx, std::move(phaseManager), numRecords, std::move(fallbackCE))) {}
+          std::move(phaseManager), numRecords, std::move(fallbackCE), std::move(executor))) {}
 
 SamplingEstimator::~SamplingEstimator() {}
 

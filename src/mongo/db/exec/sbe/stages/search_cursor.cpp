@@ -96,7 +96,7 @@ namespace {
 // Initialize the slot accessors and name to accessor mapping given the slots and names vector.
 void initializeAccessorsVector(absl::InlinedVector<value::OwnedValueAccessor, 3>& accessors,
                                value::SlotAccessorMap& accessorsMap,
-                               const IndexedStringVector& names,
+                               const StringListSet& names,
                                const value::SlotVector& slotVec) {
     accessors.resize(names.size());
     for (size_t idx = 0; idx < names.size(); ++idx) {
@@ -149,6 +149,7 @@ void SearchCursorStage::prepare(CompileCtx& ctx) {
             "RemoteCursors must be established",
             ctx.remoteCursors && ctx.remoteCursors->count(_remoteCursorId));
     _cursor = ctx.remoteCursors->at(_remoteCursorId).get();
+    _cursorId = _cursor->getCursorId();
 }
 
 value::SlotAccessor* SearchCursorStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -249,16 +250,16 @@ PlanState SearchCursorStage::getNext() {
 
     // Get BSONObj response from Mongot
     _response = _cursor->getNext(_opCtx);
-    auto& opDebug = CurOp::get(_opCtx)->debug();
 
-    // TODO: SERVER-80114 should we move this to SearchStats?
-    if (opDebug.msWaitingForMongot) {
-        *opDebug.msWaitingForMongot += durationCount<Milliseconds>(_cursor->resetWaitingTime());
-    } else {
-        opDebug.msWaitingForMongot = durationCount<Milliseconds>(_cursor->resetWaitingTime());
-    }
-    opDebug.mongotBatchNum = _cursor->getBatchNum();
-    opDebug.mongotCursorId = _cursor->getCursorId();
+    // Update search stats.
+    _specificStats.msWaitingForMongot += durationCount<Milliseconds>(_cursor->resetWaitingTime());
+    _specificStats.batchNum = _cursor->getBatchNum();
+    // Update opDebug log as well so that these are logged in "Slow query" log for every getMore
+    // command.
+    auto& opDebug = CurOp::get(_opCtx)->debug();
+    opDebug.mongotCursorId = _cursorId;
+    opDebug.msWaitingForMongot = _specificStats.msWaitingForMongot;
+    opDebug.mongotBatchNum = _specificStats.batchNum;
 
     // If there's no response, return EOF
     if (!_response) {
@@ -277,12 +278,12 @@ PlanState SearchCursorStage::getNext() {
     for (auto& elem : *_response) {
 
         auto elemName = elem.fieldNameStringData();
-        if (size_t pos = _metadataNames.findPos(elemName); pos != IndexedStringVector::npos) {
+        if (size_t pos = _metadataNames.findPos(elemName); pos != StringListSet::npos) {
             auto [tag, val] = bson::convertFrom<true>(elem);
             _metadataAccessors[pos].reset(false, tag, val);
         }
         if (!_isStoredSource) {
-            if (size_t pos = _fieldNames.findPos(elemName); pos != IndexedStringVector::npos) {
+            if (size_t pos = _fieldNames.findPos(elemName); pos != StringListSet::npos) {
                 auto [tag, val] = bson::convertFrom<true>(elem);
                 _fieldAccessors[pos].reset(false, tag, val);
             }
@@ -300,7 +301,7 @@ PlanState SearchCursorStage::getNext() {
 
             for (auto& elem : *_resultObj) {
                 auto elemName = elem.fieldNameStringData();
-                if (size_t pos = _fieldNames.findPos(elemName); pos != IndexedStringVector::npos) {
+                if (size_t pos = _fieldNames.findPos(elemName); pos != StringListSet::npos) {
                     auto [tag, val] = bson::convertFrom<true>(elem);
                     _fieldAccessors[pos].reset(false, tag, val);
                 }
@@ -382,6 +383,10 @@ std::unique_ptr<PlanStageStats> SearchCursorStage::getStats(bool includeDebugInf
         if (_collatorSlot) {
             bob.appendNumber("collatorSlot", static_cast<long long>(*_collatorSlot));
         }
+
+        // Specific stats.
+        bob.appendBool("msWaitingForMongot", _specificStats.msWaitingForMongot);
+        bob.appendNumber("batchNum", _specificStats.batchNum);
 
         ret->debugInfo = bob.obj();
     }

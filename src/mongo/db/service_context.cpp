@@ -105,6 +105,10 @@ void setGlobalServiceContext(ServiceContext::UniqueServiceContext&& serviceConte
     globalServiceContext = serviceContext.release();
 }
 
+logv2::LogService toLogService(Service* service) {
+    return toLogService(service ? service->role() : ClusterRole::None);
+}
+
 /**
  * The global clusterRole determines which services are initialized.
  * If no role is set, then ShardServer is assumed, so there's always
@@ -249,10 +253,6 @@ transport::TransportLayerManager* ServiceContext::getTransportLayerManager() con
     return _transportLayerManager.get();
 }
 
-transport::SessionManager* ServiceContext::getSessionManager() const {
-    return _sessionManager.get();
-}
-
 void ServiceContext::setStorageEngine(std::unique_ptr<StorageEngine> engine) {
     invariant(engine);
     invariant(!_storageEngine);
@@ -273,10 +273,6 @@ void ServiceContext::setFastClockSource(std::unique_ptr<ClockSource> newSource) 
 
 void ServiceContext::setPreciseClockSource(std::unique_ptr<ClockSource> newSource) {
     _preciseClockSource = std::move(newSource);
-}
-
-void ServiceContext::setSessionManager(std::unique_ptr<transport::SessionManager> sm) {
-    _sessionManager = std::move(sm);
 }
 
 void ServiceContext::setTransportLayerManager(
@@ -476,6 +472,16 @@ void ServiceContext::_delistOperation(OperationContext* opCtx) noexcept {
     }
 
     opCtx->releaseOperationKey();
+}
+
+void ServiceContext::delistOperation(OperationContext* opCtx) noexcept {
+    auto client = opCtx->getClient();
+    invariant(client);
+
+    auto service = client->getServiceContext();
+    invariant(service == this);
+
+    _delistOperation(opCtx);
 }
 
 void ServiceContext::killAndDelistOperation(OperationContext* opCtx,
