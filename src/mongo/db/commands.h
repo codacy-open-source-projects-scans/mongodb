@@ -172,8 +172,11 @@ struct CommandHelpers {
 
     static NamespaceStringOrUUID parseNsOrUUID(const DatabaseName& dbName, const BSONObj& cmdObj);
 
-    // Ensure collection identifier is not a Command
-    static void ensureNsNotCommand(const NamespaceString& nss);
+    // Check that the namespace string references a collection that holds documents
+    // rather than an internal configuration collection (the names of which contain
+    // a $). The one exception is kLocalOplogDollarMain, which is considered valid
+    // despite containing $.
+    static void ensureValidCollectionName(const NamespaceString& nss);
 
     /**
      * Return the namespace for the command. If the first field in 'cmdObj' is of type
@@ -247,6 +250,10 @@ struct CommandHelpers {
                                          BSONObjBuilder* replyBuilder);
     static BSONObj appendGenericReplyFields(const BSONObj& replyObjWithGenericReplyFields,
                                             const BSONObj& reply);
+    /*
+     * Appends a generic WriteConcernOptions to a bson object
+     */
+    static BSONObj appendWCToObj(const BSONObj& cmdObj, WriteConcernOptions newWC);
 
     /**
      * Returns a copy of 'cmdObj' with a majority writeConcern appended.  If the command object does

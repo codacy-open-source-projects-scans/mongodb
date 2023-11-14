@@ -182,7 +182,8 @@ bool WiredTigerFileVersion::shouldDowngrade(bool hasRecoveryTimestamp) {
         return false;
     }
 
-    if (!serverGlobalParams.featureCompatibility.isVersionInitialized()) {
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (!fcvSnapshot.isVersionInitialized()) {
         // If the FCV document hasn't been read, trust the WT compatibility. MongoD will
         // downgrade to the same compatibility it discovered on startup.
         return _startupVersion == StartupVersion::IS_44_FCV_42 ||
@@ -192,7 +193,7 @@ bool WiredTigerFileVersion::shouldDowngrade(bool hasRecoveryTimestamp) {
     // (Generic FCV reference): Only consider downgrading when FCV has been fully downgraded to last
     // continuous or last LTS. It's possible for WiredTiger to introduce a data format change in a
     // continuous release. This FCV gate must remain across binary version releases.
-    const auto currentVersion = serverGlobalParams.featureCompatibility.getVersion();
+    const auto currentVersion = fcvSnapshot.getVersion();
     if (currentVersion != multiversion::GenericFCV::kLastContinuous &&
         currentVersion != multiversion::GenericFCV::kLastLTS) {
         return false;
@@ -217,7 +218,8 @@ bool WiredTigerFileVersion::shouldDowngrade(bool hasRecoveryTimestamp) {
 }
 
 std::string WiredTigerFileVersion::getDowngradeString() {
-    if (!serverGlobalParams.featureCompatibility.isVersionInitialized()) {
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (!fcvSnapshot.isVersionInitialized()) {
         invariant(_startupVersion != StartupVersion::IS_44_FCV_44);
 
         switch (_startupVersion) {
@@ -234,7 +236,7 @@ std::string WiredTigerFileVersion::getDowngradeString() {
     // Either to kLastContinuous or kLastLTS. It's possible for the data format to differ between
     // kLastContinuous and kLastLTS and we'll need to handle that appropriately here. We only
     // consider downgrading when FCV has been fully downgraded.
-    const auto currentVersion = serverGlobalParams.featureCompatibility.getVersion();
+    const auto currentVersion = fcvSnapshot.getVersion();
     // (Generic FCV reference): This FCV check should exist across LTS binary versions because the
     // logic for keeping the WiredTiger release version compatible with the server FCV version will
     // be the same across different LTS binary versions.
@@ -1763,6 +1765,34 @@ std::unique_ptr<ColumnStore> WiredTigerKVEngine::getColumnStore(
         opCtx, _uri(ident), ident, descriptor, WiredTigerUtil::useTableLogging(nss));
 }
 
+std::unique_ptr<RecordStore> WiredTigerKVEngine::getTemporaryRecordStore(OperationContext* opCtx,
+                                                                         StringData ident,
+                                                                         KeyFormat keyFormat) {
+    // We don't log writes to temporary record stores.
+    const bool isLogged = false;
+    WiredTigerRecordStore::Params params;
+    params.nss = NamespaceString::kEmpty;
+    params.uuid = boost::none;
+    params.ident = ident.toString();
+    params.engineName = _canonicalName;
+    params.isCapped = false;
+    params.keyFormat = keyFormat;
+    params.overwrite = true;
+    params.isEphemeral = _ephemeral;
+    params.isLogged = isLogged;
+    // Temporary collections do not need to persist size information to the size storer.
+    params.sizeStorer = nullptr;
+    // Temporary collections do not need to reconcile collection size/counts.
+    params.tracksSizeAdjustments = false;
+    params.forceUpdateWithFullDocument = false;
+
+    std::unique_ptr<WiredTigerRecordStore> rs;
+    rs = std::make_unique<StandardWiredTigerRecordStore>(this, opCtx, params);
+    rs->postConstructorInit(opCtx, params.nss);
+
+    return std::move(rs);
+}
+
 std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(OperationContext* opCtx,
                                                                           StringData ident,
                                                                           KeyFormat keyFormat) {
@@ -1792,27 +1822,7 @@ std::unique_ptr<RecordStore> WiredTigerKVEngine::makeTemporaryRecordStore(Operat
                 "config"_attr = config);
     uassertStatusOK(wtRCToStatus(session->create(session, uri.c_str(), config.c_str()), session));
 
-    WiredTigerRecordStore::Params params;
-    params.nss = NamespaceString::kEmpty;
-    params.uuid = boost::none;
-    params.ident = ident.toString();
-    params.engineName = _canonicalName;
-    params.isCapped = false;
-    params.keyFormat = keyFormat;
-    params.overwrite = true;
-    params.isEphemeral = _ephemeral;
-    params.isLogged = isLogged;
-    // Temporary collections do not need to persist size information to the size storer.
-    params.sizeStorer = nullptr;
-    // Temporary collections do not need to reconcile collection size/counts.
-    params.tracksSizeAdjustments = false;
-    params.forceUpdateWithFullDocument = false;
-
-    std::unique_ptr<WiredTigerRecordStore> rs;
-    rs = std::make_unique<StandardWiredTigerRecordStore>(this, opCtx, params);
-    rs->postConstructorInit(opCtx, params.nss);
-
-    return std::move(rs);
+    return getTemporaryRecordStore(opCtx, ident, keyFormat);
 }
 
 void WiredTigerKVEngine::alterIdentMetadata(OperationContext* opCtx,
@@ -1885,6 +1895,10 @@ Status WiredTigerKVEngine::dropIdent(RecoveryUnit* ru,
         // cursors on the ident, or the ident is otherwise in use.
         return {ErrorCodes::ObjectIsBusy,
                 str::stream() << "Failed to remove drop-pending ident " << ident};
+    }
+
+    if (DurableCatalog::isCollectionIdent(ident)) {
+        _sizeStorer->remove(uri);
     }
 
     if (onDrop) {

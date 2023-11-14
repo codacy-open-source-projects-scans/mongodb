@@ -57,7 +57,8 @@ namespace {
 bool isRetryErrCode(int errCode) {
     return errCode == ErrorCodes::StaleConfig || errCode == ErrorCodes::StaleDbVersion ||
         errCode == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
-        errCode == ErrorCodes::TenantMigrationAborted;
+        errCode == ErrorCodes::TenantMigrationAborted ||
+        errCode == ErrorCodes::CannotImplicitlyCreateCollection;
 }
 
 bool errorsAllSame(const std::vector<ChildWriteOp const*>& errOps) {
@@ -161,7 +162,10 @@ void WriteOp::targetWrites(OperationContext* opCtx,
                                          useTwoPhaseWriteProtocol,
                                          isNonTargetedWriteWithoutShardKeyWithExactId);
         } else if (_itemRef.getOpType() == BatchedCommandRequest::BatchType_Delete) {
-            return targeter.targetDelete(opCtx, _itemRef, useTwoPhaseWriteProtocol);
+            return targeter.targetDelete(opCtx,
+                                         _itemRef,
+                                         useTwoPhaseWriteProtocol,
+                                         isNonTargetedWriteWithoutShardKeyWithExactId);
         }
         MONGO_UNREACHABLE;
     }();
@@ -194,7 +198,7 @@ void WriteOp::targetWrites(OperationContext* opCtx,
             // Do not ignore shard version if this is an updateOne/deleteOne with exact _id
             // equality.
             if (!feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
-                    serverGlobalParams.featureCompatibility) ||
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
                 (isNonTargetedWriteWithoutShardKeyWithExactId &&
                  !*isNonTargetedWriteWithoutShardKeyWithExactId)) {
                 endpoint.shardVersion->setPlacementVersionIgnored();

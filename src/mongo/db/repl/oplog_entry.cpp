@@ -96,7 +96,8 @@ BSONObj makeOplogEntryDoc(OpTime opTime,
     builder.append(OplogEntryBase::kVersionFieldName, version);
     builder.append(OplogEntryBase::kOpTypeFieldName, OpType_serializer(opType));
     if (nss.tenantId() && gMultitenancySupport &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility)) {
+        gFeatureFlagRequireTenantID.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         nss.tenantId()->serializeToBSON(OplogEntryBase::kTidFieldName, &builder);
     }
     builder.append(OplogEntryBase::kNssFieldName,
@@ -231,7 +232,8 @@ void ReplOperation::extractPrePostImageForTransaction(boost::optional<ImageBundl
 
 void ReplOperation::setTid(boost::optional<mongo::TenantId> value) & {
     if (gMultitenancySupport &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        gFeatureFlagRequireTenantID.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
         DurableReplOperation::setTid(value);
 }
 
@@ -376,7 +378,8 @@ ReplOperation MutableOplogEntry::toReplOperation() const noexcept {
 
 void MutableOplogEntry::setTid(boost::optional<mongo::TenantId> value) & {
     if (gMultitenancySupport &&
-        gFeatureFlagRequireTenantID.isEnabled(serverGlobalParams.featureCompatibility))
+        gFeatureFlagRequireTenantID.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
         getDurableReplOperation().setTid(std::move(value));
 }
 
@@ -395,7 +398,7 @@ OpTime MutableOplogEntry::getOpTime() const {
 }
 
 size_t DurableOplogEntry::getDurableReplOperationSize(const DurableReplOperation& op) {
-    const auto stmtIds = variant_util::toVector<StmtId>(op.getStatementIds());
+    const auto& stmtIds = op.getStatementIds();
     return sizeof(op) + (op.getTid() ? op.getTid()->toString().size() : 0) + op.getNss().size() +
         op.getObject().objsize() + (op.getObject2() ? op.getObject2()->objsize() : 0) +
         (sizeof(std::vector<StmtId>) + (sizeof(StmtId) * stmtIds.size()));
@@ -690,7 +693,7 @@ const boost::optional<mongo::Value>& OplogEntry::get_id() const& {
     return _entry.get_id();
 }
 
-std::vector<StmtId> OplogEntry::getStatementIds() const& {
+const std::vector<StmtId>& OplogEntry::getStatementIds() const& {
     return _entry.getStatementIds();
 }
 

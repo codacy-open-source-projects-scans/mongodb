@@ -39,7 +39,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/plan_yield_policy_remote_cursor.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor_cursor.h"
 #include "mongo/util/decorable.h"
@@ -49,6 +49,7 @@ namespace mongo {
 static constexpr auto kReturnStoredSourceArg = "returnStoredSource"_sd;
 
 using RemoteCursorMap = absl::flat_hash_map<size_t, std::unique_ptr<executor::TaskExecutorCursor>>;
+using RemoteExplainVector = std::vector<BSONObj>;
 
 /**
  * A class that contains any functions needed to run $seach queries when the enterprise module
@@ -148,15 +149,18 @@ public:
     /**
      * Executes the cursor for $search query.
      */
-    virtual void establishSearchQueryCursors(boost::intrusive_ptr<ExpressionContext> expCtx,
-                                             DocumentSource* stage,
-                                             std::unique_ptr<PlanYieldPolicy> yieldPolicy) {}
+    virtual void establishSearchQueryCursors(
+        boost::intrusive_ptr<ExpressionContext> expCtx,
+        DocumentSource* stage,
+        std::unique_ptr<PlanYieldPolicyRemoteCursor> yieldPolicy) {}
 
     /**
      * Encode $search/$searchMeta to SBE plan cache.
      * Returns true if $search/$searchMeta is at the front of the 'pipeline' and encoding is done.
      */
-    virtual bool encodeSearchForSbeCache(DocumentSource* ds, BufBuilder* bufBuilder) {
+    virtual bool encodeSearchForSbeCache(const ExpressionContext* expCtx,
+                                         DocumentSource* ds,
+                                         BufBuilder* bufBuilder) {
         return false;
     }
 
@@ -175,9 +179,15 @@ public:
      */
     virtual void establishSearchMetaCursor(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                            DocumentSource* stage,
-                                           std::unique_ptr<PlanYieldPolicy>) {}
+                                           std::unique_ptr<PlanYieldPolicyRemoteCursor>) {}
 
     virtual std::unique_ptr<RemoteCursorMap> getSearchRemoteCursors(
+        std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline) {
+        return nullptr;
+    }
+
+    virtual std::unique_ptr<RemoteExplainVector> getSearchRemoteExplains(
+        const ExpressionContext* expCtx,
         std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline) {
         return nullptr;
     }

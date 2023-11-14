@@ -73,7 +73,6 @@
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_global_options.h"
 #include "mongo/db/timeseries/timeseries_options.h"
-#include "mongo/db/timeseries/timeseries_stats.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/mutex.h"
@@ -134,24 +133,6 @@ void updateBucketFetchAndQueryStats(const ReopeningContext& context,
 }
 
 /**
- * Calculate the bucket max size constrained by the cache size and the cardinality of active
- * buckets.
- */
-int32_t getCacheDerivedBucketMaxSize(StorageEngine* storageEngine, uint32_t workloadCardinality) {
-    invariant(storageEngine);
-    uint64_t storageCacheSize =
-        static_cast<uint64_t>(storageEngine->getEngine()->getCacheSizeMB() * 1024 * 1024);
-
-    if (storageCacheSize == 0 || workloadCardinality == 0) {
-        return INT_MAX;
-    }
-
-    uint64_t derivedMaxSize = storageCacheSize / (2 * workloadCardinality);
-    uint64_t intMax = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
-    return std::min(derivedMaxSize, intMax);
-}
-
-/**
  * Abandons the write batch and notifies any waiters that the bucket has been cleared.
  */
 void abortWriteBatch(WriteBatch& batch, const Status& status) {
@@ -162,7 +143,7 @@ void abortWriteBatch(WriteBatch& batch, const Status& status) {
     batch.promise.setError(status);
 }
 
-void updateCompressionStatistics(OperationContext* opCtx, const Bucket& bucket) {
+void updateCompressionStatistics(BucketCatalog& catalog, const Bucket& bucket) {
     // Bucket is not compressed, likely because compression failed.
     // TODO SERVER-80653: This should no longer be possible with a retry mechanism on bucket
     // compression failure.
@@ -170,16 +151,9 @@ void updateCompressionStatistics(OperationContext* opCtx, const Bucket& bucket) 
         return;
     }
 
-    // TODO SERVER-82152: remove CollectionCatalog usage.
-    // Hold reference to the catalog for collection lookup without locks to be safe.
-    auto catalog = CollectionCatalog::get(opCtx);
-    auto coll = catalog->lookupCollectionByNamespace(
-        opCtx, bucket.bucketId.ns.makeTimeseriesBucketsNamespace());
-    if (coll) {
-        const auto& stats = TimeseriesStats::get(coll);
-        stats.onBucketClosedForAlwaysCompressed(bucket.decompressed->after.objsize(),
-                                                bucket.decompressed->before.objsize());
-    }
+    ExecutionStatsController stats = getOrInitializeExecutionStats(catalog, bucket.key.ns);
+    stats.incNumBytesUncompressed(bucket.decompressed->after.objsize());
+    stats.incNumBytesCompressed(bucket.decompressed->before.objsize());
 }
 
 /**
@@ -188,7 +162,8 @@ void updateCompressionStatistics(OperationContext* opCtx, const Bucket& bucket) 
  */
 std::shared_ptr<WriteBatch> findPreparedBatch(const Stripe& stripe,
                                               WithLock stripeLock,
-                                              const BucketKey& key) {
+                                              const BucketKey& key,
+                                              boost::optional<OID> oid) {
     auto it = stripe.openBucketsByKey.find(key);
     if (it == stripe.openBucketsByKey.end()) {
         // No open bucket for this metadata.
@@ -197,7 +172,8 @@ std::shared_ptr<WriteBatch> findPreparedBatch(const Stripe& stripe,
 
     auto& openSet = it->second;
     for (Bucket* potentialBucket : openSet) {
-        if (potentialBucket->preparedBatch) {
+        if (potentialBucket->preparedBatch &&
+            (!oid.has_value() || oid.value() == potentialBucket->bucketId.oid)) {
             return potentialBucket->preparedBatch;
         }
     }
@@ -211,13 +187,33 @@ std::shared_ptr<WriteBatch> findPreparedBatch(const Stripe& stripe,
  */
 boost::optional<InsertWaiter> checkForWait(const Stripe& stripe,
                                            WithLock stripeLock,
-                                           const BucketKey& key) {
-    if (auto it = stripe.outstandingReopeningRequests.find(key);
-        it != stripe.outstandingReopeningRequests.end()) {
-        return InsertWaiter{it->second};
-    } else if (auto batch = findPreparedBatch(stripe, stripeLock, key)) {
+                                           const BucketKey& key,
+                                           boost::optional<OID> oid) {
+    if (auto batch = findPreparedBatch(stripe, stripeLock, key, oid)) {
         return InsertWaiter{batch};
     }
+
+    if (auto it = stripe.outstandingReopeningRequests.find(key);
+        it != stripe.outstandingReopeningRequests.end()) {
+        auto& requests = it->second;
+        invariant(!requests.empty());
+
+        if (!oid.has_value()) {
+            // We are trying to perform a query-based reopening. This conflicts with any reopening
+            // for the key.
+            return InsertWaiter{requests.front()};
+        }
+
+        // We are about to attempt an archive-based reopening. This conflicts with any query-based
+        // reopening for the key, or another archive-based reopening for this bucket.
+        for (auto&& request : requests) {
+            if (!request->oid.has_value() ||
+                (request->oid.has_value() && request->oid.value() == oid.value())) {
+                return InsertWaiter{request};
+            }
+        }
+    }
+
     return boost::none;
 }
 }  // namespace
@@ -402,12 +398,15 @@ Bucket* useAlternateBucket(BucketCatalog& catalog,
 
 StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
                                                     BucketStateRegistry& registry,
+                                                    ExecutionStatsController& stats,
                                                     const NamespaceString& ns,
                                                     const StringDataComparator* comparator,
                                                     const TimeseriesOptions& options,
                                                     const BucketToReopen& bucketToReopen,
                                                     const uint64_t catalogEra,
                                                     const BucketKey* expectedKey) {
+    ScopeGuard updateStatsOnError([&stats] { stats.incNumBucketReopeningsFailed(); });
+
     const auto& [bucketDoc, validator] = bucketToReopen;
     if (catalogEra < getCurrentEra(registry)) {
         return {ErrorCodes::WriteConflict, "Bucket is from an earlier era, may be outdated"};
@@ -512,6 +511,7 @@ StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
         bucket->schema.calculateMemUsage() + key.metadata.toBSON().objsize() + sizeof(Bucket) +
         sizeof(std::unique_ptr<Bucket>) + (sizeof(Bucket*) * 2);
 
+    updateStatsOnError.dismiss();
     return {std::move(bucket)};
 }
 
@@ -747,6 +747,7 @@ StatusWith<InsertResult> insert(OperationContext* opCtx,
     auto rehydratedBucket = (reopeningContext && reopeningContext->bucketToReopen.has_value())
         ? rehydrateBucket(opCtx,
                           catalog.bucketStateRegistry,
+                          stats,
                           ns,
                           comparator,
                           options,
@@ -755,7 +756,6 @@ StatusWith<InsertResult> insert(OperationContext* opCtx,
                           &key)
         : StatusWith<std::unique_ptr<Bucket>>{ErrorCodes::BadValue, "No bucket to rehydrate"};
     if (rehydratedBucket.getStatus().code() == ErrorCodes::WriteConflict) {
-        stats.incNumBucketReopeningsFailed();
         return rehydratedBucket.getStatus();
     }
 
@@ -816,14 +816,6 @@ StatusWith<InsertResult> insert(OperationContext* opCtx,
     Bucket* bucket = useBucket(opCtx, catalog, stripe, stripeLock, info, mode);
     if (!bucket) {
         invariant(mode == AllowBucketCreation::kNo);
-
-        // Synchronize concurrent disk accesses. An outstanding reopening request or prepared batch
-        // for the same series would potentially conflict with our choice to reopen here, so we must
-        // wait for any such operation to finish and retry.
-        if (auto waiter = checkForWait(stripe, stripeLock, key)) {
-            return waiter.value();
-        }
-
         return getReopeningContext(
             opCtx, catalog, stripe, stripeLock, info, catalogEra, AllowQueryBasedReopening::kAllow);
     }
@@ -864,13 +856,6 @@ StatusWith<InsertResult> insert(OperationContext* opCtx,
         }
     }
 
-    // Synchronize concurrent disk accesses. An outstanding reopening request or prepared batch for
-    // the same series would potentially conflict with our choice to reopen here, so we must wait
-    // for any such operation to finish and retry.
-    if (auto waiter = checkForWait(stripe, stripeLock, key)) {
-        return waiter.value();
-    }
-
     return getReopeningContext(opCtx,
                                catalog,
                                stripe,
@@ -887,7 +872,6 @@ void waitToCommitBatch(BucketStateRegistry& registry,
                        const std::shared_ptr<WriteBatch>& batch) {
     while (true) {
         boost::optional<InsertWaiter> waiter;
-
         {
             stdx::lock_guard stripeLock{stripe.mutex};
             Bucket* bucket = useBucket(
@@ -896,14 +880,24 @@ void waitToCommitBatch(BucketStateRegistry& registry,
                 return;
             }
 
-            if (auto it = stripe.outstandingReopeningRequests.find(batch->bucketKey);
-                it != stripe.outstandingReopeningRequests.end()) {
-                // Conflict with any reopening request on this series (metaField value).
-                waiter = it->second;
-            } else if (bucket->preparedBatch) {
+            if (bucket->preparedBatch) {
                 // Conflict with other prepared batch on this bucket.
                 waiter = bucket->preparedBatch;
-            } else {
+            } else if (auto it = stripe.outstandingReopeningRequests.find(batch->bucketKey);
+                       it != stripe.outstandingReopeningRequests.end()) {
+                // Conflict with any query-based reopening request on this series (metaField value)
+                // or an archive-based request on this bucket.
+                auto& list = it->second;
+                for (auto&& request : list) {
+                    if (!request->oid.has_value() ||
+                        request->oid.value() == batch->bucketHandle.bucketId.oid) {
+                        waiter = request;
+                        break;
+                    }
+                }
+            }
+
+            if (!waiter.has_value()) {
                 // No other batches for this bucket are currently committing, so we can proceed.
                 bucket->preparedBatch = batch;
                 bucket->batches.erase(batch->opId);
@@ -917,6 +911,7 @@ void waitToCommitBatch(BucketStateRegistry& registry,
 
         // We have to wait for someone else to finish.
         waitToInsert(&waiter.value());  // We don't care about the result.
+        waiter = boost::none;
     }
 }
 
@@ -951,7 +946,7 @@ void removeBucket(
         case RemovalMode::kClose: {
             auto state = getBucketState(catalog.bucketStateRegistry, bucket.bucketId);
             if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-                    serverGlobalParams.featureCompatibility)) {
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 // When removing a closed bucket, the BucketStateRegistry may contain state for this
                 // bucket due to an untracked ongoing direct write (such as TTL delete).
                 if (state.has_value()) {
@@ -1066,19 +1061,48 @@ boost::optional<OID> findArchivedCandidate(BucketCatalog& catalog,
     return boost::none;
 }
 
-ReopeningContext getReopeningContext(OperationContext* opCtx,
-                                     BucketCatalog& catalog,
-                                     Stripe& stripe,
-                                     WithLock stripeLock,
-                                     const CreationInfo& info,
-                                     uint64_t catalogEra,
-                                     AllowQueryBasedReopening allowQueryBasedReopening) {
+std::pair<int32_t, int32_t> getCacheDerivedBucketMaxSize(uint64_t storageCacheSize,
+                                                         uint32_t workloadCardinality) {
+    if (workloadCardinality == 0) {
+        return {gTimeseriesBucketMaxSize, INT_MAX};
+    }
+
+    uint64_t intMax = static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+    int32_t derivedMaxSize = std::max(
+        static_cast<int32_t>(std::min(storageCacheSize / (2 * workloadCardinality), intMax)),
+        gTimeseriesBucketMinSize.load());
+    return {std::min(gTimeseriesBucketMaxSize, derivedMaxSize), derivedMaxSize};
+}
+
+InsertResult getReopeningContext(OperationContext* opCtx,
+                                 BucketCatalog& catalog,
+                                 Stripe& stripe,
+                                 WithLock stripeLock,
+                                 const CreationInfo& info,
+                                 uint64_t catalogEra,
+                                 AllowQueryBasedReopening allowQueryBasedReopening) {
     if (auto archived = findArchivedCandidate(catalog, stripe, stripeLock, info)) {
-        return {catalog, stripe, stripeLock, info.key, catalogEra, archived.value()};
+        // Synchronize concurrent disk accesses. An outstanding query-based reopening request for
+        // this series or an outstanding archived-based reopening request or prepared batch for this
+        // bucket would potentially conflict with our choice to reopen here, so we must wait for any
+        // such operation to finish and retry.
+        if (auto waiter = checkForWait(stripe, stripeLock, info.key, archived.value())) {
+            return waiter.value();
+        }
+
+        return ReopeningContext{
+            catalog, stripe, stripeLock, info.key, catalogEra, archived.value()};
     }
 
     if (allowQueryBasedReopening == AllowQueryBasedReopening::kDisallow) {
-        return {catalog, stripe, stripeLock, info.key, catalogEra, {}};
+        return ReopeningContext{catalog, stripe, stripeLock, info.key, catalogEra, {}};
+    }
+
+    // Synchronize concurrent disk accesses. An outstanding reopening request or prepared batch for
+    // this series would potentially conflict with our choice to reopen here, so we must wait for
+    // any such operation to finish and retry.
+    if (auto waiter = checkForWait(stripe, stripeLock, info.key, boost::none)) {
+        return waiter.value();
     }
 
     boost::optional<BSONElement> metaElement;
@@ -1091,22 +1115,24 @@ ReopeningContext getReopeningContext(OperationContext* opCtx,
         "." + std::to_string(gTimeseriesBucketMaxCount - 1);
 
     // Derive the maximum bucket size.
-    auto bucketMaxSize = getCacheDerivedBucketMaxSize(
-        opCtx->getServiceContext()->getStorageEngine(), catalog.numberOfActiveBuckets.load());
-    int32_t effectiveMaxSize = std::min(gTimeseriesBucketMaxSize, bucketMaxSize);
+    auto storageCacheSize = static_cast<uint64_t>(
+        opCtx->getServiceContext()->getStorageEngine()->getEngine()->getCacheSizeMB() * 1024 *
+        1024);
+    auto [bucketMaxSize, _] =
+        getCacheDerivedBucketMaxSize(storageCacheSize, catalog.numberOfActiveBuckets.load());
 
-    return {catalog,
-            stripe,
-            stripeLock,
-            info.key,
-            catalogEra,
-            generateReopeningPipeline(opCtx,
-                                      info.time,
-                                      metaElement,
-                                      controlMinTimePath,
-                                      maxDataTimeFieldPath,
-                                      *info.options.getBucketMaxSpanSeconds(),
-                                      effectiveMaxSize)};
+    return ReopeningContext{catalog,
+                            stripe,
+                            stripeLock,
+                            info.key,
+                            catalogEra,
+                            generateReopeningPipeline(opCtx,
+                                                      info.time,
+                                                      metaElement,
+                                                      controlMinTimePath,
+                                                      maxDataTimeFieldPath,
+                                                      *info.options.getBucketMaxSpanSeconds(),
+                                                      bucketMaxSize)};
 }
 
 void abort(BucketCatalog& catalog,
@@ -1216,7 +1242,7 @@ void expireIdleBuckets(OperationContext* opCtx,
         invariant(!archivedSet.empty());
 
         auto& [timestamp, bucket] = *archivedSet.begin();
-        closeArchivedBucket(catalog.bucketStateRegistry, bucket, closedBuckets);
+        closeArchivedBucket(catalog, bucket, closedBuckets);
         long long memory = marginalMemoryUsageForArchivedBucket(
             bucket,
             (archivedSet.size() == 1) ? IncludeMemoryOverheadFromMap::kInclude
@@ -1394,9 +1420,11 @@ std::pair<RolloverAction, RolloverReason> determineRolloverAction(
 
     // In scenarios where we have a high cardinality workload and face increased cache pressure we
     // will decrease the size of buckets before we close them.
-    int32_t cacheDerivedBucketMaxSize = getCacheDerivedBucketMaxSize(
-        opCtx->getServiceContext()->getStorageEngine(), numberOfActiveBuckets);
-    int32_t effectiveMaxSize = std::min(gTimeseriesBucketMaxSize, cacheDerivedBucketMaxSize);
+    auto storageCacheSize = static_cast<uint64_t>(
+        opCtx->getServiceContext()->getStorageEngine()->getEngine()->getCacheSizeMB() * 1024 *
+        1024);
+    auto [effectiveMaxSize, cacheDerivedBucketMaxSize] =
+        getCacheDerivedBucketMaxSize(storageCacheSize, numberOfActiveBuckets);
 
     // Before we hit our bucket minimum count, we will allow for large measurements to be inserted
     // into buckets. Instead of packing the bucket to the BSON size limit, 16MB, we'll limit the max
@@ -1501,11 +1529,11 @@ void closeOpenBucket(OperationContext* opCtx,
                      Bucket& bucket,
                      ClosedBuckets& closedBuckets) {
     if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         // Remove the bucket from the bucket state registry.
         stopTrackingBucketState(catalog.bucketStateRegistry, bucket.bucketId);
 
-        updateCompressionStatistics(opCtx, bucket);
+        updateCompressionStatistics(catalog, bucket);
         removeBucket(catalog, stripe, stripeLock, bucket, RemovalMode::kClose);
         return;
     }
@@ -1515,7 +1543,8 @@ void closeOpenBucket(OperationContext* opCtx,
         closedBuckets.emplace_back(&catalog.bucketStateRegistry,
                                    bucket.bucketId,
                                    bucket.timeField,
-                                   bucket.numMeasurements);
+                                   bucket.numMeasurements,
+                                   getOrInitializeExecutionStats(catalog, bucket.bucketId.ns));
     } catch (...) {
         error = true;
     }
@@ -1530,11 +1559,11 @@ void closeOpenBucket(OperationContext* opCtx,
                      Bucket& bucket,
                      boost::optional<ClosedBucket>& closedBucket) {
     if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         // Remove the bucket from the bucket state registry.
         stopTrackingBucketState(catalog.bucketStateRegistry, bucket.bucketId);
 
-        updateCompressionStatistics(opCtx, bucket);
+        updateCompressionStatistics(catalog, bucket);
         removeBucket(catalog, stripe, stripeLock, bucket, RemovalMode::kClose);
         return;
     }
@@ -1544,7 +1573,8 @@ void closeOpenBucket(OperationContext* opCtx,
         closedBucket = boost::in_place(&catalog.bucketStateRegistry,
                                        bucket.bucketId,
                                        bucket.timeField,
-                                       bucket.numMeasurements);
+                                       bucket.numMeasurements,
+                                       getOrInitializeExecutionStats(catalog, bucket.bucketId.ns));
     } catch (...) {
         closedBucket = boost::none;
         error = true;
@@ -1553,18 +1583,22 @@ void closeOpenBucket(OperationContext* opCtx,
         catalog, stripe, stripeLock, bucket, error ? RemovalMode::kAbort : RemovalMode::kClose);
 }
 
-void closeArchivedBucket(BucketStateRegistry& registry,
+void closeArchivedBucket(BucketCatalog& catalog,
                          ArchivedBucket& bucket,
                          ClosedBuckets& closedBuckets) {
     if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         // Remove the bucket from the bucket state registry.
-        stopTrackingBucketState(registry, bucket.bucketId);
+        stopTrackingBucketState(catalog.bucketStateRegistry, bucket.bucketId);
         return;
     }
 
     try {
-        closedBuckets.emplace_back(&registry, bucket.bucketId, bucket.timeField, boost::none);
+        closedBuckets.emplace_back(&catalog.bucketStateRegistry,
+                                   bucket.bucketId,
+                                   bucket.timeField,
+                                   boost::none,
+                                   getOrInitializeExecutionStats(catalog, bucket.bucketId.ns));
     } catch (...) {
     }
 }

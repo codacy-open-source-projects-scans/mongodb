@@ -62,12 +62,13 @@ ParsedDelete::ParsedDelete(OperationContext* opCtx,
     : _opCtx(opCtx),
       _request(request),
       _collection(collection),
-      _timeseriesDeleteQueryExprs(isTimeseriesDelete
-                                      ? createTimeseriesWritesQueryExprsIfNecessary(
-                                            feature_flags::gTimeseriesDeletesSupport.isEnabled(
-                                                serverGlobalParams.featureCompatibility),
-                                            collection)
-                                      : nullptr),
+      _timeseriesDeleteQueryExprs(
+          isTimeseriesDelete
+              ? createTimeseriesWritesQueryExprsIfNecessary(
+                    feature_flags::gTimeseriesDeletesSupport.isEnabled(
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
+                    collection)
+              : nullptr),
       _isRequestToTimeseries(isTimeseriesDelete) {}
 
 Status ParsedDelete::parseRequest() {
@@ -148,7 +149,8 @@ const DeleteRequest* ParsedDelete::getRequest() const {
 }
 
 PlanYieldPolicy::YieldPolicy ParsedDelete::yieldPolicy() const {
-    return _request->getGod() ? PlanYieldPolicy::YieldPolicy::NO_YIELD : _request->getYieldPolicy();
+    return _request->getGod() ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
+                              : _request->getYieldPolicy();
 }
 
 bool ParsedDelete::hasParsedQuery() const {

@@ -40,6 +40,10 @@
 namespace mongo::transport::grpc {
 namespace {
 const Seconds kSessionManagerShutdownTimeout{10};
+
+inline std::string makeGRPCUnixSockPath(int port) {
+    return makeUnixSockPath(port, "grpc");
+}
 }  // namespace
 
 GRPCTransportLayerImpl::Options::Options(const ServerGlobalParams& params) {
@@ -54,6 +58,12 @@ GRPCTransportLayerImpl::GRPCTransportLayerImpl(ServiceContext* svcCtx,
                                                Options options,
                                                std::unique_ptr<SessionManager> sm)
     : _svcCtx{svcCtx}, _options{std::move(options)}, _sessionManager(std::move(sm)) {}
+
+GRPCTransportLayerImpl::~GRPCTransportLayerImpl() {
+    if (_sessionManager) {
+        _sessionManager->shutdown(kSessionManagerShutdownTimeout);
+    }
+}
 
 Status GRPCTransportLayerImpl::registerService(std::unique_ptr<Service> svc) {
     try {
@@ -90,7 +100,7 @@ Status GRPCTransportLayerImpl::setup() {
                 addresses.push_back(HostAndPort(ip, _options.bindPort));
             }
             if (_options.useUnixDomainSockets) {
-                addresses.push_back(HostAndPort(makeUnixSockPath(_options.bindPort)));
+                addresses.push_back(HostAndPort(makeGRPCUnixSockPath(_options.bindPort)));
             }
             serverOptions.addresses = std::move(addresses);
             serverOptions.maxThreads = _options.maxServerThreads;
@@ -161,7 +171,7 @@ Status GRPCTransportLayerImpl::start() {
             invariant(_sessionManager);
             _server->start();
             if (_options.useUnixDomainSockets) {
-                setUnixDomainSocketPermissions(makeUnixSockPath(_options.bindPort),
+                setUnixDomainSocketPermissions(makeGRPCUnixSockPath(_options.bindPort),
                                                _options.unixDomainSocketPermissions);
             }
         }
@@ -216,10 +226,6 @@ void GRPCTransportLayerImpl::shutdown() {
     if (_client) {
         _client->shutdown();
     }
-
-    if (_sessionManager) {
-        _sessionManager->shutdown(kSessionManagerShutdownTimeout);
-    }
 }
 
 #ifdef MONGO_CONFIG_SSL
@@ -228,5 +234,10 @@ Status GRPCTransportLayerImpl::rotateCertificates(std::shared_ptr<SSLManagerInte
     return _server->rotateCertificates();
 }
 #endif
+
+const std::vector<HostAndPort>& GRPCTransportLayerImpl::getListeningAddresses() const {
+    invariant(_server);
+    return _server->getListeningAddresses();
+}
 
 }  // namespace mongo::transport::grpc

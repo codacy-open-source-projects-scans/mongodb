@@ -52,27 +52,48 @@ namespace mongo::sbe {
  *
  * Debug string representation:
  *
- * search_cursor_stage resultSlot? [metaSlot1, ..., metadataSlotN] [fieldSlot1, ..., fieldSlotN]
- *     remoteCursorId isStoredSource sortSpecSlot? limitSlot? sortKeySlot? collatorSlot?
+ * search_cursor_stage idSlot? resultSlot? [metaSlot1, ..., metadataSlotN] [fieldSlot1, ...,
+ * fieldSlotN] remoteCursorId isStoredSource sortSpecSlot? limitSlot? sortKeySlot? collatorSlot?
  */
 class SearchCursorStage final : public PlanStage {
 public:
-    SearchCursorStage(NamespaceString nss,
-                      boost::optional<UUID> collUuid,
-                      boost::optional<value::SlotId> resultSlot,
-                      std::vector<std::string> metadataNames,
-                      value::SlotVector metadataSlots,
-                      std::vector<std::string> fieldNames,
-                      value::SlotVector fieldSlots,
-                      size_t remoteCursorId,
-                      bool isStoredSource,
-                      boost::optional<value::SlotId> sortSpecSlot,
-                      boost::optional<value::SlotId> limitSlot,
-                      boost::optional<value::SlotId> sortKeySlot,
-                      boost::optional<value::SlotId> collatorSlot,
-                      boost::optional<ExplainOptions::Verbosity> explain,
-                      PlanYieldPolicy* yieldPolicy,
-                      PlanNodeId planNodeId);
+    static std::unique_ptr<SearchCursorStage> createForStoredSource(
+        NamespaceString nss,
+        boost::optional<UUID> collUuid,
+        boost::optional<value::SlotId> resultSlot,
+        std::vector<std::string> metadataNames,
+        value::SlotVector metadataSlots,
+        std::vector<std::string> fieldNames,
+        value::SlotVector fieldSlots,
+        size_t remoteCursorId,
+        boost::optional<value::SlotId> sortSpecSlot,
+        boost::optional<value::SlotId> limitSlot,
+        boost::optional<value::SlotId> sortKeySlot,
+        boost::optional<value::SlotId> collatorSlot,
+        PlanYieldPolicy* yieldPolicy,
+        PlanNodeId planNodeId);
+
+    static std::unique_ptr<SearchCursorStage> createForNonStoredSource(
+        NamespaceString nss,
+        boost::optional<UUID> collUuid,
+        boost::optional<value::SlotId> idSlot,
+        std::vector<std::string> metadataNames,
+        value::SlotVector metadataSlots,
+        size_t remoteCursorId,
+        boost::optional<value::SlotId> sortSpecSlot,
+        boost::optional<value::SlotId> limitSlot,
+        boost::optional<value::SlotId> sortKeySlot,
+        boost::optional<value::SlotId> collatorSlot,
+        PlanYieldPolicy* yieldPolicy,
+        PlanNodeId planNodeId);
+
+    static std::unique_ptr<SearchCursorStage> createForMetadata(
+        NamespaceString nss,
+        boost::optional<UUID> collUuid,
+        boost::optional<value::SlotId> resultSlot,
+        size_t remoteCursorId,
+        PlanYieldPolicy* yieldPolicy,
+        PlanNodeId planNodeId);
 
     std::unique_ptr<PlanStage> clone() const final;
 
@@ -93,17 +114,31 @@ public:
      */
     boost::optional<long long> calcDocsNeeded();
 
-    void setDocsReturnedStats(const CommonStats* docsReturnedStats) {
-        _docsReturnedStats = docsReturnedStats;
-    }
-
 private:
+    SearchCursorStage(NamespaceString nss,
+                      boost::optional<UUID> collUuid,
+                      boost::optional<value::SlotId> idSlot,
+                      boost::optional<value::SlotId> resultSlot,
+                      std::vector<std::string> metadataNames,
+                      value::SlotVector metadataSlots,
+                      std::vector<std::string> fieldNames,
+                      value::SlotVector fieldSlots,
+                      size_t remoteCursorId,
+                      bool isStoredSource,
+                      boost::optional<value::SlotId> sortSpecSlot,
+                      boost::optional<value::SlotId> limitSlot,
+                      boost::optional<value::SlotId> sortKeySlot,
+                      boost::optional<value::SlotId> collatorSlot,
+                      PlanYieldPolicy* yieldPolicy,
+                      PlanNodeId planNodeId);
+
+    PlanState doGetNext();
     bool shouldReturnEOF();
 
-private:
     const NamespaceString _namespace;
     const boost::optional<UUID> _collUuid;
     // Output slots.
+    const boost::optional<value::SlotId> _idSlot;
     const boost::optional<value::SlotId> _resultSlot;
     const StringListSet _metadataNames;
     const value::SlotVector _metadataSlots;
@@ -121,6 +156,7 @@ private:
     const boost::optional<value::SlotId> _collatorSlot;
 
     // Output slot accessors.
+    value::OwnedValueAccessor _idAccessor;
     value::OwnedValueAccessor _resultAccessor;
     absl::InlinedVector<value::OwnedValueAccessor, 3> _metadataAccessors;
     value::SlotAccessorMap _metadataAccessorsMap;
@@ -136,17 +172,12 @@ private:
     // Variables to save the value from input slots.
     boost::optional<BSONObj> _response;
     boost::optional<BSONObj> _resultObj;
+    boost::optional<BSONObj> _explainObj;
     uint64_t _limit{0};
 
     boost::optional<SortKeyGenerator> _sortKeyGen;
     executor::TaskExecutorCursor* _cursor{nullptr};
     SearchStats _specificStats;
-    const boost::optional<ExplainOptions::Verbosity> _explain;
-    // A CommonStats that tracks how many documents is returned for $search, in the stored source
-    // case, _docsReturnedStats ptr points to current stage, otherwise it points to another stage to
-    // skip the docs that been filtered out.
-    // TODO: SERVER-80648 to have a better way to track count of idx scan stage.
-    const CommonStats* _docsReturnedStats;
     // Store the cursorId for logging purpose. We need to store it because the id on the
     // TaskExecutorCursor will be set to zero after the final getMore after the cursor is exhausted.
     boost::optional<CursorId> _cursorId;

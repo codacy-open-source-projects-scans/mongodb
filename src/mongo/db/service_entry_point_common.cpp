@@ -193,6 +193,7 @@ MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
 MONGO_FAIL_POINT_DEFINE(includeAdditionalParticipantInResponse);
+MONGO_FAIL_POINT_DEFINE(enforceDirectShardOperationsCheck);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -208,18 +209,9 @@ using namespace fmt::literals;
 
 Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
                                   std::shared_ptr<CommandInvocation> invocation) {
-    auto usesDedicatedThread = [&] {
-        auto client = rec->getOpCtx()->getClient();
-        if (auto context = transport::ServiceExecutorContext::get(client); context) {
-            return context->usesDedicatedThread();
-        }
-        tassert(5453901,
-                "Threading model may only be absent for internal and direct clients",
-                !client->hasRemote() || client->isInDirectClient());
-        return true;
-    }();
+    static constexpr bool useDedicatedThread = true;
     return CommandHelpers::runCommandInvocation(
-        std::move(rec), std::move(invocation), usesDedicatedThread);
+        std::move(rec), std::move(invocation), useDedicatedThread);
 }
 
 /*
@@ -1158,12 +1150,15 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
         // ensure commands, including those occurring after the first statement in their respective
         // transactions, are checked for readConcern support. Presently, only `create` and
         // `createIndexes` do not support readConcern inside transactions.
+        // Note: _shardsvrCreateCollection is used to run the 'create' command on the primary in
+        // case of sharded cluster
         // TODO(SERVER-46971): Consider how to extend this check to other commands.
         auto cmdName = command->getName();
         auto readConcernSupport = invocation->supportsReadConcern(
             readConcernArgs.getLevel(), readConcernArgs.isImplicitDefault());
         if (readConcernArgs.hasLevel() &&
-            (cmdName == "create"_sd || cmdName == "createIndexes"_sd)) {
+            (cmdName == "create"_sd || cmdName == "_shardsvrCreateCollection"_sd ||
+             cmdName == "createIndexes"_sd)) {
             if (!readConcernSupport.readConcernSupport.isOK()) {
                 uassertStatusOK(readConcernSupport.readConcernSupport.withContext(
                     "Command {} does not support this transaction's {}"_format(
@@ -1567,7 +1562,7 @@ void ExecCommandDatabase::_initiateCommand() {
     const auto dbName = request.getDbName();
     uassert(ErrorCodes::InvalidNamespace,
             fmt::format("Invalid database name: '{}'", dbName.toStringForErrorMsg()),
-            NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow));
+            DatabaseName::isValid(dbName, DatabaseName::DollarInDbNameBehavior::Allow));
 
 
     // Connections from mongod or mongos clients (i.e. initial sync, mirrored reads, etc.) should
@@ -1789,10 +1784,10 @@ void ExecCommandDatabase::_initiateCommand() {
 
     // Check that the client has the directShardOperations role if this is a direct operation to a
     // shard.
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
     if (command->requiresAuth() && ShardingState::get(opCtx)->enabled() &&
-        serverGlobalParams.featureCompatibility.isVersionInitialized() &&
-        feature_flags::gCheckForDirectShardOperations.isEnabled(
-            serverGlobalParams.featureCompatibility)) {
+        fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gCheckForDirectShardOperations.isEnabled(fcvSnapshot)) {
         bool clusterHasTwoOrMoreShards = [&]() {
             auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
             auto* clusterCardinalityParam =
@@ -1812,6 +1807,14 @@ void ExecCommandDatabase::_initiateCommand() {
                           ActionType::issueDirectShardOperations)));
 
             if (!hasDirectShardOperations) {
+                // TODO (SERVER-77073): Remove this failpoint.
+                if (MONGO_unlikely(enforceDirectShardOperationsCheck.shouldFail())) {
+                    uasserted(
+                        ErrorCodes::Unauthorized,
+                        "You are connecting to a sharded cluster using a replica set or standalone"
+                        "connection string. Please use the sharded connection string.");
+                }
+
                 bool timeUpdated = false;
                 auto currentTime = opCtx->getServiceContext()->getFastClockSource()->now();
                 {

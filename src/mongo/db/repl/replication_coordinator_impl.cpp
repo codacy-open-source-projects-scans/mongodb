@@ -691,33 +691,11 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         }
     }
 
-    auto opCtx = cc().makeOperationContext();
-    if (!lastOpTime.isNull()) {
-
-        // If we have an oplog, it is still possible that our data is not in a consistent state. For
-        // example, if we are starting up after a crash following a post-rollback RECOVERING state.
-        // To detect this, we see if our last optime is >= the 'minValid' optime, which
-        // should be persistent across node crashes.
-        OpTime minValid = _replicationProcess->getConsistencyMarkers()->getMinValid(opCtx.get());
-
-        // It is not safe to take stable checkpoints until we reach minValid, so we set our
-        // initialDataTimestamp to prevent this. It is expected that this is only necessary when
-        // enableMajorityReadConcern:false.
-        if (lastOpTime < minValid) {
-            LOGV2_DEBUG(4916700,
-                        2,
-                        "Setting initialDataTimestamp to minValid since our last optime is less "
-                        "than minValid",
-                        "lastOpTime"_attr = lastOpTime,
-                        "minValid"_attr = minValid);
-            _storage->setInitialDataTimestamp(getServiceContext(), minValid.getTimestamp());
-        }
-    }
-
     // Update the global timestamp before setting the last applied opTime forward so the last
     // applied optime is never greater than the latest cluster time in the logical clock.
     _externalState->setGlobalTimestamp(getServiceContext(), lastOpTime.getTimestamp());
 
+    auto opCtx = cc().makeOperationContext();
     stdx::unique_lock<Latch> lock(_mutex);
     invariant(_rsConfigState == kConfigStartingUp);
     const PostMemberStateUpdateAction action =
@@ -981,8 +959,7 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
             stdx::lock_guard<Latch> lk(_mutex);
             fassert(18822, !_inShutdown);
             _setConfigState_inlock(kConfigStartingUp);
-            _topCoord->setStorageEngineSupportsReadCommitted(
-                _externalState->isReadCommittedSupportedByStorageEngine(opCtx));
+            _topCoord->setStorageEngineSupportsReadCommitted(true);
         }
 
         _replExecutor->startup();
@@ -1067,7 +1044,8 @@ bool ReplicationCoordinatorImpl::inQuiesceMode() const {
     return _inQuiesceMode;
 }
 
-void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
+void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx,
+                                          BSONObjBuilder* shutdownTimeElapsedBuilder) {
     // Shutdown must:
     // * prevent new threads from blocking in awaitReplication
     // * wake up all existing threads blocking in awaitReplication
@@ -1077,8 +1055,14 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         return;
     }
 
-    LOGV2(5074000, "Shutting down the replica set aware services.");
-    ReplicaSetAwareServiceRegistry::get(_service).onShutdown();
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down the replica set aware services",
+                                                shutdownTimeElapsedBuilder);
+        LOGV2(5074000, "Shutting down the replica set aware services.");
+        ReplicaSetAwareServiceRegistry::get(_service).onShutdown();
+    }
 
     LOGV2(21328, "Shutting down replication subsystems");
 
@@ -1096,11 +1080,19 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         }
         if (_rsConfigState == kConfigStartingUp) {
             // Wait until we are finished starting up, so that we can cleanly shut everything down.
+            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+                opCtx->getServiceContext()->getFastClockSource(),
+                "Wait for startup to complete before shutting down",
+                shutdownTimeElapsedBuilder);
             lk.unlock();
             _waitForStartUpComplete();
             lk.lock();
             fassert(18823, _rsConfigState != kConfigStartingUp);
         }
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down replication",
+                                                shutdownTimeElapsedBuilder);
         _replicationWaiterList.setErrorAll_inlock(
             {ErrorCodes::ShutdownInProgress, "Replication is being shut down"});
         _opTimeWaiterList.setErrorAll_inlock(
@@ -1111,6 +1103,10 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
 
     // joining the replication executor is blocking so it must be run outside of the mutex
     if (initialSyncerCopy) {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down initial syncer",
+                                                shutdownTimeElapsedBuilder);
         LOGV2_DEBUG(
             21329, 1, "ReplicationCoordinatorImpl::shutdown calling InitialSyncer::shutdown");
         const auto status = initialSyncerCopy->shutdown();
@@ -1124,6 +1120,10 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
     {
         stdx::unique_lock<Latch> lk(_mutex);
         if (_finishedDrainingPromise) {
+            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
+                opCtx->getServiceContext()->getFastClockSource(),
+                "Cancel wait for drain mode",
+                shutdownTimeElapsedBuilder);
             _finishedDrainingPromise->setError(
                 {ErrorCodes::InterruptedAtShutdown,
                  "Cancelling wait for drain mode to complete due to shutdown"});
@@ -1131,9 +1131,27 @@ void ReplicationCoordinatorImpl::shutdown(OperationContext* opCtx) {
         }
     }
 
-    _externalState->shutdown(opCtx);
-    _replExecutor->shutdown();
-    _replExecutor->join();
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down external state",
+                                                shutdownTimeElapsedBuilder);
+        _externalState->shutdown(opCtx);
+    }
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Shut down replication executor",
+                                                shutdownTimeElapsedBuilder);
+        _replExecutor->shutdown();
+    }
+    {
+        auto scopedTimer =
+            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
+                                                "Join replication executor",
+                                                shutdownTimeElapsedBuilder);
+        _replExecutor->join();
+    }
 }
 
 const ReplSettings& ReplicationCoordinatorImpl::getSettings() const {
@@ -1557,10 +1575,8 @@ void ReplicationCoordinatorImpl::_setMyLastAppliedOpTimeAndWallTime(
     // 'recover to timestamp' method.
     invariant(opTime.getTimestamp().getInc() > 0,
               str::stream() << "Impossible optime received: " << opTime.toString());
-    // If we are lagged behind the commit optime, set a new stable timestamp here. When majority
-    // read concern is disabled, the stable timestamp is set to lastApplied.
-    if (opTime <= _topCoord->getLastCommittedOpTime() ||
-        !serverGlobalParams.enableMajorityReadConcern) {
+    // If we are lagged behind the commit optime, set a new stable timestamp here.
+    if (opTime <= _topCoord->getLastCommittedOpTime()) {
         _setStableTimestampForStorage(lk);
     }
 }
@@ -1620,31 +1636,12 @@ Status ReplicationCoordinatorImpl::_validateReadConcern(OperationContext* opCtx,
                 "readConcern level 'snapshot' is required when specifying atClusterTime"};
     }
 
-    // We cannot support read concern 'majority' by means of reading from a historical snapshot if
-    // the storage layer doesn't support it. In this case, we can support it by using "speculative"
-    // majority reads instead.
-    if (readConcern.getLevel() == ReadConcernLevel::kMajorityReadConcern &&
-        readConcern.getMajorityReadMechanism() ==
-            ReadConcernArgs::MajorityReadMechanism::kMajoritySnapshot &&
-        !_externalState->isReadCommittedSupportedByStorageEngine(opCtx)) {
-        return {ErrorCodes::ReadConcernMajorityNotEnabled,
-                str::stream() << "Storage engine does not support read concern: "
-                              << readConcern.toString()};
-    }
 
     if (readConcern.getLevel() == ReadConcernLevel::kSnapshotReadConcern &&
         !_externalState->isReadConcernSnapshotSupportedByStorageEngine(opCtx)) {
         return {ErrorCodes::InvalidOptions,
                 str::stream() << "Storage engine does not support read concern: "
                               << readConcern.toString()};
-    }
-
-    if (readConcern.getArgsAtClusterTime() && !serverGlobalParams.enableMajorityReadConcern) {
-        return {ErrorCodes::InvalidOptions,
-                "readConcern level 'snapshot' is not supported in sharded clusters when "
-                "enableMajorityReadConcern=false. See "
-                "https://dochub.mongodb.org/core/"
-                "disabled-read-concern-majority-snapshot-restrictions."};
     }
 
     return Status::OK();
@@ -1825,16 +1822,9 @@ Status ReplicationCoordinatorImpl::_waitUntilClusterTimeForRead(OperationContext
     // We don't set isMajorityCommittedRead for transactions because snapshots are always
     // speculative; we wait for majority when the transaction commits.
     //
-    // Speculative majority reads do not need to wait for the commit point to advance to satisfy
-    // afterClusterTime reads. Waiting for the lastApplied to advance past the given target optime
-    // ensures the recency guarantee for the afterClusterTime read. At the end of the command, we
-    // will wait for the lastApplied optime to become majority committed, which then satisfies the
-    // durability guarantee.
-    //
     // Majority and snapshot reads outside of transactions should non-speculatively wait for the
     // majority committed snapshot.
-    const bool isMajorityCommittedRead = !readConcern.isSpeculativeMajority() &&
-        !opCtx->inMultiDocumentTransaction() &&
+    const bool isMajorityCommittedRead = !opCtx->inMultiDocumentTransaction() &&
         (readConcern.getLevel() == ReadConcernLevel::kMajorityReadConcern ||
          readConcern.getLevel() == ReadConcernLevel::kSnapshotReadConcern);
 
@@ -3394,10 +3384,11 @@ BSONObj ReplicationCoordinatorImpl::getConfigBSON() const {
     return _rsConfig.toBSON();
 }
 
-const MemberConfig* ReplicationCoordinatorImpl::findConfigMemberByHostAndPort(
+boost::optional<MemberConfig> ReplicationCoordinatorImpl::findConfigMemberByHostAndPort_deprecated(
     const HostAndPort& hap) const {
     stdx::lock_guard<Latch> lock(_mutex);
-    return _rsConfig.findMemberByHostAndPort(hap);
+    const MemberConfig* result = _rsConfig.findMemberByHostAndPort(hap);
+    return boost::make_optional(result, *result);
 }
 
 bool ReplicationCoordinatorImpl::isConfigLocalHostAllowed() const {
@@ -4335,13 +4326,6 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
         lockAndCall(&lk, [=, this] { _setConfigState_inlock(kConfigUninitialized); });
     };
 
-    // When writing our first oplog entry below, disable advancement of the stable timestamp so that
-    // we don't set it before setting our initial data timestamp. We will set it after we set our
-    // initialDataTimestamp. This will ensure we trigger an initial stable checkpoint properly.
-    if (!serverGlobalParams.enableMajorityReadConcern) {
-        _shouldSetStableTimestamp = false;
-    }
-
     lk.unlock();
 
     // Initiate FCV in local storage. This will propagate to other nodes via initial sync.
@@ -4423,18 +4407,9 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
     _storage->setInitialDataTimestamp(getServiceContext(),
                                       lastAppliedOpTimeAndWallTime.opTime.getTimestamp());
 
-    // Set our stable timestamp for storage and re-enable stable timestamp advancement after we have
-    // set our initial data timestamp.
-    if (!serverGlobalParams.enableMajorityReadConcern) {
-        stdx::unique_lock<Latch> lk(_mutex);
-        _shouldSetStableTimestamp = true;
-        _setStableTimestampForStorage(lk);
-    }
-
-    // In the EMRC=true case, we need to advance the commit point and take a stable checkpoint,
-    // to make sure that we can recover if we happen to roll back our first entries after
-    // replSetInitiate.
-    if (serverGlobalParams.enableMajorityReadConcern) {
+    // Advance the commit point and take a stable checkpoint, to make sure that we can recover if we
+    // happen to roll back our first entries after replSetInitiate.
+    {
         LOGV2_INFO(5872101, "Taking a stable checkpoint for replSetInitiate");
         stdx::unique_lock<Latch> lk(_mutex);
         // Will call _setStableTimestampForStorage() on success.
@@ -4700,9 +4675,9 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator(WithLock l
     // receive the replicated version. This is to avoid bugs like SERVER-32639.
     if (newState.arbiter()) {
         // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-        serverGlobalParams.mutableFeatureCompatibility.setVersion(
-            multiversion::GenericFCV::kLatest);
-        serverGlobalParams.featureCompatibility.logFCVWithContext("arbiter"_sd);
+        serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot().logFCVWithContext(
+            "arbiter"_sd);
     }
 
     _memberState = newState;
@@ -5488,8 +5463,7 @@ OpTime ReplicationCoordinatorImpl::_recalculateStableOpTime(WithLock lk) {
     // reads are enabled, the stable optime must also not surpass the majority commit point. When
     // majority reads are disabled, the stable optime is not required to be majority committed.
     OpTime stableOpTime;
-    auto maximumStableOpTime =
-        serverGlobalParams.enableMajorityReadConcern ? commitPoint : lastApplied;
+    auto maximumStableOpTime = commitPoint;
 
     // Make sure the stable optime does not surpass its maximum.
     stableOpTime = std::min(noOverlap, maximumStableOpTime);
@@ -5517,11 +5491,6 @@ OpTime ReplicationCoordinatorImpl::_recalculateStableOpTime(WithLock lk) {
 MONGO_FAIL_POINT_DEFINE(disableSnapshotting);
 
 void ReplicationCoordinatorImpl::_setStableTimestampForStorage(WithLock lk) {
-    if (!_shouldSetStableTimestamp) {
-        LOGV2_DEBUG(21395, 2, "Not setting stable timestamp for storage");
-        return;
-    }
-
     // Don't update the stable optime if we are in initial sync. We advance the oldest timestamp
     // continually to the lastApplied optime during initial sync oplog application, so if we learned
     // about an earlier commit point during this period, we would risk setting the stable timestamp
@@ -5571,36 +5540,13 @@ void ReplicationCoordinatorImpl::_setStableTimestampForStorage(WithLock lk) {
     // advance the all durable timestamp when setting the stable timestamp we use 'force=true'.
     const bool force = _getMemberState_inlock().arbiter();
 
-    // Update committed snapshot and wake up any threads waiting on read concern or
-    // write concern.
-    if (serverGlobalParams.enableMajorityReadConcern) {
-        // When majority read concern is enabled, the committed snapshot is set to the new
-        // stable optime. The wall time of the committed snapshot is not used for anything so we can
-        // create a fake one.
-        if (_updateCommittedSnapshot(lk, stableOpTime)) {
-            // Update the stable timestamp for the storage engine.
-            _storage->setStableTimestamp(getServiceContext(), stableOpTime.getTimestamp(), force);
-        }
-    } else {
-        const auto lastCommittedOpTime = _topCoord->getLastCommittedOpTime();
-        if (!lastCommittedOpTime.isNull()) {
-            // When majority read concern is disabled, we set the stable timestamp to be less than
-            // or equal to the all-durable timestamp. This makes sure that the committed snapshot is
-            // not past the all-durable timestamp to guarantee we can always read our own majority
-            // committed writes. This problem is specific to the case where we have a single node
-            // replica set and the lastCommittedOpTime is set to be the lastApplied which can be
-            // ahead of the all-durable.
-            OpTime newCommittedSnapshot = std::min(lastCommittedOpTime, stableOpTime);
-            // The wall clock time of the committed snapshot is not used for anything so we can
-            // create a fake one.
-            _updateCommittedSnapshot(lk, newCommittedSnapshot);
-        }
-        // Set the stable timestamp regardless of whether the majority commit point moved
-        // forward. If we are in rollback state, however, do not alter the stable timestamp,
-        // since it may be moved backwards explicitly by the rollback-via-refetch process.
-        if (!MONGO_unlikely(disableSnapshotting.shouldFail()) && !_memberState.rollback()) {
-            _storage->setStableTimestamp(getServiceContext(), stableOpTime.getTimestamp(), force);
-        }
+    // Update committed snapshot and wake up any threads waiting on read concern or write concern.
+    // Set the committed snapshot to the new stable optime. The wall time of the committed snapshot
+    // is not used for anything so we can create a fake one.
+
+    if (_updateCommittedSnapshot(lk, stableOpTime)) {
+        // Update the stable timestamp for the storage engine.
+        _storage->setStableTimestamp(getServiceContext(), stableOpTime.getTimestamp(), force);
     }
 }
 
@@ -5630,37 +5576,6 @@ void ReplicationCoordinatorImpl::finishRecoveryIfEligible(OperationContext* opCt
     // Maintenance mode will force us to remain in RECOVERING state, no matter what.
     if (getMaintenanceMode()) {
         LOGV2_DEBUG(21398, 1, "We cannot transition to SECONDARY state while in maintenance mode");
-        return;
-    }
-
-    // We can't go to SECONDARY state until we reach 'minValid', since the data may be in an
-    // inconsistent state before this point. If our state is inconsistent, we need to disallow reads
-    // from clients, which is why we stay in RECOVERING state.
-    auto lastApplied = getMyLastAppliedOpTime();
-    auto minValid = _replicationProcess->getConsistencyMarkers()->getMinValid(opCtx);
-    if (lastApplied < minValid) {
-        LOGV2_DEBUG(21399,
-                    2,
-                    "We cannot transition to SECONDARY state because our 'lastApplied' optime"
-                    " is less than the 'minValid' optime",
-                    "minValid"_attr = minValid,
-                    "lastApplied"_attr = lastApplied);
-        return;
-    }
-
-    // Rolling back with eMRC false, we set initialDataTimestamp to max(local oplog top, source's
-    // oplog top), then rollback via refetch. Data is inconsistent until lastApplied >=
-    // initialDataTimestamp.
-    auto initialTs = opCtx->getServiceContext()->getStorageEngine()->getInitialDataTimestamp();
-    if (lastApplied.getTimestamp() < initialTs) {
-        invariant(!serverGlobalParams.enableMajorityReadConcern);
-        LOGV2_DEBUG(4851800,
-                    2,
-                    "We cannot transition to SECONDARY state because our 'lastApplied' optime is "
-                    "less than the initial data timestamp and enableMajorityReadConcern = false",
-                    "minValid"_attr = minValid,
-                    "lastApplied"_attr = lastApplied,
-                    "initialDataTimestamp"_attr = initialTs);
         return;
     }
 

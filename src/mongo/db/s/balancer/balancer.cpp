@@ -776,7 +776,7 @@ void Balancer::_mainThread() {
                 continue;
             }
 
-            if (!_autoMergerPolicy->isEnabled() && balancerConfig->shouldBalanceForAutoMerge()) {
+            if (balancerConfig->shouldBalanceForAutoMerge()) {
                 _autoMergerPolicy->enable();
             }
 
@@ -1176,7 +1176,7 @@ int Balancer::_moveChunks(OperationContext* opCtx,
 
         if (status == ErrorCodes::IndexNotFound &&
             gFeatureFlagShardKeyIndexOptionalHashedSharding.isEnabled(
-                serverGlobalParams.featureCompatibility)) {
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
 
             const auto [cm, _] = uassertStatusOK(
                 Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(

@@ -475,13 +475,13 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
                 str::stream()
                     << "A {multi:false} update on a sharded timeseries collection is disallowed.",
                 feature_flags::gTimeseriesUpdatesSupport.isEnabled(
-                    serverGlobalParams.featureCompatibility) ||
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
                     isMulti);
         uassert(ErrorCodes::InvalidOptions,
                 str::stream()
                     << "An {upsert:true} update on a sharded timeseries collection is disallowed.",
                 feature_flags::gTimeseriesUpdatesSupport.isEnabled(
-                    serverGlobalParams.featureCompatibility) ||
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
                     !isUpsert);
 
         // Translate the update query on a timeseries collection into the bucket-level predicate
@@ -495,7 +495,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
             expCtx,
             _cri.cm.getTimeseriesFields()->getTimeseriesOptions(),
             feature_flags::gTimeseriesUpdatesSupport.isEnabled(
-                serverGlobalParams.featureCompatibility));
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
     }
 
     validateUpdateDoc(updateOp);
@@ -525,7 +525,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
     // on the shard key. If we were to target based on the replacement doc, it could result in an
     // insertion even if a document matching the query exists on another shard.
     if ((!feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
-             serverGlobalParams.featureCompatibility) ||
+             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
          updateOp.getMulti()) &&
         isUpsert) {
         return targetByShardKey(extractShardKeyFromQuery(shardKeyPattern, *cq),
@@ -559,7 +559,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
     // is allowed, since we're able to decisively select a document to modify with the two phase
     // write without shard key protocol.
     if (!feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
-            serverGlobalParams.featureCompatibility) ||
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
         isExactId) {
         // Replacement-style updates must always target a single shard. If we were unable to do so
         // using the query, we attempt to extract the shard key from the replacement and target
@@ -590,7 +590,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
                     shardKeyPattern.toString()),
         isMulti || isExactId ||
             feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
-                serverGlobalParams.featureCompatibility));
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
     if (!isMulti) {
         // If the request is {multi:false} and it's not a write without shard key, then this is a
@@ -604,7 +604,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
                 *useTwoPhaseWriteProtocol = true;
             } else if (!isUpsert && isNonTargetedWriteWithoutShardKeyWithExactId &&
                        feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
-                           serverGlobalParams.featureCompatibility)) {
+                           serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             }
         } else {
@@ -621,6 +621,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
     OperationContext* opCtx,
     const BatchItemRef& itemRef,
     bool* useTwoPhaseWriteProtocol,
+    bool* isNonTargetedWriteWithoutShardKeyWithExactId,
     std::set<ChunkRange>* chunkRanges) const {
     const auto& deleteOp = itemRef.getDeleteRef();
     const bool isMulti = deleteOp.getMulti();
@@ -652,7 +653,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
         uassert(ErrorCodes::IllegalOperation,
                 "Cannot perform a non-multi delete on a time-series collection",
                 feature_flags::gTimeseriesDeletesSupport.isEnabled(
-                    serverGlobalParams.featureCompatibility) ||
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
                     isMulti);
 
         auto tsFields = _cri.cm.getTimeseriesFields();
@@ -669,7 +670,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
             expCtx,
             tsFields->getTimeseriesOptions(),
             feature_flags::gTimeseriesDeletesSupport.isEnabled(
-                serverGlobalParams.featureCompatibility));
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
     }
 
     // Parse delete query.
@@ -703,13 +704,18 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
                         _cri.cm.getShardKeyPattern().toString()),
             isMulti || isExactId ||
                 feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
-                    serverGlobalParams.featureCompatibility));
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
     if (!isMulti) {
+        deleteOneNonTargetedShardedCount.increment(1);
         if (isExactId) {
-            deleteOneTargetedShardedCount.increment(1);
+            if (isNonTargetedWriteWithoutShardKeyWithExactId &&
+                feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                *isNonTargetedWriteWithoutShardKeyWithExactId = true;
+                deleteOneWithoutShardKeyWithIdCount.increment(1);
+            }
         } else {
-            deleteOneNonTargetedShardedCount.increment(1);
             if (useTwoPhaseWriteProtocol) {
                 *useTwoPhaseWriteProtocol = true;
             }
@@ -841,6 +847,21 @@ void CollectionRoutingInfoTargeter::noteStaleDbResponse(OperationContext* opCtx,
     _lastError = LastErrorType::kStaleDbVersion;
 }
 
+void CollectionRoutingInfoTargeter::noteCannotImplicitlyCreateCollectionResponse(
+    OperationContext* opCtx, const CannotImplicitlyCreateCollectionInfo& createInfo) {
+    dassert(!_lastError || _lastError.value() == LastErrorType::kCannotImplicitlyCreateCollection);
+
+    // TODO (SERVER-82939) Remove this check once the namespaces are guaranteed to match.
+    //
+    // In the case that a bulk write is performing operations on two different namespaces, a
+    // CannotImplicitlyCreateCollection error for one namespace can be duplicated to operations on
+    // the other namespace. In this case, we only need to create the collection for the namespace
+    // the error actually refers to.
+    if (createInfo.getNss() == getNS()) {
+        _lastError = LastErrorType::kCannotImplicitlyCreateCollection;
+    }
+}
+
 bool CollectionRoutingInfoTargeter::hasStaleShardResponse() {
     return _lastError &&
         (_lastError.value() == LastErrorType::kStaleShardVersion ||
@@ -875,6 +896,24 @@ bool CollectionRoutingInfoTargeter::refreshIfNeeded(OperationContext* opCtx) {
     }
 
     return metadataChanged;
+}
+
+bool CollectionRoutingInfoTargeter::createCollectionIfNeeded(OperationContext* opCtx) {
+    if (!_lastError || _lastError != LastErrorType::kCannotImplicitlyCreateCollection) {
+        return false;
+    }
+
+    try {
+        cluster::createLegacyUnshardedCollection(opCtx, getNS());
+        LOGV2_DEBUG(8037201, 3, "Successfully created collection", "nss"_attr = getNS());
+    } catch (const DBException& ex) {
+        LOGV2(8037200, "Could not create collection", "error"_attr = redact(ex.toStatus()));
+        _lastError = boost::none;
+        return false;
+    }
+    // Ensure the routing info is refreshed before the command is retried to avoid StaleConfig
+    _lastError = LastErrorType::kStaleShardVersion;
+    return true;
 }
 
 int CollectionRoutingInfoTargeter::getNShardsOwningChunks() const {

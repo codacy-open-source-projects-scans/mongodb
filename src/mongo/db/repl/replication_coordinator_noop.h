@@ -94,7 +94,7 @@ public:
 
     bool inQuiesceMode() const final;
 
-    void shutdown(OperationContext* opCtx) final;
+    void shutdown(OperationContext* opCtx, BSONObjBuilder* shutdownTimeElapsedBuilder) final;
 
     ServiceContext* getServiceContext() final {
         return _service;
@@ -232,7 +232,8 @@ public:
 
     BSONObj getConfigBSON() const final;
 
-    const MemberConfig* findConfigMemberByHostAndPort(const HostAndPort& hap) const final;
+    boost::optional<MemberConfig> findConfigMemberByHostAndPort_deprecated(
+        const HostAndPort& hap) const final;
 
     bool isConfigLocalHostAllowed() const final;
 

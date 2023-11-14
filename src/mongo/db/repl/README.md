@@ -9,8 +9,7 @@ sets**](https://docs.mongodb.com/manual/replication/).
 Replica sets are a group of nodes with one primary and multiple secondaries. The primary is
 responsible for all writes. Users may specify that reads from secondaries are acceptable via
 [`setSecondaryOk`](https://docs.mongodb.com/manual/reference/method/Mongo.setSecondaryOk/) or through
-[**read preference**](https://docs.mongodb.com/manual/core/read-preference/#secondaryPreferred), but
-they are not by default.
+[**read preference**](#read-preference), but they are not by default.
 
 # Steady State Replication
 
@@ -701,6 +700,55 @@ wait until the committed snapshot is beyond the specified OpTime.
 #### Code References
 - [ReadConcernArg is filled in _extractReadConcern()](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/service_entry_point_common.cpp#L261)
 
+## Read Preference
+
+The [read preference](https://www.mongodb.com/docs/manual/core/read-preference/) set on a read
+operation determines which nodes in a replica set are eligible to serve that operation. It allows
+the user to control where and how read operations are directed within a replica set. The accepted
+modes for read preference are `primary`, `primaryPreferred`, `secondary`, `secondaryPreferred`,
+and `nearest`. The formal definitions and additional command format information can be found
+[in the driver specification](https://github.com/mongodb/specifications/blob/master/source/server-selection/server-selection.rst#read-preference).
+
+### Server Selection
+
+Server selection is the process of selecting a node for a command. The client first filters servers
+by specified read preference, and then if there is more than one eligible server, filters the
+remaining servers based on latency. The server selection specification is fulfilled by any MongoDB
+replica set client that can select from multiple servers to execute reads, such as a driver or
+`mongos`. The specification determines the algorithms for filtering servers based on
+`readPreference` mode, formulas for calculating roundtrip times, etc.
+
+### Passing `$readPreference` as a parameter
+
+A client will pass any non-primary read preference to the selected server in the form of a
+`$readPreference` parameter attached to each operation. In this context, a server means either
+a replica set node or `mongos`. If the read preference parameter is omitted, the server will assume
+read preference `primary`. In the case of a replica set, `$readPreference` is passed to the
+targeted node [to validate](https://github.com/mongodb/mongo/blob/r7.1.0/src/mongo/db/service_entry_point_common.cpp#L1642-L1658)
+that the replica set state still aligns with the desired read preference.
+
+For sharded clusters, the client skips filtering servers based on read preference and passes the
+`$readPreference` directly to `mongos`. The `mongos` instance then carries out the read preference
+matching on the appropriate shard and forwards the `$readPreference` to the shard server for
+validation. It’s worth noting that if multiple `mongos` nodes exist in the topology, the driver
+will still filter based on latency.
+
+### Replica Set State and Read Preference
+
+Replica set nodes receive the `$readPreference` in a command invocation for validation purposes.
+This is to ensure that the given `$readPreference` matches the current state of the node, as the
+replica set state may have changed in the time between the client’s server selection and the node
+receiving the command. If it doesn't match, the operation will fail with one of the error codes
+mentioned below.
+
+Commands can define whether or not they can run on a secondary by overriding the
+`[secondaryAllowed](https://github.com/10gen/mongo/blob/r7.1.0/src/mongo/db/commands.h#L502-L509)`
+function. If a secondary node receives an operation it cannot service, it will either fail with a
+`NotWritablePrimary` error if the command is designated as primary-only, or a `NotPrimaryNoSecondaryOk`
+error if the command can be serviced by a secondary but the operation’s`$readPreference` specifies
+primary-only. A primary node that receives a `secondary` read preference operation will service it,
+although this case is rare since it requires the node to step up before it receives the operation.
+
 # enableMajorityReadConcern Flag
 
 `readConcern: majority` is enabled by default for WiredTiger in MongoDB. This can be problematic
@@ -1060,7 +1108,7 @@ set.
 As the node applies oplog entries, it will update the transaction table every time it encounters a
 `prepareTransaction` oplog entry to save that the state of the transaction is prepared. Instead of
 actually applying the oplog entry and preparing the transaction, the node will wait until oplog
-application has completed to reconstruct the transaction. If the node encounters a
+application [has completed](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/replication_recovery.cpp#L472) to reconstruct the transaction. If the node encounters a
 `commitTransaction` oplog entry, it will immediately commit the transaction. If the transaction it's
 about to commit was prepared, the node will find the `prepareTransaction` oplog entry(s) using the
 [`TransactionHistoryIterator`](https://github.com/mongodb/mongo/blob/v6.1/src/mongo/db/transaction/transaction_history_iterator.h)
@@ -1071,6 +1119,13 @@ over all entries in the transactions table to see which transactions are still i
 state. At that point, the node will find the `prepareTransaction` oplog entry(s) associated with the
 transaction using the `TransactionHistoryIterator`. It will check out the session associated with
 the transaction, apply all the operations from the oplog entry(s) and prepare the transaction.
+
+#### Code references
+* Function to [abort unprepared transactions during stepup or stepdown](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/replication_coordinator_impl.cpp#L2766).
+* Where we [yield locks for transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1282-L1287).
+* Where we [restore locks for transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1343-L1348).
+* Function to [reconstruct prepared transactions from oplog entries](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/transaction_oplog_application.cpp#L804).
+* Where we [skip over prepareTransaction oplog entries](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/transaction_oplog_application.cpp#L737-L752) during recovery oplog application.
 
 ## Read Concern Behavior Within Transactions
 
@@ -1116,6 +1171,10 @@ timestamp. If `atClusterTime` is not specified, then the read timestamp of the t
 the [`all_durable`](#replication-timestamp-glossary) timestamp when the transaction is started,
 which ensures a snapshot with no oplog holes.
 
+#### Code references
+* [Noop write for read-only transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1940-L1944).
+* Function to [set a read snapshot for transactions](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1170).
+
 ## Transaction Oplog Application
 
 Secondaries begin replicating transaction oplog entries once the primary has either prepared or
@@ -1124,8 +1183,8 @@ writer thread pool to schedule operations to apply. See the
 [oplog entry application](#oplog-entry-application) section for more details on how secondary oplog
 application works.
 
-Before secondaries process and apply transaction oplog entries, they will track operations that
-require changes to `config.transactions`. This results in an update to the transactions table entry
+Before secondaries process and apply transaction oplog entries, they will [track operations](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/oplog_applier_impl.cpp#L968) that
+require changes to `config.transactions`. This results in an [update to the transactions table entry](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/session_update_tracker.cpp#L336)
 (`sessionTxnRecord`) that corresponds to the oplog entry operation. For example,
 `prepareTransaction`, `commitTransaction`, and `abortTransaction` will all update the `txnState`
 accordingly.
@@ -1230,6 +1289,12 @@ transaction's session is correctly set, otherwise the session cannot be used to 
 commands. However we do not need to apply any operations in the original transaction (treated like
 an [empty transaction](https://github.com/mongodb/mongo/blob/07e1e93c566243983b45385f5c85bc7df0026f39/src/mongo/db/repl/transaction_oplog_application.cpp#L720-L731))
 since the operations should be applied by its split transactions.
+
+#### Code references
+* [Filling writer vectors for unprepared transactions on terminal applyOps.](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/oplog_applier_impl.cpp#L1018-L1033)
+* [Applying writes in parallel](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/repl/oplog_applier_impl.cpp#L809-L832) via the writer thread pool.
+* Function to [unstash transaction resources](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1462) from the RecoveryUnit to the OperationContext.
+* Function to [stash transaction resources](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1427) from the OperationContext to the RecoveryUnit.
 
 ## Transaction Errors
 
@@ -1700,24 +1765,28 @@ Before the data clone phase begins, the node will do the following:
    node restarts while this flag is set, it will restart initial sync even though it may already
    have data because it means that initial sync didn't complete. We also check this flag to prevent
    reading from the oplog while initial sync is in progress.
-2. Find a sync source.
-3. Drop all of its data except for the local database and recreate the oplog.
-4. Get the Rollback ID (RBID) from the sync source to ensure at the end that no rollbacks occurred
+2. [Reset the in-memory FCV to `kUnsetDefaultLastLTSBehavior`.](https://github.com/10gen/mongo/blob/b718dc1aa3ffb3e6df4f61a30d54cda578cf2830/src/mongo/db/repl/initial_syncer.cpp#L689). This is to ensure compatibility between the sync source and sync
+target. If the sync source is actually in a different feature compatibility version, we will find
+out when we clone from the sync source.
+3. Find a sync source.
+4. Drop all of its data except for the local database and recreate the oplog.
+5. Get the Rollback ID (RBID) from the sync source to ensure at the end that no rollbacks occurred
    during initial sync.
-5. Query its sync source's oplog for its latest OpTime and save it as the
+6. Query its sync source's oplog for its latest OpTime and save it as the
    `defaultBeginFetchingOpTime`. If there are no open transactions on the sync source, this will be
    used as the `beginFetchingTimestamp` or the timestamp that it begins fetching oplog entries from.
-6. Query its sync source's transactions table for the oldest starting OpTime of all active
+7. Query its sync source's transactions table for the oldest starting OpTime of all active
    transactions. If this timestamp exists (meaning there is an open transaction on the sync source)
    this will be used as the `beginFetchingTimestamp`. If this timestamp doesn't exist, the node will
    use the `defaultBeginFetchingOpTime` instead. This will ensure that even if a transaction was
    started on the sync source after it was queried for the oldest active transaction timestamp, the
    syncing node will have all the oplog entries associated with an active transaction in its oplog.
-7. Query its sync source's oplog for its lastest OpTime. This will be the `beginApplyingTimestamp`,
+8. Query its sync source's oplog for its lastest OpTime. This will be the `beginApplyingTimestamp`,
    or the timestamp that it begins applying oplog entries at once it has completed the data clone
    phase. If there was no active transaction on the sync source, the `beginFetchingTimestamp` will
    be the same as the `beginApplyingTimestamp`.
-8. Create an `OplogFetcher` and start fetching and buffering oplog entries from the sync source
+9. [Set the in-memory FCV to the sync source's FCV.](https://github.com/10gen/mongo/blob/b718dc1aa3ffb3e6df4f61a30d54cda578cf2830/src/mongo/db/repl/initial_syncer.cpp#L1153). This is because during the cloning phase, we do expect to clone the sync source's "admin.system.version" collection eventually (which contains the FCV document), but we can't guarantee that we will clone "admin.system.version" first. Setting the in-memory FCV value to the sync source's FCV first will ensure that we clone collections using the same FCV as the sync source. However, we won't persist the FCV to disk nor will we update our minWireVersion until we clone the actual document.
+10. Create an `OplogFetcher` and start fetching and buffering oplog entries from the sync source
    to be applied later. Operations are buffered to a collection so that they are not limited by the
    amount of memory available.
 

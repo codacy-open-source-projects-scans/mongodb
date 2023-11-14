@@ -12,18 +12,10 @@ selector:
   # TODO(SERVER-77000): Remove the test exclusion when $out.db in response has expected prefix.
   - jstests/core/query/explain/explain_agg_write_concern.js
   - jstests/aggregation/sources/out/replace_collection.js
+  - jstests/aggregation/explain_writing_aggs.js
   # `rolesInfo` is returning unprefixed database names
   - jstests/core/administrative/builtin_roles_external.js
-  # failed with: BSON field '$densify.range.bounds' is missing but a required field
-  - jstests/aggregation/sources/densify/internal_parse.js
-  # failed on: Tests that the internal stage '$mergeCursors' does not throw 'ApiStrictError' with an
-  # internal client and 'apiStrict' set to true.
-  - jstests/aggregation/api_version_stage_allowance_checks.js
-  # failed on: prefix check in response
-  - jstests/aggregation/explain_per_stage_exec_stats.js
-  - jstests/aggregation/explain_writing_aggs.js
-  # failed on: For index scan, total scannedObjects should be sum of
-  # (total documents in local collection + total matched documents in foreign collection)
+  # QueryExecutorStats assertions are hardcoded for single-node results
   - jstests/aggregation/sources/lookup/lookup_query_stats.js
   # failed on: The aggregate should always use the view on 'testDB', not an empty collection on 'siblingDB'
   - jstests/aggregation/view_resolution_namespace_collision.js
@@ -63,8 +55,6 @@ executor:
         TestData: &TestData
           tenantId: "636d957b2646ddfaf9b5e13f"
           hashTestNamesForMultitenancy: true
-          useSecurityToken: true
-          useExpectPrefix: true
   hooks:
   - class: CheckReplOplogs
   - class: CheckReplDBHash

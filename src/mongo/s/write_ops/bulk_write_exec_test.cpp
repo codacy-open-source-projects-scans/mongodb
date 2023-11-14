@@ -182,7 +182,12 @@ BulkWriteCommandReply createBulkWriteShardResponse(const executor::RemoteCommand
         0,  // cursorId
         std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0)},
         NamespaceString::makeBulkWriteNSS(boost::none)));
-    reply.setNumErrors(0);
+    reply.setNErrors(0);
+    reply.setNInserted(0);
+    reply.setNDeleted(0);
+    reply.setNMatched(0);
+    reply.setNModified(0);
+    reply.setNUpserted(0);
 
     if (withWriteConcernError) {
         BulkWriteWriteConcernError wce;
@@ -448,8 +453,8 @@ TEST_F(BulkWriteOpTest, TargetErrorsInTxn) {
     bulkWriteOp.processTargetingError(targetStatus);
     ASSERT(bulkWriteOp.isFinished());
 
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
-    ASSERT_EQ(numErrors, 1);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
+    ASSERT_EQ(summaryFields.nErrors, 1);
     ASSERT_EQ(replies.size(), 1);
     ASSERT_NOT_OK(replies[0].getStatus());
 }
@@ -1414,7 +1419,7 @@ TEST_F(BulkWriteOpTest, NoteResponseRetriedStmtIds) {
 
     auto replyInfo = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replyInfo.replyItems.size(), 3);
-    ASSERT_EQ(replyInfo.numErrors, 0);
+    ASSERT_EQ(replyInfo.summaryFields.nErrors, 0);
     ASSERT_EQ(replyInfo.wcErrors, boost::none);
     ASSERT(replyInfo.retriedStmtIds.has_value());
     std::vector<StmtId> expectedRetriedStmtIds = {2, 3, 4};
@@ -1442,7 +1447,7 @@ TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_WriteConcernError) {
 
     auto replyInfo = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replyInfo.replyItems.size(), 1);
-    ASSERT_EQ(replyInfo.numErrors, 0);
+    ASSERT_EQ(replyInfo.summaryFields.nErrors, 0);
     ASSERT_EQ(replyInfo.wcErrors->getCode(), ErrorCodes::UnsatisfiableWriteConcern);
 }
 
@@ -1529,7 +1534,7 @@ TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_NonTransientTransactionError) {
     auto replyInfo = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replyInfo.replyItems.size(), 1);
     ASSERT_EQ(replyInfo.replyItems[0].getStatus().code(), ErrorCodes::Interrupted);
-    ASSERT_EQ(replyInfo.numErrors, 1);
+    ASSERT_EQ(replyInfo.summaryFields.nErrors, 1);
     ASSERT_FALSE(replyInfo.wcErrors.has_value());
 }
 
@@ -1600,6 +1605,7 @@ TEST_F(BulkWriteOpTest, TestBulkWriteInsertSizeEstimation) {
 }
 
 // Test that we calculate accurate estimates for bulkWrite update ops.
+// TODO (SERVER-82382): Replace ASSERT_GTE with ASSERT_EQ for the following test.
 TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
     auto basicUpdate = makeTestUpdateOp(fromjson("{x: 1}") /* filter */,
                                         write_ops::UpdateModification(fromjson("{$set: {y: 1}}")),
@@ -1608,7 +1614,7 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                                         boost::none,
                                         boost::none,
                                         boost::none);
-    ASSERT_EQ(getSizeEstimate(basicUpdate), getActualSize(basicUpdate));
+    ASSERT_GTE(getSizeEstimate(basicUpdate), getActualSize(basicUpdate));
 
     auto updateAllFieldsSetBesidesArrayFilters =
         makeTestUpdateOp(fromjson("{x: 1}") /* filter */,
@@ -1618,8 +1624,8 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                          boost::none,
                          fromjson("{z: 1}") /* constants */,
                          fromjson("{locale: 'simple'}") /* collation */);
-    ASSERT_EQ(getSizeEstimate(updateAllFieldsSetBesidesArrayFilters),
-              getActualSize(updateAllFieldsSetBesidesArrayFilters));
+    ASSERT_GTE(getSizeEstimate(updateAllFieldsSetBesidesArrayFilters),
+               getActualSize(updateAllFieldsSetBesidesArrayFilters));
 
     std::vector<BSONObj> arrayFilters = {fromjson("{j: 1}"), fromjson("{k: 1}")};
     auto updateAllFieldsSet =
@@ -1632,7 +1638,7 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                          fromjson("{locale: 'simple'}") /* collation */);
     // We can't make an exact assertion when arrayFilters is set, because the way we estimate BSON
     // array index size overcounts for simplicity.
-    ASSERT(getSizeEstimate(updateAllFieldsSet) > getActualSize(updateAllFieldsSet));
+    ASSERT_GT(getSizeEstimate(updateAllFieldsSet), getActualSize(updateAllFieldsSet));
 
     std::vector<BSONObj> pipeline = {fromjson("{$set: {y: 1}}")};
     auto updateWithPipeline = makeTestUpdateOp(fromjson("{x: 1}") /* filter */,
@@ -1644,18 +1650,19 @@ TEST_F(BulkWriteOpTest, TestBulkWriteUpdateSizeEstimation) {
                                                boost::none);
     // We can't make an exact assertion when an update pipeline is used, because the way we estimate
     // BSON array index size overcounts for simplicity.
-    ASSERT(getSizeEstimate(updateWithPipeline) > getActualSize(updateWithPipeline));
+    ASSERT_GT(getSizeEstimate(updateWithPipeline), getActualSize(updateWithPipeline));
 }
 
 // Test that we calculate accurate estimates for bulkWrite delete ops.
+// TODO (SERVER-82382): Replace ASSERT_GTE with ASSERT_EQ for the following test.
 TEST_F(BulkWriteOpTest, TestBulkWriteDeleteSizeEstimation) {
     auto basicDelete = makeTestDeleteOp(fromjson("{x: 1}"), BSONObj() /* hint */, boost::none);
-    ASSERT_EQ(getSizeEstimate(basicDelete), getActualSize(basicDelete));
+    ASSERT_GTE(getSizeEstimate(basicDelete), getActualSize(basicDelete));
 
     auto deleteAllFieldsSet = makeTestDeleteOp(fromjson("{x: 1}") /* filter */,
                                                fromjson("{y: 1}") /* hint */,
                                                fromjson("{locale: 'simple'}") /* collation */);
-    ASSERT_EQ(getSizeEstimate(deleteAllFieldsSet), getActualSize(deleteAllFieldsSet));
+    ASSERT_GTE(getSizeEstimate(deleteAllFieldsSet), getActualSize(deleteAllFieldsSet));
 }
 
 // Simulates a situation where we receive a bulkWrite request with large top-level fields (in this
@@ -1923,10 +1930,10 @@ TEST_F(BulkWriteOpChildBatchErrorTest, LocalCallbackCanceledErrorNotInShutdown) 
     // The error for the first op should be the cancellation error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus(),
               kCallbackCanceledResponse.swResponse.getStatus());
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus(), kCallbackCanceledResponse.swResponse.getStatus());
-    ASSERT_EQ(numErrors, 1);
+    ASSERT_EQ(summaryFields.nErrors, 1);
 }
 
 // Test a local CallbackCanceled error received during shutdown.
@@ -1989,10 +1996,10 @@ TEST_F(BulkWriteOpChildBatchErrorTest, LocalNetworkErrorOrdered) {
     // The error for the first op should be the network error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus(),
               kNetworkErrorResponse.swResponse.getStatus());
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus(), kNetworkErrorResponse.swResponse.getStatus());
-    ASSERT_EQ(numErrors, 1);
+    ASSERT_EQ(summaryFields.nErrors, 1);
 }
 
 // Unordered bulkWrite: test handling of a local network error.
@@ -2029,13 +2036,13 @@ TEST_F(BulkWriteOpChildBatchErrorTest, LocalNetworkErrorUnordered) {
               kNetworkErrorResponse.swResponse.getStatus());
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
               kNetworkErrorResponse.swResponse.getStatus());
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 4);
     ASSERT_EQ(replies[0].getStatus(), kNetworkErrorResponse.swResponse.getStatus());
     ASSERT_EQ(replies[1].getStatus(), kNetworkErrorResponse.swResponse.getStatus());
     ASSERT_OK(replies[2].getStatus());
     ASSERT_OK(replies[3].getStatus());
-    ASSERT_EQ(numErrors, 2);
+    ASSERT_EQ(summaryFields.nErrors, 2);
 }
 
 // Ordered bulkWrite: Test handling of a local TransientTransactionError in a transaction.
@@ -2100,10 +2107,10 @@ TEST_F(BulkWriteOpChildBatchErrorTest, LocalNonTransientTransactionErrorInTxnOrd
     // The error for the first op should be the interruption error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus(),
               kInterruptedErrorResponse.swResponse.getStatus());
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
-    ASSERT_EQ(numErrors, 1);
+    ASSERT_EQ(summaryFields.nErrors, 1);
 }
 
 // Unordered bulkWrite: Test handling of a local TransientTransactionError in a transaction.
@@ -2219,11 +2226,11 @@ TEST_F(BulkWriteOpChildBatchErrorTest, LocalNonTransientTransactionErrorInTxnUno
         ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
                   kInterruptedErrorResponse.swResponse.getStatus());
 
-        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+        auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
         ASSERT_EQ(replies.size(), 2);
         ASSERT_EQ(replies[0].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
         ASSERT_EQ(replies[1].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
-        ASSERT_EQ(numErrors, 2);
+        ASSERT_EQ(summaryFields.nErrors, 2);
     }
 
     // Case 2: we receive the failed batch response after receiving successful response for other
@@ -2259,13 +2266,13 @@ TEST_F(BulkWriteOpChildBatchErrorTest, LocalNonTransientTransactionErrorInTxnUno
         ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
                   kInterruptedErrorResponse.swResponse.getStatus());
 
-        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+        auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
         ASSERT_EQ(replies.size(), 4);
         ASSERT_EQ(replies[0].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
         ASSERT_EQ(replies[1].getStatus(), kInterruptedErrorResponse.swResponse.getStatus());
         ASSERT_OK(replies[2].getStatus());
         ASSERT_OK(replies[3].getStatus());
-        ASSERT_EQ(numErrors, 2);
+        ASSERT_EQ(summaryFields.nErrors, 2);
     }
 }
 
@@ -2292,10 +2299,10 @@ TEST_F(BulkWriteOpChildBatchErrorTest, RemoteErrorOrdered) {
     // The error for the first op should be the interrupted error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus().code(),
               ErrorCodes::Interrupted);
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
-    ASSERT_EQ(numErrors, 1);
+    ASSERT_EQ(summaryFields.nErrors, 1);
 }
 
 // Unordered bulkWrite: Test handling of a remote top-level error.
@@ -2333,13 +2340,13 @@ TEST_F(BulkWriteOpChildBatchErrorTest, RemoteErrorUnordered) {
               ErrorCodes::Interrupted);
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus().code(),
               ErrorCodes::Interrupted);
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 4);
     ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
     ASSERT_EQ(replies[1].getStatus().code(), ErrorCodes::Interrupted);
     ASSERT_OK(replies[2].getStatus());
     ASSERT_OK(replies[3].getStatus());
-    ASSERT_EQ(numErrors, 2);
+    ASSERT_EQ(summaryFields.nErrors, 2);
 }
 
 // Ordered bulkWrite: Test handling of a remote top-level error that is not a
@@ -2372,10 +2379,10 @@ TEST_F(BulkWriteOpChildBatchErrorTest, RemoteNonTransientTransactionErrorInTxnOr
     // The error for the first op should be the interruption error.
     ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(0).getOpError().getStatus().code(),
               ErrorCodes::Interrupted);
-    auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 1);
     ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
-    ASSERT_EQ(numErrors, 1);
+    ASSERT_EQ(summaryFields.nErrors, 1);
 }
 
 // Ordered bulkWrite: Test handling of a remote top-level error that is a TransientTransactionError
@@ -2450,11 +2457,11 @@ TEST_F(BulkWriteOpChildBatchErrorTest, RemoteNonTransientTransactionErrorInTxnUn
         ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus().code(),
                   ErrorCodes::Interrupted);
 
-        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+        auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
         ASSERT_EQ(replies.size(), 2);
         ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
         ASSERT_EQ(replies[1].getStatus(), ErrorCodes::Interrupted);
-        ASSERT_EQ(numErrors, 2);
+        ASSERT_EQ(summaryFields.nErrors, 2);
     }
 
     // Case 2: we receive the failed batch response after receiving successful response for other
@@ -2491,13 +2498,13 @@ TEST_F(BulkWriteOpChildBatchErrorTest, RemoteNonTransientTransactionErrorInTxnUn
         ASSERT_EQ(bulkWriteOp.getWriteOp_forTest(1).getOpError().getStatus(),
                   ErrorCodes::Interrupted);
 
-        auto [replies, numErrors, _, __] = bulkWriteOp.generateReplyInfo(false);
+        auto [replies, summaryFields, _, __] = bulkWriteOp.generateReplyInfo(false);
         ASSERT_EQ(replies.size(), 4);
         ASSERT_EQ(replies[0].getStatus().code(), ErrorCodes::Interrupted);
         ASSERT_EQ(replies[1].getStatus().code(), ErrorCodes::Interrupted);
         ASSERT_OK(replies[2].getStatus());
         ASSERT_OK(replies[3].getStatus());
-        ASSERT_EQ(numErrors, 2);
+        ASSERT_EQ(summaryFields.nErrors, 2);
     }
 }
 
@@ -2648,9 +2655,9 @@ TEST_F(BulkWriteOpTest, SuccessfulShardRepliesAreSavedAfterRetargeting) {
     // We should now be done.
     ASSERT(op.isFinished());
 
-    auto [replies, numErrors, _, __] = op.generateReplyInfo(false);
+    auto [replies, summaryFields, _, __] = op.generateReplyInfo(false);
     ASSERT_EQ(replies.size(), 1);
-    ASSERT_EQ(numErrors, 0);
+    ASSERT_EQ(summaryFields.nErrors, 0);
     ASSERT_OK(replies[0].getStatus());
     // Seeing n: 2 here proves we saved the success reply from the first round of targeting.
     ASSERT_EQ(replies[0].getN(), 2);
@@ -2730,14 +2737,14 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // succeed without errors. But bulk_write_exec::execute would retry on targeting errors and
         // try to refresh the targeters upon targeting errors.
         request.setOrdered(false);
-        auto [replyItems, numErrors, _, __] =
+        auto [replyItems, summaryFields, _, __] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 2u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
         ASSERT_OK(replyItems[1].getStatus());
         ASSERT_EQUALS(targeter0->getNumRefreshes(), 1);
         ASSERT_EQUALS(targeter1->getNumRefreshes(), 1);
-        ASSERT_EQUALS(numErrors, 1);
+        ASSERT_EQUALS(summaryFields.nErrors, 1);
     });
 
     // Mock a bulkWrite response to respond to the second op, which is valid.
@@ -2754,14 +2761,14 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // Test ordered operations. This is mostly the same as the test case above except that we
         // should only return the first error for ordered operations.
         request.setOrdered(true);
-        auto [replyItems, numErrors, _, __] =
+        auto [replyItems, summaryFields, _, __] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 1u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
         // We should have another refresh attempt.
         ASSERT_EQUALS(targeter0->getNumRefreshes(), 2);
         ASSERT_EQUALS(targeter1->getNumRefreshes(), 2);
-        ASSERT_EQUALS(numErrors, 1);
+        ASSERT_EQUALS(summaryFields.nErrors, 1);
     });
 
     future.default_timed_get();
@@ -2797,12 +2804,12 @@ TEST_F(BulkWriteExecTest, CollectionDroppedBeforeRefreshingTargeters) {
 
     // After the targeting error from the first op, targeter refresh will throw a StaleEpoch
     // exception which should abort the entire bulkWrite.
-    auto [replyItems, numErrors, _, __] =
+    auto [replyItems, summaryFields, _, __] =
         bulk_write_exec::execute(operationContext(), targeters, request);
     ASSERT_EQUALS(replyItems.size(), 2u);
     ASSERT_EQUALS(replyItems[0].getStatus().code(), ErrorCodes::StaleEpoch);
     ASSERT_EQUALS(replyItems[1].getStatus().code(), ErrorCodes::StaleEpoch);
-    ASSERT_EQUALS(numErrors, 2);
+    ASSERT_EQUALS(summaryFields.nErrors, 2);
 }
 
 // Tests that WriteConcernErrors are surfaced back to the user correctly,
@@ -2820,11 +2827,11 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
 
     LOGV2(7695401, "Case 1) WCE with successful op.");
     auto future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError, _] =
+        auto [replyItems, summaryFields, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 1u);
         ASSERT_OK(replyItems[0].getStatus());
-        ASSERT_EQUALS(numErrors, 0);
+        ASSERT_EQUALS(summaryFields.nErrors, 0);
         ASSERT_EQUALS(writeConcernError->getCode(), ErrorCodes::UnsatisfiableWriteConcern);
     });
 
@@ -2838,11 +2845,11 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
     // occurs should be returned to the user.
     LOGV2(7695402, "Case 2) WCE with unsuccessful op (BadValue).");
     future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError, _] =
+        auto [replyItems, summaryFields, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         ASSERT_EQUALS(replyItems.size(), 1u);
         ASSERT_NOT_OK(replyItems[0].getStatus());
-        ASSERT_EQUALS(numErrors, 1);
+        ASSERT_EQUALS(summaryFields.nErrors, 1);
         ASSERT_EQUALS(writeConcernError->getCode(), ErrorCodes::UnsatisfiableWriteConcern);
     });
 
@@ -2853,7 +2860,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
             std::vector<mongo::BulkWriteReplyItem>{
                 BulkWriteReplyItem(0, Status(ErrorCodes::BadValue, "Dummy BadValue"))},
             NamespaceString::makeBulkWriteNSS(boost::none)));
-        reply.setNumErrors(1);
+        reply.setNErrors(1);
         return reply.toBSON();
     });
     future.default_timed_get();
@@ -2881,13 +2888,13 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
 
     LOGV2(7695403, "Case 1) WCE in ordered case.");
     auto future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError, _] =
+        auto [replyItems, summaryFields, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, request);
         // Both operations executed, therefore the size of reply items is 2.
         ASSERT_EQUALS(replyItems.size(), 2u);
         ASSERT_OK(replyItems[0].getStatus());
         ASSERT_OK(replyItems[1].getStatus());
-        ASSERT_EQUALS(numErrors, 0);
+        ASSERT_EQUALS(summaryFields.nErrors, 0);
         LOGV2(7695404, "WriteConcernError received", "wce"_attr = writeConcernError->getErrmsg());
         ASSERT_EQUALS(writeConcernError->getCode(), ErrorCodes::WriteConcernFailed);
     });
@@ -2912,12 +2919,12 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
     unorderedReq.setOrdered(false);
 
     future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError, _] =
+        auto [replyItems, summaryFields, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, unorderedReq);
         ASSERT_EQUALS(replyItems.size(), 2u);
         ASSERT_OK(replyItems[0].getStatus());
         ASSERT_OK(replyItems[1].getStatus());
-        ASSERT_EQUALS(numErrors, 0);
+        ASSERT_EQUALS(summaryFields.nErrors, 0);
         LOGV2(7695406, "WriteConcernError received", "wce"_attr = writeConcernError->getErrmsg());
         ASSERT_EQUALS(writeConcernError->getCode(), ErrorCodes::WriteConcernFailed);
     });
@@ -2941,14 +2948,14 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
     oneErrorReq.setOrdered(false);
 
     future = launchAsync([&] {
-        auto [replyItems, numErrors, writeConcernError, _] =
+        auto [replyItems, summaryFields, writeConcernError, _] =
             bulk_write_exec::execute(operationContext(), targeters, oneErrorReq);
         ASSERT_EQUALS(replyItems.size(), 2u);
         // We don't really know which of the two mock responses below will be used for
         // which operation, since this is an unordered request, so we can't assert on
         // the exact status of each operation. However we can still assert on the number
         // of errors.
-        ASSERT_EQUALS(numErrors, 1);
+        ASSERT_EQUALS(summaryFields.nErrors, 1);
         LOGV2(7695409, "WriteConcernError received", "wce"_attr = writeConcernError->getErrmsg());
         ASSERT_EQUALS(writeConcernError->getCode(), ErrorCodes::UnsatisfiableWriteConcern);
     });
@@ -2962,7 +2969,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
             std::vector<mongo::BulkWriteReplyItem>{
                 BulkWriteReplyItem(0, Status(ErrorCodes::BadValue, "Dummy BadValue"))},
             NamespaceString::makeBulkWriteNSS(boost::none)));
-        reply.setNumErrors(1);
+        reply.setNErrors(1);
         return reply.toBSON();
     });
     onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {

@@ -94,7 +94,7 @@ public:
 
     bool inQuiesceMode() const override;
 
-    void shutdown(OperationContext* opCtx) override;
+    void shutdown(OperationContext* opCtx, BSONObjBuilder* shutdownTimeElapsedBuilder) override;
 
     // Returns the ServiceContext where this instance runs.
     ServiceContext* getServiceContext() override {
@@ -241,7 +241,8 @@ public:
 
     BSONObj getConfigBSON() const override;
 
-    const repl::MemberConfig* findConfigMemberByHostAndPort(const HostAndPort& hap) const override;
+    boost::optional<repl::MemberConfig> findConfigMemberByHostAndPort_deprecated(
+        const HostAndPort& hap) const override;
 
     bool isConfigLocalHostAllowed() const override;
 

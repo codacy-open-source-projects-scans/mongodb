@@ -2195,7 +2195,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
 Status applyCommand_inlock(OperationContext* opCtx,
                            const ApplierOperation& op,
                            OplogApplication::Mode mode) {
-    if (op->shouldLogAsDDLOperation()) {
+    if (op->shouldLogAsDDLOperation() && !serverGlobalParams.quiet.load()) {
         LOGV2(7360110,
               "Applying DDL command oplog entry",
               "oplogEntry"_attr = op->toBSONForLogging(),
@@ -2310,19 +2310,15 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 // their timestamp at commit.
                 TimestampBlock tsBlock(opCtx, writeTime);
                 return curOpToApply.applyFunc(opCtx, op, mode);
+            } catch (const StorageUnavailableException&) {
+                // Retriable error.
+                throw;
             } catch (const DBException& ex) {
                 return ex.toStatus();
             }
         }();
 
         switch (status.code()) {
-            case ErrorCodes::WriteConflict: {
-                // Need to throw this up to a higher level where it will be caught and the
-                // operation retried.
-                throwWriteConflictException(str::stream()
-                                            << "WriteConflict caught during oplog application."
-                                            << " Original error: " << status.reason());
-            }
             case ErrorCodes::BackgroundOperationInProgressForDatabase: {
                 invariant(mode == OplogApplication::Mode::kInitialSync);
 

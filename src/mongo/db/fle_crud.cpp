@@ -1757,18 +1757,21 @@ std::pair<write_ops::UpdateCommandReply, BSONObj> FLEQueryInterfaceImpl::updateW
             updateReply.getWriteCommandReplyBase().setRetriedStmtIds(
                 std::vector<std::int32_t>{reply.getRetriedStmtId().value()});
         }
-        updateReply.getWriteCommandReplyBase().setN(reply.getLastErrorObject().getNumDocs());
 
-        if (reply.getLastErrorObject().getUpserted().has_value()) {
+        auto& lastErrorObject = reply.getLastErrorObject();
+
+        updateReply.getWriteCommandReplyBase().setN(lastErrorObject.getNumDocs());
+
+        if (lastErrorObject.getUpserted().has_value()) {
             write_ops::Upserted upserted;
             upserted.setIndex(0);
-            upserted.set_id(reply.getLastErrorObject().getUpserted().value());
+            upserted.set_id(lastErrorObject.getUpserted().value());
             updateReply.setUpserted(std::vector<mongo::write_ops::Upserted>{upserted});
-        }
-
-        if (reply.getLastErrorObject().getNumDocs() > 0) {
-            updateReply.setNModified(1);
-            updateReply.getWriteCommandReplyBase().setN(1);
+        } else {
+            dassert(lastErrorObject.getUpdatedExisting().has_value());
+            if (lastErrorObject.getUpdatedExisting().value()) {
+                updateReply.setNModified(1);
+            }
         }
     }
 
@@ -1882,13 +1885,14 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
     as->grantInternalAuthorization(opCtx.get());
 
     const auto setDollarTenant = nss.tenantId() && gMultitenancySupport;
-    auto sc = SerializationContext::stateCommandRequest();
+    const auto vts = auth::ValidatedTenancyScope::get(_opCtx);
 
     // We need to instruct the request object (via serialization context passed in when constructing
     // getCountsCmd) that we do not ALSO prefix the $db field when serialize() is later called since
     // we will already be setting the $tenant field below.  Providing both a tenant prefix and a
     // $tenant field is unsupported and can lead to namespace errors.
-    sc.setTenantIdSource(setDollarTenant);
+    auto sc = SerializationContext::stateCommandRequest(
+        setDollarTenant, vts != boost::none && vts->isFromAtlasProxy());
 
     GetQueryableEncryptionCountInfo getCountsCmd(nss, sc);
 

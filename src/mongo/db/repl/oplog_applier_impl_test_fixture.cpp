@@ -224,7 +224,7 @@ void OplogApplierImplTest::setUp() {
     // test fixture does not create a featureCompatibilityVersion document from which to initialize
     // the server parameter.
     // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLatest);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 
     // This is necessary to generate ghost timestamps for index builds that are not 0, since 0 is an
     // invalid timestamp.
@@ -444,7 +444,7 @@ CollectionReader::CollectionReader(OperationContext* opCtx, const NamespaceStrin
     : _collToScan(opCtx, nss),
       _exec(InternalPlanner::collectionScan(opCtx,
                                             &_collToScan.getCollection(),
-                                            PlanYieldPolicy::YieldPolicy::NO_YIELD,
+                                            PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                             InternalPlanner::FORWARD)) {}
 
 StatusWith<BSONObj> CollectionReader::next() {

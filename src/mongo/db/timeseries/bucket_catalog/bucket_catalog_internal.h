@@ -172,6 +172,7 @@ Bucket* useAlternateBucket(Stripe& stripe, WithLock stripeLock, const CreationIn
  */
 StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
                                                     BucketStateRegistry& registry,
+                                                    ExecutionStatsController& stats,
                                                     const NamespaceString& ns,
                                                     const StringDataComparator* comparator,
                                                     const TimeseriesOptions& options,
@@ -271,17 +272,25 @@ boost::optional<OID> findArchivedCandidate(BucketCatalog& catalog,
                                            const CreationInfo& info);
 
 /**
+ * Calculates the bucket max size constrained by the cache size and the cardinality of active
+ * buckets. Returns a pair of the effective value that respects the absolute bucket max and min
+ * sizes and the raw value.
+ */
+std::pair<int32_t, int32_t> getCacheDerivedBucketMaxSize(uint64_t storageCacheSize,
+                                                         uint32_t workloadCardinality);
+
+/**
  * Identifies a previously archived bucket that may be able to accommodate the measurement
  * represented by 'info', if one exists. Otherwise returns a pipeline to use for query-based
  * reopening if allowed.
  */
-ReopeningContext getReopeningContext(OperationContext* opCtx,
-                                     BucketCatalog& catalog,
-                                     Stripe& stripe,
-                                     WithLock stripeLock,
-                                     const CreationInfo& info,
-                                     uint64_t catalogEra,
-                                     AllowQueryBasedReopening allowQueryBasedReopening);
+InsertResult getReopeningContext(OperationContext* opCtx,
+                                 BucketCatalog& catalog,
+                                 Stripe& stripe,
+                                 WithLock stripeLock,
+                                 const CreationInfo& info,
+                                 uint64_t catalogEra,
+                                 AllowQueryBasedReopening allowQueryBasedReopening);
 
 /**
  * Aborts 'batch', and if the corresponding bucket still exists, proceeds to abort any other
@@ -425,7 +434,7 @@ void closeOpenBucket(OperationContext* opCtx,
 /**
  * Close an archived bucket, setting the state appropriately and removing it from the catalog.
  */
-void closeArchivedBucket(BucketStateRegistry& registry,
+void closeArchivedBucket(BucketCatalog& catalog,
                          ArchivedBucket& bucket,
                          ClosedBuckets& closedBuckets);
 

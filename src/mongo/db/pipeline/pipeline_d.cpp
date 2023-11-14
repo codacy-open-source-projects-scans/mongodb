@@ -110,12 +110,12 @@
 #include "mongo/db/pipeline/skip_and_limit.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/transformer_interface.h"
+#include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/parsed_distinct.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_executor_impl.h"
 #include "mongo/db/query/plan_yield_policy.h"
@@ -519,7 +519,8 @@ std::vector<std::unique_ptr<InnerPipelineStageInterface>> findSbeCompatibleStage
 
         // TODO (SERVER-80243): Remove 'featureFlagTimeSeriesInSbe' check.
         .unpackBucket = feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
-                            serverGlobalParams.featureCompatibility) &&
+                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+
             !queryKnob.getSbeDisableTimeSeriesForOp() &&
             cq->getExpCtx()->sbePipelineCompatibility == SbeCompatibility::fullyCompatible,
     };
@@ -653,7 +654,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
         // uses a DISTINCT_SCAN to scan exactly one document for each group. When that's not
         // possible, we return nullptr, and the caller is responsible for trying again without
         // passing a 'groupIdForDistinctScan' value.
-        ParsedDistinct parsedDistinct(std::move(cq.getValue()), groupForDistinctScan->groupId());
+        CanonicalDistinct canonicalDistinct(std::move(cq.getValue()),
+                                            groupForDistinctScan->groupId());
 
         // If the GroupFromFirst transformation was generated for the $last case, we will need to
         // flip the direction of any generated DISTINCT_SCAN to preserve the semantics of the query.
@@ -669,7 +671,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
         auto distinctExecutor =
             getExecutorDistinct(&collections.getMainCollection(),
                                 plannerOpts.options | QueryPlannerParams::STRICT_DISTINCT_ONLY,
-                                &parsedDistinct,
+                                &canonicalDistinct,
                                 flipDistinctScanDirection);
         if (!distinctExecutor.isOK()) {
             return distinctExecutor.getStatus().withContext(
@@ -870,7 +872,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::createRan
 
     // Verify that we are already under a collection lock or in a lock-free read. We avoid taking
     // locks ourselves in this function because double-locking forces any PlanExecutor we create to
-    // adopt a NO_YIELD policy.
+    // adopt an INTERRUPT_ONLY policy.
     invariant(opCtx->isLockFreeReadsOp() ||
               opCtx->lockState()->isCollectionLockedForMode(coll->ns(), MODE_IS));
 
@@ -1626,26 +1628,30 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSearch(
     const NamespaceString& nss,
     const AggregateCommandRequest* aggRequest,
     Pipeline* pipeline) {
+    uassert(7856009,
+            "Cannot have exchange specified in a $search pipeline",
+            !aggRequest || !aggRequest->getExchange());
+
     auto expCtx = pipeline->getContext();
     auto& searchHelper = getSearchHelpers(expCtx->opCtx->getServiceContext());
 
     DocumentSource* searchStage = pipeline->peekFront();
     auto yieldPolicy = PlanYieldPolicyRemoteCursor::make(
         expCtx->opCtx, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, collections, nss);
-    auto yieldPolicyPtr = yieldPolicy.get();
 
-    if (searchHelper->isSearchPipeline(pipeline)) {
-        searchHelper->establishSearchQueryCursors(expCtx, searchStage, std::move(yieldPolicy));
-    } else if (searchHelper->isSearchMetaPipeline(pipeline)) {
-        searchHelper->establishSearchMetaCursor(expCtx, searchStage, std::move(yieldPolicy));
-    } else {
-        tasserted(7856008, "Not search pipeline in buildInnerQueryExecutorSearch");
+    if (!expCtx->explain) {
+        if (searchHelper->isSearchPipeline(pipeline)) {
+            searchHelper->establishSearchQueryCursors(expCtx, searchStage, std::move(yieldPolicy));
+        } else if (searchHelper->isSearchMetaPipeline(pipeline)) {
+            searchHelper->establishSearchMetaCursor(expCtx, searchStage, std::move(yieldPolicy));
+        } else {
+            tasserted(7856008, "Not search pipeline in buildInnerQueryExecutorSearch");
+        }
     }
 
     auto [executor, callback, additionalExecutors] =
         buildInnerQueryExecutorGeneric(collections, nss, aggRequest, pipeline);
 
-    yieldPolicyPtr->registerPlanExecutor(executor.get());
     const CanonicalQuery* cq = executor->getCanonicalQuery();
 
     if (!cq->cqPipeline().empty() &&
@@ -1655,12 +1661,10 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSearch(
             // Create a yield policy for metadata cursor.
             auto metadataYieldPolicy = PlanYieldPolicyRemoteCursor::make(
                 expCtx->opCtx, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, collections, nss);
-            auto metadataYieldPolicyPtr = metadataYieldPolicy.get();
             cursor->updateYieldPolicy(std::move(metadataYieldPolicy));
 
             additionalExecutors.push_back(uassertStatusOK(getSearchMetadataExecutorSBE(
                 expCtx->opCtx, collections, nss, *cq, std::move(*cursor))));
-            metadataYieldPolicyPtr->registerPlanExecutor(additionalExecutors.back().get());
         }
     }
     return {std::move(executor), callback, std::move(additionalExecutors)};

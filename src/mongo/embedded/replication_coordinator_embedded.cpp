@@ -66,7 +66,8 @@ bool ReplicationCoordinatorEmbedded::inQuiesceMode() const {
     return false;
 }
 
-void ReplicationCoordinatorEmbedded::shutdown(OperationContext* opCtx) {}
+void ReplicationCoordinatorEmbedded::shutdown(OperationContext* opCtx,
+                                              BSONObjBuilder* shutdownTimeElapsedBuilder) {}
 
 const ReplSettings& ReplicationCoordinatorEmbedded::getSettings() const {
     static ReplSettings _settings;
@@ -361,7 +362,8 @@ BSONObj ReplicationCoordinatorEmbedded::getConfigBSON() const {
     UASSERT_NOT_IMPLEMENTED;
 }
 
-const MemberConfig* ReplicationCoordinatorEmbedded::findConfigMemberByHostAndPort(
+boost::optional<MemberConfig>
+ReplicationCoordinatorEmbedded::findConfigMemberByHostAndPort_deprecated(
     const HostAndPort& hap) const {
     UASSERT_NOT_IMPLEMENTED;
 }

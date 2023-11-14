@@ -142,6 +142,16 @@ struct FieldProjectionMap {
 static constexpr const char* kIndexKeyPrefix = "<indexKey>";
 
 /**
+ * Function that replaces parameterized constants in a MatchExpression with their corresponding
+ * param id's in ABT.
+ *
+ * Represented by an ABT FunctionCall node with two children:
+ * (1) parameter id (int) that maps to the constant value
+ * (2) enum/int representation of the constant's sbe type tag
+ */
+static constexpr auto kParameterFunctionName = "getParam";
+
+/**
  * Memo-related types.
  */
 using GroupIdType = int64_t;
@@ -336,6 +346,10 @@ struct QueryHints {
     // Controls if we prefer to insert redundant index predicates on the Seek side in order to
     // prevent issues arising from yielding.
     bool _disableYieldingTolerantPlans = true;
+
+    // Controls if we permit the optimization to remove Not operators by pushing them
+    // down toward the leaves of an ABT.
+    bool _enableNotPushdown = false;
 
     // Controls if we force sampling CE to fall back on heuristic for filter node.
     bool _forceSamplingCEFallBackForFilterNode = true;

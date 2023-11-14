@@ -102,12 +102,13 @@ ParsedUpdateBase::ParsedUpdateBase(OperationContext* opCtx,
       _canonicalQuery(),
       _extensionsCallback(std::move(extensionsCallback)),
       _collection(collection),
-      _timeseriesUpdateQueryExprs(isRequestToTimeseries
-                                      ? createTimeseriesWritesQueryExprsIfNecessary(
-                                            feature_flags::gTimeseriesUpdatesSupport.isEnabled(
-                                                serverGlobalParams.featureCompatibility),
-                                            collection)
-                                      : nullptr),
+      _timeseriesUpdateQueryExprs(
+          isRequestToTimeseries
+              ? createTimeseriesWritesQueryExprsIfNecessary(
+                    feature_flags::gTimeseriesUpdatesSupport.isEnabled(
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
+                    collection)
+              : nullptr),
       _isRequestToTimeseries(isRequestToTimeseries) {
     if (forgoOpCounterIncrements) {
         _expCtx->enabledCounters = false;
@@ -264,7 +265,8 @@ void ParsedUpdateBase::parseUpdate() {
 }
 
 PlanYieldPolicy::YieldPolicy ParsedUpdateBase::yieldPolicy() const {
-    return _request->isGod() ? PlanYieldPolicy::YieldPolicy::NO_YIELD : _request->getYieldPolicy();
+    return _request->isGod() ? PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY
+                             : _request->getYieldPolicy();
 }
 
 bool ParsedUpdateBase::hasParsedQuery() const {

@@ -166,7 +166,8 @@ public:
 
     virtual bool inQuiesceMode() const override;
 
-    virtual void shutdown(OperationContext* opCtx) override;
+    virtual void shutdown(OperationContext* opCtx,
+                          BSONObjBuilder* shutdownTimeElapsedBuilder) override;
 
     virtual const ReplSettings& getSettings() const override;
 
@@ -305,7 +306,7 @@ public:
 
     virtual BSONObj getConfigBSON() const override;
 
-    virtual const MemberConfig* findConfigMemberByHostAndPort(
+    virtual boost::optional<MemberConfig> findConfigMemberByHostAndPort_deprecated(
         const HostAndPort& hap) const override;
 
     virtual bool isConfigLocalHostAllowed() const override;
@@ -1842,9 +1843,6 @@ private:
     // The non-null OpTime used for committed reads, if there is one.
     // When engaged, this must be <= _lastCommittedOpTime.
     boost::optional<OpTime> _currentCommittedSnapshot;  // (M)
-
-    // A flag that enables/disables advancement of the stable timestamp for storage.
-    bool _shouldSetStableTimestamp = true;  // (M)
 
     // Used to signal threads that are waiting for a new value of _currentCommittedSnapshot.
     stdx::condition_variable _currentCommittedSnapshotCond;  // (M)

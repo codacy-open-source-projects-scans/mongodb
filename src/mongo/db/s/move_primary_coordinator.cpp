@@ -133,10 +133,16 @@ bool MovePrimaryCoordinator::_mustAlwaysMakeProgress() {
 void MovePrimaryCoordinator::checkIfOptionsConflict(const BSONObj& doc) const {
     const auto otherDoc = MovePrimaryCoordinatorDocument::parse(
         IDLParserContext("MovePrimaryCoordinatorDocument"), doc);
+
+    const auto toShardIdAreEqual = [&] {
+        stdx::lock_guard lk(_docMutex);
+        return _doc.getToShardId() == otherDoc.getToShardId();
+    }();
+
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "Another movePrimary operation with different arguments is already running ont the "
             "same database",
-            _doc.getToShardId() == otherDoc.getToShardId());
+            toShardIdAreEqual);
 }
 
 ExecutorFuture<void> MovePrimaryCoordinator::_runImpl(
@@ -429,8 +435,7 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getCollectionsToClone(
             uassertStatusOK(bsonExtractStringField(collInfo, "name", &collName));
 
             const NamespaceString nss(NamespaceStringUtil::deserialize(_dbName, collName));
-            if (!nss.isSystem() ||
-                nss.isLegalClientSystemNS(serverGlobalParams.featureCompatibility)) {
+            if (!nss.isSystem() || nss.isLegalClientSystemNS()) {
                 colls.push_back(nss);
             }
         }

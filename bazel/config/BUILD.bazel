@@ -1,4 +1,4 @@
-load("//bazel/config:configs.bzl", "build_mode", "compiler_type", "use_libunwind")
+load("//bazel/config:configs.bzl", "build_mode", "compiler_type", "use_libunwind", "use_gdbserver", "spider_monkey_dbg", "allocator", "use_lldbserver", "use_wait_for_debugger", "use_disable_ref_track")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -22,6 +22,13 @@ config_setting(
     name = "compiler_type_gcc",
     flag_values = {
         "//bazel/config:compiler_type": "gcc",
+    },
+)
+
+config_setting(
+    name = "compiler_type_msvc",
+    flag_values = {
+        "//bazel/config:compiler_type": "msvc",
     },
 )
 
@@ -221,5 +228,123 @@ config_setting(
     name = "use_libunwind_enabled",
     flag_values = {
         "//bazel/config:use_libunwind": "True",
+    },
+)
+
+# --------------------------------------
+# gdbserver options
+# --------------------------------------
+
+use_gdbserver(
+    name = "use_gdbserver",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_gdbserver_enabled",
+    flag_values = {
+        "//bazel/config:use_gdbserver": "True",
+    }
+)
+
+# --------------------------------------
+# Spider Monkey Debug options
+# --------------------------------------
+
+# TODO(SERVER-82800): use this flag to enable/disable SpiderMonkey debug mode in mozjs when mozjs
+# is ported over to bazel.
+spider_monkey_dbg(
+    name = "spider_monkey_dbg",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "spider_monkey_dbg_enabled",
+    flag_values = {
+        "//bazel/config:spider_monkey_dbg": "True",
+    }
+)
+
+# --------------------------------------
+# allocator options
+# --------------------------------------
+
+allocator(
+    name = "allocator",
+    build_setting_default = "system",
+)
+
+config_setting(
+    name = "auto_allocator_linux",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {
+        "//bazel/config:allocator": "auto",
+    },
+)
+
+config_setting(
+    name = "auto_allocator_windows",
+    constraint_values = [
+        "@platforms//os:windows",
+    ],
+    flag_values = {
+        "//bazel/config:allocator": "auto",
+    },
+)
+
+config_setting(
+    name = "tcmalloc_allocator",
+    flag_values = {
+        "//bazel/config:allocator": "tcmalloc",
+    },
+)
+
+# --------------------------------------
+# gdbserver options
+# --------------------------------------
+
+use_lldbserver(
+    name = "use_lldbserver",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_lldbserver_enabled",
+    flag_values = {
+        "//bazel/config:use_lldbserver": "True",
+    }
+)
+
+# --------------------------------------
+# wait-for-debugger options
+# --------------------------------------
+
+use_wait_for_debugger(
+    name = "use_wait_for_debugger",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_wait_for_debugger_enabled",
+    flag_values = {
+        "//bazel/config:use_wait_for_debugger": "True",
+    }
+)
+
+# --------------------------------------
+# wait-for-debugger options
+# --------------------------------------
+
+use_disable_ref_track(
+    name = "use_disable_ref_track",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_disable_ref_track_enabled",
+    flag_values = {
+        "//bazel/config:use_disable_ref_track": "True",
     },
 )

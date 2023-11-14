@@ -74,7 +74,6 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/bucket_compression',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
-        '$BUILD_DIR/mongo/db/timeseries/timeseries_stats',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_write_util',
         '$BUILD_DIR/mongo/db/transaction/transaction',
         '$BUILD_DIR/mongo/db/transaction/transaction_api',
@@ -138,6 +137,18 @@ env.Library(
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/update/update_driver',
         'parsed_update_array_filters',
+    ],
+)
+
+env.Library(
+    target='delete_request_idl',
+    source='delete_request.idl',
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/pipeline/runtime_constants_idl',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
     ],
 )
 

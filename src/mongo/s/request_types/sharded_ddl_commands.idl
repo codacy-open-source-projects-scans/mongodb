@@ -151,12 +151,13 @@ structs:
                 type: bool
                 description: "Whether the shard key index should enforce a unique constraint."
                 default: false
+            # TODO SERVER-83006: remove deprecated numInitialChunks parameter.
             numInitialChunks:
                 type: safeInt64
                 description: >-
                     The number of chunks to create initially when sharding an empty collection with
                     a hashed shard key.
-                default: 0
+                optional: true
             presplitHashedZones:
                 type: bool
                 description: >-
@@ -292,6 +293,11 @@ structs:
                     doesn't already exist. Only allowed if `unsplittable` is true.
                 type: shard_id
                 optional: true
+            # TODO SERVER-81190 Remove this parameter when unsplittable collections request coming 
+            # from the {create...} cmd start getting tracked in the catalog 
+            isFromCreateUnsplittableCollectionTestCommand:
+                description: "Temporary field to differentiate calls originating from the createUnsplittableCollection test command."
+                type: optionalBool
 
     CreateCollectionResponse:
         description: "Response of the create collection command"

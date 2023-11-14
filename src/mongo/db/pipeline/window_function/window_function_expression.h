@@ -432,7 +432,9 @@ public:
                                              "$stdDevSamp",
                                              "$stdDevPop",
                                              "$avg",
-                                             "$addToSet"};
+                                             "$addToSet",
+                                             "$min",
+                                             "$max"};
         if (compatibleAccumulators.count(_accumulatorName)) {
             expCtx->sbeWindowCompatibility =
                 std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
@@ -998,13 +1000,8 @@ public:
         : Expression(expCtx, std::move(name), std::move(input), std::move(bounds)),
           nExpr(std::move(nExpr)),
           sortPattern(std::move(sortPattern)) {
-        StringDataSet compatibleAccumulators{"$firstN", "$lastN"};
-        if (compatibleAccumulators.count(_accumulatorName)) {
-            expCtx->sbeWindowCompatibility =
-                std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
-        } else {
-            expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
-        }
+        expCtx->sbeWindowCompatibility =
+            std::min(expCtx->sbeWindowCompatibility, SbeCompatibility::flagGuarded);
     }
 
     Value serialize(const SerializationOptions& opts) const final;

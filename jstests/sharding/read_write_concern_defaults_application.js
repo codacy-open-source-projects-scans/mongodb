@@ -373,9 +373,8 @@ let testCases = {
     },
     cpuload: {skip: "does not accept read or write concern"},
     create: {
-        command: {create: coll},
-        checkReadConcern: false,
-        checkWriteConcern: true,
+        skip:
+            "The create command is not passed through and instead it goes out to the shards as _shardsvrCreateCollection with the user-specified write concern"
     },
     createIndexes: {
         setUp: function(conn) {
@@ -779,6 +778,7 @@ let testCases = {
     top: {skip: "does not accept read or write concern"},
     transitionFromDedicatedConfigServer: {skip: "does not accept read or write concern"},
     transitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
+    transitionToShardedCluster: {skip: "accepts only majority"},
     unshardCollection: {skip: "does not accept read or write concern"},
     update: {
         setUp: function(conn) {

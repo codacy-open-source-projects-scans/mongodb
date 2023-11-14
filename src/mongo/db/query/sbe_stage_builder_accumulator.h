@@ -65,6 +65,8 @@ const StringData kDerivativeInputFirst = "inputFirst"_sd;
 const StringData kDerivativeInputLast = "inputLast"_sd;
 const StringData kDerivativeSortByFirst = "sortByFirst"_sd;
 const StringData kDerivativeSortByLast = "sortByLast"_sd;
+
+const StringData kDefaultVal = "defaultVal"_sd;
 }  // namespace AccArgs
 
 /**
@@ -129,15 +131,6 @@ std::unique_ptr<sbe::EExpression> buildFinalize(
     StringDataMap<std::unique_ptr<sbe::EExpression>> argExprs,
     boost::optional<sbe::value::SlotId> collatorSlot,
     sbe::value::FrameIdGenerator& frameIdGenerator);
-
-/**
- * Translates an input AccumulationStatement into an SBE EExpression for the initialization of the
- * accumulator state.
- */
-std::vector<std::unique_ptr<sbe::EExpression>> buildInitialize(
-    const AccumulationStatement& acc,
-    std::unique_ptr<sbe::EExpression> initExpr,
-    sbe::value::FrameIdGenerator&);
 
 /**
  * Translates an input AccumulationStatement into an SBE EExpression for the initialization of the

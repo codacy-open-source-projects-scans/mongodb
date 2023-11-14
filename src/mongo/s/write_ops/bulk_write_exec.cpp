@@ -68,6 +68,7 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
+#include "mongo/s/cannot_implicitly_create_collection_info.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard.h"
@@ -204,6 +205,7 @@ void fillOKInsertReplies(BulkWriteReplyInfo& replyInfo, int size) {
         reply.setOk(1);
         reply.setIdx(i);
         replyInfo.replyItems.push_back(reply);
+        replyInfo.summaryFields.nInserted += 1;
     }
 }
 
@@ -223,9 +225,14 @@ BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType
                     // BulkWrite needs only _id, not index.
                     reply.setUpserted(
                         IDLAnyTypeOwned(upsertDetails[0]->getUpsertedID().firstElement()));
+                    replyInfo.summaryFields.nUpserted += 1;
                 }
 
                 reply.setNModified(response.getNModified());
+                replyInfo.summaryFields.nModified += response.getNModified();
+                replyInfo.summaryFields.nMatched += response.getN();
+            } else {
+                replyInfo.summaryFields.nDeleted += response.getN();
             }
             reply.setOk(1);
             reply.setIdx(0);
@@ -241,6 +248,7 @@ BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType
                     replyInfo.replyItems[idx].setN(0);
                     replyInfo.replyItems[idx].setOk(0);
                     replyInfo.replyItems[idx].setStatus(err.getStatus());
+                    replyInfo.summaryFields.nInserted -= 1;
                 }
             } else {
                 invariant(errDetails.size() == 1 && response.getN() == 0);
@@ -251,7 +259,7 @@ BulkWriteReplyInfo processFLEResponse(const BulkWriteCRUDOp::OpType& firstOpType
                 }
                 replyInfo.replyItems.push_back(reply);
             }
-            replyInfo.numErrors += errDetails.size();
+            replyInfo.summaryFields.nErrors += errDetails.size();
         } else {
             // response.toStatus() is not OK but there is no errDetails so the
             // top level status should be not OK instead. Raising an exception.
@@ -339,7 +347,7 @@ std::pair<FLEBatchResult, BulkWriteReplyInfo> attemptExecuteFLE(
         }
 
         replyInfo.replyItems.push_back(reply);
-        replyInfo.numErrors = 1;
+        replyInfo.summaryFields.nErrors = 1;
         return {FLEBatchResult::kProcessed, std::move(replyInfo)};
     }
 }
@@ -354,13 +362,8 @@ void executeRetryableTimeseriesUpdate(OperationContext* opCtx,
     // Construct a single-op update request based on the update operation at opIdx.
     auto& bulkWriteReq = bulkWriteOp.getClientRequest();
 
-    BulkWriteCommandRequest singleUpdateRequest;
-    singleUpdateRequest.setOps({bulkWriteReq.getOps()[opIdx]});
-    singleUpdateRequest.setNsInfo(bulkWriteReq.getNsInfo());
-    singleUpdateRequest.setBypassDocumentValidation(bulkWriteReq.getBypassDocumentValidation());
-    singleUpdateRequest.setLet(bulkWriteReq.getLet());
-    singleUpdateRequest.setStmtId(bulk_write_common::getStatementId(bulkWriteReq, opIdx));
-    singleUpdateRequest.setDbName(DatabaseName::kAdmin);
+    BulkWriteCommandRequest singleUpdateRequest =
+        bulk_write_common::makeSingleOpBulkWriteCommandRequest(bulkWriteReq, opIdx);
 
     auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
     auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
@@ -447,10 +450,30 @@ void executeWriteWithoutShardKey(
     } else {
         // Execute the two phase write protocol for writes that cannot directly target a shard.
 
-        // TODO (SERVER-77871): Support shard key metrics sampling.
+        const auto targetedWriteBatch = [&] {
+            // If there is a targeted write with a sampleId, use that write instead in order to pass
+            // the sampleId to the two phase write protocol. Otherwise, just choose the first
+            // targeted write.
+            for (auto&& [_ /* shardId */, childBatch] : childBatches) {
+                auto nextBatch = childBatch.get();
+
+                // For a write without shard key, we expect each TargetedWriteBatch in childBatches
+                // to contain only one TargetedWrite directed to each shard.
+                tassert(7787100,
+                        "There must be only 1 targeted write in this targeted write batch.",
+                        nextBatch->getWrites().size() == 1);
+
+                auto targetedWrite = nextBatch->getWrites().begin()->get();
+                if (targetedWrite->sampleId) {
+                    return nextBatch;
+                }
+            }
+            return childBatches.begin()->second.get();
+        }();
+
         auto cmdObj = bulkWriteOp
                           .buildBulkCommandRequest(targeters,
-                                                   *childBatches.begin()->second.get(),
+                                                   *targetedWriteBatch,
                                                    allowShardKeyUpdatesWithoutFullShardKeyInQuery)
                           .toBSON({});
 
@@ -578,9 +601,12 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
         // Refresh the targeter(s) if we received a target error or a stale config/db error.
         bool targeterChanged = false;
         try {
+            for (auto& targeter : targeters) {
+                targeterChanged = targeterChanged || targeter->createCollectionIfNeeded(opCtx);
+            }
             LOGV2_DEBUG(7298200, 2, "Refreshing all targeters for bulkWrite");
             for (auto& targeter : targeters) {
-                targeterChanged = targeter->refreshIfNeeded(opCtx);
+                targeterChanged = targeterChanged || targeter->refreshIfNeeded(opCtx);
             }
             LOGV2_DEBUG(7298201,
                         2,
@@ -698,6 +724,16 @@ BulkWriteCommandRequest BulkWriteOp::buildBulkCommandRequest(
     for (const auto& targetedWrite : targetedBatch.getWrites()) {
         const WriteOpRef& writeOpRef = targetedWrite->writeOpRef;
         ops.push_back(_clientRequest.getOps().at(writeOpRef.first));
+
+        if (targetedWrite->sampleId.has_value()) {
+            stdx::visit(
+                OverloadedVisitor{
+                    [&](mongo::BulkWriteInsertOp& op) { return; },
+                    [&](mongo::BulkWriteUpdateOp& op) { op.setSampleId(targetedWrite->sampleId); },
+                    [&](mongo::BulkWriteDeleteOp& op) { op.setSampleId(targetedWrite->sampleId); },
+                },
+                ops.back());
+        }
 
         // Set the nsInfo's shardVersion & databaseVersion fields based on the endpoint
         // of each operation. Since some operations may be on the same namespace, this
@@ -855,6 +891,12 @@ void BulkWriteOp::processChildBatchResponseFromRemote(
         // batch.
         const auto& replyItems = bwReply.getCursor().getFirstBatch();
 
+        _nInserted += bwReply.getNInserted();
+        _nDeleted += bwReply.getNDeleted();
+        _nMatched += bwReply.getNMatched();
+        _nUpserted += bwReply.getNUpserted();
+        _nModified += bwReply.getNModified();
+
         // Capture the errors if any exist and mark the writes in the TargetedWriteBatch so that
         // they may be re-targeted if needed.
         noteChildBatchResponse(
@@ -920,7 +962,8 @@ void BulkWriteOp::noteChildBatchResponse(
         // replyItem as having failed with a staleness error.
         if (!ordered && lastError &&
             (lastError->getStatus().code() == ErrorCodes::StaleDbVersion ||
-             ErrorCodes::isStaleShardVersionError(lastError->getStatus())) &&
+             ErrorCodes::isStaleShardVersionError(lastError->getStatus()) ||
+             lastError->getStatus() == ErrorCodes::CannotImplicitlyCreateCollection) &&
             (index == (int)replyItems.size())) {
             // Decrement the index so it keeps pointing to the same error (i.e. the
             // last error, which is a staleness error).
@@ -949,6 +992,7 @@ void BulkWriteOp::noteChildBatchResponse(
                     TrackedErrors trackedErrors;
                     trackedErrors.startTracking(ErrorCodes::StaleConfig);
                     trackedErrors.startTracking(ErrorCodes::StaleDbVersion);
+                    trackedErrors.startTracking(ErrorCodes::CannotImplicitlyCreateCollection);
                     errorsPerNamespace->emplace(nss, trackedErrors);
                 }
 
@@ -1084,6 +1128,15 @@ void BulkWriteOp::noteWriteOpFinalResponse(
     }
 
     if (reply.getStatus().isOK()) {
+        if (writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Insert) {
+            _nInserted += reply.getN().value_or(0);
+        } else if (writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Delete) {
+            _nDeleted += reply.getN().value_or(0);
+        } else {
+            _nModified += reply.getNModified().value_or(0);
+            _nMatched += reply.getN().value_or(0);
+            _nUpserted += reply.getUpserted() ? 1 : 0;
+        }
         writeOp.setOpComplete(reply);
     } else {
         auto writeError = write_ops::WriteError(opIdx, reply.getStatus());
@@ -1104,7 +1157,12 @@ void BulkWriteOp::noteWriteOpFinalResponse(
 BulkWriteReplyInfo BulkWriteOp::generateReplyInfo(bool errorsOnly) {
     dassert(isFinished());
     std::vector<BulkWriteReplyItem> replyItems;
-    int numErrors = 0;
+    SummaryFields summary;
+    summary.nInserted = _nInserted;
+    summary.nDeleted = _nDeleted;
+    summary.nMatched = _nMatched;
+    summary.nModified = _nModified;
+    summary.nUpserted = _nUpserted;
     replyItems.reserve(_writeOps.size());
 
     const auto ordered = _clientRequest.getOrdered();
@@ -1112,11 +1170,30 @@ BulkWriteReplyInfo BulkWriteOp::generateReplyInfo(bool errorsOnly) {
         // If we encountered an error causing us to abort execution we may not have waited for
         // responses to all outstanding requests.
         dassert(writeOp.getWriteState() != WriteOpState_Pending || _aborted);
-        if (writeOp.getWriteState() == WriteOpState_Completed) {
+        auto writeOpState = writeOp.getWriteState();
+
+        // TODO (SERVER-79611): Improve mongos metrics.
+        if (writeOpState == WriteOpState_Completed || writeOpState == WriteOpState_Error) {
+            switch (writeOp.getWriteItem().getOpType()) {
+                case BatchedCommandRequest::BatchType_Insert:
+                    globalOpCounters.gotInsert();
+                    break;
+                case BatchedCommandRequest::BatchType_Update:
+                    globalOpCounters.gotUpdate();
+                    break;
+                case BatchedCommandRequest::BatchType_Delete:
+                    globalOpCounters.gotDelete();
+                    break;
+                default:
+                    MONGO_UNREACHABLE
+            }
+        }
+
+        if (writeOpState == WriteOpState_Completed) {
             if (!errorsOnly) {
                 replyItems.push_back(writeOp.takeBulkWriteReplyItem());
             }
-        } else if (writeOp.getWriteState() == WriteOpState_Error) {
+        } else if (writeOpState == WriteOpState_Error) {
             replyItems.emplace_back(writeOp.getWriteItem().getItemIndex(),
                                     writeOp.getOpError().getStatus());
             // TODO SERVER-79510: Remove this. This is necessary right now because the nModified
@@ -1129,14 +1206,18 @@ BulkWriteReplyInfo BulkWriteOp::generateReplyInfo(bool errorsOnly) {
             if (writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Update) {
                 replyItems.back().setNModified(0);
             }
-            numErrors++;
+            // We only count nErrors at the end of the command because it is simpler and less error
+            // prone. If we counted errors as we encountered them we could hit edge cases where we
+            // accidentally count the same error multiple times. At this point in the execution we
+            // have already resolved any repeat errors.
+            summary.nErrors++;
             // Only return the first error if we are ordered.
             if (ordered)
                 break;
         }
     }
 
-    return {std::move(replyItems), numErrors, generateWriteConcernError(), _retriedStmtIds};
+    return {std::move(replyItems), summary, generateWriteConcernError(), _retriedStmtIds};
 }
 
 void BulkWriteOp::saveWriteConcernError(ShardId shardId, BulkWriteWriteConcernError wcError) {
@@ -1192,6 +1273,16 @@ void BulkWriteOp::noteStaleResponses(
                     _opCtx,
                     error.endpoint,
                     *error.error.getStatus().extraInfo<StaleDbRoutingVersion>());
+            }
+            for (const auto& error :
+                 errors->second.getErrors(ErrorCodes::CannotImplicitlyCreateCollection)) {
+                LOGV2_DEBUG(8037203,
+                            0,
+                            "Noting cannotImplicitlyCreateCollection response.",
+                            "status"_attr = error.error.getStatus());
+                targeter->noteCannotImplicitlyCreateCollectionResponse(
+                    _opCtx,
+                    *error.error.getStatus().extraInfo<CannotImplicitlyCreateCollectionInfo>());
             }
         }
     }

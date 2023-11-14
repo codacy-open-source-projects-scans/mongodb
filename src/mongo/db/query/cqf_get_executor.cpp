@@ -106,6 +106,7 @@
 #include "mongo/db/query/optimizer/utils/utils.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -362,6 +363,7 @@ QueryHints getHintsFromQueryKnobs() {
     hints._minIndexEqPrefixes = internalCascadesOptimizerMinIndexEqPrefixes.load();
     hints._maxIndexEqPrefixes = internalCascadesOptimizerMaxIndexEqPrefixes.load();
     hints._numSamplingChunks = internalCascadesOptimizerSampleChunks.load();
+    hints._enableNotPushdown = internalCascadesOptimizerEnableNotPushdown.load();
     hints._forceSamplingCEFallBackForFilterNode =
         internalCascadesOptimizerSamplingCEFallBackForFilterNode.load();
 
@@ -453,6 +455,11 @@ static ExecParams createExecutor(
     // plan instead.
     PlanAndProps toExplain = std::move(planAndProps);
 
+    // TODO SERVER-82709: Instead of using the framework control here, use the query eligibility
+    // information.
+    auto frameworkControl =
+        QueryKnobConfiguration::decoration(opCtx).getInternalQueryFrameworkControlForOp();
+
     ExplainVersion explainVersion = ExplainVersion::Vmax;
     const auto& explainVersionStr = internalCascadesOptimizerExplainVersion.get();
     if (explainVersionStr == "v1"_sd) {
@@ -464,12 +471,16 @@ static ExecParams createExecutor(
     } else if (explainVersionStr == "v2compact"_sd) {
         explainVersion = ExplainVersion::V2Compact;
         toExplain = *phaseManager.getPostMemoPlan();
+    } else if (explainVersionStr == "bson"_sd &&
+               frameworkControl == QueryFrameworkControlEnum::kTryBonsai) {
+        explainVersion = ExplainVersion::UserFacingExplain;
     } else if (explainVersionStr == "bson"_sd) {
         explainVersion = ExplainVersion::V3;
     } else {
         // Should have been validated.
         MONGO_UNREACHABLE;
     }
+
     abtPrinter = std::make_unique<ABTPrinter>(
         phaseManager.getMetadata(), std::move(toExplain), explainVersion);
 
@@ -574,9 +585,6 @@ void validateFindCommandOptions(const FindCommandRequest& req) {
             req.getCollation().isEmpty() ||
                 SimpleBSONObjComparator::kInstance.evaluate(req.getCollation() ==
                                                             CollationSpec::kSimpleSpec));
-    uassert(ErrorCodes::InternalErrorNotSupported,
-            "let unsupported in CQF",
-            !req.getLet() || req.getLet()->isEmpty());
     uassert(
         ErrorCodes::InternalErrorNotSupported, "min unsupported in CQF", req.getMin().isEmpty());
     uassert(

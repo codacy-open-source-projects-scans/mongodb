@@ -1103,8 +1103,15 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         // initialization which will transition some components into the "primary" state, like
         // the TransactionCoordinatorService, and they would fail if the onStepUp logic
         // attempted the same transition.
-        ShardingCatalogManager::get(opCtx)->installConfigShardIdentityDocument(opCtx);
-        if (gFeatureFlagAllMongodsAreSharded.isEnabledAndIgnoreFCVUnsafeAtStartup()) {
+
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        // TODO: SERVER-82965 Remove condition after v8.0 becomes last-lts.
+        if (!serverGlobalParams.doAutoBootstrapSharding ||
+            gFeatureFlagAllMongodsAreSharded.isEnabled(fcvSnapshot)) {
+            ShardingCatalogManager::get(opCtx)->installConfigShardIdentityDocument(opCtx);
+        }
+
+        if (gFeatureFlagAllMongodsAreSharded.isEnabled(fcvSnapshot)) {
             ShardingReady::get(opCtx)->scheduleTransitionToConfigShard(opCtx);
         }
     }
@@ -1238,13 +1245,6 @@ double ReplicationCoordinatorExternalStateImpl::getElectionTimeoutOffsetLimitFra
     return replElectionTimeoutOffsetLimitFraction;
 }
 
-bool ReplicationCoordinatorExternalStateImpl::isReadCommittedSupportedByStorageEngine(
-    OperationContext* opCtx) const {
-    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    // This should never be called if the storage engine has not been initialized.
-    invariant(storageEngine);
-    return storageEngine->supportsReadConcernMajority();
-}
 
 bool ReplicationCoordinatorExternalStateImpl::isReadConcernSnapshotSupportedByStorageEngine(
     OperationContext* opCtx) const {

@@ -37,12 +37,102 @@ build_mode = rule(
 )
 
 # =========
+# gdbserver
+# ========= 
+
+use_gdbserver_provider = provider(
+    doc = "Choose if gdbserver should be used",
+    fields = ["type"],
+)
+
+use_gdbserver = rule(
+    implementation = lambda ctx: use_gdbserver_provider(type = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
 # libunwind
 # =========
 
-use_libunwind_provider = provider(fields = ["type"])
+use_libunwind_provider = provider(fields = ["enabled"])
 
 use_libunwind = rule(
-    implementation = lambda ctx: use_libunwind_provider(type = ctx.build_setting_value),
+    implementation = lambda ctx: use_libunwind_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
+)
+
+# =========
+# spider_monkey_dbg
+# =========
+
+spider_monkey_dbg_provider = provider(doc = "Enable SpiderMonkey debug mode.", fields = ["enabled"])
+
+spider_monkey_dbg = rule(
+    implementation = lambda ctx: spider_monkey_dbg_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# allocator
+# =========
+
+allocator_values = ["auto", "system", "tcmalloc"]
+
+allocator_provider = provider(
+    doc = "Allocator to use (use \"auto\" for best choice for current platform)",
+    fields = {"allocator": "choose one of " + ".".join(allocator_values)},
+)
+
+def allocator_impl(ctx):
+    allocator_value = ctx.build_setting_value
+    if allocator_value not in allocator_values:
+        fail(str(ctx.label) + " allocator allowed to take values {" + ", ".join(allocator_values) + "} but was set to unallowed value " + allocator_value)
+    return allocator_provider(allocator = allocator_value)
+
+allocator = rule(
+    implementation = allocator_impl,
+    build_setting = config.string(flag = True),
+)
+
+# =========
+# lldb-server
+# ========= 
+
+use_lldbserver_provider = provider(
+    doc = "Choose if lldbserver should be used",
+    fields = ["type"],
+)
+
+use_lldbserver = rule(
+    implementation = lambda ctx: use_lldbserver_provider(type = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# wait_for_debugger
+# ========= 
+
+use_wait_for_debugger_provider = provider(
+    doc = "Wait for debugger attach on process startup",
+    fields = ["enabled"],
+)
+
+use_wait_for_debugger = rule(
+    implementation = lambda ctx: use_wait_for_debugger_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# disable-ref-track
+# =========
+
+use_disable_ref_track_provider = provider(
+    doc = "Disables runtime tracking of REF state changes for pages within wiredtiger. " + 
+    "Tracking the REF state changes is useful for debugging but there is a small performance cost.",
+    fields = ["enabled"],
+)
+
+use_disable_ref_track = rule(
+    implementation = lambda ctx: use_disable_ref_track_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True)
 )

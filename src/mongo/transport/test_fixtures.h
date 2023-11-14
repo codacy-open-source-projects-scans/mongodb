@@ -47,6 +47,8 @@
 
 namespace mongo::transport::test {
 
+constexpr auto kLetKernelChoosePort = 0;
+
 template <typename T>
 class BlockingQueue {
 public:
@@ -98,8 +100,8 @@ struct SessionThread {
         _tasks.push(std::move(task));
     }
 
-    transport::Session& session() const {
-        return *_session;
+    std::shared_ptr<transport::Session> session() const {
+        return _session;
     }
 
 private:

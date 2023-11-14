@@ -211,7 +211,7 @@ Status userAllowedCreateNS(OperationContext* opCtx, const NamespaceString& ns) {
         return Status::OK();
     }
 
-    if (!ns.isValid(NamespaceString::DollarInDbNameBehavior::Disallow)) {
+    if (!ns.isValid(DatabaseName::DollarInDbNameBehavior::Disallow)) {
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "Invalid namespace: " << ns.toStringForErrorMsg());
     }
@@ -225,7 +225,7 @@ Status userAllowedCreateNS(OperationContext* opCtx, const NamespaceString& ns) {
         return Status::OK();
     }
 
-    if (ns.isSystem() && !ns.isLegalClientSystemNS(serverGlobalParams.featureCompatibility)) {
+    if (ns.isSystem() && !ns.isLegalClientSystemNS()) {
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "Invalid system namespace: " << ns.toStringForErrorMsg());
     }
@@ -248,7 +248,7 @@ Status userAllowedCreateNS(OperationContext* opCtx, const NamespaceString& ns) {
             return Status::OK();
         }
 
-        if (ns.isConfigDB() && ns.isLegalClientSystemNS(serverGlobalParams.featureCompatibility)) {
+        if (ns.isConfigDB() && ns.isLegalClientSystemNS()) {
             return Status::OK();
         }
 

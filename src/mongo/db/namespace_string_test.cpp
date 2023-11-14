@@ -112,58 +112,7 @@ TEST_F(NamespaceStringTest, Oplog) {
     ASSERT(NamespaceString::oplog("local.oplog.$foo"));
 }
 
-TEST_F(NamespaceStringTest, DatabaseValidNames) {
-    ASSERT(NamespaceString::validDBName("foo", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(NamespaceString::validDBName("foo$bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo/bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo.bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo\\bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo\"bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("a\0b"_sd, NamespaceString::DollarInDbNameBehavior::Allow));
-#ifdef _WIN32
-    ASSERT(
-        !NamespaceString::validDBName("foo*bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo<bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo>bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo:bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo|bar", NamespaceString::DollarInDbNameBehavior::Allow));
-    ASSERT(
-        !NamespaceString::validDBName("foo?bar", NamespaceString::DollarInDbNameBehavior::Allow));
-#endif
-
-    ASSERT(NamespaceString::validDBName("foo"));
-    ASSERT(!NamespaceString::validDBName("foo$bar"));
-    ASSERT(!NamespaceString::validDBName("foo/bar"));
-    ASSERT(!NamespaceString::validDBName("foo bar"));
-    ASSERT(!NamespaceString::validDBName("foo.bar"));
-    ASSERT(!NamespaceString::validDBName("foo\\bar"));
-    ASSERT(!NamespaceString::validDBName("foo\"bar"));
-    ASSERT(!NamespaceString::validDBName("a\0b"_sd));
-#ifdef _WIN32
-    ASSERT(!NamespaceString::validDBName("foo*bar"));
-    ASSERT(!NamespaceString::validDBName("foo<bar"));
-    ASSERT(!NamespaceString::validDBName("foo>bar"));
-    ASSERT(!NamespaceString::validDBName("foo:bar"));
-    ASSERT(!NamespaceString::validDBName("foo|bar"));
-    ASSERT(!NamespaceString::validDBName("foo?bar"));
-#endif
-
-    ASSERT(NamespaceString::validDBName(
-        "ThisIsADatabaseNameThatBrokeAllRecordsForValidLengthForDBName63"));
-    ASSERT(!NamespaceString::validDBName(
-        "WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"));
-
+TEST_F(NamespaceStringTest, CheckNamespaceStringConstructor) {
     ASSERT_THROWS_CODE(
         makeNamespaceString(boost::none,
                             "WhileThisDatabaseNameExceedsTheMaximumLengthForDatabaseNamesof63"),
@@ -213,17 +162,15 @@ TEST_F(NamespaceStringTest, IsCollectionlessCursorNamespace) {
 }
 
 TEST_F(NamespaceStringTest, IsLegalClientSystemNamespace) {
-    const auto& currentFCV = serverGlobalParams.featureCompatibility;
-    ASSERT_TRUE(makeNamespaceString(boost::none, "test.system.buckets.1234")
-                    .isLegalClientSystemNS(currentFCV));
-    ASSERT_TRUE(makeNamespaceString(boost::none, "test.system.buckets.abcde")
-                    .isLegalClientSystemNS(currentFCV));
-    ASSERT_FALSE(makeNamespaceString(boost::none, "test.system.buckets..1234")
-                     .isLegalClientSystemNS(currentFCV));
-    ASSERT_FALSE(makeNamespaceString(boost::none, "test.system.buckets.a234$")
-                     .isLegalClientSystemNS(currentFCV));
+    ASSERT_TRUE(
+        makeNamespaceString(boost::none, "test.system.buckets.1234").isLegalClientSystemNS());
+    ASSERT_TRUE(
+        makeNamespaceString(boost::none, "test.system.buckets.abcde").isLegalClientSystemNS());
     ASSERT_FALSE(
-        makeNamespaceString(boost::none, "test.system.buckets.").isLegalClientSystemNS(currentFCV));
+        makeNamespaceString(boost::none, "test.system.buckets..1234").isLegalClientSystemNS());
+    ASSERT_FALSE(
+        makeNamespaceString(boost::none, "test.system.buckets.a234$").isLegalClientSystemNS());
+    ASSERT_FALSE(makeNamespaceString(boost::none, "test.system.buckets.").isLegalClientSystemNS());
 }
 
 TEST_F(NamespaceStringTest, IsDropPendingNamespace) {

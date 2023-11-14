@@ -347,18 +347,17 @@ NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(const DatabaseName& dbName,
         return {dbName, uassertStatusOK(UUID::parse(first))};
     } else {
         const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
-        ensureNsNotCommand(nss);
+        ensureValidCollectionName(nss);
         return nss;
     }
 }
 
-void CommandHelpers::ensureNsNotCommand(const NamespaceString& nss) {
-    // TODO SERVER-81638 this method needs to be simplified and more explicit.
+void CommandHelpers::ensureValidCollectionName(const NamespaceString& nss) {
     uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Invalid collection name specified '" << nss.toStringForErrorMsg(),
-            !(NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()).find('$') !=
-                  std::string::npos &&
-              nss != NamespaceString::kLocalOplogDollarMain));
+            str::stream() << "Invalid collection name specified '" << nss.toStringForErrorMsg()
+                          << "'",
+            (NamespaceString::validCollectionName(nss.coll()) ||
+             nss == NamespaceString::kLocalOplogDollarMain));
 }
 
 NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
@@ -478,7 +477,7 @@ BSONObj CommandHelpers::appendGenericReplyFields(const BSONObj& replyObjWithGene
     return b.obj();
 }
 
-BSONObj appendWCToObj(const BSONObj& cmdObj, WriteConcernOptions newWC) {
+BSONObj CommandHelpers::appendWCToObj(const BSONObj& cmdObj, WriteConcernOptions newWC) {
     // Append all original fields except the writeConcern field to the new command.
     BSONObjBuilder cmdObjWithWriteConcern;
     for (const auto& elem : cmdObj) {

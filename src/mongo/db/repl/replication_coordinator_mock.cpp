@@ -107,7 +107,8 @@ bool ReplicationCoordinatorMock::inQuiesceMode() const {
     return false;
 }
 
-void ReplicationCoordinatorMock::shutdown(OperationContext*) {
+void ReplicationCoordinatorMock::shutdown(OperationContext*,
+                                          BSONObjBuilder* shutdownTimeElapsedBuilder) {
     // TODO
 }
 
@@ -453,10 +454,11 @@ Status ReplicationCoordinatorMock::validateWriteConcern(
     return _getConfigReturnValue.validateWriteConcern(writeConcern);
 }
 
-const MemberConfig* ReplicationCoordinatorMock::findConfigMemberByHostAndPort(
+boost::optional<MemberConfig> ReplicationCoordinatorMock::findConfigMemberByHostAndPort_deprecated(
     const HostAndPort& hap) const {
     stdx::lock_guard<Mutex> lock(_mutex);
-    return _getConfigReturnValue.findMemberByHostAndPort(hap);
+    const MemberConfig* result = _getConfigReturnValue.findMemberByHostAndPort(hap);
+    return boost::make_optional(result, *result);
 }
 
 bool ReplicationCoordinatorMock::isConfigLocalHostAllowed() const {

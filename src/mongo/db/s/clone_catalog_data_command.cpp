@@ -124,10 +124,9 @@ public:
             CloneCatalogData::parse(IDLParserContext("_shardsvrCloneCatalogData"), cmdObj);
         const auto dbName = cloneCatalogDataRequest.getCommandParameter().dbName();
 
-        uassert(
-            ErrorCodes::InvalidNamespace,
-            str::stream() << "invalid db name specified: " << dbName.toStringForErrorMsg(),
-            NamespaceString::validDBName(dbName, NamespaceString::DollarInDbNameBehavior::Allow));
+        uassert(ErrorCodes::InvalidNamespace,
+                str::stream() << "invalid db name specified: " << dbName.toStringForErrorMsg(),
+                DatabaseName::isValid(dbName, DatabaseName::DollarInDbNameBehavior::Allow));
 
         uassert(ErrorCodes::InvalidOptions,
                 str::stream() << "Can't clone catalog data for " << dbName.toStringForErrorMsg()
@@ -163,7 +162,8 @@ public:
         {
             FixedFCVRegion fcvRegion{opCtx};
             forceSameUUIDAsSource =
-                feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(*fcvRegion);
+                feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
+                    (*fcvRegion).acquireFCVSnapshot());
         }
 
         Cloner cloner;

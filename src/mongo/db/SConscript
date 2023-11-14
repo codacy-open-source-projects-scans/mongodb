@@ -321,6 +321,7 @@ env.Clone().InjectModule("enterprise").Library(
         'server_options_base',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/client/connection_string',
         '$BUILD_DIR/mongo/db/auth/cluster_auth_mode',
         'server_base',
     ],
@@ -981,10 +982,17 @@ env.CppUnitTest(
     target='replica_set_endpoint_test',
     source=[
         'replica_set_endpoint_sharding_state_test.cpp',
+        'replica_set_endpoint_test_fixture.cpp',
+        'replica_set_endpoint_util_test.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/auth/authmocks',
-        '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
+        '$BUILD_DIR/mongo/db/s/sharding_catalog_manager',
+        '$BUILD_DIR/mongo/rpc/message',
+        '$BUILD_DIR/mongo/transport/transport_layer_mock',
+        'commands',
+        'commands_test_example',
+        'service_context_d_test_fixture',
         'shard_role_api',
     ],
 )
@@ -1145,6 +1153,7 @@ env.Library(
         'storage/storage_engine_common',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/s/replica_set_endpoint_feature_flag',
         'auth/auth',
         'command_can_run_here',
         'commands/fsync_locked',
@@ -1548,7 +1557,6 @@ execEnv.Library(
         'exec/unpack_timeseries_bucket.cpp',
         'exec/update_stage.cpp',
         'exec/upsert_stage.cpp',
-        'ops/delete_request.idl',
         'ops/parsed_delete.cpp',
         'ops/parsed_update.cpp',
         'ops/update_result.cpp',
@@ -1568,7 +1576,6 @@ execEnv.Library(
         'query/find.cpp',
         'query/get_executor.cpp',
         'query/internal_plans.cpp',
-        'query/plan_executor.cpp',
         'query/plan_executor_factory.cpp',
         'query/plan_executor_impl.cpp',
         'query/plan_executor_sbe.cpp',
@@ -1578,20 +1585,20 @@ execEnv.Library(
         'query/plan_insert_listener.cpp',
         'query/plan_ranker.cpp',
         'query/plan_yield_policy_impl.cpp',
-        'query/plan_yield_policy_remote_cursor.cpp',
         'query/plan_yield_policy_sbe.cpp',
         'query/sbe_cached_solution_planner.cpp',
         'query/sbe_multi_planner.cpp',
         'query/sbe_plan_ranker.cpp',
         'query/sbe_runtime_planner.cpp',
         'query/sbe_stage_builder.cpp',
+        'query/sbe_stage_builder_abt_helpers.cpp',
+        'query/sbe_stage_builder_abt_holder_impl.cpp',
         'query/sbe_stage_builder_accumulator.cpp',
         'query/sbe_stage_builder_coll_scan.cpp',
         'query/sbe_stage_builder_const_eval.cpp',
         'query/sbe_stage_builder_expression.cpp',
         'query/sbe_stage_builder_filter.cpp',
-        'query/sbe_stage_builder_abt_helpers.cpp',
-        'query/sbe_stage_builder_abt_holder_impl.cpp',
+        'query/sbe_stage_builder_group.cpp',
         'query/sbe_stage_builder_helpers.cpp',
         'query/sbe_stage_builder_index_scan.cpp',
         'query/sbe_stage_builder_lookup.cpp',
@@ -1609,7 +1616,6 @@ execEnv.Library(
         'query/shard_filterer_factory_impl.cpp',
         'query/stage_builder_util.cpp',
         'query/wildcard_multikey_paths.cpp',
-        'query/yield_policy_callbacks_impl.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
@@ -1637,9 +1643,11 @@ execEnv.Library(
         'fts/base_fts',
         'index/index_access_method',
         'matcher/expressions_mongod_only',
+        'ops/delete_request_idl',
         'ops/parsed_update',
         'pipeline/pipeline',
         'query/cost_model/query_cost_model',
+        'query/plan_executor',
         'query/plan_yield_policy',
         'query/query_common',
         'query/query_plan_cache',
@@ -2709,6 +2717,20 @@ env.CppUnitTest(
 envWithAsio = env.Clone()
 envWithAsio.InjectThirdParty(libraries=['asio'])
 
+env.Library(
+    target='commands_test_example',
+    source=[
+        'commands_test_example.idl',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+        'commands',
+        'server_base',
+    ],
+)
+
 if wiredtiger:
     envWithAsio.CppUnitTest(
         target='db_unittest_test',
@@ -2720,7 +2742,6 @@ if wiredtiger:
             'client_context_test.cpp',
             'client_strand_test.cpp',
             'collection_index_usage_tracker_test.cpp',
-            'commands_test_example.idl',
             'commands_test.cpp',
             'curop_test.cpp',
             'database_name_test.cpp',
@@ -2808,6 +2829,7 @@ if wiredtiger:
             'collection_index_usage_tracker',
             'commands',
             'commands/bulk_write_command',
+            'commands_test_example',
             'common',
             'dbmessage',
             'fle_crud',
@@ -2923,5 +2945,32 @@ env.Benchmark(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         'service_context',
+    ],
+)
+
+env.Benchmark(
+    target='service_entry_point_common_bm',
+    source=[
+        'service_entry_point_common_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmongod',
+        '$BUILD_DIR/mongo/db/catalog/catalog_impl',
+        '$BUILD_DIR/mongo/db/commands/standalone',
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/index_builds_coordinator_mongod',
+        '$BUILD_DIR/mongo/db/op_observer/op_observer',
+        '$BUILD_DIR/mongo/db/repl/replmocks',
+        '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
+        '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
+        '$BUILD_DIR/mongo/db/storage/storage_control',
+        '$BUILD_DIR/mongo/db/vector_clock_mongod',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+        '$BUILD_DIR/mongo/util/periodic_runner_factory',
+        'mongod_options_init',
+        'read_write_concern_defaults_mock',
+        'service_context',
+        'service_context_d',
+        'storage/wiredtiger/storage_wiredtiger',
     ],
 )

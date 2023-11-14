@@ -100,7 +100,9 @@
 #include "mongo/rpc/rewrite_state_change_errors.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
+#include "mongo/s/cannot_implicitly_create_collection_info.h"
 #include "mongo/s/catalog_cache.h"
+#include "mongo/s/cluster_ddl.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/load_balancer_support.h"
@@ -143,18 +145,9 @@ MONGO_FAIL_POINT_DEFINE(allowSkippingAppendRequiredFieldsToResponse);
 
 Future<void> runCommandInvocation(std::shared_ptr<RequestExecutionContext> rec,
                                   std::shared_ptr<CommandInvocation> invocation) {
-    bool usesDedicatedThread = [&] {
-        auto client = rec->getOpCtx()->getClient();
-        if (auto context = transport::ServiceExecutorContext::get(client); context) {
-            return context->usesDedicatedThread();
-        }
-        tassert(5453902,
-                "Threading model may only be absent for internal and direct clients",
-                !client->hasRemote() || client->isInDirectClient());
-        return true;
-    }();
+    static constexpr bool useDedicatedThread = true;
     return CommandHelpers::runCommandInvocation(
-        std::move(rec), std::move(invocation), usesDedicatedThread);
+        std::move(rec), std::move(invocation), useDedicatedThread);
 }
 
 /**
@@ -283,7 +276,7 @@ void ExecCommandClient::_prologue() {
             dbname != DatabaseName::kLocal.db());
     uassert(ErrorCodes::InvalidNamespace,
             "Invalid database name: '{}'"_format(dbname),
-            NamespaceString::validDBName(dbname, NamespaceString::DollarInDbNameBehavior::Allow));
+            DatabaseName::validDBName(dbname, DatabaseName::DollarInDbNameBehavior::Allow));
 
     StringMap<int> topLevelFields;
     for (auto&& element : request.body) {
@@ -491,6 +484,7 @@ private:
     void _onSnapshotError(Status& status);
     void _onShardCannotRefreshDueToLocksHeldError(Status& status);
     void _onTenantMigrationAborted(Status& status);
+    void _onCannotImplicitlyCreateCollection(Status& status);
 
     ParseAndRunCommand* const _parc;
 
@@ -1131,6 +1125,17 @@ void ParseAndRunCommand::RunAndRetry::_onTenantMigrationAborted(Status& status) 
         iassert(status);
 }
 
+void ParseAndRunCommand::RunAndRetry::_onCannotImplicitlyCreateCollection(Status& status) {
+    invariant(status.code() == ErrorCodes::CannotImplicitlyCreateCollection);
+
+    auto opCtx = _parc->_rec->getOpCtx();
+
+    auto extraInfo = status.extraInfo<CannotImplicitlyCreateCollectionInfo>();
+    invariant(extraInfo);
+
+    cluster::createLegacyUnshardedCollection(opCtx, extraInfo->getNss());
+}
+
 Future<void> ParseAndRunCommand::RunAndRetry::run() {
     return makeReadyFutureWith([&] {
                // Try kMaxNumStaleVersionRetries times. On the last try, exceptions are
@@ -1162,6 +1167,10 @@ Future<void> ParseAndRunCommand::RunAndRetry::run() {
         })
         .onError<ErrorCodes::TenantMigrationAborted>([this](Status status) {
             _onTenantMigrationAborted(status);
+            return run();  // Retry
+        })
+        .onError<ErrorCodes::CannotImplicitlyCreateCollection>([this](Status status) {
+            _onCannotImplicitlyCreateCollection(status);
             return run();  // Retry
         });
 }

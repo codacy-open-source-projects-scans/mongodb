@@ -61,7 +61,8 @@ bool ReplicationCoordinatorNoOp::inQuiesceMode() const {
     MONGO_UNREACHABLE;
 }
 
-void ReplicationCoordinatorNoOp::shutdown(OperationContext* opCtx) {}
+void ReplicationCoordinatorNoOp::shutdown(OperationContext* opCtx,
+                                          BSONObjBuilder* shutdownTimeElapsedBuilder) {}
 
 MemberState ReplicationCoordinatorNoOp::getMemberState() const {
     return MemberState::RS_PRIMARY;
@@ -340,7 +341,7 @@ BSONObj ReplicationCoordinatorNoOp::getConfigBSON() const {
     MONGO_UNREACHABLE;
 }
 
-const MemberConfig* ReplicationCoordinatorNoOp::findConfigMemberByHostAndPort(
+boost::optional<MemberConfig> ReplicationCoordinatorNoOp::findConfigMemberByHostAndPort_deprecated(
     const HostAndPort& hap) const {
     MONGO_UNREACHABLE;
 }

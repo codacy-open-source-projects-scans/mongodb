@@ -592,6 +592,15 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             CatalogCacheLoader::get(serviceContext).shutDown();
         }
 
+        // Shutdown the SessionManager and its sessions and give it a grace period to complete.
+        if (auto mgr = serviceContext->getTransportLayerManager()) {
+            if (!mgr->shutdownSessionManagers(Seconds(10))) {
+                LOGV2_OPTIONS(22844,
+                              {LogComponent::kNetwork},
+                              "SessionManager did not shutdown within the time limit");
+            }
+        }
+
         // Shutdown Full-Time Data Capture
         stopMongoSFTDC(serviceContext);
     }
@@ -649,13 +658,13 @@ Status initializeSharding(
             catCache->invalidateEntriesThatReferenceShard(removedShard);
         }};
 
-    if (!mongosGlobalParams.configdbs) {
+    if (!serverGlobalParams.configdbs) {
         return {ErrorCodes::BadValue, "Unrecognized connection string."};
     }
 
     auto shardRegistry = std::make_unique<ShardRegistry>(opCtx->getServiceContext(),
                                                          std::move(shardFactory),
-                                                         mongosGlobalParams.configdbs,
+                                                         serverGlobalParams.configdbs,
                                                          std::move(shardRemovalHooks));
 
     Status status = initializeGlobalShardingState(
@@ -943,7 +952,7 @@ ExitCode main(ServiceContext* serviceContext) {
     serviceContext->setFastClockSource(FastClockSourceFactory::create(Milliseconds{10}));
 
     // We either have a setting where all processes are in localhost or none are
-    const auto& configServers = mongosGlobalParams.configdbs.getServers();
+    const auto& configServers = serverGlobalParams.configdbs.getServers();
     invariant(!configServers.empty());
     const auto allowLocalHost = configServers.front().isLocalHost();
 
@@ -981,7 +990,7 @@ MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersionLatest,
                                      ("EndStartupOptionStorage"))
 // (Generic FCV reference): This FCV reference should exist across LTS binary versions.
 (InitializerContext* context) {
-    serverGlobalParams.mutableFeatureCompatibility.setVersion(multiversion::GenericFCV::kLatest);
+    serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 }
 
 #ifdef MONGO_CONFIG_SSL

@@ -106,6 +106,7 @@ public:
         OperationContext* opCtx,
         const BatchItemRef& itemRef,
         bool* useTwoPhaseWriteProtocol = nullptr,
+        bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
         std::set<ChunkRange>* chunkRanges = nullptr) const override {
         return _targetQuery(itemRef.getDeleteRef().getFilter(), chunkRanges);
     }
@@ -136,12 +137,22 @@ public:
         // No-op
     }
 
+    void noteCannotImplicitlyCreateCollectionResponse(
+        OperationContext* opCtx, const CannotImplicitlyCreateCollectionInfo& createInfo) override {
+        // No-op
+    }
+
     bool hasStaleShardResponse() override {
         // No-op
         return false;
     }
 
     bool refreshIfNeeded(OperationContext* opCtx) override {
+        // No-op
+        return false;
+    }
+
+    bool createCollectionIfNeeded(OperationContext* opCtx) override {
         // No-op
         return false;
     }

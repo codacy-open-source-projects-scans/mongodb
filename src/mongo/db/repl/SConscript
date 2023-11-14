@@ -598,6 +598,7 @@ env.Library(
     target='oplog_entry',
     source=[
         'oplog_entry.cpp',
+        'oplog_entry_serialization.cpp',
         'oplog_entry.idl',
     ],
     LIBDEPS=[
@@ -611,6 +612,16 @@ env.Library(
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/server_feature_flags',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
+    ],
+)
+
+env.Benchmark(
+    target='oplog_entry_bm',
+    source=[
+        'oplog_entry_bm.cpp',
+    ],
+    LIBDEPS=[
+        'oplog_entry',
     ],
 )
 
@@ -1770,6 +1781,7 @@ if wiredtiger:
             'drop_pending_collection_reaper_test.cpp',
             'idempotency_document_structure_test.cpp',
             'initial_syncer_test.cpp',
+            'insert_group_test.cpp',
             'isself_test.cpp',
             'member_config_test.cpp',
             'multiapplier_test.cpp',
