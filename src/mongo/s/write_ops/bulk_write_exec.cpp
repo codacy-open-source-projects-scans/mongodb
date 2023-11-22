@@ -76,6 +76,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/index_version.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
+#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/shard_version_factory.h"
 #include "mongo/s/stale_exception.h"
@@ -99,11 +100,6 @@ namespace {
 // The number of times we'll try to continue a batch op if no progress is being made. This only
 // applies when no writes are occurring and metadata is not changing on reload.
 const int kMaxRoundsWithoutProgress(5);
-
-bool isVerboseWc(const BSONObj& wc) {
-    BSONElement wElem = wc["w"];
-    return !wElem.isNumber() || wElem.Number() != 0;
-}
 
 /**
  * Send and process the child batches. Each child batch is targeted at a unique shard: therefore one
@@ -129,14 +125,14 @@ void executeChildBatches(OperationContext* opCtx,
 
             // Per-operation write concern is not supported in transactions.
             if (!TransactionRouter::get(opCtx)) {
-                auto wc = opCtx->getWriteConcern().toBSON();
-                if (isVerboseWc(wc)) {
-                    builder.append(WriteConcernOptions::kWriteConcernField, wc);
+                auto wc = opCtx->getWriteConcern();
+                if (wc.requiresWriteAcknowledgement()) {
+                    builder.append(WriteConcernOptions::kWriteConcernField, wc.toBSON());
                 } else {
                     // Mongos needs to send to the shard with w > 0 so it will be able to see the
                     // writeErrors
                     builder.append(WriteConcernOptions::kWriteConcernField,
-                                   upgradeWriteConcern(wc));
+                                   upgradeWriteConcern(wc.toBSON()));
                 }
             }
 
@@ -904,9 +900,13 @@ void BulkWriteOp::processChildBatchResponseFromRemote(
     } else {
         noteChildBatchError(writeBatch, childBatchStatus);
 
-        // If we are in a transaction, we must abort execution on any error.
-        // TODO SERVER-72793: handle WouldChangeOwningShard errors.
-        if (TransactionRouter::get(_opCtx)) {
+        // If we are in a transaction, we must abort execution on any error, excluding
+        // WouldChangeOwningShard. We do not abort on WouldChangeOwningShard because the error is
+        // returned from the shard and recorded here as a placeholder, as we will end up processing
+        // the update (as a delete + insert on the corresponding shards in a txn) at the level of
+        // ClusterBulkWriteCmd.
+        if (TransactionRouter::get(_opCtx) &&
+            childBatchStatus != ErrorCodes::WouldChangeOwningShard) {
             _aborted = true;
 
             auto errorReply =
@@ -952,17 +952,18 @@ void BulkWriteOp::noteChildBatchResponse(
 
         // On most errors (for example, a DuplicateKeyError) unordered bulkWrite on a shard attempts
         // to execute following operations even if a preceding operation errored. This isn't true
-        // for StaleConfig or StaleDbVersion errors. On these errors, since the shard knows that
-        // following operations will also be stale, it stops right away (except for unordered
-        // timeseries inserts, see SERVER-80796).
-        // For that reason, although typically we can expect the size of replyItems to match the
-        // size of the number of operations sent (even in the case of errors), when a staleness
-        // error is received the size of replyItems will be <= the size of the number of operations.
-        // When this is the case, we treat all the remaining operations which may not have a
-        // replyItem as having failed with a staleness error.
+        // for StaleConfig, StaleDbVersion of ShardCannotRefreshDueToLocksHeld errors. On these
+        // errors, since the shard knows that following operations will fail for the same reason, it
+        // stops right away (except for unordered timeseries inserts, see SERVER-80796).
+        // As a consequence, although typically we can expect the size of replyItems to match the
+        // size of the number of operations sent (even in the case of errors), when a
+        // staleness/cache busy error is received the size of replyItems will be <= the size of the
+        // number of operations. When this is the case, we treat all the remaining operations which
+        // may not have a replyItem as having failed due to the same cause.
         if (!ordered && lastError &&
             (lastError->getStatus().code() == ErrorCodes::StaleDbVersion ||
              ErrorCodes::isStaleShardVersionError(lastError->getStatus()) ||
+             lastError->getStatus().code() == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
              lastError->getStatus() == ErrorCodes::CannotImplicitlyCreateCollection) &&
             (index == (int)replyItems.size())) {
             // Decrement the index so it keeps pointing to the same error (i.e. the
@@ -990,6 +991,11 @@ void BulkWriteOp::noteChildBatchResponse(
             if (errorsPerNamespace) {
                 if (errorsPerNamespace->find(nss) == errorsPerNamespace->end()) {
                     TrackedErrors trackedErrors;
+                    // Stale routing info errors need to be tracked in order to trigger a refresh of
+                    // the targeter. On the other hand, errors caused by the catalog cache being
+                    // temporarily unavailable (such as ShardCannotRefreshDueToLocksHeld) are
+                    // ignored in this context, since no deduction can be made around possible
+                    // placement changes.
                     trackedErrors.startTracking(ErrorCodes::StaleConfig);
                     trackedErrors.startTracking(ErrorCodes::StaleDbVersion);
                     trackedErrors.startTracking(ErrorCodes::CannotImplicitlyCreateCollection);

@@ -59,7 +59,6 @@
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/batched_delete_stage.h"
@@ -142,9 +141,9 @@
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/query_settings/query_settings_gen.h"
+#include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/query/query_settings_decoration.h"
-#include "mongo/db/query/query_settings_gen.h"
-#include "mongo/db/query/query_settings_manager.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/sbe_cached_solution_planner.h"
 #include "mongo/db/query/sbe_multi_planner.h"
@@ -515,13 +514,18 @@ void fillOutIndexEntries(OperationContext* opCtx,
 }
 }  // namespace
 
-CollectionStats fillOutCollectionStats(OperationContext* opCtx, const CollectionPtr& collection) {
-    auto recordStore = collection->getRecordStore();
-    CollectionStats stats;
-    stats.noOfRecords = recordStore->numRecords(opCtx),
-    stats.approximateDataSizeBytes = recordStore->dataSize(opCtx),
-    stats.storageSizeBytes = recordStore->storageSize(opCtx);
-    return stats;
+void fillOutPlannerCollectionInfo(OperationContext* opCtx,
+                                  const CollectionPtr& collection,
+                                  PlannerCollectionInfo* out,
+                                  bool includeSizeStats) {
+    out->isTimeseries = static_cast<bool>(collection->getTimeseriesOptions());
+    if (includeSizeStats) {
+        // We only include these sometimes, since they are slightly expensive to compute.
+        auto recordStore = collection->getRecordStore();
+        out->noOfRecords = recordStore->numRecords(opCtx);
+        out->approximateDataSizeBytes = recordStore->dataSize(opCtx);
+        out->storageSizeBytes = recordStore->storageSize(opCtx);
+    }
 }
 
 void fillOutPlannerParams(OperationContext* opCtx,
@@ -606,10 +610,14 @@ void fillOutPlannerParams(OperationContext* opCtx,
         plannerParams->clusteredCollectionCollator = collection->getDefaultCollator();
     }
 
-    if (!plannerParams->columnStoreIndexes.empty()) {
-        // Fill out statistics needed for column scan query planning.
-        plannerParams->collectionStats = fillOutCollectionStats(opCtx, collection);
 
+    fillOutPlannerCollectionInfo(opCtx,
+                                 collection,
+                                 &plannerParams->collectionStats,
+                                 // Only include the full size stats when there's a CSI.
+                                 !plannerParams->columnStoreIndexes.empty());
+    if (!plannerParams->columnStoreIndexes.empty()) {
+        // Only fill this out when a CSI is present.
         const auto kMB = 1024 * 1024;
         plannerParams->availableMemoryBytes =
             static_cast<long long>(ProcessInfo::getMemSizeMB()) * kMB;
@@ -633,7 +641,8 @@ std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsIn
                                 secondaryColl,
                                 secondaryInfo.indexes,
                                 secondaryInfo.columnIndexes);
-            secondaryInfo.stats = fillOutCollectionStats(opCtx, secondaryColl);
+            fillOutPlannerCollectionInfo(
+                opCtx, secondaryColl, &secondaryInfo.stats, true /* include size stats */);
         } else {
             secondaryInfo.exists = false;
         }
@@ -1562,6 +1571,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSlotBasedExe
 
     return plan_executor_factory::make(opCtx,
                                        std::move(cq),
+                                       nullptr /*pipeline*/,
                                        std::move(solutions[0]),
                                        std::move(roots[0]),
                                        {},
@@ -1712,8 +1722,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
             auto maybeExec = getSBEExecutorViaCascadesOptimizer(
                 collections, std::move(queryHints), canonicalQuery.get());
             if (maybeExec) {
-                auto exec = uassertStatusOK(
-                    makeExecFromParams(std::move(canonicalQuery), std::move(*maybeExec)));
+                auto exec = uassertStatusOK(makeExecFromParams(
+                    std::move(canonicalQuery), nullptr /*pipeline*/, std::move(*maybeExec)));
                 return StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>(
                     std::move(exec));
             } else {
@@ -1878,6 +1888,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSearchMetada
         opCtx, cq, metadataCursorId, remoteCursors.get(), sbeYieldPolicy.get());
     return plan_executor_factory::make(opCtx,
                                        nullptr /* cq */,
+                                       nullptr /*pipeline*/,
                                        nullptr /* solution */,
                                        std::move(root),
                                        nullptr /* optimizerData */,

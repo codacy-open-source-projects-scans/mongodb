@@ -20,9 +20,11 @@ import mongo.platform as mongo_platform
 import mongo.generators as mongo_generators
 
 _SUPPORTED_PLATFORM_MATRIX = [
-    "windows:amd64:msvc",
     "linux:arm64:gcc",
     "linux:arm64:clang",
+    "windows:amd64:msvc",
+    "macos:amd64:clang",
+    "macos:arm64:clang",
 ]
 
 
@@ -365,8 +367,9 @@ def generate(env: SCons.Environment.Environment) -> None:
         # === Architecture/platform ===
 
         # Bail if current architecture not supported for Bazel:
-        normalized_arch = platform.machine().lower().replace("aarch64", "arm64")
-        normalized_os = sys.platform.replace("win32", "windows")
+        normalized_arch = platform.machine().lower().replace("aarch64", "arm64").replace(
+            "x86_64", "amd64")
+        normalized_os = sys.platform.replace("win32", "windows").replace("darwin", "macos")
         current_platform = f"{normalized_os}:{normalized_arch}:{env.ToolchainName()}"
         if current_platform not in _SUPPORTED_PLATFORM_MATRIX:
             raise Exception(
@@ -378,8 +381,9 @@ def generate(env: SCons.Environment.Environment) -> None:
         # TODO(SERVER-81038): remove once bazel/bazelisk is self-hosted.
         if not os.path.exists("bazelisk"):
             ext = ".exe" if normalized_os == "windows" else ""
+            os_str = normalized_os.replace("macos", "darwin")
             urllib.request.urlretrieve(
-                f"https://github.com/bazelbuild/bazelisk/releases/download/v1.17.0/bazelisk-{normalized_os}-{normalized_arch}{ext}",
+                f"https://github.com/bazelbuild/bazelisk/releases/download/v1.17.0/bazelisk-{os_str}-{normalized_arch}{ext}",
                 "bazelisk")
             os.chmod("bazelisk", stat.S_IXUSR)
 
@@ -407,10 +411,11 @@ def generate(env: SCons.Environment.Environment) -> None:
             f'--//bazel/config:allocator={allocator}',
             f'--//bazel/config:use_lldbserver={False if env.GetOption("lldb-server") is None else True}',
             f'--//bazel/config:use_wait_for_debugger={False if env.GetOption("wait-for-debugger") is None else True}',
+            f'--//bazel/config:use_ocsp_stapling={True if env.GetOption("ocsp-stapling") == "on" else False}',
             f'--//bazel/config:use_disable_ref_track={False if env.GetOption("disable-ref-track") is None else True}',
             f'--dynamic_mode={"off" if static_link else "fully"}',
-            f'--platforms=@mongo_toolchain//:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
-            f'--host_platform=@mongo_toolchain//:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
+            f'--platforms=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
+            f'--host_platform=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
             '--compilation_mode=dbg',  # always build this compilation mode as we always build with -g
         ]
 
@@ -424,7 +429,11 @@ def generate(env: SCons.Environment.Environment) -> None:
         env['BAZEL_FLAGS_STR'] = str(bazel_internal_flags) + env.get("BAZEL_FLAGS", "")
 
         # We always use --compilation_mode debug for now as we always want -g, so assume -dbg location
-        out_dir_platform = "x64_windows" if normalized_os == "windows" else "$TARGET_ARCH"
+        out_dir_platform = "$TARGET_ARCH"
+        if normalized_os == "macos":
+            out_dir_platform = "darwin_arm64" if normalized_arch == "arm64" else "darwin"
+        elif normalized_os == "windows":
+            out_dir_platform = "x64_windows"
         env["BAZEL_OUT_DIR"] = env.Dir(f"#/bazel-out/{out_dir_platform}-dbg/bin/")
 
         # === Builders ===

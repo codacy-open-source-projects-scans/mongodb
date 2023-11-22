@@ -15,9 +15,9 @@ rst.initiate();
 const testDB = rst.getPrimary().getDB("test");
 const qsutils = new QuerySettingsUtils(testDB, jsTestName());
 
-const queryA = qsutils.makeFindQueryInstance({a: 1});
-const queryB = qsutils.makeFindQueryInstance({b: "string"});
-const queryC = qsutils.makeFindQueryInstance({c: 1});
+const queryA = qsutils.makeFindQueryInstance({filter: {a: 1}});
+const queryB = qsutils.makeFindQueryInstance({filter: {b: "string"}});
+const queryC = qsutils.makeFindQueryInstance({filter: {c: 1}});
 const querySettingsA = {
     indexHints: {allowedIndexes: ["a_1", {$natural: 1}]}
 };
@@ -27,10 +27,6 @@ const querySettingsB = {
 const querySettingsC = {
     indexHints: {allowedIndexes: ["c_1"]}
 };
-
-// Set the 'clusterServerParameterRefreshIntervalSecs' value to 1 second for faster fetching of
-// 'querySettings' cluster parameter on mongos from the configsvr.
-const clusterParamRefreshSecs = qsutils.setClusterParamRefreshSecs(1);
 
 function runSetQuerySettingsConcurrently(
     {initialConfiguration, settingToFail, settingToPass, finalConfiguration}) {
@@ -105,6 +101,4 @@ function runSetQuerySettingsConcurrently(
     qsutils.assertQueryShapeConfiguration([]);
 }
 
-// Reset the 'clusterServerParameterRefreshIntervalSecs' parameter to its initial value.
-clusterParamRefreshSecs.restore();
 rst.stopSet();

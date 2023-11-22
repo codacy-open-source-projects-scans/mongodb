@@ -151,7 +151,7 @@ public:
         : _propsMap(propsMap), _numChunks(numChunks), _ridProjections(ridProjections) {}
 
     void transport(ABT& n, const LimitSkipNode& limit, ABT& child) {
-        if (limit.getProperty().getSkip() != 0) {
+        if (limit.getProperty().getSkip() != 0 || !child.is<PhysicalScanNode>()) {
             return;
         }
         const PhysicalScanNode& physicalScan = *child.cast<PhysicalScanNode>();
@@ -160,7 +160,8 @@ public:
         ABT newPhysicalScan =
             make<PhysicalScanNode>(FieldProjectionMap{._ridProjection = ProjectionName{ridProj}},
                                    physicalScan.getScanDefName(),
-                                   physicalScan.useParallelScan());
+                                   physicalScan.useParallelScan(),
+                                   physicalScan.getScanOrder());
 
         NodeProps props = _propsMap.at(&physicalScan);
         properties::getProperty<properties::ProjectionRequirement>(props._physicalProps)
@@ -224,7 +225,6 @@ private:
 };
 
 class SamplingTransport {
-    static constexpr size_t kMaxSampleSize = 1000;
 
 public:
     SamplingTransport(OptPhaseManager phaseManager,
@@ -232,7 +232,9 @@ public:
                       std::unique_ptr<cascades::CardinalityEstimator> fallbackCE,
                       std::unique_ptr<SamplingExecutor> executor)
         : _phaseManager(std::move(phaseManager)),
-          _sampleSize(std::min<int64_t>(numRecords, kMaxSampleSize)),
+          _sampleSize(std::min<int64_t>(
+              _phaseManager.getHints()._sqrtSampleSizeEnabled ? std::sqrt(numRecords) : numRecords,
+              _phaseManager.getHints()._samplingCollectionSizeMax)),
           _fallbackCE(std::move(fallbackCE)),
           _executor(std::move(executor)) {}
 

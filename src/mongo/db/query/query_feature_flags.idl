@@ -59,7 +59,7 @@ feature_flags:
                     by default"
       cpp_varname: gFeatureFlagSbeFull
       default: false
-      shouldBeFCVGated: true
+      shouldBeFCVGated: false
 
     featureFlagQueryStats:
       description: "Feature flag for enabling full queryStats collection."
@@ -73,6 +73,12 @@ feature_flags:
       cpp_varname: gFeatureFlagQueryStatsFindCommand
       default: true
       version: 7.1
+      shouldBeFCVGated: true
+
+    featureFlagQueryStatsDataBearingNodes:
+      description: "Feature flag for enabling aggregation of queryStats from data bearing nodes."
+      cpp_varname: gFeatureFlagQueryStatsDataBearingNodes
+      default: false
       shouldBeFCVGated: true
 
     featureFlagSearchBatchSizeLimit:

@@ -14,4 +14,4 @@
 - featureFlagAuthoritativeShardCollection
 - featureFlagAllMongodsAreSharded
 - featureFlagGRPC
-- featureFlagUnsplittableCollectionsOnNonPrimaryShard
+- featureFlagReplicaSetEndpoint

@@ -916,6 +916,8 @@ env.Library(
     target='shard_role_api',
     source=[
         'catalog/collection_operation_source.cpp',
+        'direct_shard_client_tracker.cpp',
+        'locker_api.cpp',
         'replica_set_endpoint_sharding_state.cpp',
         'replica_set_endpoint_util.cpp',
         's/collection_metadata.cpp',
@@ -981,6 +983,7 @@ env.Library(
 env.CppUnitTest(
     target='replica_set_endpoint_test',
     source=[
+        'direct_shard_client_tracker_test.cpp',
         'replica_set_endpoint_sharding_state_test.cpp',
         'replica_set_endpoint_test_fixture.cpp',
         'replica_set_endpoint_util_test.cpp',
@@ -1154,6 +1157,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/s/replica_set_endpoint_feature_flag',
+        '$BUILD_DIR/mongo/s/startup_initialization',
         'auth/auth',
         'command_can_run_here',
         'commands/fsync_locked',
@@ -1179,7 +1183,7 @@ env.Library(
         'service_context',
     ],
     LIBDEPS_PRIVATE=[
-        'concurrency/lock_manager',
+        'shard_role_api',
     ],
 )
 
@@ -1191,6 +1195,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/s/query_analysis_sampler',
+        '$BUILD_DIR/mongo/s/startup_initialization',
         '$BUILD_DIR/mongo/transport/service_executor',
         'audit',
         'auth/auth',
@@ -1652,7 +1657,7 @@ execEnv.Library(
         'query/query_common',
         'query/query_plan_cache',
         'query/query_planner',
-        'query/query_settings',
+        'query/query_settings/query_settings',
         'repl/repl_coordinator_interface',
         'session/logical_session_cache',
         'shard_filterer',
@@ -1827,7 +1832,7 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'query/query_knobs',
-        'query/query_settings',
+        'query/query_settings/query_settings',
         'query/query_shape/query_shape_common',
         'sbe_values',
         'stats/counters',
@@ -2412,6 +2417,8 @@ env.Library(
         '$BUILD_DIR/mongo/executor/async_rpc_error_info',
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/rpc/rpc',
+        '$BUILD_DIR/mongo/s/commands/cluster_commands',
+        '$BUILD_DIR/mongo/s/commands/sharded_cluster_commands',
         '$BUILD_DIR/mongo/s/commands/sharded_cluster_sharding_commands',
         '$BUILD_DIR/mongo/scripting/scripting_server',
         '$BUILD_DIR/mongo/transport/message_compressor_options_server',
@@ -2535,6 +2542,7 @@ env.Library(
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',
         '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_impl',
         '$BUILD_DIR/mongo/s/sessions_collection_sharded',
+        '$BUILD_DIR/mongo/s/startup_initialization',
         '$BUILD_DIR/mongo/scripting/scripting',
         '$BUILD_DIR/mongo/transport/ingress_handshake_metrics',
         '$BUILD_DIR/mongo/transport/service_executor',
@@ -2583,7 +2591,7 @@ env.Library(
         'periodic_runner_job_abort_expired_transactions',
         'pipeline/change_stream_expired_pre_image_remover',
         'pipeline/process_interface/mongod_process_interface_factory',
-        'query/query_settings_manager',
+        'query/query_settings/manager',
         'query/stats/stats',
         'repl/drop_pending_collection_reaper',
         'repl/initial_syncer',
@@ -2744,6 +2752,7 @@ if wiredtiger:
             'collection_index_usage_tracker_test.cpp',
             'commands_test.cpp',
             'curop_test.cpp',
+            'd_concurrency_test.cpp',
             'database_name_test.cpp',
             'db_raii_multi_collection_test.cpp',
             'db_raii_test.cpp',
@@ -2772,9 +2781,9 @@ if wiredtiger:
             'operation_time_tracker_test.cpp',
             'persistent_task_store_test.cpp',
             'query/fle/equality_predicate_test.cpp',
+            'query/fle/query_rewriter_test.cpp',
             'query/fle/range_predicate_test.cpp',
             'query/fle/range_validator_test.cpp',
-            'query/fle/query_rewriter_test.cpp',
             'read_write_concern_defaults_test.cpp',
             'read_write_concern_provenance_test.cpp',
             'record_id_test.cpp',
@@ -2813,6 +2822,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/util/clock_source_mock',
             '$BUILD_DIR/mongo/util/net/network',
             '$BUILD_DIR/mongo/util/net/ssl_options_server',
+            '$BUILD_DIR/mongo/util/progress_meter',
             'auth/auth',
             'auth/authmocks',
             'auth/security_token',
@@ -2943,8 +2953,19 @@ env.Benchmark(
         'operation_cpu_timer_bm.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         'service_context',
+        'shard_role_api',
+    ],
+)
+
+env.Benchmark(
+    target='d_concurrency_bm',
+    source=[
+        'd_concurrency_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/service_context_non_d',
+        'shard_role_api',
     ],
 )
 

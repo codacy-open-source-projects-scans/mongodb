@@ -183,6 +183,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,  // isNull
     0,  // isObject
     0,  // isArray
+    0,  // isInListData
     0,  // isString
     0,  // isNumber
     0,  // isBinData
@@ -848,6 +849,10 @@ void CodeFragment::appendIsObject(Instruction::Parameter input) {
 
 void CodeFragment::appendIsArray(Instruction::Parameter input) {
     appendSimpleInstruction(Instruction::isArray, input);
+}
+
+void CodeFragment::appendIsInListData(Instruction::Parameter input) {
+    appendSimpleInstruction(Instruction::isInListData, input);
 }
 
 void CodeFragment::appendIsString(Instruction::Parameter input) {
@@ -4938,7 +4943,8 @@ FastTuple<bool, value::TypeTags, value::Value> pcreNextMatch(pcre::Regex* pcre,
     auto [matchedTag, matchedVal] = value::makeNewString(m[0]);
     value::ValueGuard matchedGuard{matchedTag, matchedVal};
 
-    StringData precedesMatch(m.input().begin() + m.startPos(), m[0].begin());
+    StringData precedesMatch = m.input().substr(m.startPos());
+    precedesMatch = precedesMatch.substr(0, m[0].data() - precedesMatch.data());
     codePointPos += str::lengthInUTF8CodePoints(precedesMatch);
     startBytePos += precedesMatch.size();
 
@@ -9480,6 +9486,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockMax(arity);
         case Builtin::valueBlockCount:
             return builtinValueBlockCount(arity);
+        case Builtin::valueBlockSum:
+            return builtinValueBlockSum(arity);
         case Builtin::valueBlockGtScalar:
             return builtinValueBlockGtScalar(arity);
         case Builtin::valueBlockGteScalar:
@@ -9964,6 +9972,8 @@ std::string builtinToString(Builtin b) {
             return "valueBlockMax";
         case Builtin::valueBlockCount:
             return "valueBlockCount";
+        case Builtin::valueBlockSum:
+            return "valueBlockSum";
         case Builtin::valueBlockGtScalar:
             return "valueBlockGtScalar";
         case Builtin::valueBlockGteScalar:
@@ -10897,6 +10907,10 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
             }
             case Instruction::isArray: {
                 runTagCheck(pcPointer, value::isArray);
+                break;
+            }
+            case Instruction::isInListData: {
+                runTagCheck(pcPointer, value::isInListData);
                 break;
             }
             case Instruction::isString: {

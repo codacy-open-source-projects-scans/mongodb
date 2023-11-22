@@ -15,10 +15,10 @@ export class QuerySettingsUtils {
     }
 
     /**
-     * Makes an query instance of the find command with an optional filter clause.
+     * Makes an query instance of the find command.
      */
-    makeFindQueryInstance(filter = {}) {
-        return {find: this.collName, $db: this.db.getName(), filter};
+    makeFindQueryInstance(findObj) {
+        return {find: this.collName, $db: this.db.getName(), ...findObj};
     }
 
     /**
@@ -90,27 +90,6 @@ export class QuerySettingsUtils {
             const queryPlanner = getQueryPlanner(explain);
             assert.docEq(expectedQuerySettings, queryPlanner.querySettings, queryPlanner);
         }
-    }
-
-    // Adjust the 'clusterServerParameterRefreshIntervalSecs' value for faster fetching of
-    // 'querySettings' cluster parameter on mongos from the configsvr.
-    // TODO: SERVER-81062 Update cluster parameter cache on set-/removeQuerySettings and perform
-    // single retry on failure.
-    setClusterParamRefreshSecs(newValue) {
-        if (FixtureHelpers.isMongos(this.db)) {
-            const response = assert.commandWorked(this.db.adminCommand(
-                {getParameter: 1, clusterServerParameterRefreshIntervalSecs: 1}));
-            const oldValue = response.clusterServerParameterRefreshIntervalSecs;
-            assert.commandWorked(this.db.adminCommand(
-                {setParameter: 1, clusterServerParameterRefreshIntervalSecs: newValue}));
-            return {
-                restore: () => {
-                    assert.commandWorked(this.db.adminCommand(
-                        {setParameter: 1, clusterServerParameterRefreshIntervalSecs: oldValue}));
-                }
-            };
-        }
-        return {restore: () => {}};
     }
 
     /**

@@ -242,9 +242,6 @@ std::pair<value::TypeTags, value::Value> genericCompare(
         }
     }
 
-    // TODO: SERVER-82089: Use cmp3w instead of simple comparisons in ABT optimization + lowering of
-    // parameterized constants
-
     return {value::TypeTags::Nothing, 0};
 }
 
@@ -365,6 +362,7 @@ struct Instruction {
         isNull,
         isObject,
         isArray,
+        isInListData,
         isString,
         isNumber,
         isBinData,
@@ -584,6 +582,8 @@ struct Instruction {
                 return "isObject";
             case isArray:
                 return "isArray";
+            case isInListData:
+                return "isInListData";
             case isString:
                 return "isString";
             case isNumber:
@@ -903,6 +903,7 @@ enum class Builtin : uint16_t {
     valueBlockMin,
     valueBlockMax,
     valueBlockCount,
+    valueBlockSum,
     valueBlockGtScalar,
     valueBlockGteScalar,
     valueBlockEqScalar,
@@ -1265,6 +1266,7 @@ public:
     void appendIsNull(Instruction::Parameter input);
     void appendIsObject(Instruction::Parameter input);
     void appendIsArray(Instruction::Parameter input);
+    void appendIsInListData(Instruction::Parameter input);
     void appendIsString(Instruction::Parameter input);
     void appendIsNumber(Instruction::Parameter input);
     void appendIsBinData(Instruction::Parameter input);
@@ -2135,6 +2137,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMin(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMax(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCount(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockSum(ArityType arity);
 
     template <class Cmp, value::ColumnOpType::Flags AddFlags = value::ColumnOpType::kNoFlags>
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmpScalar(ArityType arity);

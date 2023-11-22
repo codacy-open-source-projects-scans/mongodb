@@ -54,6 +54,10 @@ variables:
     -j$(grep -c ^processor /proc/cpuinfo)
     --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
 
+# THIS HAS COPIES IN
+# - etc/evergreen_yml_components/variants/compile_static_analysis.yml
+# - etc/evergreen_yml_components/variants/amazon/build_dev.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &linux-arm64-dynamic-compile-params  # Essential set of compile parameters used for Linux dev variants.
   run_on:
   - amazon2-arm64-large
@@ -61,17 +65,6 @@ variables:
   modules:
     - enterprise
   stepback: false
-
-- &linux-arm64-dynamic-compile-expansions
-  scons_cache_scope: shared
-  scons_cache_mode: all
-  has_packages: false
-  compile_flags: >-
-    --ssl
-    MONGO_DISTMOD=amazon2
-    -j$(grep -c ^processor /proc/cpuinfo)
-    --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-    --link-model=dynamic
 
 - &amazon-linux2-arm64-compile-expansions
   scons_cache_scope: shared
@@ -86,8 +79,7 @@ variables:
 # If you add anything to san_options, make sure the appropriate changes are
 # also made to SConstruct.
 # and also to the san_options in evergreen.yml and sanitizer.yml
-- aubsan_options: &aubsan_options
-  >-
+- aubsan_options: &aubsan_options >-
     UBSAN_OPTIONS="print_stacktrace=1:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
     LSAN_OPTIONS="suppressions=etc/lsan.suppressions:report_objects=1"
     ASAN_OPTIONS="detect_leaks=1:check_initialization_order=true:strict_init_order=true:abort_on_error=1:disable_coredump=0:handle_abort=1:strict_string_checks=true:detect_invalid_pointer_pairs=1:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
@@ -146,11 +138,9 @@ buildvariants:
     <<: *linux-x86-dynamic-compile-expansions
     bv_future_git_tag: r100.0.0-9999
     compile_variant: *linux-x86-dynamic-compile-future-tag-multiversion
-  depends_on:
-  - name: version_expansions_gen
-    variant: enterprise-rhel-80-64-bit-future-git-tag-multiversion-version-gen
   tasks:
-  - name: compile_test_serial_TG
+  - name: version_expansions_future_git_tag_multiversion_gen
+  - name: compile_test_serial_future_git_tag_multiversion_TG
 
 - <<: *generic_linux_compile_params
   name: &linux-x86-dynamic-debug-compile-required linux-x86-dynamic-debug-compile-required  # TODO: replace with Sanitizer.
@@ -302,48 +292,55 @@ buildvariants:
   tasks:
     - name: compile_bazel_windows_TG
 
-- <<: *linux-arm64-dynamic-compile-params
-  name: &amazon-linux2-arm64-dynamic-compile amazon-linux2-arm64-dynamic-compile
-  display_name: "! Amazon Linux 2 arm64 Shared Library Compile & Static Analysis"
+# Note that this task is currently optional;
+# This will eventually become suggested, then required.
+- name: &macos-arm64-bazel-compile macos-arm64-bazel-compile
+  display_name: "MacOS ARM64 Bazel Compile"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - macos-1100-arm64
   expansions:
-    <<: *linux-arm64-dynamic-compile-expansions
-    clang_tidy_toolchain: v4
-    compile_variant: *amazon-linux2-arm64-dynamic-compile
+    test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_external_data_source,requires_latch_analyzer
+    push_path: osx
+    push_bucket: downloads.mongodb.org
+    push_name: macos
+    push_arch: arm64
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
+    compile_flags: >-
+      --ssl
+      -j$(sysctl -n hw.logicalcpu)
+      --libc++
+      --variables-files=etc/scons/xcode_macosx_arm.vars
+      --use-diagnostic-latches=off
+    resmoke_jobs_max: 6
+    compile_variant: *macos-arm64-bazel-compile
   tasks:
-    - name: clang_tidy_TG
-      distros:
-        - amazon2-arm64-xlarge
-    - name: compile_ninja_quick_TG
-    - name: compile_test_parallel_unittest_stream_TG
-    - name: compile_test_parallel_core_stream_TG
-    - name: compile_test_parallel_dbtest_stream_TG
-    - name: compile_integration_and_test_parallel_stream_TG
-    - name: generate_buildid_to_debug_symbols_mapping
-    - name: iwyu_self_test_TG
-    - name: .lint
-    - name: resmoke_validation_tests
-    - name: server_discovery_and_monitoring_json_test_TG
-    - name: server_selection_json_test_TG
-    - name: run_pretty_printer_tests
+  - name: compile_bazel_macos_TG
 
-- <<: *linux-arm64-dynamic-compile-params
-  name: &amazon-linux2-arm64-crypt-compile amazon-linux2-arm64-crypt-compile
-  display_name: "! Amazon Linux 2 arm64 Crypt Compile"
+# Note that this task is currently optional;
+# This will eventually become suggested, then required.
+- name: &macos-amd64-bazel-compile macos-amd64-bazel-compile
+  display_name: "MacOS AMD64 Bazel Compile"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - macos-1100
   expansions:
-    <<: *linux-arm64-dynamic-compile-expansions
-    compile_variant: *amazon-linux2-arm64-crypt-compile
+    test_flags: --excludeWithAnyTags=incompatible_with_macos,requires_external_data_source,requires_latch_analyzer
+    push_path: osx
+    push_bucket: downloads.mongodb.org
+    push_name: macos
+    push_arch: x86_64
+    compile_env: DEVELOPER_DIR=/Applications/Xcode13.app
+    compile_flags: >-
+      --ssl
+      -j$(sysctl -n hw.logicalcpu)
+      --libc++
+      --variables-files=etc/scons/xcode_macosx_arm.vars
+      --use-diagnostic-latches=off
+    resmoke_jobs_max: 6
+    compile_variant: *macos-amd64-bazel-compile
   tasks:
-    - name: .crypt
-    - name: crypt_build_debug_and_test
-
-- <<: *linux-arm64-dynamic-compile-params
-  name: &amazon-linux2-arm64-stitch-compile amazon-linux2-arm64-stitch-compile
-  display_name: "* Amazon Linux 2 arm64 Stitch Compile"
-  expansions:
-    <<: *linux-arm64-dynamic-compile-expansions
-    compile_variant: *amazon-linux2-arm64-stitch-compile
-  tasks:
-    - name: .stitch
+  - name: compile_bazel_macos_TG
 
 - <<: *generic_linux_compile_params
   name: &linux-x86-dynamic-grpc-suggested linux-x86-dynamic-grpc-suggested
@@ -401,16 +398,6 @@ buildvariants:
     python: '/cygdrive/c/python/python39/python.exe'
     scons_cache_scope: shared
     compile_variant: *windows-dev-compile-suggested
-  tasks:
-    - name: scons_compile_smoke_test_TG
-    - name: ninja_compile_smoke_test_TG
-
-- <<: *linux-arm64-dynamic-compile-params
-  name: &amazon-linux2-arm64-dev-compile amazon-linux2-arm64-dev-compile
-  display_name: "* Amazon Linux 2 arm64 Dev Compile"
-  expansions:
-    <<: *linux-arm64-dynamic-compile-expansions
-    compile_variant: *amazon-linux2-arm64-dynamic-compile
   tasks:
     - name: scons_compile_smoke_test_TG
     - name: ninja_compile_smoke_test_TG

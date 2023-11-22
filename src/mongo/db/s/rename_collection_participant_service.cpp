@@ -48,6 +48,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/locker_api.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -89,7 +90,8 @@ const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 void dropCollectionLocally(OperationContext* opCtx,
                            const NamespaceString& nss,
                            bool markFromMigrate) {
-    DropCollectionCoordinator::dropCollectionLocally(opCtx, nss, markFromMigrate);
+    DropCollectionCoordinator::dropCollectionLocally(
+        opCtx, nss, markFromMigrate, false /* dropSystemCollections */);
     LOGV2_DEBUG(5515100,
                 1,
                 "Dropped target collection locally on renameCollection participant.",
@@ -150,7 +152,7 @@ void renameOrDropTarget(OperationContext* opCtx,
 void clearFilteringMetadataOnNss(OperationContext* opCtx, const NamespaceString& nss) {
     // Set the placement version to UNKNOWN to force a future operation to refresh the metadata
     // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+    UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
     AutoGetCollection autoColl(opCtx, nss, MODE_IX);
     CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
         ->clearFilteringMetadata(opCtx);

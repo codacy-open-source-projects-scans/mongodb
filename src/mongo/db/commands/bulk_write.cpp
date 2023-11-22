@@ -84,6 +84,7 @@
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/introspect.h"
+#include "mongo/db/locker_api.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/ops/delete_request_gen.h"
@@ -768,7 +769,7 @@ bool handleGroupedInserts(OperationContext* opCtx,
     boost::optional<ScopedAdmissionPriorityForLock> priority;
     if (nsString == NamespaceString::kConfigSampledQueriesNamespace ||
         nsString == NamespaceString::kConfigSampledQueriesDiffNamespace) {
-        priority.emplace(opCtx->lockState(), AdmissionContext::Priority::kLow);
+        priority.emplace(shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kLow);
     }
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1407,7 +1408,8 @@ public:
             const NamespaceString cursorNss =
                 NamespaceString::makeBulkWriteNSS(req.getDollarTenant());
 
-            if (replies.size() == 0) {
+            if (replies.size() == 0 || bulk_write_common::isUnacknowledgedBulkWrite(opCtx)) {
+                // Skip cursor creation and return the simplest reply.
                 return BulkWriteCommandReply(BulkWriteCommandResponseCursor(
                                                  0 /* cursorId */, {} /* firstBatch */, cursorNss),
                                              summaryFields.nErrors,

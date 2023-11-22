@@ -36,6 +36,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
@@ -401,6 +402,8 @@ TEST_F(QueryPlannerTest,
     // With the simplifer enabled the solution below will be simplified to "{a:1, b:2, c:1, $or:
     // [{d:3}, {e:4}]}" which allow the multiplanner to build more effective test with only one
     // fecth instead of two.
+    RAIIServerParameterControllerForTest controller(
+        "internalQueryEnableBooleanExpressionsSimplifier", true);
 
     addIndex(BSON("a" << 1 << "b" << 1));
     runQuery(fromjson("{c: 1, $or: [{a:1, b:2, d:3}, {a:1, b:2, e:4}]}"));
@@ -926,13 +929,8 @@ TEST_F(QueryPlannerTest, CantExplodeWithEmptyBounds) {
     addIndex(BSON("a" << 1 << "b" << 1));
     runQuerySortProj(fromjson("{a: {$in: []}}"), BSON("b" << 1), BSONObj());
 
-    assertNumSolutions(2U);
-    assertSolutionExists(
-        "{sort: {pattern: {b:1}, limit: 0, type: 'simple', node: "
-        "{cscan: {dir: 1}}}}");
-    assertSolutionExists(
-        "{fetch: {node: {sort: {pattern: {b:1}, limit: 0, type: 'default', node: "
-        "{ixscan: {pattern: {a: 1, b: 1}}}}}}}");
+    assertNumSolutions(1);
+    assertSolutionExists("{eof: 1}");
 }
 
 // SERVER-13752
@@ -2950,6 +2948,56 @@ TEST_F(QueryPlannerTest, NoOrSolutionsIfMaxOrSolutionsIsZero) {
     runQuery(BSON(
         "$or" << BSON_ARRAY(BSON("one" << 0 << "two" << 0) << BSON("one" << 1 << "two" << 1))));
     assertNumSolutions(2U);
+}
+
+TEST_F(QueryPlannerTest, EOFForAlwaysFalsePredicates) {
+    runQuery(fromjson("{$alwaysFalse: 1}"));
+    assertNumSolutions(1);
+    assertSolutionExists("{eof: 1}");
+}
+
+TEST_F(QueryPlannerTest, EOFForAlwaysFalsePredicatesAndOtherModifications) {
+    runQuerySortProjSkipLimit(
+        fromjson("{$alwaysFalse: 1}"), fromjson("{x:1}"), fromjson("{x:1}"), 5, 6);
+    assertNumSolutions(1);
+    assertSolutionExists("{eof: 1}");
+}
+
+TEST_F(QueryPlannerTest, EOFForAlwaysFalsePredicatesUsingClusteredCollections) {
+    params.clusteredInfo = clustered_util::makeDefaultClusteredIdIndex();
+    runQuery(fromjson("{$alwaysFalse: 1}"));
+    assertNumSolutions(1);
+    assertSolutionExists("{eof: 1}");
+}
+
+TEST_F(QueryPlannerTest, NotEOFForChangeStreamsEvenIfAlwaysFalsePredicateIsGiven) {
+    // Here we simulate a change stream by requesting a tailable cursor on the oplog of the testColl
+    // collection. See NamespaceString::oplog() method.
+    nss = NamespaceString::createNamespaceString_forTest("local.oplog");
+    auto cmdObj = fromjson("{find: 'oplog.testColl', filter: {$alwaysFalse: 1}, tailable: true}");
+    runQueryAsCommand(cmdObj);
+
+    assertNumSolutions(1);
+    assertSolutionExists("{cscan: {filter: {$alwaysFalse: 1}, collation: {}, dir: 1}}");
+}
+
+TEST_F(QueryPlannerTest, NotEOFForChangeCollectionsEvenIfAlwaysFalsePredicateIsGiven) {
+    // Here we simulate a change collection (serverless change stream) by requesting a tailable
+    // cursor on the config.system.change_collection collection. See
+    // NamespaceString::isChangeCollection() method.
+    nss = NamespaceString::createNamespaceString_forTest("config.system");
+    auto cmdObj =
+        fromjson("{find: 'system.change_collection', filter: {$alwaysFalse: 1}, tailable: true}");
+    runQueryAsCommand(cmdObj);
+
+    assertNumSolutions(1);
+    assertSolutionExists("{cscan: {filter: {$alwaysFalse: 1}, collation: {}, dir: 1}}");
+}
+
+TEST_F(QueryPlannerTest, EOFForAlwaysFalsePredicatesInTailableCursors) {
+    runQueryAsCommand(fromjson("{find: 'testColl', filter: {$alwaysFalse: 1}, tailable: true}"));
+    assertNumSolutions(1);
+    assertSolutionExists("{eof: 1}");
 }
 
 }  // namespace

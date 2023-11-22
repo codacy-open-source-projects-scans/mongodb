@@ -736,12 +736,23 @@ private:
 
         if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             _setShardedClusterCardinalityParameter(opCtx, requestedVersion);
+            // TODO (SERVER-83264): Remove once 8.0 becomes last LTS.
+            _upgradeConfigSettingsSchema(opCtx, requestedVersion);
         }
 
         // TODO SERVER-80490: Remove this once 8.0 is released.
         // Sanitizes the wiredTiger.creationString option from the durable catalog. Removes the
         // encryption config options since they are ephemeral in nature.
         _sanitizeCreationConfigString(opCtx, requestedVersion);
+    }
+
+    void _upgradeConfigSettingsSchema(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        if (feature_flags::gBalancerSettingsSchema.isEnabledOnVersion(requestedVersion)) {
+            LOGV2(8260900, "Updating schema on config.settings");
+            uassertStatusOK(
+                ShardingCatalogManager::get(opCtx)->upgradeDowngradeConfigSettings(opCtx));
+        }
     }
 
     // TODO SERVER-80490: Remove this method once 8.0 is released.
@@ -853,6 +864,18 @@ private:
                     }
                     wunit.commit();
                 });
+        }
+    }
+
+    void _downgradeConfigSettingsSchema(
+        OperationContext* opCtx,
+        const multiversion::FeatureCompatibilityVersion requestedVersion,
+        const multiversion::FeatureCompatibilityVersion originalVersion) {
+        if (feature_flags::gBalancerSettingsSchema.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+                requestedVersion, originalVersion)) {
+            LOGV2(8260901, "Updating schema on config.settings");
+            uassertStatusOK(
+                ShardingCatalogManager::get(opCtx)->upgradeDowngradeConfigSettings(opCtx));
         }
     }
 
@@ -1203,6 +1226,8 @@ private:
             // be able to apply the oplog entries correctly.
             abortAllReshardCollection(opCtx);
             _createReshardingCoordinatorUniqueIndex(opCtx, requestedVersion, originalVersion);
+            // TODO (SERVER-83264): Remove once 8.0 becomes last LTS.
+            _downgradeConfigSettingsSchema(opCtx, requestedVersion, originalVersion);
         }
 
         if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
@@ -1315,7 +1340,14 @@ private:
         multiversion::FeatureCompatibilityVersion actualVersion,
         multiversion::FeatureCompatibilityVersion requestedVersion) {
 
-        std::function<void()> unblockNewIndexBuilds;
+        // Any actions to be performed post-update must also be performed in case of interruption
+        // during this function.
+        std::vector<std::function<void()>> postUpdateActions;
+        ScopeGuard postUpdateActionsGuard([&postUpdateActions]() {
+            for (const auto& action : postUpdateActions) {
+                action();
+            }
+        });
 
         // TODO (SERVER-68290): Remove index build abort due to FCV downgrade once the
         // feature flag is removed.
@@ -1332,9 +1364,8 @@ private:
             indexBuildsCoord->setNewIndexBuildsBlocked(true, reason);
             // New index builds will be unblocked after ScopedPostFCVDocumentUpdateActions goes out
             // of scope once the FCV document has been updated.
-            unblockNewIndexBuilds = [indexBuildsCoord] {
-                indexBuildsCoord->setNewIndexBuildsBlocked(false);
-            };
+            postUpdateActions.push_back(
+                [indexBuildsCoord] { indexBuildsCoord->setNewIndexBuildsBlocked(false); });
 
             if (hangAfterBlockingIndexBuildsForFcvDowngrade.shouldFail()) {
                 LOGV2(7738704, "Hanging for failpoint hangAfterBlockingIndexBuildsForFcvDowngrade");
@@ -1349,14 +1380,14 @@ private:
             indexBuildsCoord->waitForAllIndexBuildsToStop(opCtx);
         }
 
-        const auto postUpdateActions = [unblockNewIndexBuilds =
-                                            std::move(unblockNewIndexBuilds)]() {
-            if (unblockNewIndexBuilds) {
-                unblockNewIndexBuilds();
+        postUpdateActionsGuard.dismiss();
+        const auto runAllActions = [postUpdateActions = std::move(postUpdateActions)]() {
+            for (const auto& action : postUpdateActions) {
+                action();
             }
         };
 
-        return {postUpdateActions};
+        return {runAllActions};
     }
 
     // _prepareToDowngrade performs all actions and checks that need to be done before proceeding to

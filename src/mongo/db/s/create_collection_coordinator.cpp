@@ -63,10 +63,10 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/create_gen.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/locker_api.h"
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -251,11 +251,11 @@ OptionsAndIndexes getCollectionOptionsAndIndexes(OperationContext* opCtx,
 // 'collation' parameter to succeed (as an acknowledge of what specified in points 1. and 2.)
 BSONObj resolveCollationForUserQueries(OperationContext* opCtx,
                                        const NamespaceString& nss,
-                                       const boost::optional<Collation>& collationInRequest) {
+                                       const boost::optional<BSONObj>& collationInRequest) {
     // Ensure the collation is valid. Currently we only allow the simple collation.
     std::unique_ptr<CollatorInterface> requestedCollator = nullptr;
     if (collationInRequest) {
-        auto collationBson = collationInRequest.value().toBSON();
+        const auto& collationBson = collationInRequest.value();
         requestedCollator = uassertStatusOK(
             CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collationBson));
         uassert(ErrorCodes::BadValue,
@@ -549,7 +549,13 @@ void broadcastDropCollection(OperationContext* opCtx,
                        participants.end());
 
     sharding_ddl_util::sendDropCollectionParticipantCommandToShards(
-        opCtx, nss, participants, executor, osi, true /* fromMigrate */);
+        opCtx,
+        nss,
+        participants,
+        executor,
+        osi,
+        true /* fromMigrate */,
+        false /* dropSystemCollections */);
 }
 
 boost::optional<CreateCollectionResponse> checkIfCollectionAlreadyTrackedWithSameOptions(
@@ -592,7 +598,7 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadyTrackedWithSam
                 return false;
             }
 
-            if (request.getUnique() != cm.isUnique()) {
+            if (request.getUnique().value_or(false) != cm.isUnique()) {
                 return false;
             }
 
@@ -645,7 +651,7 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadyTrackedWithSam
     }
 
     auto requestMatchesExistingCollection = [&] {
-        if (cm.isUnique() != request.getUnique()) {
+        if (cm.isUnique() != request.getUnique().value_or(false)) {
             return false;
         }
 
@@ -704,7 +710,8 @@ void checkCommandArguments(OperationContext* opCtx,
     uassert(ErrorCodes::InvalidOptions,
             "Hashed shard keys cannot be declared unique. It's possible to ensure uniqueness on "
             "the hashed field by declaring an additional (non-hashed) unique index on the field.",
-            !ShardKeyPattern(*request.getShardKey()).isHashedPattern() || !request.getUnique());
+            !ShardKeyPattern(*request.getShardKey()).isHashedPattern() ||
+                !request.getUnique().value_or(false));
 
     if (originalNss.dbName() == DatabaseName::kConfig) {
         auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
@@ -844,6 +851,13 @@ TranslatedRequestParams translateRequestParameters(OperationContext* opCtx,
                 timeseries::optionsAreEqual(*request.getTimeseries(), *existingTimeseriesOptions));
     } else if (!request.getTimeseries()) {
         request.setTimeseries(existingTimeseriesOptions);
+    }
+
+    if (request.getUnsplittable()) {
+        return TranslatedRequestParams(
+            resolvedNamespace,
+            request.getShardKey().value(),
+            resolveCollationForUserQueries(opCtx, resolvedNamespace, request.getCollation()));
     }
 
     // check that they are consistent with the requested shard key before creating the key pattern
@@ -1050,7 +1064,7 @@ boost::optional<UUID> createCollectionAndIndexes(
             nss,
             shardKeyPattern,
             collationBSON,
-            request.getUnique(),
+            request.getUnique().value_or(false),
             request.getEnforceUniquenessCheck().value_or(true),
             shardkeyutil::ValidationBehaviorsShardCollection(opCtx));
     } else {
@@ -1060,7 +1074,7 @@ boost::optional<UUID> createCollectionAndIndexes(
                                          nss,
                                          shardKeyPattern,
                                          collationBSON,
-                                         request.getUnique() &&
+                                         request.getUnique().value_or(false) &&
                                              request.getEnforceUniquenessCheck().value_or(true),
                                          shardkeyutil::ValidationBehaviorsShardCollection(opCtx)));
     }
@@ -1087,6 +1101,10 @@ ShardsvrCreateCollectionRequest patchedRequestForChangeStream(
     const mongo::TranslatedRequestParams& translatedRequestParams) {
     auto req = originalRequest;
     req.setShardKey(translatedRequestParams.getKeyPattern().toBSON());
+    // TODO SERVER-83006: remove deprecated numInitialChunks parameter.
+    // numInitialChunks should not be logged by the change stream. The field is no longer used and
+    // it's kept in the request until it can be safely removed in SERVER-83006
+    req.setNumInitialChunks(boost::none);
     return req;
 }
 
@@ -1142,7 +1160,7 @@ boost::optional<CreateCollectionResponse> commit(
     }
 
     if (request.getUnique()) {
-        coll.setUnique(request.getUnique());
+        coll.setUnique(*request.getUnique());
     }
 
     const auto patchedRequestBSONObj =
@@ -1181,7 +1199,7 @@ boost::optional<CreateCollectionResponse> commit(
 
         // TODO (SERVER-71444): Fix to be interruptible or document exception.
         {
-            UninterruptibleLockGuard noInterrupt(opCtx->lockState());  // NOLINT.
+            UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
             AutoGetCollection autoColl(opCtx, nss, MODE_IX);
             CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
                 ->clearFilteringMetadata(opCtx);
@@ -1322,7 +1340,7 @@ ExecutorFuture<void> CreateCollectionCoordinatorLegacy::_runImpl(
                                     nss(),
                                     shardKeyPattern.toBSON(),
                                     collation,
-                                    _request.getUnique(),
+                                    _request.getUnique().value_or(false),
                                     _request.getUnsplittable().value_or(false))) {
 
                             // A previous request already created and committed the collection
@@ -1384,7 +1402,7 @@ ExecutorFuture<void> CreateCollectionCoordinatorLegacy::_runImpl(
                 _splitPolicy = create_collection_util::createPolicy(
                     opCtx,
                     shardKeyPattern,
-                    _request.getPresplitHashedZones(),
+                    _request.getPresplitHashedZones().value_or(false),
                     getTagsAndValidate(opCtx, nss(), shardKeyPattern.toBSON()),
                     getNumShards(opCtx),
                     *_collectionEmpty,
@@ -1399,8 +1417,10 @@ ExecutorFuture<void> CreateCollectionCoordinatorLegacy::_runImpl(
                                                              nss(),
                                                              _doc.getTranslatedRequestParams());
 
-                audit::logShardCollection(
-                    opCtx->getClient(), nss(), *_request.getShardKey(), _request.getUnique());
+                audit::logShardCollection(opCtx->getClient(),
+                                          nss(),
+                                          *_request.getShardKey(),
+                                          _request.getUnique().value_or(false));
 
                 _initialChunks =
                     createChunks(opCtx, shardKeyPattern, _collectionUUID, _splitPolicy, nss());
@@ -1551,6 +1571,7 @@ void CreateCollectionCoordinator::_releaseCriticalSectionsOnParticipants(
     ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss());
     unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
     unblockCRUDOperationsRequest.setReason(_critSecReason);
+    unblockCRUDOperationsRequest.setThrowIfReasonDiffers(false);
 
     async_rpc::GenericArgs args;
     async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
@@ -1641,7 +1662,7 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                 _splitPolicy = create_collection_util::createPolicy(
                     opCtx,
                     shardKeyPattern,
-                    _request.getPresplitHashedZones(),
+                    _request.getPresplitHashedZones().value_or(false),
                     getTagsAndValidate(opCtx, nss(), shardKeyPattern.toBSON()),
                     getNumShards(opCtx),
                     *_collectionEmpty,
@@ -1655,8 +1676,10 @@ ExecutorFuture<void> CreateCollectionCoordinator::_runImpl(
                                                              nss(),
                                                              _doc.getTranslatedRequestParams());
 
-                audit::logShardCollection(
-                    opCtx->getClient(), nss(), *_request.getShardKey(), _request.getUnique());
+                audit::logShardCollection(opCtx->getClient(),
+                                          nss(),
+                                          *_request.getShardKey(),
+                                          _request.getUnique().value_or(false));
 
                 _initialChunks =
                     createChunks(opCtx, shardKeyPattern, _collectionUUID, _splitPolicy, nss());

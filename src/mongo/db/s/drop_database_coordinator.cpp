@@ -49,7 +49,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/logical_time.h"
@@ -255,13 +254,25 @@ void DropDatabaseCoordinator::_dropShardedCollection(
     participants.erase(std::remove(participants.begin(), participants.end(), primaryShardId),
                        participants.end());
     sharding_ddl_util::sendDropCollectionParticipantCommandToShards(
-        opCtx, nss, participants, **executor, getNewSession(opCtx), true /* fromMigrate */);
+        opCtx,
+        nss,
+        participants,
+        **executor,
+        getNewSession(opCtx),
+        true /* fromMigrate */,
+        false /* dropSystemCollections */);
 
     // The sharded collection must be dropped on the primary shard after it has been dropped on all
     // of the other shards to ensure it can only be re-created as unsharded with a higher optime
     // than all of the drops.
     sharding_ddl_util::sendDropCollectionParticipantCommandToShards(
-        opCtx, nss, {primaryShardId}, **executor, getNewSession(opCtx), false /* fromMigrate */);
+        opCtx,
+        nss,
+        {primaryShardId},
+        **executor,
+        getNewSession(opCtx),
+        false /* fromMigrate */,
+        false /* dropSystemCollections */);
 
     {
         ShardsvrParticipantBlock unblockCRUDOperationsRequest(nss);
