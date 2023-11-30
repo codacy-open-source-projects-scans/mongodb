@@ -883,7 +883,8 @@ void QueryPlannerAnalysis::removeImpreciseInternalExprFilters(const QueryPlanner
     // imprecise filters may be able to save us the significant work of doing a fetch. In such
     // cases, we assume the imprecise filter is always worth applying.
     if (root.fetched() && root.filter) {
-        expression::removeImpreciseInternalExprNodes(root.filter.get());
+        root.filter =
+            expression::assumeImpreciseInternalExprNodesReturnTrue(std::move(root.filter));
     }
 
     for (auto& child : root.children) {
@@ -900,10 +901,9 @@ QueryPlannerAnalysis::determineLookupStrategy(
     bool allowDiskUse,
     const CollatorInterface* collator) {
     auto foreignCollItr = collectionsInfo.find(foreignCollName);
-    tassert(5842600,
-            str::stream() << "Expected collection info, but found none; target collection: "
-                          << foreignCollName.toStringForErrorMsg(),
-            foreignCollItr != collectionsInfo.end());
+    if (foreignCollItr == collectionsInfo.end()) {
+        return {EqLookupNode::LookupStrategy::kNonExistentForeignCollection, boost::none};
+    }
 
     // Check if an eligible index exists for indexed loop join strategy.
     const auto foreignIndex = [&]() -> boost::optional<IndexEntry> {

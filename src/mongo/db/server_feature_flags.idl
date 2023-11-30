@@ -57,7 +57,7 @@ feature_flags:
         description: "Support for bulkWrite command and one-shot transactions"
         cpp_varname: gFeatureFlagBulkWriteCommand
         default: false
-        shouldBeFCVGated: false
+        shouldBeFCVGated: true
     featureFlagAuditConfigClusterParameter:
         description: "Enable use of new auditConfig cluster server parameter"
         cpp_varname: feature_flags::gFeatureFlagAuditConfigClusterParameter
@@ -119,4 +119,9 @@ feature_flags:
         description: "Feature flag gating OIDC authentication with internal authorization"
         cpp_varname: gFeatureFlagOIDCInternalAuthorization
         default: true
+        shouldBeFCVGated: false
+    featureFlag80MakeAllDeploymentsShardedClusters:
+        description: "Enable upgradeBackCompat and downgradeBackCompat CLI parameters"
+        cpp_varname: gfeatureFlag80MakeAllDeploymentsShardedClusters
+        default: false
         shouldBeFCVGated: false

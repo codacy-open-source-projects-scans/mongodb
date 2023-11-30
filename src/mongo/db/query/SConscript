@@ -316,7 +316,7 @@ env.Library(
         'framework_control.cpp',
         'query_feature_flags.idl',
         'query_knobs.idl',
-        'query_stats/util.cpp',
+        'query_stats/query_stats_on_parameter_change.cpp',
         'sbe_plan_cache_on_parameter_change.cpp',
     ],
     LIBDEPS_PRIVATE=[
@@ -449,6 +449,7 @@ env.CppUnitTest(
         "ce_mode_parameter_test.cpp",
         "classic_stage_builder_test.cpp",
         "count_command_test.cpp",
+        "cqf_fast_paths_test.cpp",
         "cursor_response_test.cpp",
         "query_shape/distinct_cmd_shape_test.cpp",
         "query_shape/find_cmd_shape_test.cpp",
@@ -498,6 +499,7 @@ env.CppUnitTest(
         "query_planner_wildcard_index_test.cpp",
         "query_request_test.cpp",
         "query_settings_test.cpp",
+        "query_settings/query_framework_serialization_test.cpp",
         "query_settings/query_settings_manager_test.cpp",
         "query_settings/query_settings_validation_test.cpp",
         "query_solution_test.cpp",
@@ -519,6 +521,7 @@ env.CppUnitTest(
         "view_response_formatter_test.cpp",
         'map_reduce_output_format_test.cpp',
         'max_time_ms_parser_test.cpp',
+        "sbe_stage_builder_window_function_test.cpp",
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/auth/authmocks",

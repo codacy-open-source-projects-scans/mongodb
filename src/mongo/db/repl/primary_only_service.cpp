@@ -373,6 +373,7 @@ void PrimaryOnlyService::startup(OperationContext* opCtx) {
 }
 
 void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
+    using namespace fmt::literals;
     SimpleBSONObjUnorderedMap<ActiveInstance> savedInstances;
     invariant(_getHasExecutor());
     auto newThenOldScopedExecutor =
@@ -514,14 +515,13 @@ void PrimaryOnlyService::onStepDown() {
                "numInstances"_attr = _activeInstances.size(),
                "numOperationContexts"_attr = _opCtxs.size());
 
+    _onServiceTermination();
     _interruptInstances(lk,
                         {ErrorCodes::InterruptedDueToReplStateChange,
                          "PrimaryOnlyService interrupted due to stepdown"});
 
     _setState(State::kPaused, lk);
     _rebuildStatus = Status::OK();
-
-    _afterStepDown();
 }
 
 void PrimaryOnlyService::shutdown() {
@@ -540,6 +540,7 @@ void PrimaryOnlyService::shutdown() {
 
         // If the _state is already kPaused, the instances have already been interrupted.
         if (_state != State::kPaused) {
+            _onServiceTermination();
             _interruptInstances(lk,
                                 {ErrorCodes::InterruptedAtShutdown,
                                  "PrimaryOnlyService interrupted due to shutdown"});

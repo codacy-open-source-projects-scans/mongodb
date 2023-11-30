@@ -436,6 +436,9 @@ env.Library(
         'service_entry_point_mongos.cpp',
         'sharding_uptime_reporter.cpp',
     ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
+    ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/curop_metrics',
         '$BUILD_DIR/mongo/db/not_primary_error_tracker',
@@ -447,9 +450,6 @@ env.Library(
         'commands/cluster_commands_common',
         'load_balancer_support',
         'sharding_router_api',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/catalog/collection_catalog',
     ],
 )
 
@@ -485,6 +485,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/windows_options' if env.TargetOSIs('windows') else [],
         '$BUILD_DIR/mongo/executor/async_rpc_error_info',
         '$BUILD_DIR/mongo/executor/hedging_metrics',
+        '$BUILD_DIR/mongo/idl/cluster_server_parameter_server_status',
         '$BUILD_DIR/mongo/transport/message_compressor_options_server',
         '$BUILD_DIR/mongo/transport/session_manager',
         '$BUILD_DIR/mongo/transport/transport_layer_manager',

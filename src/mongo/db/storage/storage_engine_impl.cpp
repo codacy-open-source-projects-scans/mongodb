@@ -1233,8 +1233,8 @@ std::shared_ptr<Ident> StorageEngineImpl::markIdentInUse(StringData ident) {
     return _dropPendingIdentReaper.markIdentInUse(ident);
 }
 
-void StorageEngineImpl::checkpoint(OperationContext* opCtx) {
-    _engine->checkpoint(opCtx);
+void StorageEngineImpl::checkpoint() {
+    _engine->checkpoint();
 }
 
 StorageEngine::CheckpointIteration StorageEngineImpl::getCheckpointIteration() const {
@@ -1449,6 +1449,12 @@ StatusWith<BSONObj> StorageEngineImpl::getSanitizedStorageOptionsForSecondaryRep
 
 void StorageEngineImpl::dump() const {
     _engine->dump();
+}
+
+Status StorageEngineImpl::autoCompact(OperationContext* opCtx,
+                                      bool enable,
+                                      boost::optional<int64_t> freeSpaceTargetMB) {
+    return _engine->autoCompact(opCtx, enable, freeSpaceTargetMB);
 }
 
 }  // namespace mongo

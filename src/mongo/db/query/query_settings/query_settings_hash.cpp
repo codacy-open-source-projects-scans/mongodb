@@ -29,12 +29,14 @@
 
 #include "mongo/db/query/query_settings/query_settings_hash.h"
 
+#include "mongo/db/query/query_knobs_gen.h"
+
 namespace mongo::query_settings {
 
 size_t hash(const QuerySettings& querySettings) {
     size_t hash = 0;
-    if (auto version = querySettings.getQueryEngineVersion()) {
-        boost::hash_combine(hash, absl::Hash<QueryEngineVersionEnum>{}(*version));
+    if (auto version = querySettings.getQueryFramework()) {
+        boost::hash_combine(hash, absl::Hash<QueryFrameworkControlEnum>{}(*version));
     }
     if (auto indexHints = querySettings.getIndexHints()) {
         auto hashVectorOfHints = [&](const std::vector<IndexHint>& hints) {

@@ -147,7 +147,7 @@ variables:
 
 - &compile_bazel_task_group_template
   name: compile_bazel_task_group_template
-  max_hosts: 1
+  max_hosts: -1
   tasks: []
   setup_group_can_fail_task: true
   setup_group:
@@ -162,6 +162,7 @@ variables:
   - func: "f_expansions_write"
   - func: "set up credentials"
   - func: "f_expansions_write"
+  - func: "get engflow creds"
 
 
 - &compile_task_group_template
@@ -180,6 +181,7 @@ variables:
   - func: "attach report"
   - func: "attach artifacts"
   - func: "attach local resmoke invocation"
+  - func: "attach multiversion download links"
   - func: "kill processes"
   - func: "save mongo coredumps"
   - func: "generate hang analyzer tasks"
@@ -451,6 +453,27 @@ functions:
       remote_file: ${mongo_venv}
       bucket: mciuploads
       extract_to: "."
+
+  "get engflow creds": &get_engflow_creds
+  - command: s3.get
+    params:
+      aws_key: ${engflow_key}
+      aws_secret: ${engflow_secret}
+      remote_file: engflow/engflow.key
+      bucket: serverengflow
+      local_file: "src/engflow.key"
+  - command: s3.get
+    params:
+      aws_key: ${engflow_key}
+      aws_secret: ${engflow_secret}
+      remote_file: engflow/engflow.cert
+      bucket: serverengflow
+      local_file: "src/engflow.cert"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/generate_evergreen_engflow_bazelrc.sh"
 
   "adjust venv": &adjust_venv
     command: subprocess.exec
@@ -1356,6 +1379,17 @@ functions:
       args:
       - "src/evergreen/bazel_compile.sh"
 
+  "bazel compile (msvc)":
+  - *get_version_expansions
+  - *apply_version_expansions
+  - *f_expansions_write
+  - command: subprocess.exec
+    type: test
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/bazel_compile.sh"
+
   "bazel run":
   - *get_version_expansions
   - *apply_version_expansions
@@ -1556,60 +1590,6 @@ functions:
       binary: bash
       args:
       - "./src/evergreen/jepsen_docker/cleanup.sh"
-
-  "f_dsi_pre_run":
-  - command: manifest.load
-  - command: expansions.update
-    params:
-      updates: []
-
-  "f_dsi_post_run":
-  - command: shell.exec
-    params:
-      script: ./src/dsi/run-dsi post_run
-  - command: perf.send
-    params:
-      file: ./build/CedarReports/cedar_report.json
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      bucket: genny-metrics
-      region: us-east-1
-      prefix: ${task_id}_${execution}
-  - command: attach.results
-    params:
-      file_location: ./build/EvergreenResultsJson/results.json
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: ./build/Artifacts/DSIArtifacts.tgz
-      remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/logs/dsi-artifacts-${task_name}-${build_id}-${execution}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: application/x-gzip
-      display_name: DSI Artifacts - Execution ${execution}
-  # TODO: https://jira.mongodb.org/browse/EVG-21107
-  #  - command: s3.put
-  #     params:
-  #       aws_key: ${aws_key}
-  #       aws_secret: ${aws_secret}
-  #       local_file: ./build/Documentation/index.html
-  #       remote_file: ${project_dir}/${build_variant}/${revision}/${task_id}/${version_id}/logs/${task_name}-${build_id}-index.html
-  #       bucket: mciuploads
-  #       permissions: public-read
-  #       content_type: text/html
-  #       display_name: Documentation
-  # TODO https://jira.mongodb.org/browse/PERF-4829
-  #   - command: s3.put
-  #     params:
-  #       aws_key: ${aws_key}
-  #       aws_secret: ${aws_secret}
-  #       local_file: bootstrap.yml
-  #       remote_file: ${project}/${build_variant}/${revision}/${task_id}/${version_id}/bootstrap-${task_name}-${build_id}-${execution}.yml
-  #       bucket: mciuploads
-  #       permissions: public-read
-  #       content_type: text/plain
-  #       display_name: Task Bootstrap Config
 
   "run jepsen test":
   - *f_expansions_write
@@ -2638,6 +2618,19 @@ functions:
       content_type: text/plain
       display_name: Resmoke.py Invocation for Local Usage
 
+  "attach multiversion download links":
+    command: s3.put
+    params:
+      optional: true
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: src/multiversion-downloads.json
+      remote_file: ${project}/${build_variant}/${revision}/multiversion-downloads-${task_id}-${execution}.json
+      bucket: mciuploads
+      permissions: public-read
+      content_type: application/json
+      display_name: Multiversion download links
+
   "attach multiversion exclude tags":
     command: s3.put
     params:
@@ -2702,11 +2695,9 @@ tasks:
     vars:
       targets: >-
         build/fast/mongo/db/commands/libfsync_locked.a
-      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
         BAZEL_INTEGRATION_DEBUG=1
-        BAZEL_FLAGS=--config=local
         ICECC=
         --build-profile=fast
         --ninja=disabled
@@ -2724,6 +2715,19 @@ tasks:
       targets: src/mongo/db/commands:fsync_locked
       compiler: clang
 
+- name: bazel_py_hello_world
+  tags: []
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
+  - func: "fetch bazel"
+  - func: "bazel compile (gcc)"
+    vars:
+      targets: //bazel:py_hello_world
+      compiler: gcc
+
 - name: compile_bazel_dist_test_windows
   tags: []
   depends_on:
@@ -2736,11 +2740,9 @@ tasks:
     vars:
       targets: >-
         build/fast/mongo/db/commands/fsync_locked.lib
-      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
         BAZEL_INTEGRATION_DEBUG=1
-        BAZEL_FLAGS=--config=local
         ICECC=
         --build-profile=fast
         --ninja=disabled
@@ -2762,12 +2764,11 @@ tasks:
     vars:
       targets: >-
         build/fast/mongo/db/commands/libfsync_locked.a
-      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       # MacOS needs the sandbox_writable_path set to tmpdir to allow the bazel sandbox to write to /data/mci/{id}/tmp
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
         BAZEL_INTEGRATION_DEBUG=1
-        BAZEL_FLAGS="--config=local --subcommands --verbose_failures --sandbox_debug --sandbox_writable_path=$TMPDIR"
+        BAZEL_FLAGS="--subcommands --verbose_failures --sandbox_debug --sandbox_writable_path=$TMPDIR"
         ICECC=
         --build-profile=fast
         --ninja=disabled
@@ -2776,6 +2777,7 @@ tasks:
   - func: "verify build output present"
     vars:
       output: build/fast/mongo/db/commands/libfsync_locked.a
+
 
 # Validates that the bazel mongo toolchain can be used to compile targets that
 # contain C and asssembly source code files.
@@ -2808,11 +2810,9 @@ tasks:
     vars:
       targets: >-
         build/fast/third_party/unwind/libunwind.a
-      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
         BAZEL_INTEGRATION_DEBUG=1
-        BAZEL_FLAGS=--config=local
         ICECC=
         --build-profile=fast
         --ninja=disabled
@@ -2836,11 +2836,9 @@ tasks:
       targets: >-
         build/fast/mongo/platform/visibility_test1
       separate_debug: off
-      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
         BAZEL_INTEGRATION_DEBUG=1
-        BAZEL_FLAGS=--config=local
         ICECC=
         --build-profile=fast
         --ninja=disabled
@@ -2863,9 +2861,6 @@ tasks:
     vars:
       target: >-
         //src/mongo/platform:visibility_test1
-      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
-      args: >-
-        --config=local
 
 - name: run_bazel_program_windows
   tags: []
@@ -2879,11 +2874,9 @@ tasks:
     vars:
       target: >-
         //src/mongo/platform:visibility_test1
-      # TODO SERVER-79852 remove "BAZEL_FLAGS=--config=local" flag
       # TODO DEVPROD-2508 remove dbg flags when compilation_mode is synced with build_mode automatically
       # TODO DEVPROD-2513 remove "--copt /std:c++20" flag when toolchain sets this automatically
       args: >-
-        --config=local
         --compilation_mode=dbg
         --//bazel/config:build_mode=dbg
         --copt /std:c++20
@@ -3176,7 +3169,6 @@ tasks:
         --build-profile=fast
         BAZEL_BUILD_ENABLED=1
         BAZEL_INTEGRATION_DEBUG=1
-        BAZEL_FLAGS=--config=local
         CCACHE=
         ICECC=
   - *f_expansions_write
@@ -5524,6 +5516,16 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
+- <<: *gen_task_template
+  name: aggregation_unsplittable_collections_on_random_shard_passthrough
+  # TODO SERVER-83445 Enable on non-all-feature-flag variants.
+  tags: ["unsplittable_collections"]
+  depends_on:
+  - name: aggregation
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - <<: *task_template
   name: aggregation_column_store_index_passthrough
   # TODO SERVER-75026 Remove the 'feature_flag_guarded' tag and ensure this suite is run on all
@@ -6462,6 +6464,7 @@ tasks:
 
 - <<: *gen_task_template
   name: unsplittable_collections_created_on_any_shard_jscore_passthrough_gen
+  # TODO SERVER-83445 Enable on non-all-feature-flag variants.
   tags: ["unsplittable_collections"]
   commands:
   - func: "generate resmoke tasks"
@@ -6673,6 +6676,7 @@ tasks:
     - func: "generate resmoke tasks"
       vars:
         use_large_distro: "true"
+        resmoke_jobs_max: 1
 
 - <<: *gen_task_template
   name: shard_split_jscore_passthrough_gen
@@ -6860,6 +6864,14 @@ tasks:
 
 - <<: *gen_task_template
   name: multitenancy_with_atlas_proxy_jscore_passthrough_gen
+  tags: ["serverless"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+
+- <<: *gen_task_template
+  name: concurrency_multitenancy_replication_with_atlas_proxy_gen
   tags: ["serverless"]
   commands:
   - func: "generate resmoke tasks"
@@ -7238,12 +7250,11 @@ tasks:
     vars:
       resmoke_jobs_max: 1
 
-- <<: *task_template
-  name: concurrency_simultaneous_replication_wiredtiger_cursor_sweeps
-  tags: ["concurrency", "repl", "cursor_sweeps"]
+- <<: *gen_task_template
+  name: concurrency_simultaneous_replication_wiredtiger_cursor_sweeps_gen
+  tags: ["concurrency", "large", "repl", "cursor_sweeps", "random_name"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
     vars:
       resmoke_jobs_max: 1
 
@@ -9402,11 +9413,13 @@ task_groups:
   - compile_bazel_program
   - compile_ninja_bazel
   - run_bazel_program
+  - bazel_py_hello_world
 
 - <<: *compile_bazel_task_group_template
   name: compile_bazel_windows_TG
   tasks:
   - compile_bazel_dist_test_windows
+  - bazel_py_hello_world
   - run_bazel_program_windows
   - compile_ninja_bazel
 
@@ -9414,6 +9427,7 @@ task_groups:
   name: compile_bazel_macos_TG
   tasks:
   - compile_bazel_dist_test_macos
+  - bazel_py_hello_world
 
 - <<: *compile_task_group_template
   name: compile_upload_benchmarks_TG
