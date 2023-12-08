@@ -156,6 +156,7 @@ let viewsCommandTests = {
     _recvChunkStatus: {skip: isAnInternalCommand},
     _refreshQueryAnalyzerConfiguration: {skip: isAnInternalCommand},
     _shardsvrAbortReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrChangePrimary: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
@@ -268,6 +269,7 @@ let viewsCommandTests = {
         command: {captrunc: "view", n: 2, inc: false},
         expectFailure: true,
     },
+    changePrimary: {skip: "Tested in sharding/change_primary.js"},
     checkMetadataConsistency: {
         command: {checkMetadataConsistency: "view"},
         expectFailure: false,
@@ -466,7 +468,8 @@ let viewsCommandTests = {
     getShardVersion: {
         command: {getShardVersion: "test.view"},
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NoShardingEnabled,
+        expectedErrorCode:
+            [ErrorCodes.ShardingStateNotInitialized, ErrorCodes.NoShardingEnabled_OBSOLETE],
         isAdminCommand: true,
         skipSharded: true,  // mongos is tested in views/views_sharded.js
     },
@@ -718,7 +721,8 @@ let viewsCommandTests = {
         },
         skipSharded: true,
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NoShardingEnabled,
+        expectedErrorCode:
+            [ErrorCodes.ShardingStateNotInitialized, ErrorCodes.NoShardingEnabled_OBSOLETE],
         isAdminCommand: true,
     },
     splitVector: {

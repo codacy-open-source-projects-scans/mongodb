@@ -381,12 +381,12 @@ void CurOp::setGenericOpRequestDetails(NamespaceString nss,
 
 void CurOp::setEndOfOpMetrics(long long nreturned) {
     _debug.additiveMetrics.nreturned = nreturned;
-    // A non-null queryStats store key indicates the current query is being tracked for queryStats
+    // A non-none queryStatsInfo.keyHash indicates the current query is being tracked for queryStats
     // and therefore the executionTime needs to be recorded as part of that effort. executionTime is
     // set with the final executionTime in completeAndLogOperation, but for query stats collection
     // we want it set before incrementing cursor metrics using OpDebug's AdditiveMetrics. The value
     // set here will be overwritten later in completeAndLogOperation.
-    if (_debug.queryStatsKeyHash) {
+    if (_debug.queryStatsInfo.keyHash) {
         _debug.additiveMetrics.executionTime = elapsedTimeExcludingPauses();
     }
 }
@@ -986,6 +986,14 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("planningTimeMicros", durationCount<Microseconds>(planningTime));
     }
 
+    if (estimatedCost) {
+        pAttrs->add("estimatedCost", *estimatedCost);
+    }
+
+    if (estimatedCardinality) {
+        pAttrs->add("estimatedCardinality", *estimatedCardinality);
+    }
+
     if (prepareConflictDurationMillis > Milliseconds::zero()) {
         pAttrs->add("prepareConflictDuration", prepareConflictDurationMillis);
     }
@@ -1380,6 +1388,10 @@ void OpDebug::append(OperationContext* opCtx,
         b.appendNumber("planningTimeMicros", durationCount<Microseconds>(planningTime));
     }
 
+    OPDEBUG_APPEND_OPTIONAL(b, "estimatedCost", estimatedCost);
+
+    OPDEBUG_APPEND_OPTIONAL(b, "estimatedCardinality", estimatedCardinality);
+
     if (totalOplogSlotDurationMicros > Microseconds::zero()) {
         b.appendNumber("totalOplogSlotDurationMicros",
                        durationCount<Microseconds>(totalOplogSlotDurationMicros));
@@ -1711,6 +1723,14 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
 
     addIfNeeded("planningTimeMicros", [](auto field, auto args, auto& b) {
         b.appendNumber(field, durationCount<Microseconds>(args.op.planningTime));
+    });
+
+    addIfNeeded("estimatedCost", [](auto field, auto args, auto& b) {
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.estimatedCost);
+    });
+
+    addIfNeeded("estimatedCardinality", [](auto field, auto args, auto& b) {
+        OPDEBUG_APPEND_OPTIONAL(b, field, args.op.estimatedCardinality);
     });
 
     addIfNeeded("totalOplogSlotDurationMicros", [](auto field, auto args, auto& b) {

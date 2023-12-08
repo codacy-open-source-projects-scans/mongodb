@@ -90,7 +90,7 @@ public:
 
     virtual ~StorageEngineImpl();
 
-    virtual void notifyStartupComplete() override;
+    virtual void notifyStartupComplete(OperationContext* opCtx) override;
 
     virtual RecoveryUnit* newRecoveryUnit() override;
 
@@ -336,7 +336,7 @@ public:
     }
 
     void addDropPendingIdent(
-        const stdx::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
+        const std::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
         std::shared_ptr<Ident> ident,
         DropIdentCallback&& onDrop) override;
 
@@ -407,9 +407,7 @@ public:
 
     void dump() const override;
 
-    virtual Status autoCompact(OperationContext* opCtx,
-                               bool enable,
-                               boost::optional<int64_t> freeSpaceTargetMB) override;
+    virtual Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) override;
 
 private:
     using CollIter = std::list<std::string>::iterator;

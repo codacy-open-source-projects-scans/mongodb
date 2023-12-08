@@ -52,6 +52,23 @@ namespace mongo::optimizer::fast_path {
     }
 
 /**
+ * Holds all information required to construct SBE plans for queries that have a fast path
+ * implementation.
+ */
+struct ExecTreeGeneratorParams {
+    const UUID collectionUuid;
+    PlanYieldPolicy* yieldPolicy;
+    const BSONObj& filter;
+};
+
+using ExecTreeResult = std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData>;
+
+/**
+ * Returns an SBE plan using a fast path implementation for the given filter. Used only for testing.
+ */
+ExecTreeResult getFastPathExecTreeForTest(const ExecTreeGeneratorParams& filter);
+
+/**
  * Returns the arguments to create a PlanExecutor for the given CanonicalQuery.
  */
 boost::optional<ExecParams> tryGetSBEExecutorViaFastPath(
@@ -69,7 +86,7 @@ boost::optional<ExecParams> tryGetSBEExecutorViaFastPath(
     const NamespaceString& nss,
     const MultipleCollectionAccessor& collections,
     bool hasExplain,
-    bool hasIndexHint,
+    boost::optional<BSONObj> indexHint,
     const Pipeline* pipeline,
     const CanonicalQuery* canonicalQuery = nullptr);
 }  // namespace mongo::optimizer::fast_path

@@ -83,7 +83,6 @@
 #include "mongo/db/s/shard_local.h"
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/shard_id.h"
@@ -115,6 +114,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_initialization.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
@@ -364,110 +364,6 @@ void ShardingInitializationMongoD::shutDown(OperationContext* opCtx) {
     _replicaSetChangeListener.reset();
 }
 
-bool ShardingInitializationMongoD::initializeShardingAwarenessIfNeeded(OperationContext* opCtx) {
-    invariant(!shard_role_details::getLocker(opCtx)->isLocked());
-
-    // In sharded queryableBackupMode mode, we ignore the shardIdentity document on disk and instead
-    // *require* a shardIdentity document to be passed through --overrideShardIdentity
-    if (storageGlobalParams.queryableBackupMode) {
-        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
-            uassert(ErrorCodes::InvalidOptions,
-                    "If started with --shardsvr in queryableBackupMode, a shardIdentity document "
-                    "must be provided through --overrideShardIdentity",
-                    !serverGlobalParams.overrideShardIdentity.isEmpty());
-
-            auto overrideShardIdentity =
-                uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(
-                    serverGlobalParams.overrideShardIdentity));
-
-            {
-                // Global lock is required to call initializeFromShardIdentity
-                Lock::GlobalWrite lk(opCtx);
-                initializeFromShardIdentity(opCtx, overrideShardIdentity);
-            }
-
-            return true;
-        } else {
-            // Error if --overrideShardIdentity is used but *not* started with --shardsvr
-            uassert(ErrorCodes::InvalidOptions,
-                    str::stream()
-                        << "Not started with --shardsvr, but a shardIdentity document was provided "
-                           "through --overrideShardIdentity: "
-                        << serverGlobalParams.overrideShardIdentity,
-                    serverGlobalParams.overrideShardIdentity.isEmpty());
-            return false;
-        }
-
-        MONGO_UNREACHABLE;
-    }
-
-    // In sharded *non*-readOnly mode, error if --overrideShardIdentity is provided
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "--overrideShardIdentity is only allowed in sharded "
-                             "queryableBackupMode. If not in queryableBackupMode, you can edit "
-                             "the shardIdentity document by starting the server *without* "
-                             "--shardsvr, manually updating the shardIdentity document in the "
-                          << NamespaceString::kServerConfigurationNamespace.toStringForErrorMsg()
-                          << " collection, and restarting the server with --shardsvr.",
-            serverGlobalParams.overrideShardIdentity.isEmpty());
-
-    // Use the shardIdentity document on disk if one exists, but it is okay if no shardIdentity
-    // document is available at all (sharding awareness will be initialized when a shardIdentity
-    // document is inserted)
-    BSONObj shardIdentityBSON;
-    const bool foundShardIdentity = [&] {
-        AutoGetCollection autoColl(opCtx, NamespaceString::kServerConfigurationNamespace, MODE_IS);
-        return Helpers::findOne(opCtx,
-                                autoColl.getCollection(),
-                                BSON("_id" << ShardIdentityType::IdName),
-                                shardIdentityBSON);
-    }();
-
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
-        if (!foundShardIdentity) {
-            if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-                LOGV2_WARNING(7445900,
-                              "Started with ShardServer role, but no shardIdentity document was "
-                              "found on disk.",
-                              logAttrs(NamespaceString::kServerConfigurationNamespace));
-            } else {
-                LOGV2_WARNING(22074,
-                              "Started with ShardServer role, but no shardIdentity document was "
-                              "found on disk. This most likely means this server has not yet been "
-                              "added to a sharded cluster.",
-                              logAttrs(NamespaceString::kServerConfigurationNamespace));
-            }
-            return false;
-        }
-
-        invariant(!shardIdentityBSON.isEmpty());
-
-        auto shardIdentity =
-            uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(shardIdentityBSON));
-        uassertStatusOK(shardIdentity.validate(
-            true /* fassert cluster role matches shard identity document */));
-
-
-        {
-            // Global lock is required to call initializeFromShardIdentity
-            Lock::GlobalWrite lk(opCtx);
-            initializeFromShardIdentity(opCtx, shardIdentity);
-        }
-
-        return true;
-    } else {
-        // Warn if a shardIdentity document is found on disk but *not* started with --shardsvr.
-        if (!shardIdentityBSON.isEmpty()) {
-            LOGV2_WARNING(
-                22075,
-                "Not started with --shardsvr, but a shardIdentity document was found on disk",
-                logAttrs(NamespaceString::kServerConfigurationNamespace),
-                "shardIdentityDocument"_attr = shardIdentityBSON);
-        }
-        return false;
-    }
-}
-
 void ShardingInitializationMongoD::initializeFromShardIdentity(
     OperationContext* opCtx, const ShardIdentityType& shardIdentity) {
     invariant(serverGlobalParams.clusterRole.has(ClusterRole::ShardServer));
@@ -512,19 +408,14 @@ void ShardingInitializationMongoD::initializeFromShardIdentity(
         return;
     }
 
-    auto initializationStatus = shardingState->initializationStatus();
-    uassert(ErrorCodes::ManualInterventionRequired,
-            str::stream() << "Server's sharding metadata manager failed to initialize and will "
-                             "remain in this state until the instance is manually reset"
-                          << causedBy(*initializationStatus),
-            !initializationStatus);
-
     try {
         _initFunc(opCtx, shardIdentity);
-        shardingState->setInitialized(shardIdentity.getShardName().toString(),
-                                      shardIdentity.getClusterId());
+        shardingState->setRecoveryCompleted({shardIdentity.getClusterId(),
+                                             serverGlobalParams.clusterRole,
+                                             shardIdentity.getConfigsvrConnectionString(),
+                                             ShardId(shardIdentity.getShardName().toString())});
     } catch (const DBException& ex) {
-        shardingState->setInitialized(ex.toStatus());
+        shardingState->setRecoveryFailed(ex.toStatus());
     }
 
     if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
@@ -582,13 +473,32 @@ void ShardingInitializationMongoD::updateShardIdentityConfigString(
     }
 }
 
-void ShardingInitializationMongoD::onSetCurrentConfig(OperationContext* opCtx) {
-    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        return;
+void ShardingInitializationMongoD::onStepUpBegin(OperationContext* opCtx, long long term) {
+    _isPrimary.store(true);
+    if (Grid::get(opCtx)->isInitialized()) {
+        ShardRegistry::scheduleReplicaSetUpdateOnConfigServerIfNeeded(
+            opCtx, [&]() -> bool { return _isPrimary.load(); });
     }
+}
 
-    auto myConnectionString = repl::ReplicationCoordinator::get(opCtx)->getConfigConnectionString();
-    Grid::get(opCtx)->shardRegistry()->initConfigShardIfNecessary(myConnectionString);
+void ShardingInitializationMongoD::onStepDown() {
+    _isPrimary.store(false);
+}
+
+void ShardingInitializationMongoD::onSetCurrentConfig(OperationContext* opCtx) {
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        // TODO: SERVER-82965 Remove if condition, shard registry should always exists for config
+        // servers.
+        if (auto shardRegistry = Grid::get(opCtx)->shardRegistry()) {
+            auto myConnectionString =
+                repl::ReplicationCoordinator::get(opCtx)->getConfigConnectionString();
+            shardRegistry->initConfigShardIfNecessary(myConnectionString);
+        }
+    }
+    if (Grid::get(opCtx)->isInitialized()) {
+        ShardRegistry::scheduleReplicaSetUpdateOnConfigServerIfNeeded(
+            opCtx, [&]() -> bool { return _isPrimary.load(); });
+    }
 }
 
 void ShardingInitializationMongoD::onInitialDataAvailable(OperationContext* opCtx,
@@ -597,8 +507,10 @@ void ShardingInitializationMongoD::onInitialDataAvailable(OperationContext* opCt
         initializeGlobalShardingStateForConfigServerIfNeeded(opCtx);
     }
 
-    // This function may take the global lock.
-    initializeShardingAwarenessIfNeededAndLoadGlobalSettings(opCtx);
+    if (auto shardIdentityDoc = getShardIdentityDoc(opCtx)) {
+        // This function will take the global lock.
+        initializeShardingAwarenessAndLoadGlobalSettings(opCtx, *shardIdentityDoc);
+    }
 }
 
 void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCtx) {
@@ -831,19 +743,19 @@ void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
           "memberState"_attr = (isStandaloneOrPrimary ? "primary" : "secondary"));
 }
 
-void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(
-    OperationContext* opCtx, BSONObjBuilder* startupTimeElapsedBuilder) {
-
-    bool shardingInitialized;
+void initializeShardingAwarenessAndLoadGlobalSettings(OperationContext* opCtx,
+                                                      const ShardIdentity& shardIdentity,
+                                                      BSONObjBuilder* startupTimeElapsedBuilder) {
     {
         auto scopedTimer = createTimeElapsedBuilderScopedTimer(
             opCtx->getServiceContext()->getFastClockSource(),
             "Initialize information needed to make a mongod instance shard aware",
             startupTimeElapsedBuilder);
-        shardingInitialized =
-            ShardingInitializationMongoD::get(opCtx)->initializeShardingAwarenessIfNeeded(opCtx);
+        Lock::GlobalWrite lk(opCtx);
+        ShardingInitializationMongoD::get(opCtx)->initializeFromShardIdentity(opCtx, shardIdentity);
     }
-    if (shardingInitialized) {
+
+    {
         // Config servers can't always perform remote reads here, so they use a local client.
         auto scopedTimer =
             createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
@@ -858,6 +770,94 @@ void initializeShardingAwarenessIfNeededAndLoadGlobalSettings(
                         "Error loading global settings from config server at startup",
                         "error"_attr = redact(status));
         }
+    }
+}
+
+boost::optional<ShardIdentity> ShardingInitializationMongoD::getShardIdentityDoc(
+    OperationContext* opCtx) {
+    // In sharded queryableBackupMode mode, we ignore the shardIdentity document on disk and instead
+    // *require* a shardIdentity document to be passed through --overrideShardIdentity
+    if (storageGlobalParams.queryableBackupMode) {
+        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
+            uassert(ErrorCodes::InvalidOptions,
+                    "If started with --shardsvr in queryableBackupMode, a shardIdentity document "
+                    "must be provided through --overrideShardIdentity",
+                    !serverGlobalParams.overrideShardIdentity.isEmpty());
+
+            return uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(
+                serverGlobalParams.overrideShardIdentity));
+        } else {
+            // Error if --overrideShardIdentity is used but *not* started with --shardsvr
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream()
+                        << "Not started with --shardsvr, but a shardIdentity document was provided "
+                           "through --overrideShardIdentity: "
+                        << serverGlobalParams.overrideShardIdentity,
+                    serverGlobalParams.overrideShardIdentity.isEmpty());
+            return boost::none;
+        }
+
+        MONGO_UNREACHABLE;
+    }
+
+    // In sharded *non*-readOnly mode, error if --overrideShardIdentity is provided
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "--overrideShardIdentity is only allowed in sharded "
+                             "queryableBackupMode. If not in queryableBackupMode, you can edit "
+                             "the shardIdentity document by starting the server *without* "
+                             "--shardsvr, manually updating the shardIdentity document in the "
+                          << NamespaceString::kServerConfigurationNamespace.toStringForErrorMsg()
+                          << " collection, and restarting the server with --shardsvr.",
+            serverGlobalParams.overrideShardIdentity.isEmpty());
+
+    // Use the shardIdentity document on disk if one exists, but it is okay if no shardIdentity
+    // document is available at all (sharding awareness will be initialized when a shardIdentity
+    // document is inserted)
+    BSONObj shardIdentityBSON;
+    const bool foundShardIdentity = [&] {
+        AutoGetCollection autoColl(opCtx, NamespaceString::kServerConfigurationNamespace, MODE_IS);
+        return Helpers::findOne(opCtx,
+                                autoColl.getCollection(),
+                                BSON("_id" << ShardIdentityType::IdName),
+                                shardIdentityBSON);
+    }();
+
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+        if (!foundShardIdentity) {
+            if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+                LOGV2_WARNING(7445900,
+                              "Started with ConfigServer role, but no shardIdentity document was "
+                              "found on disk.",
+                              logAttrs(NamespaceString::kServerConfigurationNamespace));
+            } else {
+                LOGV2_WARNING(22074,
+                              "Started with ShardServer role, but no shardIdentity document was "
+                              "found on disk. This most likely means this server has not yet been "
+                              "added to a sharded cluster.",
+                              logAttrs(NamespaceString::kServerConfigurationNamespace));
+            }
+            return boost::none;
+        }
+
+        invariant(!shardIdentityBSON.isEmpty());
+
+        auto shardIdentity =
+            uassertStatusOK(ShardIdentityType::fromShardIdentityDocument(shardIdentityBSON));
+        uassertStatusOK(shardIdentity.validate(
+            true /* fassert cluster role matches shard identity document */));
+
+        return shardIdentity;
+    } else {
+        // Warn if a shardIdentity document is found on disk but *not* started with --shardsvr.
+        if (!shardIdentityBSON.isEmpty()) {
+            LOGV2_WARNING(
+                22075,
+                "Not started with --shardsvr, but a shardIdentity document was found on disk",
+                logAttrs(NamespaceString::kServerConfigurationNamespace),
+                "shardIdentityDocument"_attr = shardIdentityBSON);
+        }
+
+        return boost::none;
     }
 }
 

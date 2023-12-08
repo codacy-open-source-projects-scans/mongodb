@@ -188,7 +188,7 @@ public:
      * When all of the storage startup tasks are completed as a whole, then this function is called
      * by the external force managing the startup process.
      */
-    virtual void notifyStartupComplete() {}
+    virtual void notifyStartupComplete(OperationContext* opCtx) {}
 
     /**
      * Returns a new interface to the storage engine's recovery unit.  The recovery
@@ -465,7 +465,7 @@ public:
      * CheckpointIteration should be chosen when performing untimestamped drops as they
      * will make the ident wait for a catalog checkpoint before proceeding with the ident drop.
      */
-    virtual void addDropPendingIdent(const stdx::variant<Timestamp, CheckpointIteration>& dropTime,
+    virtual void addDropPendingIdent(const std::variant<Timestamp, CheckpointIteration>& dropTime,
                                      std::shared_ptr<Ident> ident,
                                      DropIdentCallback&& onDrop = nullptr) = 0;
 
@@ -729,14 +729,21 @@ public:
     virtual void dump() const = 0;
 
     /**
+     * Represents the options for background compaction.
+     */
+    struct AutoCompactOptions {
+        bool enable = false;
+        boost::optional<int64_t> freeSpaceTargetMB;
+        std::vector<StringData> excludedIdents;
+    };
+
+    /**
      * Toggles auto compact for a database. Auto compact periodically iterates through all of
      * the files available and runs compaction if they are eligible. If the freeSpaceTargetMB is
      * provided, compaction only proceeds if the free storage space available is greater than
      * the provided value.
      */
-    virtual Status autoCompact(OperationContext* opCtx,
-                               bool enable,
-                               boost::optional<int64_t> freeSpaceTargetMB) = 0;
+    virtual Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) = 0;
 };
 
 }  // namespace mongo

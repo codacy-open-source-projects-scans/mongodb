@@ -129,7 +129,7 @@
 #include "mongo/util/synchronized_value.h"
 #include "mongo/util/uuid.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQueryOptimizer
 
 MONGO_FAIL_POINT_DEFINE(failConstructingBonsaiExecutor);
 
@@ -292,8 +292,12 @@ static std::pair<IndexDefinitions, MultikeynessTrie> buildIndexSpecsOptimizer(
                 MatchExpressionParser::kBanAllSpecialFeatures);
 
             // We need a non-empty root projection name.
-            ABT exprABT = generateMatchExpression(
-                expr.get(), false /*allowAggExpression*/, "<root>" /*rootProjection*/, prefixId);
+            QueryParameterMap qp;
+            ABT exprABT = generateMatchExpression(expr.get(),
+                                                  false /*allowAggExpression*/,
+                                                  "<root>" /*rootProjection*/,
+                                                  prefixId,
+                                                  qp);
             exprABT = make<EvalFilter>(std::move(exprABT), make<Variable>(scanProjName));
 
             // TODO SERVER-70315: simplify partial filter expression.
@@ -439,7 +443,7 @@ static ExecParams createExecutor(
                                       std::move(staticData));
 
     sbePlan->attachToOperationContext(opCtx);
-    if (expCtx->mayDbProfile) {
+    if (expCtx->explain || expCtx->mayDbProfile) {
         sbePlan->markShouldCollectTimingInfo();
     }
 
@@ -739,7 +743,8 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                                           const bool requireRID,
                                           Metadata metadata,
                                           const ConstFoldFn& constFold,
-                                          QueryHints hints) {
+                                          QueryHints hints,
+                                          QueryParameterMap queryParameters) {
     switch (mode) {
         case CEMode::kSampling: {
             Metadata metadataForSampling = metadata;
@@ -778,7 +783,8 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                 {._numSamplingChunks = hints._numSamplingChunks,
                  ._samplingCollectionSizeMin = hints._samplingCollectionSizeMin,
                  ._samplingCollectionSizeMax = hints._samplingCollectionSizeMax,
-                 ._sqrtSampleSizeEnabled = hints._sqrtSampleSizeEnabled} /*hints*/};
+                 ._sqrtSampleSizeEnabled = hints._sqrtSampleSizeEnabled} /*hints*/,
+                queryParameters};
 
             auto samplingEstimator = std::make_unique<SamplingEstimator>(
                 std::move(phaseManagerForSampling),
@@ -796,7 +802,8 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     defaultConvertPathToInterval,
                     constFold,
                     DebugInfo::kDefaultForProd,
-                    std::move(hints)};
+                    std::move(hints),
+                    std::move(queryParameters)};
         }
 
         case CEMode::kHistogram:
@@ -812,7 +819,8 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     defaultConvertPathToInterval,
                     constFold,
                     DebugInfo::kDefaultForProd,
-                    std::move(hints)};
+                    std::move(hints),
+                    std::move(queryParameters)};
 
         case CEMode::kHeuristic:
             return {OptPhaseManager::getAllProdRewrites(),
@@ -825,7 +833,8 @@ static OptPhaseManager createPhaseManager(const CEMode mode,
                     defaultConvertPathToInterval,
                     constFold,
                     DebugInfo::kDefaultForProd,
-                    std::move(hints)};
+                    std::move(hints),
+                    std::move(queryParameters)};
 
         default:
             MONGO_UNREACHABLE;
@@ -891,6 +900,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
         : make<ValueScanNode>(ProjectionNameVector{scanProjName},
                               createInitialScanProps(scanProjName, scanDefName));
 
+    QueryParameterMap queryParameters;
+
     // Check if pipeline is eligible for plan caching.
     // TODO SERVER-83414: Enable histogram CE with parameterization.
     auto _isCacheable = (internalQueryCardinalityEstimatorMode != "histogram"_sd);
@@ -918,7 +929,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
             MatchExpression::parameterize(
                 dynamic_cast<DocumentSourceMatch*>(pipeline->peekFront())->getMatchExpression());
         }
-        abt = translatePipelineToABT(metadata, *pipeline, scanProjName, std::move(abt), prefixId);
+        abt = translatePipelineToABT(
+            metadata, *pipeline, scanProjName, std::move(abt), prefixId, queryParameters);
     } else {
         // Clear match expression auto-parameterization by setting max param count to zero before
         // CQ to ABT translation
@@ -928,7 +940,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
             MatchExpression::unparameterize(canonicalQuery->getPrimaryMatchExpression());
         }
         abt = translateCanonicalQueryToABT(
-            metadata, *canonicalQuery, scanProjName, std::move(abt), prefixId);
+            metadata, *canonicalQuery, scanProjName, std::move(abt), prefixId, queryParameters);
     }
     // If pipeline exists and is cacheable, save the MatchExpression in ExecParams for binding.
     const auto pipelineMatchExpr = pipeline && _isCacheable
@@ -967,7 +979,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                                                       requireRID,
                                                       std::move(metadata),
                                                       constFold,
-                                                      std::move(queryHints));
+                                                      std::move(queryHints),
+                                                      std::move(queryParameters));
     auto resultPlans = phaseManager.optimizeNoAssert(std::move(abt), false /*includeRejected*/);
     if (resultPlans.empty()) {
         // Could not find a plan.
@@ -979,15 +992,25 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     {
         const auto& memo = phaseManager.getMemo();
         const auto& memoStats = memo.getStats();
-        OPTIMIZER_DEBUG_LOG(6264800,
-                            5,
-                            "Optimizer stats",
-                            "memoGroups"_attr = memo.getGroupCount(),
-                            "memoLogicalNodes"_attr = memo.getLogicalNodeCount(),
-                            "memoPhysNodes"_attr = memo.getPhysicalNodeCount(),
-                            "memoIntegrations"_attr = memoStats._numIntegrations,
-                            "physPlansExplored"_attr = memoStats._physPlanExplorationCount,
-                            "physMemoChecks"_attr = memoStats._physMemoCheckCount);
+        if (memoStats._estimatedCost) {
+            CurOp::get(opCtx)->debug().estimatedCost = memoStats._estimatedCost->getCost();
+        }
+        if (memoStats._ce) {
+            CurOp::get(opCtx)->debug().estimatedCardinality = (double)*memoStats._ce;
+        }
+        OPTIMIZER_DEBUG_LOG(
+            6264800,
+            5,
+            "Optimizer stats",
+            "memoGroups"_attr = memo.getGroupCount(),
+            "memoLogicalNodes"_attr = memo.getLogicalNodeCount(),
+            "memoPhysNodes"_attr = memo.getPhysicalNodeCount(),
+            "memoIntegrations"_attr = memoStats._numIntegrations,
+            "physPlansExplored"_attr = memoStats._physPlanExplorationCount,
+            "physMemoChecks"_attr = memoStats._physMemoCheckCount,
+            "estimatedCost"_attr =
+                (memoStats._estimatedCost ? memoStats._estimatedCost->getCost() : -1.0),
+            "estimatedCardinality"_attr = (memoStats._ce ? (double)*memoStats._ce : -1.0));
     }
 
     const auto explainMemoFn = [&phaseManager]() {

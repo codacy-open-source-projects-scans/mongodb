@@ -59,6 +59,7 @@ buildvariants:
   - name: .ssl
   - name: .stitch
   - name: test_packages
+  - name: .timeseries_crud
     distros:
     - ubuntu2004-package
   - name: .publish
@@ -120,6 +121,9 @@ buildvariants:
   - name: .crypt
     distros:
     - suse12-sp5-large
+  - name: .timeseries_crud
+    distros:
+    - suse12-sp5-large
   - name: .publish_crypt
   - name: test_packages
     distros:
@@ -178,6 +182,7 @@ buildvariants:
   - name: .publish_crypt
   - name: .publish
   - name: test_packages
+  - name: .timeseries_crud
     distros:
     - ubuntu2004-package
   - name: generate_buildid_to_debug_symbols_mapping
@@ -234,6 +239,7 @@ buildvariants:
   - name: .stitch
   - name: .publish
   - name: test_packages
+  - name: .timeseries_crud
     distros:
     - ubuntu2004-package
   - name: generate_buildid_to_debug_symbols_mapping

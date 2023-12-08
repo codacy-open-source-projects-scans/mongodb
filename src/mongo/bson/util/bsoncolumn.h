@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/bson/timestamp.h"
 #include <absl/numeric/int128.h>
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
@@ -50,10 +51,12 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/util/simple8b.h"
+#include "mongo/bson/util/simple8b_type_util.h"
 #include "mongo/platform/int128.h"
-#include "mongo/stdx/variant.h"
 
 namespace mongo {
+
+class ElementStorage;
 
 /**
  * The BSONColumn class represents an implementation to interpret a BSONElement of BinDataType 7,
@@ -80,9 +83,6 @@ namespace mongo {
  * also applies to functions declared 'const'.
  */
 class BSONColumn {
-private:
-    class ElementStorage;
-
 public:
     BSONColumn(const char* buffer, size_t size);
     explicit BSONColumn(BSONElement bin);
@@ -223,7 +223,7 @@ public:
 
             // Last encoded values used to calculate delta and delta-of-delta
             BSONElement lastValue;
-            stdx::variant<Decoder64, Decoder128> decoder = Decoder64{};
+            std::variant<Decoder64, Decoder128> decoder = Decoder64{};
         };
 
         /**
@@ -258,7 +258,7 @@ public:
         void _incrementRegular(Regular& regular);
         void _incrementInterleaved(Interleaved& interleaved);
 
-        stdx::variant<Regular, Interleaved> _mode = Regular{};
+        std::variant<Regular, Interleaved> _mode = Regular{};
     };
 
     /**
@@ -324,124 +324,6 @@ public:
 
 private:
     /**
-     * BSONElement storage, owns materialised BSONElement returned by BSONColumn.
-     * Allocates memory in blocks which double in size as they grow.
-     */
-    class ElementStorage
-        : public boost::intrusive_ref_counter<ElementStorage, boost::thread_unsafe_counter> {
-    public:
-        /**
-         * "Writable" BSONElement. Provides access to a writable pointer for writing the value of
-         * the BSONElement. Users must write valid BSON data depending on the requested BSON type.
-         */
-        class Element {
-        public:
-            Element(char* buffer, int nameSize, int valueSize);
-
-            /**
-             * Returns a pointer for writing a BSONElement value.
-             */
-            char* value();
-
-            /**
-             * Size for the pointer returned by value()
-             */
-            int size() const;
-
-            /**
-             * Constructs a BSONElement from the owned buffer.
-             */
-            BSONElement element() const;
-
-        private:
-            char* _buffer;
-            int _nameSize;
-            int _valueSize;
-        };
-
-        /**
-         * RAII Helper to manage contiguous mode. Starts on construction and leaves on destruction.
-         */
-        class ContiguousBlock {
-        public:
-            ContiguousBlock(ElementStorage& storage);
-            ~ContiguousBlock();
-
-            // Return pointer to contigous block and the block size
-            std::pair<const char*, int> done();
-
-        private:
-            ElementStorage& _storage;
-            bool _finished = false;
-        };
-
-        /**
-         * Allocates provided number of bytes. Returns buffer that is safe to write up to that
-         * amount. Any subsequent call to allocate() or deallocate() invalidates the returned
-         * buffer.
-         */
-        char* allocate(int bytes);
-
-        /**
-         * Allocates a BSONElement of provided type and value size. Field name is set to empty
-         * string.
-         */
-        Element allocate(BSONType type, StringData fieldName, int valueSize);
-
-        /**
-         * Deallocates provided number of bytes. Moves back the pointer of used memory so it can be
-         * re-used by the next allocate() call.
-         */
-        void deallocate(int bytes);
-
-        /**
-         * Starts contiguous mode. All allocations will be in a contiguous memory block. When
-         * allocate() need to grow contents from previous memory block is copied.
-         */
-        ContiguousBlock startContiguous();
-
-        /**
-         * Returns writable pointer to the beginning of contiguous memory block. Any call to
-         * allocate() will invalidate this pointer.
-         */
-        char* contiguous() const {
-            return _block.get() + _contiguousPos;
-        }
-
-        /**
-         * Returns pointer to the end of current memory block. Any call to allocate() will
-         * invalidate this pointer.
-         */
-        const char* position() const {
-            return _block.get() + _pos;
-        }
-
-    private:
-        // Starts contiguous mode
-        void _beginContiguous();
-
-        // Ends contiguous mode, returns size of block
-        int _endContiguous();
-
-        // Full memory blocks that are kept alive.
-        std::vector<std::unique_ptr<char[]>> _blocks;
-
-        // Current memory block
-        std::unique_ptr<char[]> _block;
-
-        // Capacity of current memory block
-        int _capacity = 0;
-
-        // Position to first unused byte in current memory block
-        int _pos = 0;
-
-        // Position to beginning of contiguous block if enabled.
-        int _contiguousPos = 0;
-
-        bool _contiguousEnabled = false;
-    };
-
-    /**
      * Validates the BSONColumn on construction, should be the last call in the constructor when all
      * members are initialized.
      */
@@ -463,8 +345,285 @@ inline BSONColumn::Iterator::DecodingState::DecodingState() = default;
 inline BSONColumn::Iterator::DecodingState::Decoder64::Decoder64() = default;
 
 /**
+ * BSONElement storage, owns materialised BSONElement returned by BSONColumn.
+ * Allocates memory in blocks which double in size as they grow.
+ */
+class ElementStorage
+    : public boost::intrusive_ref_counter<ElementStorage, boost::thread_unsafe_counter> {
+public:
+    /**
+     * "Writable" BSONElement. Provides access to a writable pointer for writing the value of
+     * the BSONElement. Users must write valid BSON data depending on the requested BSON type.
+     */
+    class Element {
+    public:
+        Element(char* buffer, int nameSize, int valueSize);
+
+        /**
+         * Returns a pointer for writing a BSONElement value.
+         */
+        char* value();
+
+        /**
+         * Size for the pointer returned by value()
+         */
+        int size() const;
+
+        /**
+         * Constructs a BSONElement from the owned buffer.
+         */
+        BSONElement element() const;
+
+    private:
+        char* _buffer;
+        int _nameSize;
+        int _valueSize;
+    };
+
+    /**
+     * RAII Helper to manage contiguous mode. Starts on construction and leaves on destruction.
+     */
+    class ContiguousBlock {
+    public:
+        ContiguousBlock(ElementStorage& storage);
+        ~ContiguousBlock();
+
+        // Return pointer to contigous block and the block size
+        std::pair<const char*, int> done();
+
+    private:
+        ElementStorage& _storage;
+        bool _finished = false;
+    };
+
+    /**
+     * Allocates provided number of bytes. Returns buffer that is safe to write up to that
+     * amount. Any subsequent call to allocate() or deallocate() invalidates the returned
+     * buffer.
+     */
+    char* allocate(int bytes);
+
+    /**
+     * Allocates a BSONElement of provided type and value size. Field name is set to empty
+     * string.
+     */
+    Element allocate(BSONType type, StringData fieldName, int valueSize);
+
+    /**
+     * Deallocates provided number of bytes. Moves back the pointer of used memory so it can be
+     * re-used by the next allocate() call.
+     */
+    void deallocate(int bytes);
+
+    /**
+     * Starts contiguous mode. All allocations will be in a contiguous memory block. When
+     * allocate() need to grow contents from previous memory block is copied.
+     */
+    ContiguousBlock startContiguous();
+
+    /**
+     * Returns writable pointer to the beginning of contiguous memory block. Any call to
+     * allocate() will invalidate this pointer.
+     */
+    char* contiguous() const {
+        return _block.get() + _contiguousPos;
+    }
+
+    /**
+     * Returns pointer to the end of current memory block. Any call to allocate() will
+     * invalidate this pointer.
+     */
+    const char* position() const {
+        return _block.get() + _pos;
+    }
+
+private:
+    // Starts contiguous mode
+    void _beginContiguous();
+
+    // Ends contiguous mode, returns size of block
+    int _endContiguous();
+
+    // Full memory blocks that are kept alive.
+    std::vector<std::unique_ptr<char[]>> _blocks;
+
+    // Current memory block
+    std::unique_ptr<char[]> _block;
+
+    // Capacity of current memory block
+    int _capacity = 0;
+
+    // Position to first unused byte in current memory block
+    int _pos = 0;
+
+    // Position to beginning of contiguous block if enabled.
+    int _contiguousPos = 0;
+
+    bool _contiguousEnabled = false;
+};
+
+/**
  * Work in progress, do not use.
  */
+namespace bsoncolumn {
+
+/**
+ * Interface for a buffer to receive decoded elements from block-based
+ * BSONColumn decompression.
+ */
+template <class T>
+concept Appendable =
+    requires(T& t, StringData strVal, BSONBinData binVal, BSONCode codeVal, BSONElement bsonVal) {
+    t.append(true);
+    t.append((int32_t)1);
+    t.append((int64_t)1);
+    t.append(Decimal128());
+    t.append((double)1.0);
+    t.append((Timestamp)1);
+    t.append(Date_t::now());
+    t.append(OID::gen());
+    t.append(strVal);
+    t.append(binVal);
+    t.append(codeVal);
+
+    // Strings can arrive either in 128-bit encoded format, or as
+    // literals (BSONElement)
+
+    // Takes pre-allocated BSONElement
+    t.template append<bool>(bsonVal);
+    t.template append<int32_t>(bsonVal);
+    t.template append<int64_t>(bsonVal);
+    t.template append<Decimal128>(bsonVal);
+    t.template append<double>(bsonVal);
+    t.template append<Timestamp>(bsonVal);
+    t.template append<Date_t>(bsonVal);
+    t.template append<OID>(bsonVal);
+    t.template append<StringData>(bsonVal);
+    t.template append<BSONBinData>(bsonVal);
+    t.template append<BSONCode>(bsonVal);
+
+    t.appendMissing();
+};
+
+/**
+ * Interface to accept elements decoded from BSONColumn and materialize them
+ * as Elements of user-defined type.
+ */
+template <class T>
+concept Materializer = requires(T& t,
+                                typename T::Allocator alloc,
+                                StringData strVal,
+                                BSONBinData binVal,
+                                BSONCode codeVal,
+                                BSONElement bsonVal) {
+    { T::materialize(alloc, true) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, (int32_t)1) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, (int64_t)1) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, Decimal128()) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, (double)1.0) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, (Timestamp)1) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, Date_t::now()) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, OID::gen()) } -> std::same_as<typename T::Element>;
+
+    { T::materialize(alloc, strVal) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, binVal) } -> std::same_as<typename T::Element>;
+    { T::materialize(alloc, codeVal) } -> std::same_as<typename T::Element>;
+
+    { T::template materialize<bool>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<int32_t>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<int64_t>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<Decimal128>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<double>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<Timestamp>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<Date_t>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<OID>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+
+    { T::template materialize<StringData>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<BSONBinData>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+    { T::template materialize<BSONCode>(alloc, bsonVal) } -> std::same_as<typename T::Element>;
+
+
+    { T::materializeMissing(alloc) } -> std::same_as<typename T::Element>;
+};
+
+/**
+ * Implements Appendable and utilizes a user-defined Materializer to receive output of
+ * BSONColumn decoding and fill a container of user-defined elements.  Container can
+ * be user-defined or any STL container can be used.
+ */
+template <class CMaterializer, class Container>
+requires Materializer<CMaterializer>
+class Collector {
+    using Element = typename CMaterializer::Element;
+    using CAllocator = class CMaterializer::Allocator;
+
+public:
+    Collector(Container& collection, CAllocator& allocator)
+        : _collection(collection), _allocator(allocator) {}
+
+    void append(bool val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(int32_t val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(int64_t val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(Decimal128 val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(double val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(Timestamp val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(Date_t val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(OID val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(const StringData& val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(const BSONBinData& val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    void append(const BSONCode& val) {
+        collect(CMaterializer::materialize(_allocator, val));
+    }
+
+    template <typename T>
+    void append(const BSONElement& val) {
+        collect(CMaterializer::template materialize<T>(_allocator, val));
+    }
+
+    void appendMissing() {
+        collect(CMaterializer::materializeMissing(_allocator));
+    }
+
+private:
+    inline void collect(Element val) {
+        _collection.insert(_collection.end(), val);
+    }
+
+    Container& _collection;
+    CAllocator& _allocator;
+};
+
+
 class BSONColumnBlockBased {
 
 public:
@@ -473,9 +632,21 @@ public:
     /**
      * Decompress entire BSONColumn
      *
-     * TODO: change signature from function to buffer
      */
-    void decompress(std::function<void(BSONElement, int)> callback) const;
+    template <class Buffer>
+    requires Appendable<Buffer>
+    void decompress(Buffer& buffer) const;
+
+    /**
+     * Wrapper that expects the caller to define a Materializer and
+     * a Container to receive a collection of elements from block decoding
+     */
+    template <class CMaterializer, class Container>
+    requires Materializer<CMaterializer>
+    void decompress(Container& collection, typename CMaterializer::Allocator& allocator) const {
+        Collector<CMaterializer, Container> collector(collection, allocator);
+        decompress(collector);
+    }
 
     /**
      * Return first non-missing element stored in this BSONColumn
@@ -530,5 +701,7 @@ public:
 
 private:
 };
+
+}  // namespace bsoncolumn
 
 }  // namespace mongo

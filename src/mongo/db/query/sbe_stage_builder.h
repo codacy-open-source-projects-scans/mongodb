@@ -92,11 +92,12 @@ sbe::value::SlotVector getSlotsOrderedByName(const PlanStageReqs& reqs,
                                              const PlanStageSlots& outputs);
 
 /**
- * Returns a vector of the unique slot IDs needed by 'reqs', ordered by slot ID. This function is
- * intended for use in situations where a join or sort or something else is being constructed and
- * a PlanStageSlot's contents need to be "forwarded" through a PlanStage.
+ * Returns a vector of the unique slot IDs needed by 'reqs', ordered by slot ID, and metadata slots.
+ * This function is intended for use in situations where a join or sort or something else is being
+ * constructed and a PlanStageSlot's contents need to be "forwarded" through a PlanStage.
  */
-sbe::value::SlotVector getSlotsToForward(const PlanStageReqs& reqs,
+sbe::value::SlotVector getSlotsToForward(PlanStageStaticData* data,
+                                         const PlanStageReqs& reqs,
                                          const PlanStageSlots& outputs,
                                          const sbe::value::SlotVector& exclude = sbe::makeSV());
 
@@ -537,7 +538,8 @@ public:
           _makeResultInfoReq(cloneInfoReq(other._makeResultInfoReq)),
           _isBuildingUnionForTailableCollScan(other._isBuildingUnionForTailableCollScan),
           _isTailableCollScanResumeBranch(other._isTailableCollScanResumeBranch),
-          _targetNamespace(other._targetNamespace) {}
+          _targetNamespace(other._targetNamespace),
+          _hasLimit(other._hasLimit) {}
 
     PlanStageReqs(PlanStageReqs&& other) = default;
 
@@ -548,6 +550,7 @@ public:
             _isBuildingUnionForTailableCollScan = other._isBuildingUnionForTailableCollScan;
             _isTailableCollScanResumeBranch = other._isTailableCollScanResumeBranch;
             _targetNamespace = other._targetNamespace;
+            _hasLimit = other._hasLimit;
         }
         return *this;
     }
@@ -785,6 +788,15 @@ public:
         return _targetNamespace;
     }
 
+    bool getHasLimit() const {
+        return _hasLimit;
+    }
+
+    PlanStageReqs& setHasLimit(bool b) {
+        _hasLimit = b;
+        return *this;
+    }
+
 private:
     friend class PlanStageSlots;
 
@@ -813,6 +825,10 @@ private:
     // namespace different from its parent node can set this value to notify any child nodes of
     // the correct namespace.
     NamespaceString _targetNamespace;
+
+    // When the pipeline has a limit stage this will be set to true. The flag is used by the sort
+    // stage to improve the performance of queries that have both sort and limit.
+    bool _hasLimit{false};
 };  // class PlanStageReqs
 
 struct BuildProjectionPlan {
@@ -1020,6 +1036,12 @@ private:
 
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildGroup(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
+
+    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildGroupImpl(
+        const GroupNode* groupNode,
+        const PlanStageReqs& reqs,
+        std::unique_ptr<sbe::PlanStage> childStage,
+        PlanStageSlots childOutputs);
 
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildLookup(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);

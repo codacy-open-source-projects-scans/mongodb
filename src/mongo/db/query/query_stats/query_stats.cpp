@@ -72,6 +72,13 @@ CounterMetric queryStatsEvictedMetric("queryStats.numEvicted");
 CounterMetric queryStatsRateLimitedRequestsMetric("queryStats.numRateLimitedRequests");
 CounterMetric queryStatsStoreWriteErrorsMetric("queryStats.numQueryStatsStoreWriteErrors");
 
+/**
+ * Indicates whether or not query stats is enabled via the feature flag.
+ */
+bool isQueryStatsFeatureEnabled() {
+    return feature_flags::gFeatureFlagQueryStats.isEnabled(
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+}
 
 /**
  * Cap the queryStats store size.
@@ -105,10 +112,10 @@ void assertConfigurationAllowed() {
             "Cannot configure queryStats store. The feature flag is not enabled. Please restart "
             "and specify the feature flag, or upgrade the feature compatibility version to one "
             "where it is enabled by default.",
-            isQueryStatsFeatureEnabled(/* requiresFullQueryStatsFeatureFlag = */ false));
+            isQueryStatsFeatureEnabled());
 }
 
-class TelemetryOnParamChangeUpdaterImpl final : public query_stats_util::OnParamChangeUpdater {
+class QueryStatsOnParamChangeUpdaterImpl final : public query_stats_util::OnParamChangeUpdater {
 public:
     void updateCacheSize(ServiceContext* serviceCtx, memory_util::MemorySize memSize) final {
         assertConfigurationAllowed();
@@ -137,7 +144,7 @@ ServiceContext::ConstructorActionRegisterer queryStatsStoreManagerRegisterer{
         // configuration setParameter command is run).
 
         query_stats_util::queryStatsStoreOnParamChangeUpdater(serviceCtx) =
-            std::make_unique<TelemetryOnParamChangeUpdaterImpl>();
+            std::make_unique<QueryStatsOnParamChangeUpdaterImpl>();
         size_t size = getQueryStatsStoreSize();
         auto&& globalQueryStatsStoreManager = queryStatsStoreDecoration(serviceCtx);
         // Initially the queryStats store used the same number of partitions as the plan cache, that
@@ -168,14 +175,12 @@ ServiceContext::ConstructorActionRegisterer queryStatsStoreManagerRegisterer{
 /**
  * Top-level checks for whether queryStats collection is enabled. If this returns false, we must go
  * no further.
- * TODO SERVER-79494 Remove requiresFullQueryStatsFeatureFlag parameter.
  */
-bool isQueryStatsEnabled(const ServiceContext* serviceCtx, bool requiresFullQueryStatsFeatureFlag) {
+bool isQueryStatsEnabled(const ServiceContext* serviceCtx) {
     // During initialization, FCV may not yet be setup but queries could be run. We can't
     // check whether queryStats should be enabled without FCV, so default to not recording
     // those queries.
-    return isQueryStatsFeatureEnabled(requiresFullQueryStatsFeatureFlag) &&
-        queryStatsStoreDecoration(serviceCtx)->getMaxSize() > 0;
+    return isQueryStatsFeatureEnabled() && queryStatsStoreDecoration(serviceCtx)->getMaxSize() > 0;
 }
 
 /**
@@ -213,19 +218,10 @@ void updateStatistics(const QueryStatsStore::Partition& proofOfLock,
 
 }  // namespace
 
-bool isQueryStatsFeatureEnabled(bool requiresFullQueryStatsFeatureFlag) {
-    return feature_flags::gFeatureFlagQueryStats.isEnabled(
-               serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
-        (!requiresFullQueryStatsFeatureFlag &&
-         feature_flags::gFeatureFlagQueryStatsFindCommand.isEnabled(
-             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
-}
-
 void registerRequest(OperationContext* opCtx,
                      const NamespaceString& collection,
-                     std::function<std::unique_ptr<Key>(void)> makeKey,
-                     bool requiresFullQueryStatsFeatureFlag) {
-    if (!isQueryStatsEnabled(opCtx->getServiceContext(), requiresFullQueryStatsFeatureFlag)) {
+                     std::function<std::unique_ptr<Key>(void)> makeKey) {
+    if (!isQueryStatsEnabled(opCtx->getServiceContext())) {
         return;
     }
 
@@ -236,7 +232,7 @@ void registerRequest(OperationContext* opCtx,
 
     auto& opDebug = CurOp::get(opCtx)->debug();
 
-    if (opDebug.queryStatsRateLimited) {
+    if (opDebug.queryStatsInfo.wasRateLimited) {
         LOGV2_DEBUG(
             8288900,
             4,
@@ -245,11 +241,11 @@ void registerRequest(OperationContext* opCtx,
     }
 
     if (!shouldCollect(opCtx->getServiceContext())) {
-        opDebug.queryStatsRateLimited = true;
+        opDebug.queryStatsInfo.wasRateLimited = true;
         return;
     }
 
-    if (opDebug.queryStatsKey) {
+    if (opDebug.queryStatsInfo.key) {
         // A find() request may have already registered the shapifier. Ie, it's a find command over
         // a non-physical collection, eg view, which is implemented by generating an agg pipeline.
         LOGV2_DEBUG(7198700,
@@ -264,7 +260,7 @@ void registerRequest(OperationContext* opCtx,
     // in a BSON object that exceeds the 16 MB memory limit. In these cases, we want to exclude the
     // original query from queryStats metrics collection and let it execute normally.
     try {
-        opDebug.queryStatsKey = makeKey();
+        opDebug.queryStatsInfo.key = makeKey();
     } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
         LOGV2_DEBUG(7979400,
                     1,
@@ -273,7 +269,7 @@ void registerRequest(OperationContext* opCtx,
         queryStatsStoreWriteErrorsMetric.increment();
         return;
     }
-    opDebug.queryStatsKeyHash = absl::HashOf(*opDebug.queryStatsKey);
+    opDebug.queryStatsInfo.keyHash = absl::HashOf(*opDebug.queryStatsInfo.key);
     // TODO look up this query shape (sub-component of query stats store key) in some new shared
     // data structure that the query settings component could share. See if the query SHAPE hash has
     // been computed before. If so, record the query shape hash on the opDebug. If not, compute the
@@ -284,8 +280,7 @@ QueryStatsStore& getQueryStatsStore(OperationContext* opCtx) {
     uassert(6579000,
             "Query stats is not enabled without the feature flag on and a cache size greater than "
             "0 bytes",
-            isQueryStatsEnabled(opCtx->getServiceContext(),
-                                /*requiresFullQueryStatsFeatureFlag*/ false));
+            isQueryStatsEnabled(opCtx->getServiceContext()));
     return queryStatsStoreDecoration(opCtx->getServiceContext())->getQueryStatsStore();
 }
 
@@ -312,7 +307,7 @@ void writeQueryStats(OperationContext* opCtx,
 
     // Otherwise we didn't find an existing entry. Try to create one.
     tassert(7315200,
-            "key cannot be null when writing a new entry to the telemetry store",
+            "key cannot be null when writing a new entry to the queryStats store",
             key != nullptr);
     size_t numEvicted =
         queryStatsStore.put(*queryStatsKeyHash, QueryStatsEntry(std::move(key)), partitionLock);

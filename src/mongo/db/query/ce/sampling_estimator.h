@@ -70,10 +70,11 @@ public:
                       std::unique_ptr<SamplingExecutor> executor);
     ~SamplingEstimator();
 
-    CEType deriveCE(const Metadata& metadata,
-                    const cascades::Memo& memo,
-                    const properties::LogicalProps& logicalProps,
-                    ABT::reference_type logicalNodeRef) const final;
+    CERecord deriveCE(const Metadata& metadata,
+                      const cascades::Memo& memo,
+                      const properties::LogicalProps& logicalProps,
+                      const QueryParameterMap& queryParameters,
+                      ABT::reference_type logicalNodeRef) const final;
 
 private:
     std::unique_ptr<SamplingTransport> _transport;

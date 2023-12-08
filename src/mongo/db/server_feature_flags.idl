@@ -57,7 +57,7 @@ feature_flags:
         description: "Support for bulkWrite command and one-shot transactions"
         cpp_varname: gFeatureFlagBulkWriteCommand
         default: false
-        shouldBeFCVGated: true
+        shouldBeFCVGated: false
     featureFlagAuditConfigClusterParameter:
         description: "Enable use of new auditConfig cluster server parameter"
         cpp_varname: feature_flags::gFeatureFlagAuditConfigClusterParameter
@@ -125,3 +125,8 @@ feature_flags:
         cpp_varname: gfeatureFlag80MakeAllDeploymentsShardedClusters
         default: false
         shouldBeFCVGated: false
+    featureFlagUseSorterChecksumV2:
+        description: "Feature flag to enable v2 version of sorter file checksum"
+        cpp_varname: gFeatureFlagUseSorterChecksumV2
+        default: false
+        shouldBeFCVGated: true

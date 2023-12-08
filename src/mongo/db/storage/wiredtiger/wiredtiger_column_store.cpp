@@ -151,7 +151,8 @@ std::string& WiredTigerColumnStore::makeKeyInBuffer(std::string& buffer, PathVie
 class WiredTigerColumnStore::WriteCursor final : public ColumnStore::WriteCursor {
 public:
     WriteCursor(OperationContext* opCtx, const std::string& uri, uint64_t tableId)
-        : _opCtx(opCtx), _curwrap(uri, tableId, true /* allow overwrite */, opCtx) {
+        : _opCtx(opCtx),
+          _curwrap(*WiredTigerRecoveryUnit::get(opCtx), uri, tableId, true /* allow overwrite */) {
         _curwrap.assertInActiveTxn();
     }
 
@@ -190,7 +191,7 @@ void WiredTigerColumnStore::WriteCursor::insert(PathView path, RowId rid, CellVi
 
     c()->set_key(c(), keyItem.Get());
     c()->set_value(c(), valueItem.Get());
-    int ret = WT_OP_CHECK(wiredTigerCursorInsert(_opCtx, c()));
+    int ret = WT_OP_CHECK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(_opCtx), c()));
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
     metricsCollector.incrementOneIdxEntryWritten(c()->uri, keyItem.size);
@@ -211,7 +212,7 @@ void WiredTigerColumnStore::WriteCursor::remove(PathView path, RowId rid) {
     auto key = makeKey(path, rid);
     auto keyItem = WiredTigerItem(key);
     c()->set_key(c(), keyItem.Get());
-    int ret = WT_OP_CHECK(wiredTigerCursorRemove(_opCtx, c()));
+    int ret = WT_OP_CHECK(wiredTigerCursorRemove(*WiredTigerRecoveryUnit::get(_opCtx), c()));
     if (ret == WT_NOTFOUND) {
         return;
     }
@@ -237,7 +238,7 @@ void WiredTigerColumnStore::WriteCursor::update(PathView path, RowId rid, CellVi
 
     c()->set_key(c(), keyItem.Get());
     c()->set_value(c(), valueItem.Get());
-    int ret = WT_OP_CHECK(wiredTigerCursorUpdate(_opCtx, c()));
+    int ret = WT_OP_CHECK(wiredTigerCursorUpdate(*WiredTigerRecoveryUnit::get(_opCtx), c()));
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
     metricsCollector.incrementOneIdxEntryWritten(c()->uri, keyItem.size);
@@ -251,7 +252,7 @@ IndexValidateResults WiredTigerColumnStore::validate(OperationContext* opCtx, bo
 
     IndexValidateResults results;
 
-    WiredTigerUtil::validateTableLogging(opCtx,
+    WiredTigerUtil::validateTableLogging(*WiredTigerRecoveryUnit::get(opCtx),
                                          _uri,
                                          _isLogged,
                                          StringData{_indexName},
@@ -263,7 +264,7 @@ IndexValidateResults WiredTigerColumnStore::validate(OperationContext* opCtx, bo
         return results;
     }
 
-    WiredTigerIndexUtil::validateStructure(opCtx, _uri, results);
+    WiredTigerIndexUtil::validateStructure(*WiredTigerRecoveryUnit::get(opCtx), _uri, results);
 
     return results;
 }
@@ -284,7 +285,7 @@ class WiredTigerColumnStore::Cursor final : public ColumnStore::Cursor,
 public:
     Cursor(OperationContext* opCtx, const WiredTigerColumnStore* idx)
         : WiredTigerIndexCursorGeneric(opCtx, true /* forward */), _idx(*idx) {
-        _cursor.emplace(_idx.uri(), _idx._tableId, false, _opCtx);
+        _cursor.emplace(*WiredTigerRecoveryUnit::get(_opCtx), _idx.uri(), _idx._tableId, false);
     }
 
     boost::optional<FullCellView> next() override {
@@ -336,7 +337,7 @@ public:
 
     void restore() override {
         if (!_cursor) {
-            _cursor.emplace(_idx.uri(), _idx._tableId, false, _opCtx);
+            _cursor.emplace(*WiredTigerRecoveryUnit::get(_opCtx), _idx.uri(), _idx._tableId, false);
         }
 
         // Ensure an active session exists, so any restored cursors will bind to it
@@ -504,7 +505,7 @@ std::unique_ptr<ColumnStore::Cursor> WiredTigerColumnStore::newCursor(
 class WiredTigerColumnStore::BulkBuilder final : public ColumnStore::BulkBuilder {
 public:
     BulkBuilder(WiredTigerColumnStore* idx, OperationContext* opCtx)
-        : _opCtx(opCtx), _cursor(idx->uri(), opCtx) {}
+        : _opCtx(opCtx), _cursor(*WiredTigerRecoveryUnit::get(opCtx), idx->uri()) {}
 
     void addCell(PathView path, RowId rid, CellView cell) override {
         const std::string& key = makeKeyInBuffer(_buffer, path, rid);
@@ -514,7 +515,8 @@ public:
         WiredTigerItem cellItem(cell.rawData(), cell.size());
         _cursor->set_value(_cursor.get(), cellItem.Get());
 
-        invariantWTOK(wiredTigerCursorInsert(_opCtx, _cursor.get()), _cursor->session);
+        invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(_opCtx), _cursor.get()),
+                      _cursor->session);
 
         ResourceConsumption::MetricsCollector::get(_opCtx).incrementOneIdxEntryWritten(
             _cursor->uri, keyItem.size);
@@ -556,13 +558,15 @@ long long WiredTigerColumnStore::getFreeStorageBytes(OperationContext* opCtx) co
 
 Status WiredTigerColumnStore::compact(OperationContext* opCtx,
                                       boost::optional<int64_t> freeSpaceTargetMB) {
-    return WiredTigerIndexUtil::compact(opCtx, _uri, freeSpaceTargetMB);
+    return WiredTigerIndexUtil::compact(
+        *opCtx, *WiredTigerRecoveryUnit::get(opCtx), _uri, freeSpaceTargetMB);
 }
 
 bool WiredTigerColumnStore::appendCustomStats(OperationContext* opCtx,
                                               BSONObjBuilder* output,
                                               double scale) const {
-    return WiredTigerIndexUtil::appendCustomStats(opCtx, output, scale, _uri);
+    return WiredTigerIndexUtil::appendCustomStats(
+        *WiredTigerRecoveryUnit::get(opCtx), output, scale, _uri);
 }
 
 }  // namespace mongo

@@ -72,7 +72,8 @@ OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
                                  PathToIntervalFn pathToInterval,
                                  ConstFoldFn constFold,
                                  DebugInfo debugInfo,
-                                 QueryHints queryHints)
+                                 QueryHints queryHints,
+                                 QueryParameterMap queryParameters)
     : _phaseSet(std::move(phaseSet)),
       _debugInfo(std::move(debugInfo)),
       _hints(std::move(queryHints)),
@@ -88,7 +89,8 @@ OptPhaseManager::OptPhaseManager(OptPhaseManager::PhaseSet phaseSet,
       _postMemoPlan(),
       _requireRID(requireRID),
       _ridProjections(),
-      _prefixId(prefixId) {
+      _prefixId(prefixId),
+      _queryParameters(std::move(queryParameters)) {
     uassert(6624093, "Cost derivation is null", _costEstimator);
     uassert(7088900, "Exploration CE is null", _explorationCE);
     uassert(7088901, "Substitution CE is null", _substitutionCE);
@@ -192,7 +194,8 @@ void OptPhaseManager::runMemoLogicalRewrite(const OptPhase phase,
                                           _pathToInterval,
                                           _constFold,
                                           *_logicalPropsDerivation,
-                                          useSubstitutionCE ? *_substitutionCE : *_explorationCE);
+                                          useSubstitutionCE ? *_substitutionCE : *_explorationCE,
+                                          _queryParameters);
     rootGroupId = logicalRewriter->addRootNode(input);
 
     if (runStandalone) {
@@ -275,6 +278,10 @@ PlanExtractorResult OptPhaseManager::runMemoPhysicalRewrite(
         }
     }
 
+    if (!result.empty()) {
+        _memo.setStatsEstimatedCost(result.front().getRootAnnotation()._cost);
+        _memo.setStatsCE(result.front().getRootAnnotation()._adjustedCE);
+    }
     return result;
 }
 

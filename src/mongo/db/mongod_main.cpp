@@ -127,8 +127,8 @@
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/op_observer/oplog_writer_impl.h"
-#include "mongo/db/op_observer/oplog_writer_transaction_proxy.h"
+#include "mongo/db/op_observer/operation_logger_impl.h"
+#include "mongo/db/op_observer/operation_logger_transaction_proxy.h"
 #include "mongo/db/op_observer/user_write_block_mode_op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/periodic_runner_job_abort_expired_transactions.h"
@@ -191,7 +191,6 @@
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
 #include "mongo/db/s/sharding_ready.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/serverless/multitenancy_check.h"
@@ -258,6 +257,7 @@
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/service_entry_point_mongos.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
@@ -466,11 +466,11 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
 
 MONGO_FAIL_POINT_DEFINE(shutdownAtStartup);
 
-void logStartupTimeElapsedStatistics(ServiceContext* serviceContext,
-                                     Date_t beginInitAndListen,
-                                     BSONObjBuilder* startupTimeElapsedBuilder,
-                                     BSONObjBuilder* startupInfoBuilder,
-                                     StorageEngine::LastShutdownState lastShutdownState) {
+void logMongodStartupTimeElapsedStatistics(ServiceContext* serviceContext,
+                                           Date_t beginInitAndListen,
+                                           BSONObjBuilder* startupTimeElapsedBuilder,
+                                           BSONObjBuilder* startupInfoBuilder,
+                                           StorageEngine::LastShutdownState lastShutdownState) {
     mongo::Milliseconds elapsedInitAndListen =
         serviceContext->getFastClockSource()->now() - beginInitAndListen;
     startupTimeElapsedBuilder->append("_initAndListen total elapsed time",
@@ -479,7 +479,7 @@ void logStartupTimeElapsedStatistics(ServiceContext* serviceContext,
                                lastShutdownState == StorageEngine::LastShutdownState::kClean);
     startupInfoBuilder->append("Statistics", startupTimeElapsedBuilder->obj());
     LOGV2_INFO(8423403,
-               "initAndListen complete",
+               "mongod startup complete",
                "Summary of time elapsed"_attr = startupInfoBuilder->obj());
 }
 
@@ -537,10 +537,15 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     serviceContext->getService(ClusterRole::ShardServer)
         ->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>());
 
-    // Set up the periodic runner for background job execution. This is required to be running
-    // before both the storage engine or the transport layer are initialized.
-    auto runner = makePeriodicRunner(serviceContext);
-    serviceContext->setPeriodicRunner(std::move(runner));
+    {
+        // Set up the periodic runner for background job execution. This is required to be running
+        // before both the storage engine or the transport layer are initialized.
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Set up periodic runner",
+                                                  &startupTimeElapsedBuilder);
+        auto runner = makePeriodicRunner(serviceContext);
+        serviceContext->setPeriodicRunner(std::move(runner));
+    }
 
     // When starting the server with --queryableBackupMode or --recoverFromOplogAsStandalone, we are
     // in read-only mode and don't allow user-originating operations to perform writes
@@ -550,7 +555,13 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
 #ifdef MONGO_CONFIG_SSL
-    OCSPManager::start(serviceContext);
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(
+            serviceContext->getFastClockSource(),
+            "Set up online certificate status protocol manager",
+            &startupTimeElapsedBuilder);
+        OCSPManager::start(serviceContext);
+    }
     CertificateExpirationMonitor::get()->start(serviceContext);
 #endif
 
@@ -592,11 +603,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                                 &startupTimeElapsedBuilder,
                                 &startupInfoBuilder,
                                 lastShutdownState] {
-        logStartupTimeElapsedStatistics(serviceContext,
-                                        beginInitAndListen,
-                                        &startupTimeElapsedBuilder,
-                                        &startupInfoBuilder,
-                                        lastShutdownState);
+        logMongodStartupTimeElapsedStatistics(serviceContext,
+                                              beginInitAndListen,
+                                              &startupTimeElapsedBuilder,
+                                              &startupInfoBuilder,
+                                              lastShutdownState);
     });
 
 #ifdef MONGO_CONFIG_WIREDTIGER_ENABLED
@@ -704,7 +715,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // the upgrade flag to true.
     auto storageEngine = serviceContext->getStorageEngine();
     invariant(storageEngine);
-    storageEngine->notifyStartupComplete();
+    storageEngine->notifyStartupComplete(startupOpCtx.get());
 
     BackupCursorHooks::initialize(serviceContext);
 
@@ -816,12 +827,16 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         WaitForMajorityService::get(serviceContext).startup(serviceContext);
     }
 
-    if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        // A config shard initializes sharding awareness after setting up its config server state.
+    if (auto shardIdentityDoc =
+            ShardingInitializationMongoD::getShardIdentityDoc(startupOpCtx.get())) {
+        if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+            // A config shard initializes sharding awareness after setting up its config server
+            // state.
 
-        // This function may take the global lock.
-        initializeShardingAwarenessIfNeededAndLoadGlobalSettings(startupOpCtx.get(),
-                                                                 &startupTimeElapsedBuilder);
+            // This function will take the global lock.
+            initializeShardingAwarenessAndLoadGlobalSettings(
+                startupOpCtx.get(), *shardIdentityDoc, &startupTimeElapsedBuilder);
+        }
     }
 
     try {
@@ -873,16 +888,22 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                     serviceContext->getFastClockSource(),
                     "Initialize the sharding components for a config server",
                     &startupTimeElapsedBuilder);
+
                 initializeGlobalShardingStateForConfigServerIfNeeded(startupOpCtx.get());
             }
 
-            // This function may take the global lock.
-            initializeShardingAwarenessIfNeededAndLoadGlobalSettings(startupOpCtx.get(),
-                                                                     &startupTimeElapsedBuilder);
+            // TODO: SERVER-82965 We shouldn't need to read the doc multiple times once we are
+            // in sharding only development since config servers can always create it themselves.
+            if (auto shardIdentityDoc =
+                    ShardingInitializationMongoD::getShardIdentityDoc(startupOpCtx.get())) {
+                // This function will take the global lock.
+                initializeShardingAwarenessAndLoadGlobalSettings(
+                    startupOpCtx.get(), *shardIdentityDoc, &startupTimeElapsedBuilder);
 
-            // Sharding is always ready when there is at least one shard at startup (either the
-            // config shard or a dedicated shard server).
-            ShardingReady::get(startupOpCtx.get())->setIsReadyIfShardExists(startupOpCtx.get());
+                // Sharding is always ready when there is at least one shard at startup (either the
+                // config shard or a dedicated shard server).
+                ShardingReady::get(startupOpCtx.get())->setIsReadyIfShardExists(startupOpCtx.get());
+            }
         } else if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
             // TODO SERVER-83135: Replace this 'else if' with an 'if' once we support
             // config shard + embedded router.
@@ -892,8 +913,13 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             serviceContext->getService(ClusterRole::RouterServer)
                 ->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongos>());
 
-            // This function may take the global lock.
-            initializeShardingAwarenessIfNeededAndLoadGlobalSettings(startupOpCtx.get());
+            // TODO: SERVER-82965 We shouldn't need to read the doc multiple times
+            if (auto shardIdentityDoc =
+                    ShardingInitializationMongoD::getShardIdentityDoc(startupOpCtx.get())) {
+                // This function will take the global lock.
+                initializeShardingAwarenessAndLoadGlobalSettings(
+                    startupOpCtx.get(), *shardIdentityDoc, nullptr);
+            }
         } else {
             // On a dedicated shard server, ShardingReady is always set because there is guaranteed
             // to be at least one shard in the sharded cluster (either the config shard or a
@@ -1021,11 +1047,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             // shutdown task to complete and return.
 
             logStartupStats.dismiss();
-            logStartupTimeElapsedStatistics(serviceContext,
-                                            beginInitAndListen,
-                                            &startupTimeElapsedBuilder,
-                                            &startupInfoBuilder,
-                                            lastShutdownState);
+            logMongodStartupTimeElapsedStatistics(serviceContext,
+                                                  beginInitAndListen,
+                                                  &startupTimeElapsedBuilder,
+                                                  &startupInfoBuilder,
+                                                  lastShutdownState);
 
             MONGO_IDLE_THREAD_BLOCK;
             return waitForShutdown();
@@ -1159,11 +1185,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     logStartupStats.dismiss();
-    logStartupTimeElapsedStatistics(serviceContext,
-                                    beginInitAndListen,
-                                    &startupTimeElapsedBuilder,
-                                    &startupInfoBuilder,
-                                    lastShutdownState);
+    logMongodStartupTimeElapsedStatistics(serviceContext,
+                                          beginInitAndListen,
+                                          &startupTimeElapsedBuilder,
+                                          &startupInfoBuilder,
+                                          lastShutdownState);
 
     MONGO_IDLE_THREAD_BLOCK;
     return waitForShutdown();
@@ -1437,8 +1463,9 @@ void setUpObservers(ServiceContext* serviceContext) {
     if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         DurableHistoryRegistry::get(serviceContext)
             ->registerPin(std::make_unique<ReshardingHistoryHook>());
-        opObserverRegistry->addObserver(std::make_unique<OpObserverImpl>(
-            std::make_unique<OplogWriterTransactionProxy>(std::make_unique<OplogWriterImpl>())));
+        opObserverRegistry->addObserver(
+            std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerTransactionProxy>(
+                std::make_unique<OperationLoggerImpl>())));
         opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<MigrationChunkClonerSourceOpObserver>());
@@ -1471,7 +1498,7 @@ void setUpObservers(ServiceContext* serviceContext) {
 
     if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
         opObserverRegistry->addObserver(
-            std::make_unique<OpObserverImpl>(std::make_unique<OplogWriterImpl>()));
+            std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
         opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
@@ -1540,17 +1567,17 @@ struct ShutdownContext {
 ServiceContext::Decoration<ShutdownContext> getShutdownContext =
     ServiceContext::declareDecoration<ShutdownContext>();
 
-void logShutdownTimeElapsedStatistics(ServiceContext* serviceContext,
-                                      Date_t beginShutdownTask,
-                                      BSONObjBuilder* shutdownTimeElapsedBuilder,
-                                      BSONObjBuilder* shutdownInfoBuilder) {
+void logMongodShutdownTimeElapsedStatistics(ServiceContext* serviceContext,
+                                            Date_t beginShutdownTask,
+                                            BSONObjBuilder* shutdownTimeElapsedBuilder,
+                                            BSONObjBuilder* shutdownInfoBuilder) {
     mongo::Milliseconds elapsedInitAndListen =
         serviceContext->getFastClockSource()->now() - beginShutdownTask;
     shutdownTimeElapsedBuilder->append("shutdownTask total elapsed time",
                                        elapsedInitAndListen.toString());
     shutdownInfoBuilder->append("Statistics", shutdownTimeElapsedBuilder->obj());
     LOGV2_INFO(8423404,
-               "shutdownTask complete",
+               "mongod shutdown complete",
                "Summary of time elapsed"_attr = shutdownInfoBuilder->obj());
 }
 
@@ -1586,10 +1613,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     Date_t beginShutdownTask = serviceContext->getFastClockSource()->now();
     ScopeGuard logShutdownStats(
         [serviceContext, beginShutdownTask, &shutdownTimeElapsedBuilder, &shutdownInfoBuilder] {
-            logShutdownTimeElapsedStatistics(serviceContext,
-                                             beginShutdownTask,
-                                             &shutdownTimeElapsedBuilder,
-                                             &shutdownInfoBuilder);
+            logMongodShutdownTimeElapsedStatistics(serviceContext,
+                                                   beginShutdownTask,
+                                                   &shutdownTimeElapsedBuilder,
+                                                   &shutdownInfoBuilder);
         });
 
     // If we don't have shutdownArgs, we're shutting down from a signal, or other clean shutdown
@@ -1764,6 +1791,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     if (auto storageEngine = serviceContext->getStorageEngine()) {
         if (storageEngine->supportsReadConcernSnapshot()) {
+            TimeElapsedBuilderScopedTimer scopedTimer(
+                serviceContext->getFastClockSource(),
+                "Shut down the thread that aborts expired transactions",
+                &shutdownTimeElapsedBuilder);
             LOGV2(4784908, "Shutting down the PeriodicThreadToAbortExpiredTransactions");
             PeriodicThreadToAbortExpiredTransactions::get(serviceContext)->stop();
         }
@@ -2044,7 +2075,13 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     FlowControl::shutdown(serviceContext);
 #ifdef MONGO_CONFIG_SSL
-    OCSPManager::shutdown(serviceContext);
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(
+            serviceContext->getFastClockSource(),
+            "Shut down online certificate status protocol manager",
+            &shutdownTimeElapsedBuilder);
+        OCSPManager::shutdown(serviceContext);
+    }
 #endif
 }
 

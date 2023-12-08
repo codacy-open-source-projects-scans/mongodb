@@ -66,7 +66,7 @@ public:
      * When all of the storage startup tasks are completed as a whole, then this function is called
      * by the external force managing the startup process.
      */
-    virtual void notifyStartupComplete() {}
+    virtual void notifyStartupComplete(OperationContext* opCtx) {}
 
     virtual RecoveryUnit* newRecoveryUnit() = 0;
 
@@ -494,8 +494,7 @@ public:
      * See StorageEngine::autoCompact for details
      */
     virtual Status autoCompact(OperationContext* opCtx,
-                               bool enable,
-                               boost::optional<int64_t> freeSpaceTargetMB) {
+                               const StorageEngine::AutoCompactOptions& options) {
         return Status(ErrorCodes::CommandNotSupported,
                       "The current storage engine doesn't support auto compact");
     }

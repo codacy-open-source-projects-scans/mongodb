@@ -93,7 +93,7 @@ CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) 
     if constexpr (kCETestLogOnly) {
         std::cout << ExplainGenerator::explainV2(abt) << std::endl;
     }
-
+    QueryParameterMap qp;  // Intentionally unused
     OptPhaseManager phaseManager{_optPhases,
                                  _prefixId,
                                  false /*requireRID*/,
@@ -104,7 +104,8 @@ CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) 
                                  defaultConvertPathToInterval,
                                  ConstEval::constFold,
                                  DebugInfo::kDefaultForTests,
-                                 _hints};
+                                 _hints,
+                                 qp};
     optimize(phaseManager, abt);
 
     const auto& memo = phaseManager.getMemo();
@@ -118,13 +119,13 @@ CEType CETester::getCE(ABT& abt, std::function<bool(const ABT&)> nodePredicate) 
     // the original ABT (usually testing the CE for FilterNodes). The memo won't have any groups for
     // us to estimate directly yet.
     if (_optPhases.empty()) {
-        auto card = cht->deriveCE(_metadata, memo, {}, abt.ref());
+        auto card = cht->deriveCE(_metadata, memo, {}, qp, abt.ref());
 
         if constexpr (kCETestLogOnly) {
-            std::cout << "CE: " << card << std::endl;
+            std::cout << "CE: {" << card._ce << ", " << card._mode << "}" << std::endl;
         }
 
-        return card;
+        return card._ce;
     }
 
     boost::optional<CEType> outCard;

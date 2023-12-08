@@ -235,7 +235,7 @@ Status wtRCToStatus_slow(int retCode, WT_SESSION* session, StringData prefix) {
     return Status(ErrorCodes::UnknownError, s);
 }
 
-void WiredTigerUtil::fetchTypeAndSourceURI(OperationContext* opCtx,
+void WiredTigerUtil::fetchTypeAndSourceURI(WiredTigerRecoveryUnit& ru,
                                            const std::string& tableUri,
                                            std::string* type,
                                            std::string* source) {
@@ -243,7 +243,7 @@ void WiredTigerUtil::fetchTypeAndSourceURI(OperationContext* opCtx,
     const size_t colon = tableUri.find(':');
     invariant(colon != string::npos);
     colgroupUri += tableUri.substr(colon);
-    StatusWith<std::string> colgroupResult = getMetadataCreate(opCtx, colgroupUri);
+    StatusWith<std::string> colgroupResult = getMetadataCreate(ru, colgroupUri);
     invariant(colgroupResult.getStatus());
     WiredTigerConfigParser parser(colgroupResult.getValue());
 
@@ -288,15 +288,14 @@ StatusWith<std::string> WiredTigerUtil::getMetadataCreate(WT_SESSION* session, S
     return _getMetadata(cursor, uri);
 }
 
-StatusWith<std::string> WiredTigerUtil::getMetadataCreate(OperationContext* opCtx, StringData uri) {
-    invariant(opCtx);
-
-    auto session = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn();
+StatusWith<std::string> WiredTigerUtil::getMetadataCreate(WiredTigerRecoveryUnit& ru,
+                                                          StringData uri) {
+    auto session = ru.getSessionNoTxn();
 
     WT_CURSOR* cursor = nullptr;
     try {
         const std::string metadataURI = "metadata:create";
-        cursor = session->getCachedCursor(WiredTigerSession::kMetadataCreateTableId, "");
+        cursor = session->getNewCursor(metadataURI, "");
         if (!cursor) {
             cursor = session->getNewCursor(metadataURI);
         }
@@ -305,7 +304,7 @@ StatusWith<std::string> WiredTigerUtil::getMetadataCreate(OperationContext* opCt
     }
     invariant(cursor);
     ScopeGuard releaser = [&] {
-        session->releaseCursor(WiredTigerSession::kMetadataCreateTableId, cursor, "");
+        session->closeCursor(cursor);
     };
 
     return _getMetadata(cursor, uri);
@@ -320,14 +319,12 @@ StatusWith<std::string> WiredTigerUtil::getMetadata(WT_SESSION* session, StringD
     return _getMetadata(cursor, uri);
 }
 
-StatusWith<std::string> WiredTigerUtil::getMetadata(OperationContext* opCtx, StringData uri) {
-    invariant(opCtx);
-
-    auto session = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn();
+StatusWith<std::string> WiredTigerUtil::getMetadata(WiredTigerRecoveryUnit& ru, StringData uri) {
+    auto session = ru.getSessionNoTxn();
     WT_CURSOR* cursor = nullptr;
     try {
         const std::string metadataURI = "metadata:";
-        cursor = session->getCachedCursor(WiredTigerSession::kMetadataTableId, "");
+        cursor = session->getNewCursor(metadataURI, "");
         if (!cursor) {
             cursor = session->getNewCursor(metadataURI);
         }
@@ -336,16 +333,16 @@ StatusWith<std::string> WiredTigerUtil::getMetadata(OperationContext* opCtx, Str
     }
     invariant(cursor);
     ScopeGuard releaser = [&] {
-        session->releaseCursor(WiredTigerSession::kMetadataTableId, cursor, "");
+        session->closeCursor(cursor);
     };
 
     return _getMetadata(cursor, uri);
 }
 
-Status WiredTigerUtil::getApplicationMetadata(OperationContext* opCtx,
+Status WiredTigerUtil::getApplicationMetadata(WiredTigerRecoveryUnit& ru,
                                               StringData uri,
                                               BSONObjBuilder* bob) {
-    StatusWith<std::string> metadataResult = getMetadata(opCtx, uri);
+    StatusWith<std::string> metadataResult = getMetadata(ru, uri);
     if (!metadataResult.isOK()) {
         return metadataResult.getStatus();
     }
@@ -396,21 +393,19 @@ Status WiredTigerUtil::getApplicationMetadata(OperationContext* opCtx,
     return Status::OK();
 }
 
-StatusWith<BSONObj> WiredTigerUtil::getApplicationMetadata(OperationContext* opCtx,
+StatusWith<BSONObj> WiredTigerUtil::getApplicationMetadata(WiredTigerRecoveryUnit& ru,
                                                            StringData uri) {
     BSONObjBuilder bob;
-    Status status = getApplicationMetadata(opCtx, uri, &bob);
+    Status status = getApplicationMetadata(ru, uri, &bob);
     if (!status.isOK()) {
         return StatusWith<BSONObj>(status);
     }
     return StatusWith<BSONObj>(bob.obj());
 }
 
-StatusWith<int64_t> WiredTigerUtil::checkApplicationMetadataFormatVersion(OperationContext* opCtx,
-                                                                          StringData uri,
-                                                                          int64_t minimumVersion,
-                                                                          int64_t maximumVersion) {
-    StatusWith<std::string> result = getMetadata(opCtx, uri);
+StatusWith<int64_t> WiredTigerUtil::checkApplicationMetadataFormatVersion(
+    WiredTigerRecoveryUnit& ru, StringData uri, int64_t minimumVersion, int64_t maximumVersion) {
+    StatusWith<std::string> result = getMetadata(ru, uri);
     if (result.getStatus().code() == ErrorCodes::NoSuchKey) {
         return result.getStatus();
     }
@@ -901,18 +896,13 @@ int WiredTigerUtil::ErrorAccumulator::onError(WT_EVENT_HANDLER* handler,
     }
 }
 
-int WiredTigerUtil::verifyTable(OperationContext* opCtx,
+int WiredTigerUtil::verifyTable(WiredTigerRecoveryUnit& ru,
                                 const std::string& uri,
                                 std::vector<std::string>* errors) {
     ErrorAccumulator eventHandler(errors);
 
-    // Try to close as much as possible to avoid EBUSY errors.
-    WiredTigerRecoveryUnit::get(opCtx)->getSession()->closeAllCursors(uri);
-    WiredTigerSessionCache* sessionCache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
-    sessionCache->closeAllCursors(uri);
-
     // Open a new session with custom error handlers.
-    WT_CONNECTION* conn = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache()->conn();
+    WT_CONNECTION* conn = ru.getSessionCache()->conn();
     WT_SESSION* session;
     invariantWTOK(conn->open_session(conn, &eventHandler, nullptr, &session), nullptr);
     ON_BLOCK_EXIT([&] { session->close(session, ""); });
@@ -921,7 +911,7 @@ int WiredTigerUtil::verifyTable(OperationContext* opCtx,
     return (session->verify)(session, uri.c_str(), nullptr);
 }
 
-void WiredTigerUtil::validateTableLogging(OperationContext* opCtx,
+void WiredTigerUtil::validateTableLogging(WiredTigerRecoveryUnit& ru,
                                           StringData uri,
                                           bool isLogged,
                                           boost::optional<StringData> indexName,
@@ -934,7 +924,7 @@ void WiredTigerUtil::validateTableLogging(OperationContext* opCtx,
     }
     attrs.add("uri", uri);
 
-    auto metadata = WiredTigerUtil::getMetadataCreate(opCtx, uri);
+    auto metadata = WiredTigerUtil::getMetadataCreate(ru, uri);
     if (!metadata.isOK()) {
         attrs.add("error", metadata.getStatus());
         LOGV2_WARNING(6898100, "Failed to check WT table logging setting", attrs);
@@ -998,18 +988,17 @@ bool WiredTigerUtil::useTableLogging(const NamespaceString& nss) {
     return true;
 }
 
-Status WiredTigerUtil::setTableLogging(OperationContext* opCtx, const std::string& uri, bool on) {
+Status WiredTigerUtil::setTableLogging(WiredTigerRecoveryUnit& ru,
+                                       const std::string& uri,
+                                       bool on) {
     if (gWiredTigerSkipTableLoggingChecksOnStartup) {
         LOGV2_DEBUG(5548302, 1, "Skipping table logging check", "uri"_attr = uri);
         return Status::OK();
     }
 
-    // Try to close as much as possible to avoid EBUSY errors.
-    WiredTigerRecoveryUnit::get(opCtx)->getSession()->closeAllCursors(uri);
-    WiredTigerSessionCache* sessionCache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
-    sessionCache->closeAllCursors(uri);
-
     const std::string setting = on ? "log=(enabled=true)" : "log=(enabled=false)";
+
+    WiredTigerSessionCache* sessionCache = ru.getSessionCache();
 
     // This method does some "weak" parsing to see if the table is in the expected logging
     // state. Only attempt to alter the table when a change is needed. This avoids grabbing heavy
@@ -1040,7 +1029,7 @@ Status WiredTigerUtil::setTableLogging(OperationContext* opCtx, const std::strin
         22432, 1, "Changing table logging settings", "uri"_attr = uri, "loggingEnabled"_attr = on);
     // Only alter the metadata once we're sure that we need to change the table settings, since
     // WT_SESSION::alter may return EBUSY and require taking a checkpoint to make progress.
-    auto status = sessionCache->getKVEngine()->alterMetadata(opCtx, uri, setting);
+    auto status = sessionCache->getKVEngine()->alterMetadata(uri, setting);
     if (!status.isOK()) {
         // Dump the storage engine's internal state to assist in diagnosis.
         sessionCache->getKVEngine()->dump();
@@ -1283,7 +1272,7 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
     cfg << "verbose=[";
 
     // Enable WiredTiger progress messages.
-    cfg << "recovery_progress:1,checkpoint_progress:1,compact_progress:1,checkpoint_cleanup:1";
+    cfg << "recovery_progress:1,checkpoint_progress:1,compact_progress:1";
 
     // Process each LOGV2 WiredTiger component and set the desired verbosity level.
     for (const auto& [component, componentStr] : *wtVerboseComponents) {
@@ -1312,10 +1301,6 @@ std::string WiredTigerUtil::generateWTVerboseConfiguration() {
             default:
                 level = WT_VERBOSE_INFO;
                 break;
-        }
-
-        if (componentStr == "checkpoint" && gWiredTigerStressConfig) {
-            level = WT_VERBOSE_DEBUG_1;
         }
 
         cfg << componentStr << ":" << level;

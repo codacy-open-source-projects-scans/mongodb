@@ -99,7 +99,7 @@ public:
         repl::ReplicationCoordinator::set(getGlobalServiceContext(),
                                           std::make_unique<repl::ReplicationCoordinatorMock>(
                                               getGlobalServiceContext(), replSettings));
-        _engine.notifyStartupComplete();
+        _engine.notifyStartupComplete(Client::getCurrent()->makeOperationContext().get());
     }
 
     ~WiredTigerRecoveryUnitHarnessHelper() {}
@@ -316,7 +316,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture,
     getCursor(ru1, &cursor);
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
-    invariantWTOK(wiredTigerCursorInsert(clientAndCtx1.second.get(), cursor), cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
 
@@ -339,7 +341,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture,
     getCursor(ru1, &cursor);
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
-    invariantWTOK(wiredTigerCursorInsert(clientAndCtx1.second.get(), cursor), cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
 
@@ -363,7 +367,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteAllowedWhileIgnorePrepareFalse) {
     getCursor(ru1, &cursor);
     cursor->set_key(cursor, "key1");
     cursor->set_value(cursor, "value1");
-    invariantWTOK(wiredTigerCursorInsert(clientAndCtx1.second.get(), cursor), cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
 
@@ -382,7 +388,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteAllowedWhileIgnorePrepareFalse) {
     cursor->set_value(cursor, "value2");
 
     // The write is allowed.
-    invariantWTOK(wiredTigerCursorInsert(clientAndCtx2.second.get(), cursor), cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx2.second.get()), cursor),
+        cursor->session);
 
     ru1->abortUnitOfWork();
     ru2->abortUnitOfWork();
@@ -395,7 +403,9 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteOnADocumentBeingPreparedTriggersW
     getCursor(ru1, &cursor);
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
-    invariantWTOK(wiredTigerCursorInsert(clientAndCtx1.second.get(), cursor), cursor->session);
+    invariantWTOK(
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx1.second.get()), cursor),
+        cursor->session);
     ru1->setPrepareTimestamp({1, 1});
     ru1->prepareUnitOfWork();
 
@@ -404,7 +414,8 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteOnADocumentBeingPreparedTriggersW
     getCursor(ru2, &cursor);
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value2");
-    int ret = wiredTigerCursorInsert(clientAndCtx2.second.get(), cursor);
+    int ret =
+        wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(clientAndCtx2.second.get()), cursor);
     ASSERT_EQ(WT_ROLLBACK, ret);
 
     ru1->abortUnitOfWork();
@@ -689,200 +700,6 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampAfterSetTimestampOnAbor
     ASSERT(!commitTs);
 }
 
-TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsAreNotCached) {
-    auto opCtx = clientAndCtx1.second.get();
-
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx);
-
-    std::unique_ptr<RecordStore> rs(
-        harnessHelper->createRecordStore(opCtx, "test.checkpoint_cached"));
-    auto uri = dynamic_cast<WiredTigerRecordStore*>(rs.get())->getURI();
-
-    WiredTigerKVEngine* engine = harnessHelper->getEngine();
-
-    // Insert a record.
-    WriteUnitOfWork wuow(opCtx);
-    StatusWith<RecordId> s = rs->insertRecord(opCtx, "data", 4, Timestamp());
-    ASSERT_TRUE(s.isOK());
-    ASSERT_EQUALS(1, rs->numRecords(opCtx));
-    wuow.commit();
-
-    // Test 1: A normal read should create a new cursor and release it into the session cache.
-
-    // Close all cached cursors to establish a 'before' state.
-    ru->getSession()->closeAllCursors(uri);
-    int cachedCursorsBefore = ru->getSession()->cachedCursors();
-
-    RecordData rd;
-    ASSERT_TRUE(rs->findRecord(opCtx, s.getValue(), &rd));
-
-    // A cursor should have been checked out and released into the cache.
-    ASSERT_GT(ru->getSession()->cachedCursors(), cachedCursorsBefore);
-    // All opened cursors are returned.
-    ASSERT_EQ(0, ru->getSession()->cursorsOut());
-
-    ru->abandonSnapshot();
-
-    // Force a checkpoint.
-    engine->flushAllFiles(opCtx, /*callerHoldsReadLock*/ false);
-
-    // Test 2: Checkpoint cursors are not expected to be cached, they
-    // should be immediately closed when destructed.
-    ru->setTimestampReadSource(WiredTigerRecoveryUnit::ReadSource::kCheckpoint);
-
-    // Close any cached cursors to establish a new 'before' state.
-    ru->getSession()->closeAllCursors(uri);
-    cachedCursorsBefore = ru->getSession()->cachedCursors();
-
-    // Will search the checkpoint cursor for the record, then release the checkpoint cursor.
-    ASSERT_TRUE(rs->findRecord(opCtx, s.getValue(), &rd));
-
-    // No new cursors should have been released into the cache, with the exception of a metadata
-    // cursor that is opened to determine if the table is LSM. Metadata cursors are cached.
-    ASSERT_EQ(ru->getSession()->cachedCursors(), cachedCursorsBefore + 1);
-
-    // All opened cursors are closed.
-    ASSERT_EQ(0, ru->getSession()->cursorsOut());
-
-    ASSERT_EQ(ru->getTimestampReadSource(), WiredTigerRecoveryUnit::ReadSource::kCheckpoint);
-}
-
-TEST_F(WiredTigerRecoveryUnitTestFixture, ReadOnceCursorsCached) {
-    auto opCtx = clientAndCtx1.second.get();
-
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx);
-
-    std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx, "test.read_once"));
-    auto uri = dynamic_cast<WiredTigerRecordStore*>(rs.get())->getURI();
-
-    // Insert a record.
-    WriteUnitOfWork wuow(opCtx);
-    StatusWith<RecordId> s = rs->insertRecord(opCtx, "data", 4, Timestamp());
-    ASSERT_TRUE(s.isOK());
-    ASSERT_EQUALS(1, rs->numRecords(opCtx));
-    wuow.commit();
-
-    // Test 1: A normal read should create a new cursor and release it into the session cache.
-
-    // Close all cached cursors to establish a 'before' state.
-    ru->getSession()->closeAllCursors(uri);
-    int cachedCursorsBefore = ru->getSession()->cachedCursors();
-
-    RecordData rd;
-    ASSERT_TRUE(rs->findRecord(opCtx, s.getValue(), &rd));
-
-    // A cursor should have been checked out and released into the cache.
-    ASSERT_GT(ru->getSession()->cachedCursors(), cachedCursorsBefore);
-    // All opened cursors are returned.
-    ASSERT_EQ(0, ru->getSession()->cursorsOut());
-
-    ru->abandonSnapshot();
-
-    // Test 2: A read-once operation should create a new cursor because it has a different
-    // configuration. This will be released into the cache.
-
-    ru->setReadOnce(true);
-
-    // Close any cached cursors to establish a new 'before' state.
-    ru->getSession()->closeAllCursors(uri);
-    cachedCursorsBefore = ru->getSession()->cachedCursors();
-
-    // The subsequent read operation will create a new read_once cursor and release into the cache.
-    ASSERT_TRUE(rs->findRecord(opCtx, s.getValue(), &rd));
-
-    // A new cursor should have been released into the cache.
-    ASSERT_GT(ru->getSession()->cachedCursors(), cachedCursorsBefore);
-    // All opened cursors are closed.
-    ASSERT_EQ(0, ru->getSession()->cursorsOut());
-
-    ASSERT(ru->getReadOnce());
-}
-
-TEST_F(WiredTigerRecoveryUnitTestFixture, CacheMixedOverwrite) {
-    auto opCtx = clientAndCtx1.second.get();
-    std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx, "test.A"));
-    auto uri = dynamic_cast<WiredTigerRecordStore*>(rs.get())->getURI();
-
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx, MODE_IX);
-    auto ru = WiredTigerRecoveryUnit::get(opCtx);
-
-    // Close all cached cursors to establish a 'before' state.
-    auto session = ru->getSession();
-    ru->getSession()->closeAllCursors(uri);
-    int cachedCursorsBefore = ru->getSession()->cachedCursors();
-
-    // Use a large, unused table ID for this test to ensure we don't collide with any other table
-    // ids.
-    int tableId = 999999999;
-    WT_CURSOR* cursor;
-
-    // Expect no cached cursors.
-    {
-        auto config = "";
-        cursor = session->getCachedCursor(tableId, config);
-        ASSERT_FALSE(cursor);
-
-        cursor = session->getNewCursor(uri, config);
-        ASSERT(cursor);
-        session->releaseCursor(tableId, cursor, config);
-        ASSERT_GT(session->cachedCursors(), cachedCursorsBefore);
-    }
-
-    cachedCursorsBefore = session->cachedCursors();
-
-    // Use a different overwrite setting, expect no cached cursors.
-    {
-        auto config = "overwrite=false";
-        cursor = session->getCachedCursor(tableId, config);
-        ASSERT_FALSE(cursor);
-
-        cursor = session->getNewCursor(uri, config);
-        ASSERT(cursor);
-        session->releaseCursor(tableId, cursor, config);
-        ASSERT_GT(session->cachedCursors(), cachedCursorsBefore);
-    }
-
-    cachedCursorsBefore = session->cachedCursors();
-
-    // Expect cursors to be cached.
-    {
-        auto config = "";
-        cursor = session->getCachedCursor(tableId, config);
-        ASSERT(cursor);
-        session->releaseCursor(tableId, cursor, config);
-        ASSERT_EQ(session->cachedCursors(), cachedCursorsBefore);
-    }
-
-    // Expect cursors to be cached.
-    {
-        auto config = "overwrite=false";
-        cursor = session->getCachedCursor(tableId, config);
-        ASSERT(cursor);
-        session->releaseCursor(tableId, cursor, config);
-        ASSERT_EQ(session->cachedCursors(), cachedCursorsBefore);
-    }
-
-    // Use yet another cursor config, and expect no cursors to be cached.
-    {
-        auto config = "overwrite=true";
-        cursor = session->getCachedCursor(tableId, config);
-        ASSERT_FALSE(cursor);
-
-        cursor = session->getNewCursor(uri, config);
-        ASSERT(cursor);
-        session->releaseCursor(tableId, cursor, config);
-        ASSERT_GT(session->cachedCursors(), cachedCursorsBefore);
-    }
-}
-
 TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorNotChanged) {
     auto opCtx1 = clientAndCtx1.second.get();
     auto opCtx2 = clientAndCtx2.second.get();
@@ -1032,13 +849,15 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, MultiTimestampConstraintsInternalState
     getCursor(ru1, &cursor);
     cursor->set_key(cursor, "key");
     cursor->set_value(cursor, "value");
-    invariantWTOK(wiredTigerCursorInsert(opCtx, cursor), cursor->session);
+    invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
+                  cursor->session);
 
     // Perform a write at ts1.
     cursor->set_key(cursor, "key2");
     cursor->set_value(cursor, "value");
     ASSERT_OK(ru1->setTimestamp(ts1));
-    invariantWTOK(wiredTigerCursorInsert(opCtx, cursor), cursor->session);
+    invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
+                  cursor->session);
 
     // Setting the timestamp again to the same value should not fail.
     ASSERT_OK(ru1->setTimestamp(ts1));
@@ -1052,7 +871,8 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, MultiTimestampConstraintsInternalState
     cursor->set_key(cursor, "key3");
     cursor->set_value(cursor, "value");
     ASSERT_OK(ru1->setTimestamp(ts2));
-    invariantWTOK(wiredTigerCursorInsert(opCtx, cursor), cursor->session);
+    invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
+                  cursor->session);
 
     ru1->commitUnitOfWork();
 }
@@ -1070,7 +890,8 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, AbandonSnapshotAbortMode) {
         getCursor(ru1, &cursor);
         cursor->set_key(cursor, key);
         cursor->set_value(cursor, "value");
-        invariantWTOK(wiredTigerCursorInsert(opCtx, cursor), cursor->session);
+        invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
+                      cursor->session);
 
         ru1->commitUnitOfWork();
     }
@@ -1170,13 +991,15 @@ DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
         getCursor(ru1, &cursor);
         cursor->set_key(cursor, "key");
         cursor->set_value(cursor, "value");
-        invariantWTOK(wiredTigerCursorInsert(opCtx, cursor), cursor->session);
+        invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
+                      cursor->session);
 
         // Perform a write at ts1.
         cursor->set_key(cursor, "key2");
         cursor->set_value(cursor, "value");
         ASSERT_OK(ru1->setTimestamp(ts1));
-        invariantWTOK(wiredTigerCursorInsert(opCtx, cursor), cursor->session);
+        invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), cursor),
+                      cursor->session);
 
         // Setting the timestamp again to a different value should detect that we're trying to set
         // multiple timestamps with the first write being non timestamped.

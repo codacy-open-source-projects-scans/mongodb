@@ -111,7 +111,6 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -132,6 +131,7 @@
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/query_analysis_sampler_util.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -235,14 +235,10 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     // It is important to do this before canonicalizing and optimizing the query, each of which
     // would alter the query shape.
     if (!(collection && collection.get()->getCollectionOptions().encryptedFieldConfig)) {
-        query_stats::registerRequest(
-            opCtx,
-            nss,
-            [&]() {
-                return std::make_unique<query_stats::FindKey>(
-                    expCtx, *parsedRequest, collOrViewAcquisition.getCollectionType());
-            },
-            /*requiresFullQueryStatsFeatureFlag*/ false);
+        query_stats::registerRequest(opCtx, nss, [&]() {
+            return std::make_unique<query_stats::FindKey>(
+                expCtx, *parsedRequest, collOrViewAcquisition.getCollectionType());
+        });
     }
 
     expCtx->setQuerySettings(lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));

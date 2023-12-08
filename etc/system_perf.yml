@@ -806,8 +806,9 @@ buildvariants:
     tasks:
       - name: schedule_global_auto_tasks
 
-  - &compile-amazon2
-    name: compile-amazon2
+  ###
+  # Old compiles
+  - name: compile-amazon2
     display_name: Compile
     modules: *modules
     cron: "0 0 * * *" # Everyday at 00:00
@@ -830,35 +831,7 @@ buildvariants:
     tasks:
       - name: compile
 
-  - name: package-amazon2-x86
-    display_name: Compile for Amazon Linux 2 x86 NEW
-    modules: *modules
-    cron: "0 0 * * *" # Everyday at 00:00
-    expansions: &compile-expansions
-      platform: linux
-      project_dir: &project_dir dsi
-      tooltags: ""
-      use_scons_cache: true
-      compile_variant: amazon2-x86-compile
-      compile_flags: >-
-        --ssl
-        --separate-debug
-        MONGO_DISTMOD=amazon2
-        -j$(grep -c ^processor /proc/cpuinfo)
-        --release
-        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-        --use-diagnostic-latches=off
-        install-mongocryptd
-    run_on:
-      - "amazon2-xlarge"
-    tasks:
-      - name: package_new_compile
-        depends_on:
-          - name: archive_dist_test
-            variant: amazon2-x86-compile
-
-  - &compile-amazon2-streams
-    name: compile-amazon2-streams
+  - name: compile-amazon2-streams
     display_name: Compile Mongo Streams for Amazon2
     modules: *modules
     cron: "0 0 * * *" # Everyday at 00:00
@@ -888,21 +861,6 @@ buildvariants:
       - "amazon2-arm64-xlarge"
     tasks:
       - name: compile
-
-  - name: package-amazon-linux2-arm64
-    display_name: Compile for Amazon Linux 2 arm64 NEW
-    modules: *modules
-    cron: "0 0 * * *" # Everyday at 00:00
-    expansions:
-      <<: *compile-expansions
-      compile_variant: amazon-linux2-arm64-compile
-    run_on:
-      - "amazon2-arm64-xlarge"
-    tasks:
-      - name: package_new_compile
-        depends_on:
-          - name: archive_dist_test
-            variant: amazon-linux2-arm64-compile
 
   - name: compile-amazon-linux2-arm64-mongocrypt-shlib
     display_name: Compile mongo_crypt_v1.so for Amazon Linux 2 arm64
@@ -982,10 +940,16 @@ buildvariants:
       - "amazon2023.0-arm64-large"
     tasks:
       - name: compile_mongocrypt_shlib
+  ###
 
+  ###
+  # New compiles
   - name: amazon2-x86-compile
-    display_name: "Amazon2 x86 Static Compile"
+    display_name: Compile for Amazon Linux 2 x86 NEW
+    modules: *modules
     expansions:
+      platform: linux
+      project_dir: *project_dir
       compile_variant: amazon2-x86-compile
       scons_cache_scope: shared
       scons_cache_mode: all
@@ -996,16 +960,21 @@ buildvariants:
         -j$(grep -c ^processor /proc/cpuinfo)
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     run_on:
-    - amazon2-xlarge
-    modules:
-      - enterprise
+      - amazon2-xlarge
     tasks:
       - name: compile_and_package_serial_no_unittests_TG
+      - name: package_new_compile
+        depends_on:
+          - name: archive_dist_test
+            variant: amazon2-x86-compile
 
-  - name: amazon-linux2-arm64-compile
-    display_name: "Amazon Linux2 Arm64 Static Compile"
+  - name: amazon2-arm64-compile
+    display_name: Compile for Amazon Linux 2 arm64 NEW
+    modules: *modules
     expansions:
-      compile_variant: amazon-linux2-arm64-compile
+      platform: linux
+      project_dir: *project_dir
+      compile_variant: amazon2-arm64-compile
       scons_cache_scope: shared
       scons_cache_mode: all
       has_packages: false
@@ -1015,11 +984,39 @@ buildvariants:
         -j$(grep -c ^processor /proc/cpuinfo)
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     run_on:
-    - amazon2-arm64-xlarge
-    modules:
-      - enterprise
+      - amazon2-arm64-xlarge
     tasks:
       - name: compile_and_package_serial_no_unittests_TG
+      - name: package_new_compile
+        depends_on:
+          - name: archive_dist_test
+            variant: amazon2-arm64-compile
+
+  - name: amazon2-x86-streams-compile
+    display_name: Compile Streams for Amazon Linux 2 x86 NEW
+    modules: *modules
+    expansions:
+      platform: linux
+      project_dir: *project_dir
+      compile_variant: amazon2-x86-streams-compile
+      scons_cache_scope: shared
+      scons_cache_mode: all
+      has_packages: false
+      compile_flags: >-
+        --ssl
+        MONGO_DISTMOD=amazon2
+        -j$(grep -c ^processor /proc/cpuinfo)
+        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --streams-release-build
+    run_on:
+      - amazon2-xlarge
+    tasks:
+      - name: compile_and_package_serial_no_unittests_TG
+      - name: package_new_compile
+        depends_on:
+          - name: archive_dist_test
+            variant: amazon2-x86-streams-compile
+  ###
 
   - name: linux-intel-standalone-classic-query-engine
     display_name: Linux Intel Standalone (Classic Query Engine)
@@ -1260,51 +1257,10 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: ycsb_60GB
-      - name: ycsb_60GB.long
-        cron: &only-run-in-patch-cron "0 0 29 2 1" # Next trigger: 02/29/2044 00:00:00Z.
-        # This is to only run the variants when they're checked in evergreen.
-        # A lot of variants with this cron will also run in the auto_run suites.
-        # TODO EVG-17874 remove this redundancy.
       - name: tpcc
       - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -1344,47 +1300,7 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: tpcc
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
       - name: linkbench2
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
 
   - name: atlas-M60-real
     display_name: M60-Atlas ReplSet AWS
@@ -1423,44 +1339,6 @@ buildvariants:
       - name: tpcc_majority
       - name: linkbench
       - name: linkbench2
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
 
   - name: atlas-M60-shard-real-aws-multi-client.2023-09
     display_name: M60-Shard Atlas AWS Multiple Workload Clients 2023-09
@@ -1587,38 +1465,6 @@ buildvariants:
         cron: *high-value-workload-cron
       - name: filter_with_complex_logical_expression_high_value
         cron: *high-value-workload-cron
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -1973,50 +1819,10 @@ buildvariants:
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
       - name: tpcc
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -2046,50 +1852,6 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
-      - name: industry_benchmarks
-        cron: *only-run-in-patch-cron
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -2174,32 +1936,6 @@ buildvariants:
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -2348,52 +2084,16 @@ buildvariants:
       - name: ycsb_60GB.long
       - name: crud_workloads_majority
       - name: tpcc
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
       - name: linkbench
       - name: linkbench2
       - name: tpch_1_normalized
       - name: tpch_1_denormalized
       - name: tpch_10_normalized
       - name: tpch_10_denormalized
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
       - name: tsbs_query
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
       - name: tsbs_query_fixed_bucketing
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -2619,44 +2319,10 @@ buildvariants:
       - name: change_streams_listen_throughput
         cron: *high-value-workload-cron
       - name: change_streams_multi_mongos
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
       - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -2678,50 +2344,10 @@ buildvariants:
       - name: schedule_variant_auto_tasks
       - name: industry_benchmarks
       - name: mongos_workloads
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
       - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -2817,8 +2443,6 @@ buildvariants:
       - name: change_streams_listen_throughput
       - name: industry_benchmarks
       - name: linkbench
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
       - name: mongos_workloads
       - name: mongos_large_catalog_workloads
       - name: move_chunk_large_chunk_map_workloads
@@ -2829,36 +2453,6 @@ buildvariants:
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -2957,51 +2551,11 @@ buildvariants:
       - name: bestbuy_query
       - name: industry_benchmarks
       - name: linkbench
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
       - name: mongos_workloads
       - name: tsbs_query_sharded
       - name: tsbs_query_finance_sharded
       - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -3039,50 +2593,6 @@ buildvariants:
     tasks:
       - name: schedule_patch_auto_tasks
       - name: schedule_variant_auto_tasks
-      - name: industry_benchmarks
-        cron: *only-run-in-patch-cron
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
 
   - name: linux-3-node-replSet.2022-11
     display_name: Linux 3-Node ReplSet 2022-11
@@ -3166,20 +2676,6 @@ buildvariants:
         cron: *high-value-workload-cron
       - name: time_series_sort_high_value
         cron: *high-value-workload-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -3311,8 +2807,6 @@ buildvariants:
       - name: linkbench
       - name: linkbench2
         cron: *high-value-workload-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
       - name: tsbs_query
         cron: *high-value-workload-cron
       - name: mixed_workloads_genny_rate_limited_high_value
@@ -3327,24 +2821,6 @@ buildvariants:
         cron: *high-value-workload-cron
       - name: time_series_sort_high_value
         cron: *high-value-workload-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
 
   - name: linux-3-node-replSet-intel-query-stats.2022-11
     display_name: Linux 3-Node ReplSet Intel 2022-11 (QueryStats)
@@ -3867,35 +3343,11 @@ buildvariants:
       # TODO: Enable in SERVER-66572.
       # - name: tpch_10_normalized
       # - name: tpch_10_denormalized
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
       - name: tsbs_query
         cron: *high-value-workload-cron
       - name: tsbs_query_finance
       - name: tsbs_query_manual_bucketing
       - name: tsbs_query_fixed_bucketing
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: agg-query-comparison_read_commands
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
       - name: genny_query_TenMDocCollection_IntId
       - name: genny_query_TenMDocCollection_ObjectId
       - name: genny_query_TenMDocCollection_SubDocId
@@ -3948,77 +3400,35 @@ buildvariants:
       - "rhel70-perf-microbenchmarks"
     depends_on: *_compile_amazon_linux2_arm64
     tasks:
-      - name: big_collection
-      - name: genny_scale_InsertRemove
-      - name: genny_execution_UserAcquisition
-      - name: aggregation_read_commands
-      - name: aggregation_read_commands_large_dataset
-      - name: agg-query-comparison_read_commands
-        cron: *high-value-workload-cron
-      - name: query_read_commands
-      - name: query_read_commands_large_dataset
-      - name: views-aggregation
-      - name: views-query
-      - name: where_read_commands
-      - name: update_read_commands
-      - name: insert_read_commands
-      - name: wildcard-index-read_read_commands
-      - name: wildcard-index-write_read_commands
-      - name: geo_read_commands
-      - name: misc_read_commands
-      - name: misc_custom_filter_default_read_commands
-      - name: misc_custom_filter_slow_or_sample_read_commands
-      - name: misc_custom_filter_complex_read_commands
-      - name: misc_custom_filter_whole_doc_read_commands
-      - name: misc_slowms_everything_read_commands
-      - name: singleThreaded_read_commands
-      - name: pipeline-updates
-      - name: javascript
-      - name: compound_wildcard_index_write_commands
-      - name: compound_wildcard_index_read_commands
-      - name: tie-breaking-heuristics
-      - name: industry_benchmarks
-        cron: *only-run-in-patch-cron
-      - name: ycsb_60GB.long
-        cron: *only-run-in-patch-cron
-      - name: linkbench2
-        cron: *only-run-in-patch-cron
-      - name: tpcc_majority
-        cron: *only-run-in-patch-cron
-      - name: mixed_workloads_genny_rate_limited_high_value
-        cron: *only-run-in-patch-cron
-      - name: load_test_high_value
-        cron: *only-run-in-patch-cron
-      - name: majority_reads10_k_threads_high_value
-        cron: *only-run-in-patch-cron
-      - name: bestbuy_agg
-        cron: *only-run-in-patch-cron
-      - name: large_indexed_ins_high_value
-        cron: *only-run-in-patch-cron
-      - name: expressive_queries_high_value
-        cron: *only-run-in-patch-cron
-      - name: time_series_sort_high_value
-        cron: *only-run-in-patch-cron
-      - name: tsbs_load
-        cron: *only-run-in-patch-cron
-      - name: tsbs_query
-        cron: *only-run-in-patch-cron
-      - name: medical_workload_diagnosis_50_50_high_value
-        cron: *only-run-in-patch-cron
-      - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
-        cron: *only-run-in-patch-cron
-      - name: array_traversal_high_value
-        cron: *only-run-in-patch-cron
-      - name: filter_with_complex_logical_expression_high_value
-        cron: *only-run-in-patch-cron
-      - name: change_streams_listen_throughput
-        cron: *only-run-in-patch-cron
-      - name: change_streams_latency
-        cron: *only-run-in-patch-cron
-      - name: mongos_workloads
-        cron: *only-run-in-patch-cron
-      - name: move_chunk_workloads
-        cron: *only-run-in-patch-cron
+    - name: big_collection
+    - name: genny_scale_InsertRemove
+    - name: genny_execution_UserAcquisition
+    - name: aggregation_read_commands
+    - name: aggregation_read_commands_large_dataset
+    - name: agg-query-comparison_read_commands
+      cron: *high-value-workload-cron
+    - name: query_read_commands
+    - name: query_read_commands_large_dataset
+    - name: views-aggregation
+    - name: views-query
+    - name: where_read_commands
+    - name: update_read_commands
+    - name: insert_read_commands
+    - name: wildcard-index-read_read_commands
+    - name: wildcard-index-write_read_commands
+    - name: geo_read_commands
+    - name: misc_read_commands
+    - name: misc_custom_filter_default_read_commands
+    - name: misc_custom_filter_slow_or_sample_read_commands
+    - name: misc_custom_filter_complex_read_commands
+    - name: misc_custom_filter_whole_doc_read_commands
+    - name: misc_slowms_everything_read_commands
+    - name: singleThreaded_read_commands
+    - name: pipeline-updates
+    - name: javascript
+    - name: compound_wildcard_index_write_commands
+    - name: compound_wildcard_index_read_commands
+    - name: tie-breaking-heuristics
 
   # Specialized Temporary Variants to understand the impact of query stats better.
   - <<: *linux-microbenchmarks-standalone-arm
@@ -4187,36 +3597,36 @@ buildvariants:
       <<: *standalone-arm-expansions
       mongodb_setup: mongo-perf-standalone-all-feature-flags.2023-02
     # Same as standalone tasks, but with tasks required all feature flags added
-    tasks: &microbenchmarks-all-feature-flags-tasks
-      - name: big_collection
-      - name: genny_scale_InsertRemove
-      - name: genny_execution_UserAcquisition
-      - name: aggregation_read_commands
-      - name: aggregation_read_commands_large_dataset
-      - name: agg-query-comparison_read_commands
-        cron: "0 0 * * 0,2,3,4,5" # *linux-microbenchmarks-standalone-arm contains high-value cron for this task. resetting correct cron
-      - name: query_read_commands
-      - name: query_read_commands_large_dataset
-      - name: views-aggregation
-      - name: views-query
-      - name: where_read_commands
-      - name: update_read_commands
-      - name: insert_read_commands
-      - name: wildcard-index-read_read_commands
-      - name: wildcard-index-write_read_commands
-      - name: geo_read_commands
-      - name: misc_read_commands
-      - name: misc_custom_filter_default_read_commands
-      - name: misc_custom_filter_slow_or_sample_read_commands
-      - name: misc_custom_filter_complex_read_commands
-      - name: misc_custom_filter_whole_doc_read_commands
-      - name: misc_slowms_everything_read_commands
-      - name: singleThreaded_read_commands
-      - name: pipeline-updates
-      - name: javascript
-      - name: compound_wildcard_index_write_commands
-      - name: compound_wildcard_index_read_commands
-      - name: tie-breaking-heuristics
+    tasks: &mirobenchmarks-all-feature-flags-tasks
+    - name: big_collection
+    - name: genny_scale_InsertRemove
+    - name: genny_execution_UserAcquisition
+    - name: aggregation_read_commands
+    - name: aggregation_read_commands_large_dataset
+    - name: agg-query-comparison_read_commands
+      cron: "0 0 * * 0,2,3,4,5" # *linux-microbenchmarks-standalone-arm contains high-value cron for this task. resetting correct cron
+    - name: query_read_commands
+    - name: query_read_commands_large_dataset
+    - name: views-aggregation
+    - name: views-query
+    - name: where_read_commands
+    - name: update_read_commands
+    - name: insert_read_commands
+    - name: wildcard-index-read_read_commands
+    - name: wildcard-index-write_read_commands
+    - name: geo_read_commands
+    - name: misc_read_commands
+    - name: misc_custom_filter_default_read_commands
+    - name: misc_custom_filter_slow_or_sample_read_commands
+    - name: misc_custom_filter_complex_read_commands
+    - name: misc_custom_filter_whole_doc_read_commands
+    - name: misc_slowms_everything_read_commands
+    - name: singleThreaded_read_commands
+    - name: pipeline-updates
+    - name: javascript
+    - name: compound_wildcard_index_write_commands
+    - name: compound_wildcard_index_read_commands
+    - name: tie-breaking-heuristics
 
   - <<: *linux-microbenchmarks-standalone-arm
     name: linux-microbenchmarks-standalone-classic-query-engine-arm.2023-01
@@ -4409,7 +3819,7 @@ buildvariants:
     expansions:
       <<: *standalone-intel-expansions
       mongodb_setup: mongo-perf-standalone-all-feature-flags.2023-02
-    tasks: *microbenchmarks-all-feature-flags-tasks
+    tasks: *mirobenchmarks-all-feature-flags-tasks
     # yaml does not nicely merge arrays, so DO NOT ADD INDIVIDUAL TASKS HERE.
     # Add tasks to the anchor that this variant references
     # If diverging from that list, add the entire list of desired tasks here

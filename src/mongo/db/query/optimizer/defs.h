@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "mongo/db/query/optimizer/containers.h"
+#include "mongo/db/query/optimizer/syntax/syntax_fwd_declare.h"
 #include "mongo/db/query/optimizer/utils/strong_alias.h"
 #include "mongo/db/query/util/named_enum.h"
 
@@ -232,6 +233,14 @@ constexpr CEType& operator*=(CEType& v1, const SelectivityType v2) {
     return v1;
 }
 
+// Holds a CE and the estimation method used to derive it.
+struct CERecord {
+    CEType _ce;
+    std::string _mode;
+
+    bool operator==(const CERecord& other) const = default;
+};
+
 // We can divide two cardinalities to obtain a selectivity.
 constexpr SelectivityType operator/(const CEType v1, const CEType v2) {
     return {v1._value / v2._value};
@@ -378,5 +387,10 @@ struct QueryHints {
 
 QUERY_UTIL_NAMED_ENUM_DEFINE(ScanOrder, SCAN_ORDER);
 #undef SCAN_ORDER
+
+/*
+ * Type for storing mapping between query parameter IDs and Constants.
+ */
+using QueryParameterMap = opt::unordered_map<int32_t, Constant>;
 
 }  // namespace mongo::optimizer

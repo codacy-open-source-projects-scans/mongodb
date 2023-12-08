@@ -142,7 +142,6 @@
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
-#include "mongo/stdx/variant.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
@@ -1432,6 +1431,13 @@ void ReplicationCoordinatorImpl::setMyHeartbeatMessage(const std::string& msg) {
     _topCoord->setMyHeartbeatMessage(_replExecutor->now(), msg);
 }
 
+void ReplicationCoordinatorImpl::setMyLastWrittenOpTimeAndWallTimeForward(
+    const OpTimeAndWallTime& opTimeAndWallTime) {
+    stdx::unique_lock<Latch> lock(_mutex);
+    _setMyLastWrittenOpTimeAndWallTime(lock, opTimeAndWallTime, false);
+    _reportUpstream_inlock(std::move(lock));
+}
+
 void ReplicationCoordinatorImpl::setMyLastAppliedOpTimeAndWallTimeForward(
     const OpTimeAndWallTime& opTimeAndWallTime, bool advanceGlobalTimestamp) {
     // Update the global timestamp before setting the last applied opTime forward so the last
@@ -1532,6 +1538,12 @@ void ReplicationCoordinatorImpl::_reportUpstream_inlock(stdx::unique_lock<Latch>
     _externalState->forwardSecondaryProgress();  // Must do this outside _mutex
 }
 
+void ReplicationCoordinatorImpl::_setMyLastWrittenOpTimeAndWallTime(
+    WithLock lk, const OpTimeAndWallTime& opTimeAndWallTime, bool isRollbackAllowed) {
+    _topCoord->setMyLastWrittenOpTimeAndWallTime(
+        opTimeAndWallTime, _replExecutor->now(), isRollbackAllowed);
+}
+
 void ReplicationCoordinatorImpl::_setMyLastAppliedOpTimeAndWallTime(
     WithLock lk, const OpTimeAndWallTime& opTimeAndWallTime, bool isRollbackAllowed) {
     const auto opTime = opTimeAndWallTime.opTime;
@@ -1591,6 +1603,16 @@ void ReplicationCoordinatorImpl::_setMyLastDurableOpTimeAndWallTime(
     // There could be replication waiters waiting for our lastDurable for {j: true}, wake up those
     // that now have their write concern satisfied.
     _wakeReadyWaiters(lk, opTimeAndWallTime.opTime);
+}
+
+OpTime ReplicationCoordinatorImpl::getMyLastWrittenOpTime() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _getMyLastWrittenOpTime_inlock();
+}
+
+OpTimeAndWallTime ReplicationCoordinatorImpl::getMyLastWrittenOpTimeAndWallTime() const {
+    stdx::lock_guard<Latch> lock(_mutex);
+    return _getMyLastWrittenOpTimeAndWallTime_inlock();
 }
 
 OpTime ReplicationCoordinatorImpl::getMyLastAppliedOpTime() const {
@@ -1856,6 +1878,14 @@ Status ReplicationCoordinatorImpl::awaitTimestampCommitted(OperationContext* opC
     return waitUntilMajorityOpTime(opCtx, waitOpTime);
 }
 
+OpTimeAndWallTime ReplicationCoordinatorImpl::_getMyLastWrittenOpTimeAndWallTime_inlock() const {
+    return _topCoord->getMyLastWrittenOpTimeAndWallTime();
+}
+
+OpTime ReplicationCoordinatorImpl::_getMyLastWrittenOpTime_inlock() const {
+    return _topCoord->getMyLastWrittenOpTime();
+}
+
 OpTimeAndWallTime ReplicationCoordinatorImpl::_getMyLastAppliedOpTimeAndWallTime_inlock() const {
     return _topCoord->getMyLastAppliedOpTimeAndWallTime();
 }
@@ -1994,18 +2024,18 @@ bool ReplicationCoordinatorImpl::_doneWaitingForReplication_inlock(
     invariant(writeConcern.syncMode != WriteConcernOptions::SyncMode::UNSET);
 
     const bool useDurableOpTime = writeConcern.syncMode == WriteConcernOptions::SyncMode::JOURNAL;
-    if (!stdx::holds_alternative<std::string>(writeConcern.w)) {
-        if (auto wTags = stdx::get_if<WTags>(&writeConcern.w)) {
+    if (!holds_alternative<std::string>(writeConcern.w)) {
+        if (auto wTags = std::get_if<WTags>(&writeConcern.w)) {
             auto tagPattern = uassertStatusOK(_rsConfig.makeCustomWriteMode(*wTags));
             return _topCoord->haveTaggedNodesReachedOpTime(opTime, tagPattern, useDurableOpTime);
         }
 
         return _topCoord->haveNumNodesReachedOpTime(
-            opTime, stdx::get<int64_t>(writeConcern.w), useDurableOpTime);
+            opTime, std::get<int64_t>(writeConcern.w), useDurableOpTime);
     }
 
     StringData patternName;
-    auto wMode = stdx::get<std::string>(writeConcern.w);
+    auto wMode = std::get<std::string>(writeConcern.w);
     if (wMode == WriteConcernOptions::kMajority) {
         if (_externalState->snapshotsEnabled() && !gTestingSnapshotBehaviorInIsolation) {
             // Make sure we have a valid "committed" snapshot up to the needed optime.
@@ -2025,28 +2055,38 @@ bool ReplicationCoordinatorImpl::_doneWaitingForReplication_inlock(
                 return false;
             }
 
+            // The following is an optimization when we are checking for opTime, but not config.
+            // For majority write concern, in addition to waiting for the committed snapshot to
+            // advance past the write, it also waits for a majority of nodes to have their
+            // lasDurable (j: true) or lastApplied (j: false) to advance past the write.
+            // Waiting for the committed snapshot is sufficient in most cases and so the additional
+            // wait is usually a no-op and only needed
+            // when writeConcernMajorityJournalDefault is false and j: true.
+            // When writeConcernMajorityShouldJournal is true,
+            // waiting for committedSnapshot is enough regardless of the j value.
+            // When writeConcernMajorityShouldJournal is false,
+            // committedSnapshot also cover j: false. Otherwise, fall through.
+
+            if (writeConcern.checkCondition == WriteConcernOptions::CheckCondition::OpTime &&
+                (getWriteConcernMajorityShouldJournal_inlock() || !useDurableOpTime)) {
+                if (kDebugBuild) {
+                    // At this stage all the tagged nodes should have reached the opTime, except
+                    // after the reconfig(see SERVER-47205). If the OpTime is greater than
+                    // _committedSnapshotAfterReconfig, check for that.
+                    if (!_committedSnapshotAfterReconfig ||
+                        (_committedSnapshotAfterReconfig < opTime)) {
+                        auto tagPattern = uassertStatusOK(_rsConfig.findCustomWriteMode(
+                            ReplSetConfig::kMajorityWriteConcernModeName));
+                        dassert(_topCoord->haveTaggedNodesReachedOpTime(
+                            opTime, tagPattern, useDurableOpTime));
+                    }
+                }
+                return true;
+            }
             // Fallthrough to wait for "majority" write concern.
         }
 
-        // Wait for all drop pending collections with drop optime before and at 'opTime' to be
-        // removed from storage.
-        if (auto dropOpTime = _externalState->getEarliestDropPendingOpTime()) {
-            if (*dropOpTime <= opTime) {
-                LOGV2_DEBUG(
-                    21338,
-                    1,
-                    "Unable to satisfy the requested majority write concern at 'committed' optime. "
-                    "There are still drop pending collections that have to be removed from storage "
-                    "before we can satisfy the write concern",
-                    "opTime"_attr = opTime,
-                    "earliestDropOpTime"_attr = *dropOpTime,
-                    "writeConcern"_attr = writeConcern.toBSON());
-                return false;
-            }
-        }
-
         // Continue and wait for replication to the majority (of voters).
-        // *** Needed for J:True, writeConcernMajorityShouldJournal:False (appliedOpTime snapshot).
         patternName = ReplSetConfig::kMajorityWriteConcernModeName;
     } else {
         patternName = wMode;
@@ -4123,6 +4163,7 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
         }
     }
 
+    _committedSnapshotAfterReconfig = _getCurrentCommittedSnapshotOpTime_inlock();
     lk.unlock();
     ReplicaSetAwareServiceRegistry::get(_service).onSetCurrentConfig(opCtx);
     _performPostMemberStateUpdateAction(action);
@@ -4919,11 +4960,6 @@ void ReplicationCoordinatorImpl::incrementNumCatchUpOpsIfCatchingUp(long numOps)
     if (_catchupState) {
         _catchupState->incrementNumCatchUpOps_inlock(numOps);
     }
-}
-
-void ReplicationCoordinatorImpl::signalDropPendingCollectionsRemovedFromStorage() {
-    stdx::lock_guard<Latch> lock(_mutex);
-    _wakeReadyWaiters(lock, _externalState->getEarliestDropPendingOpTime());
 }
 
 boost::optional<Timestamp> ReplicationCoordinatorImpl::getRecoveryTimestamp() {

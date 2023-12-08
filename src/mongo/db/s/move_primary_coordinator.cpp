@@ -62,7 +62,6 @@
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_logging.h"
 #include "mongo/db/s/sharding_recovery_service.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/shard_id.h"
@@ -81,6 +80,7 @@
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/move_primary_gen.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -438,6 +438,7 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getCollectionsToClone(
             uassertStatusOK(bsonExtractStringField(collInfo, "name", &collName));
 
             const NamespaceString nss(NamespaceStringUtil::deserialize(_dbName, collName));
+
             if (!nss.isSystem() || nss.isLegalClientSystemNS()) {
                 colls.push_back(nss);
             }
@@ -448,34 +449,34 @@ std::vector<NamespaceString> MovePrimaryCoordinator::getCollectionsToClone(
     }();
 
     const auto collectionsToIgnore = [&] {
-        auto colls = Grid::get(opCtx)->catalogClient()->getShardedCollectionNamespacesForDb(
+        auto catalogClient = Grid::get(opCtx)->catalogClient();
+        auto colls = catalogClient->getShardedCollectionNamespacesForDb(
             opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {});
-        auto unshardedCollsOutsideDbPrimary =
-            Grid::get(opCtx)
-                ->catalogClient()
-                ->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
-                    opCtx,
-                    _dbName,
-                    {ShardingState::get(opCtx)->shardId().toString()},
-                    repl::ReadConcernLevel::kMajorityReadConcern);
+        auto unshardedTrackedColls = _doc.getCloneOnlyUntrackedColls()
+            ? catalogClient->getUnsplittableCollectionNamespacesForDb(
+                  opCtx, _dbName, repl::ReadConcernLevel::kMajorityReadConcern, {})
+            : catalogClient->getUnsplittableCollectionNamespacesForDbOutsideOfShards(
+                  opCtx,
+                  _dbName,
+                  {ShardingState::get(opCtx)->shardId().toString()},
+                  repl::ReadConcernLevel::kMajorityReadConcern);
 
-        std::move(unshardedCollsOutsideDbPrimary.begin(),
-                  unshardedCollsOutsideDbPrimary.end(),
-                  std::back_inserter(colls));
+        std::move(
+            unshardedTrackedColls.begin(), unshardedTrackedColls.end(), std::back_inserter(colls));
 
         std::sort(colls.begin(), colls.end());
 
         return colls;
     }();
 
-    std::vector<NamespaceString> unshardedCollectionsOnDbPrimary;
+    std::vector<NamespaceString> collectionsToClone;
     std::set_difference(allCollections.cbegin(),
                         allCollections.cend(),
                         collectionsToIgnore.cbegin(),
                         collectionsToIgnore.cend(),
-                        std::back_inserter(unshardedCollectionsOnDbPrimary));
+                        std::back_inserter(collectionsToClone));
 
-    return unshardedCollectionsOnDbPrimary;
+    return collectionsToClone;
 }
 
 void MovePrimaryCoordinator::assertNoOrphanedDataOnRecipient(
@@ -536,6 +537,7 @@ std::vector<NamespaceString> MovePrimaryCoordinator::cloneDataToRecipient(Operat
             "_shardsvrCloneCatalogData",
             DatabaseNameUtil::serialize(_dbName, SerializationContext::stateDefault()));
         commandBuilder.append("from", fromShard->getConnString().toString());
+        commandBuilder.append("cloneOnlyUntrackedColls", _doc.getCloneOnlyUntrackedColls());
         if (osi.is_initialized()) {
             commandBuilder.appendElements(osi->toBSON());
         }
@@ -594,6 +596,7 @@ void MovePrimaryCoordinator::commitMetadataToConfig(
     OperationContext* opCtx, const DatabaseVersion& preCommitDbVersion) const {
     const auto commitCommand = [&] {
         ConfigsvrCommitMovePrimary request(_dbName, preCommitDbVersion, _doc.getToShardId());
+        request.setCloneOnlyUntrackedColls(_doc.getCloneOnlyUntrackedColls());
         request.setDbName(DatabaseName::kAdmin);
         return CommandHelpers::appendMajorityWriteConcern(request.toBSON({}));
     }();

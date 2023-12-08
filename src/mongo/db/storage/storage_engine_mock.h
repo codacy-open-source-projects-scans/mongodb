@@ -171,7 +171,7 @@ public:
         return 0;
     }
     void addDropPendingIdent(
-        const stdx::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
+        const std::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
         std::shared_ptr<Ident> ident,
         DropIdentCallback&& onDrop) final {}
     void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) final {}
@@ -230,9 +230,7 @@ public:
 
     void dump() const final {}
 
-    Status autoCompact(OperationContext* opCtx,
-                       bool enable,
-                       boost::optional<int64_t> freeSpaceTargetMB) final {
+    Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) final {
         return Status::OK();
     }
 };

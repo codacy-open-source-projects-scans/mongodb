@@ -140,6 +140,40 @@ repl::OpTime _logOp(OperationContext* opCtx,
         });
 }
 
+/**
+ * Initializes currentOp for dbcheck background job.
+ */
+void _initializeCurOp(OperationContext* opCtx, boost::optional<DbCheckCollectionInfo> info) {
+    if (!info) {
+        return;
+    }
+
+    stdx::unique_lock<Client> lk(*opCtx->getClient());
+    auto curOp = CurOp::get(opCtx);
+    curOp->setNS_inlock(info->nss);
+    curOp->setOpDescription_inlock(info->toBSON());
+    curOp->ensureStarted();
+}
+
+BSONObj DbCheckCollectionInfo::toBSON() const {
+    BSONObjBuilder builder;
+    builder.append("dbcheck",
+                   NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
+    uuid.appendToBuilder(&builder, "uuid");
+    if (secondaryIndexCheckParameters) {
+        builder.append("secondaryIndexCheckParameters", secondaryIndexCheckParameters->toBSON());
+    }
+
+    builder.append("start", start);
+    builder.append("end", end);
+    builder.append("maxDocsPerBatch", maxDocsPerBatch);
+    builder.append("maxBatchTimeMillis", maxBatchTimeMillis);
+    builder.append("maxCount", maxCount);
+    builder.append("maxSize", maxSize);
+    builder.append(WriteConcernOptions::kWriteConcernField, writeConcern.toBSON());
+    return builder.obj();
+}
+
 DbCheckStartAndStopLogger::DbCheckStartAndStopLogger(OperationContext* opCtx,
                                                      boost::optional<DbCheckCollectionInfo> info)
     : _info(info), _opCtx(opCtx) {
@@ -284,11 +318,7 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
     BSONObj end;
     const auto maxCount = invocation.getMaxCount();
     const auto maxSize = invocation.getMaxSize();
-    const auto maxRate = invocation.getMaxCountPerSecond();
     const auto maxDocsPerBatch = invocation.getMaxDocsPerBatch();
-    const auto maxBytesPerBatch = invocation.getMaxBytesPerBatch();
-    const auto maxDocsPerSec = invocation.getMaxDocsPerSec();
-    const auto maxBytesPerSec = invocation.getMaxBytesPerSec();
     const auto maxBatchTimeMillis = invocation.getMaxBatchTimeMillis();
 
     boost::optional<SecondaryIndexCheckParameters> secondaryIndexCheckParameters = boost::none;
@@ -344,11 +374,7 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
                                             end,
                                             maxCount,
                                             maxSize,
-                                            maxRate,
                                             maxDocsPerBatch,
-                                            maxBytesPerBatch,
-                                            maxDocsPerSec,
-                                            maxBytesPerSec,
                                             maxBatchTimeMillis,
                                             invocation.getBatchWriteConcern(),
                                             secondaryIndexCheckParameters,
@@ -374,12 +400,8 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
     uassert(6769501, "dbCheck no longer supports snapshotRead:false", invocation.getSnapshotRead());
 
     const int64_t max = std::numeric_limits<int64_t>::max();
-    const auto rate = invocation.getMaxCountPerSecond();
     const auto maxDocsPerBatch = invocation.getMaxDocsPerBatch();
-    const auto maxBytesPerBatch = invocation.getMaxBytesPerBatch();
     const auto maxBatchTimeMillis = invocation.getMaxBatchTimeMillis();
-    const auto maxDocsPerSec = invocation.getMaxDocsPerSec();
-    const auto maxBytesPerSec = invocation.getMaxBytesPerSec();
     auto result = std::make_unique<DbCheckRun>();
     auto perCollectionWork = [&](const Collection* coll) {
         if (!coll->ns().isReplicated()) {
@@ -391,11 +413,7 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
                                    BSON("_id" << MAXKEY),
                                    max,
                                    max,
-                                   rate,
                                    maxDocsPerBatch,
-                                   maxBytesPerBatch,
-                                   maxDocsPerSec,
-                                   maxBytesPerSec,
                                    maxBatchTimeMillis,
                                    invocation.getBatchWriteConcern(),
                                    boost::none,
@@ -460,6 +478,8 @@ void DbCheckJob::run() {
         info = _run->front();
     }
     DbCheckStartAndStopLogger startStop(opCtx, info);
+    _initializeCurOp(opCtx, info);
+    ON_BLOCK_EXIT([opCtx] { CurOp::get(opCtx)->done(); });
 
     if (MONGO_unlikely(hangBeforeProcessingDbCheckRun.shouldFail())) {
         LOGV2(7949000, "Hanging dbcheck due to failpoint 'hangBeforeProcessingDbCheckRun'");
@@ -709,7 +729,7 @@ void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
                         "indexName"_attr = indexName,
                         logAttrs(_info.nss),
                         "uuid"_attr = _info.uuid);
-            Status status = Status(ErrorCodes::KeyNotFound,
+            Status status = Status(ErrorCodes::NoSuchKey,
                                    "could not create batch bounds because of error while batching");
             const auto logEntry = dbCheckErrorHealthLogEntry(
                 _info.nss,
@@ -1210,7 +1230,7 @@ void DbChecker::_reverseLookup(OperationContext* opCtx,
                     "uuid"_attr = _info.uuid);
 
         Status status =
-            Status(ErrorCodes::KeyNotFound,
+            Status(ErrorCodes::NoSuchKey,
                    str::stream() << "cannot find document from recordId "
                                  << recordId.toStringHumanReadable() << " from index " << indexName
                                  << " for ns " << _info.nss.toStringForErrorMsg());
@@ -1286,7 +1306,7 @@ void DbChecker::_reverseLookup(OperationContext* opCtx,
                 logAttrs(_info.nss),
                 "uuid"_attr = _info.uuid);
     Status status =
-        Status(ErrorCodes::KeyNotFound,
+        Status(ErrorCodes::NoSuchKey,
                str::stream() << "found index key entry with corresponding document and "
                                 "key string set that does not contain expected keystring "
                              << keyStringBson << " from index " << indexName << " for ns "
@@ -1569,7 +1589,7 @@ StatusWith<DbCheckCollectionBatchStats> DbChecker::_runBatch(OperationContext* o
 
     if (!status.isOK()) {
         // dbCheck should still continue if we get an error fetching a record.
-        if (status.code() == ErrorCodes::KeyNotFound) {
+        if (status.code() == ErrorCodes::NoSuchKey) {
             std::unique_ptr<HealthLogEntry> healthLogEntry =
                 dbCheckErrorHealthLogEntry(_info.nss,
                                            _info.uuid,
@@ -1689,9 +1709,7 @@ public:
                "              maxKey: <last key, inclusive>,\n"
                "              maxCount: <try to keep a batch within maxCount number of docs>,\n"
                "              maxSize: <try to keep a batch withing maxSize of docs (bytes)>,\n"
-               "              maxCountPerSecond: <max rate in docs/sec>\n"
                "              maxDocsPerBatch: <max number of docs/batch>\n"
-               "              maxBytesPerBatch: <try to keep a batch within max bytes/batch>\n"
                "              maxBatchTimeMillis: <max time processing a batch in "
                "milliseconds>\n"
                "to check a collection.\n"

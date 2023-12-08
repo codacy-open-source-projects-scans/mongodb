@@ -146,7 +146,7 @@ public:
 
     ~WiredTigerKVEngine();
 
-    void notifyStartupComplete() override;
+    void notifyStartupComplete(OperationContext* opCtx) override;
 
     void setRecordStoreExtraOptions(const std::string& options);
     void setSortedDataInterfaceExtraOptions(const std::string& options);
@@ -257,7 +257,7 @@ public:
                             const IndexDescriptor* desc,
                             bool isForceUpdateMetadata) override;
 
-    Status alterMetadata(OperationContext* opCtx, StringData uri, StringData config);
+    Status alterMetadata(StringData uri, StringData config);
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 
@@ -430,8 +430,7 @@ public:
                                              bool roundUpIfTooOld) override;
 
     Status autoCompact(OperationContext* opCtx,
-                       bool enable,
-                       boost::optional<int64_t> freeSpaceTargetMB) override;
+                       const StorageEngine::AutoCompactOptions& options) override;
 
 private:
     StatusWith<Timestamp> _pinOldestTimestamp(WithLock,

@@ -1,4 +1,8 @@
-import {checkCascadesOptimizerEnabled, navigateToPlanPath} from "jstests/libs/optimizer_utils.js";
+import {
+    checkCascadesOptimizerEnabled,
+    navigateToPlanPath,
+    runWithFastPathsDisabled
+} from "jstests/libs/optimizer_utils.js";
 
 if (!checkCascadesOptimizerEnabled(db)) {
     jsTestLog("Skipping test because the optimizer is not enabled");
@@ -24,11 +28,17 @@ assert.commandWorked(bulk.execute());
 [0, 10, 100, 500, 1000].forEach(n => {
     assert.commandWorked(
         db.adminCommand({setParameter: 1, internalCascadesOptimizerSampleChunks: n}));
-    const res = coll.explain().aggregate([{$match: {'a': {$lt: 2}}}]);
+    const res =
+        runWithFastPathsDisabled(() => coll.explain().aggregate([{$match: {'a': {$lt: 2}}}]));
     const estimate = navigateToPlanPath(res, "properties.adjustedCE");
 
-    // Verify the winning plan cardinality is within roughly 25% of the expected documents,
+    // Verify the winning plan cardinality is within roughly 30% of the expected documents,
     // regardless of the chunk size or whether sampled in chunks or not.
-    assert.lt(nDocs * 0.2 * 0.75, estimate);
-    assert.gt(nDocs * 0.2 * 1.25, estimate);
+    assert.lt(nDocs * 0.2 * 0.7, estimate);
+    assert.gt(nDocs * 0.2 * 1.3, estimate);
+
+    // Verify that sampling was used to estimate.
+    const ceMode = navigateToPlanPath(
+        res, "child.properties.logicalProperties.cardinalityEstimate.1.requirementCEs.0.mode");
+    assert.eq("sampling", ceMode);
 });

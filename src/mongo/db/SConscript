@@ -59,7 +59,7 @@ env.SConscript(
 env.Library(
     target='server_base',
     source=[
-        'basic_types.idl',
+        env.BazelIdlc('basic_types.idl')[0],
         'cluster_role.cpp',
         'feature_compatibility_version_document.idl',
         'feature_compatibility_version_parser.cpp',
@@ -117,6 +117,7 @@ env.Library(
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/session/logical_session_id_helpers',
         '$BUILD_DIR/mongo/db/storage/key_string',
@@ -186,6 +187,18 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+    ],
+)
+
+env.Benchmark(
+    target='profile_filter_bm',
+    source=[
+        'profile_filter_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/commands/profile_common',
+        '$BUILD_DIR/mongo/util/processinfo',
+        'profile_filter',
     ],
 )
 
@@ -606,7 +619,7 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/catalog/collection_crud',
         '$BUILD_DIR/mongo/db/op_observer/op_observer',
         '$BUILD_DIR/mongo/db/op_observer/op_observer_impl',
-        '$BUILD_DIR/mongo/db/op_observer/oplog_writer_impl',
+        '$BUILD_DIR/mongo/db/op_observer/operation_logger_impl',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
         'change_stream_options',
         'change_stream_options_manager',
@@ -796,7 +809,7 @@ env.CppUnitTest(
 )
 
 env.Library(
-    target="coll_mod_command_idl",
+    target='coll_mod_command_idl',
     source=[
         'coll_mod.idl',
     ],
@@ -817,6 +830,8 @@ env.Library(
         'dbcommands.idl',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/pipeline/document_sources_idl',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'server_base',
@@ -872,7 +887,6 @@ env.Library(
         'concurrency/lock_manager',
         'generic_cursor',
         'index_commands_idl',
-        'pipeline/change_stream_pre_and_post_images_options',
         'prepare_conflict_tracker',
         'query/common_query_enums_and_helpers',
         'repl/read_concern_args',
@@ -931,7 +945,6 @@ env.Library(
         's/shard_key_index_util.cpp',
         's/sharding_api_d_params.idl',
         's/sharding_migration_critical_section.cpp',
-        's/sharding_state.cpp',
         's/sharding_statistics.cpp',
         's/sharding_write_router.cpp',
         's/transaction_coordinator_curop.cpp',
@@ -1218,7 +1231,6 @@ env.Library(
         'rw_concern_d',
         'server_feature_flags',
         'session/session_catalog_mongod',
-        'shard_role_api',
         'shared_request_handling',
         'stats/api_version_metrics',
         'stats/counters',
@@ -1243,7 +1255,7 @@ env.Library(
         '$BUILD_DIR/mongo/idl/idl_parser',
     ],
     LIBDEPS_PRIVATE=[
-        'sorter/sorter_idl',
+        'sorter/sorter_base',
     ],
 )
 
@@ -1436,8 +1448,10 @@ env.Library(
     LIBDEPS_PRIVATE=[
         'catalog/catalog_helpers',
         'catalog/index_key_validate',
+        'coll_mod_command_idl',
         'commands/fsync_locked',
         'commands/server_status_core',
+        'index_commands_idl',
         'ops/write_ops',
         'query_exec',
         'record_id_helpers',
@@ -1689,7 +1703,7 @@ execEnv.Library(
         '$BUILD_DIR/mongo/db/query/optimizer/optimizer',
         '$BUILD_DIR/mongo/db/repl/wait_for_majority_service',
         '$BUILD_DIR/mongo/db/session/kill_sessions',
-        '$BUILD_DIR/mongo/db/sorter/sorter_idl',
+        '$BUILD_DIR/mongo/db/sorter/sorter_base',
         '$BUILD_DIR/mongo/db/sorter/sorter_stats',
         '$BUILD_DIR/mongo/db/stats/resource_consumption_metrics',
         '$BUILD_DIR/mongo/db/storage/record_store_base',
@@ -2584,8 +2598,8 @@ env.Library(
         'op_observer/fcv_op_observer',
         'op_observer/find_and_modify_images_op_observer',
         'op_observer/op_observer',
-        'op_observer/oplog_writer_impl',
-        'op_observer/oplog_writer_transaction_proxy',
+        'op_observer/operation_logger_impl',
+        'op_observer/operation_logger_transaction_proxy',
         'op_observer/user_write_block_mode_op_observer',
         'periodic_runner_job_abort_expired_transactions',
         'pipeline/change_stream_expired_pre_image_remover',
@@ -2700,7 +2714,6 @@ env.Library(
         'op_observer/op_observer',
         'repl/replmocks',
         'service_context_d',
-        'shard_role_api',
         'stats/top',
         'storage/storage_control',
         'storage/storage_options',
@@ -2852,7 +2865,7 @@ if wiredtiger:
             'mirror_maestro',
             'mongohasher',
             'multitenancy',
-            'op_observer/oplog_writer_impl',
+            'op_observer/operation_logger_impl',
             'operation_time_tracker',
             'ops/write_ops',
             'pipeline/change_stream_expired_pre_image_remover',

@@ -908,8 +908,8 @@ void StorageEngineImpl::startTimestampMonitor() {
     _timestampMonitor->addListener(&_collectionCatalogCleanupTimestampListener);
 }
 
-void StorageEngineImpl::notifyStartupComplete() {
-    _engine->notifyStartupComplete();
+void StorageEngineImpl::notifyStartupComplete(OperationContext* opCtx) {
+    _engine->notifyStartupComplete(opCtx);
 }
 
 RecoveryUnit* StorageEngineImpl::newRecoveryUnit() {
@@ -1219,7 +1219,7 @@ void StorageEngineImpl::_dumpCatalog(OperationContext* opCtx) {
 }
 
 void StorageEngineImpl::addDropPendingIdent(
-    const stdx::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
+    const std::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
     std::shared_ptr<Ident> ident,
     DropIdentCallback&& onDrop) {
     _dropPendingIdentReaper.addDropPendingIdent(dropTime, ident, std::move(onDrop));
@@ -1451,10 +1451,8 @@ void StorageEngineImpl::dump() const {
     _engine->dump();
 }
 
-Status StorageEngineImpl::autoCompact(OperationContext* opCtx,
-                                      bool enable,
-                                      boost::optional<int64_t> freeSpaceTargetMB) {
-    return _engine->autoCompact(opCtx, enable, freeSpaceTargetMB);
+Status StorageEngineImpl::autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) {
+    return _engine->autoCompact(opCtx, options);
 }
 
 }  // namespace mongo

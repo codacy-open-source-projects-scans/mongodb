@@ -125,7 +125,6 @@
 #include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/query_analysis_writer.h"
-#include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -146,6 +145,7 @@
 #include "mongo/s/query_analysis_sampler_util.h"
 #include "mongo/s/router_role.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/s/sharding_state.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
@@ -1446,7 +1446,7 @@ Status runAggregate(OperationContext* opCtx,
                         nss,
                         collections,
                         request.getExplain().has_value(),
-                        request.getHint().has_value(),
+                        request.getHint(),
                         pipeline.get())) {
                     return fastPathExec;
                 }
@@ -1540,6 +1540,7 @@ Status runAggregate(OperationContext* opCtx,
                 cmdObj,
                 &bodyBuilder);
         }
+        collectQueryStatsMongod(opCtx, std::move(curOp->debug().queryStatsInfo.key));
     } else {
         auto maybePinnedCursor = executeUntilFirstBatch(
             opCtx, expCtx, request, cmdObj, privileges, origNss, extDataSrcGuard, execs, result);
@@ -1556,7 +1557,7 @@ Status runAggregate(OperationContext* opCtx,
         if (maybePinnedCursor) {
             collectQueryStatsMongod(opCtx, *maybePinnedCursor);
         } else {
-            collectQueryStatsMongod(opCtx, std::move(curOp->debug().queryStatsKey));
+            collectQueryStatsMongod(opCtx, std::move(curOp->debug().queryStatsInfo.key));
         }
 
         // For an optimized away pipeline, signal the cache that a query operation has completed.

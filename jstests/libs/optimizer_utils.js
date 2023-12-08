@@ -1,4 +1,4 @@
-import {getAggPlanStage, isAggregationPlan} from "jstests/libs/analyze_plan.js";
+import {getAggPlanStage, getQueryPlanner, isAggregationPlan} from "jstests/libs/analyze_plan.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 /**
@@ -13,13 +13,6 @@ export function checkCascadesOptimizerEnabled(theDB) {
 // TODO SERVER-82185: Remove this once M2-eligibility checker + E2E parameterization implemented
 export function checkPlanCacheParameterization(theDB) {
     return false;
-}
-
-export function checkFastPathEnabled(theDB) {
-    const isDisabled =
-        theDB.adminCommand({getParameter: 1, internalCascadesOptimizerDisableFastPath: 1})
-            .internalCascadesOptimizerDisableFastPath;
-    return !isDisabled;
 }
 
 /**
@@ -43,10 +36,14 @@ export function checkCascadesFeatureFlagEnabled(theDB) {
  * Given the result of an explain command, returns whether the bonsai optimizer was used.
  */
 export function usedBonsaiOptimizer(explain) {
+    function isCQF(queryPlanner) {
+        return queryPlanner.queryFramework === "cqf";
+    }
+
+    // This section handles the explain output for aggregations against sharded colls.
     if (explain.hasOwnProperty("shards")) {
-        // This section handles the explain output for aggregations against sharded colls.
         for (let shardName of Object.keys(explain.shards)) {
-            if (explain.shards[shardName].queryPlanner.queryFramework !== "cqf") {
+            if (!isCQF(getQueryPlanner(explain.shards[shardName]))) {
                 return false;
             }
         }
@@ -55,7 +52,7 @@ export function usedBonsaiOptimizer(explain) {
                explain.queryPlanner.winningPlan.hasOwnProperty("shards")) {
         // This section handles the explain output for find queries against sharded colls.
         for (let shardExplain of explain.queryPlanner.winningPlan.shards) {
-            if (shardExplain.queryFramework !== "cqf") {
+            if (!isCQF(shardExplain)) {
                 return false;
             }
         }
@@ -63,7 +60,7 @@ export function usedBonsaiOptimizer(explain) {
     }
 
     // This section handles the explain output for unsharded queries.
-    return explain.hasOwnProperty("queryPlanner") && explain.queryPlanner.queryFramework === "cqf";
+    return explain.hasOwnProperty("queryPlanner") && isCQF(explain.queryPlanner);
 }
 
 /**
@@ -380,6 +377,11 @@ export function assertValueOnPath(value, doc, path) {
 
 export function assertValueOnPlanPath(value, doc, path) {
     assertValueOnPathFn(value, doc, path, navigateToPlanPath);
+}
+
+export function runWithFastPathsDisabled(fn) {
+    const disableFastPath = [{key: "internalCascadesOptimizerDisableFastPath", value: true}];
+    return runWithParams(disableFastPath, fn);
 }
 
 export function runWithParams(keyValPairs, fn) {
