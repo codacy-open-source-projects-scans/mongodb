@@ -18,7 +18,9 @@ env.SConscript(
         'query_settings',
         'query_stats',
         'query_shape',
+        'search',
         'stats',
+        'vector_search',
     ],
     exports=[
         'env',
@@ -45,7 +47,7 @@ env.Library(
         'parsed_find_command.cpp',
         'query_shape/distinct_cmd_shape.cpp',
         'query_shape/find_cmd_shape.cpp',
-        'query_stats/find_key_generator.cpp',
+        'query_stats/find_key.cpp',
         'query_utils.cpp',
     ],
     LIBDEPS=[
@@ -84,7 +86,7 @@ env.Library(
         'stage_types.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/catalog/clustered_collection_options',
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/exec/sbe/query_sbe_plan_stats',
         '$BUILD_DIR/mongo/db/index/expression_params',
         '$BUILD_DIR/mongo/db/query_expressions',

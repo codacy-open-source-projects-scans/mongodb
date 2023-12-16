@@ -2,9 +2,10 @@
 
 variables:
 # THIS HAS COPIES IN:
-# - etc/evergreen.yml
 # - etc/evergreen_yml_components/variants/rhel/test_dev.yml
-# - etc/evergreen_yml_components/variants/config_shard.yml
+# - etc/evergreen_yml_components/variants/rhel/test_config_shard.yml
+# - etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
+# - etc/evergreen_yml_components/variants/rhel/test_classic_engine.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &linux_x86_dynamic_compile_variant_dependency
   depends_on:
@@ -19,9 +20,10 @@ variables:
     variant: linux-x86-dynamic-compile
 
 # THIS HAS COPIES IN:
-# - etc/evergreen.yml
 # - etc/evergreen_yml_components/variants/rhel/test_dev.yml
-# - etc/evergreen_yml_components/variants/config_shard.yml
+# - etc/evergreen_yml_components/variants/rhel/test_config_shard.yml
+# - etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
+# - etc/evergreen_yml_components/variants/rhel/test_classic_engine.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &linux_x86_generic_expansions
   multiversion_platform: rhel80
@@ -33,9 +35,10 @@ variables:
   compile_variant: *linux_x86_dynamic_compile_variant_name
 
 # THIS HAS COPIES IN:
-# - etc/evergreen.yml
 # - etc/evergreen_yml_components/variants/rhel/test_dev.yml
-# - etc/evergreen_yml_components/variants/config_shard.yml
+# - etc/evergreen_yml_components/variants/rhel/test_config_shard.yml
+# - etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
+# - etc/evergreen_yml_components/variants/rhel/test_classic_engine.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &enterprise-rhel-80-64-bit-dynamic-expansions
   <<: *linux_x86_generic_expansions
@@ -116,9 +119,9 @@ variables:
   - name: .crypt
   - name: unittest_shell_hang_analyzer_gen
   - name: test_packages
-  - name: .timeseries_crud
     distros:
     - ubuntu2004-package
+  - name: .timeseries_crud
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
@@ -1042,7 +1045,7 @@ buildvariants:
     max_sub_suites: 3
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
-      --excludeWithAnyTags=resource_intensive,requires_sbe
+      --excludeWithAnyTags=resource_intensive
   depends_on:
   - name: archive_dist_test_debug
     variant: *linux_x86_dynamic_compile_variant_name
@@ -1161,7 +1164,7 @@ buildvariants:
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
       --runAllFeatureFlagTests
-      --excludeWithAnyTags=resource_intensive,requires_sbe
+      --excludeWithAnyTags=resource_intensive
   tasks:
   - name: analyze_shard_key_jscore_passthrough_gen
   - name: query_golden_classic
@@ -1318,3 +1321,14 @@ buildvariants:
   - name: external_auth_aws
   - name: external_auth_oidc
   - name: lint_fuzzer_sanity_patch
+
+- name: &tla-plus tla-plus
+  display_name: "TLA+"
+  run_on:
+  - rhel80-build
+  cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
+  stepback: false
+  expansions:
+    timeout_secs: 345600 # 4 days
+  tasks:
+  - name: tla_plus

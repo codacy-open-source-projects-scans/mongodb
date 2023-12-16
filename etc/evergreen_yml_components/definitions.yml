@@ -1016,6 +1016,14 @@ functions:
       args:
       - "./src/evergreen/powercycle_sentinel_run.sh"
 
+  "sign macos dev binaries": &sign_macos_dev_binaries
+    command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "buildscripts/sign_macos_binaries_for_testing.py"
+
   "execute resmoke tests": &execute_resmoke_tests
     command: subprocess.exec
     type: test
@@ -1218,6 +1226,7 @@ functions:
   - *update_task_timeout_expansions
   - *update_task_timeout
   - *f_expansions_write
+  - *sign_macos_dev_binaries
   - command: subprocess.exec
     params:
       binary: bash
@@ -1267,6 +1276,7 @@ functions:
   - *update_resmoke_jobs_expansions
   - *f_expansions_write
   - *configure_evergreen_api_credentials
+  - *sign_macos_dev_binaries
   - command: subprocess.exec
     params:
       binary: bash
@@ -2086,24 +2096,6 @@ functions:
   - *archive_jepsen_mongod_logs
   - *tar_jepsen_mongos_logs
   - *archive_jepsen_mongos_logs
-
-  "save blackduck artifacts":
-  - command: archive.targz_pack
-    params:
-      target: blackduck.tgz
-      source_dir: /home/ec2-user/blackduck/runs/
-      include:
-      - "**"
-  - command: s3.put
-    params:
-      aws_key: ${aws_key}
-      aws_secret: ${aws_secret}
-      local_file: blackduck.tgz
-      remote_file: ${project}/${build_variant}/${version_id}/blackduck-${task_id}-${execution}.tgz
-      bucket: mciuploads
-      permissions: public-read
-      content_type: ${content_type|application/gzip}
-      display_name: BlackDuck logs
 
   ### Process & archive mongo coredumps ###
   "gather mongo coredumps": &gather_mongo_coredumps
@@ -2939,7 +2931,15 @@ tasks:
         archive-dist-test
       task_compile_flags: >-
         PREFIX=dist-test
-      sign_macos_archive: true
+  - command: subprocess.exec
+    params:
+      binary: bash
+      add_expansions_to_env: true
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "evergreen/macos_notary.py"
+      - "mongodb-binaries.${ext|tgz}"
+
   - command: s3.put
     params:
       optional: true
@@ -2974,6 +2974,7 @@ tasks:
       - "./etc/evergreen_yml_components/**"
       - "./etc/repo_config.yaml"
       - "./etc/scons/**"
+      - "./etc/macos_dev_entitlements.xml"
       - "docker_compose/**"
       - "buildscripts/**"
       - "jstests/**"
@@ -3753,7 +3754,7 @@ tasks:
       targets: archive-mongo-crypt-dev
       task_compile_flags: >-
         --allocator=system
-        --enterprise-features=fle,search,vector_search
+        --enterprise-features=fle
         --js-engine=none
         --link-model=dynamic-sdk
         --enable-http-client=off
@@ -3790,7 +3791,7 @@ tasks:
         --dbg=on
         --opt=off
         --allocator=system
-        --enterprise-features=fle,search,vector_search
+        --enterprise-features=fle
         --js-engine=none
         --link-model=dynamic-sdk
         DESTDIR='$BUILD_ROOT/crypt-lib-$MONGO_VERSION'
@@ -3827,7 +3828,7 @@ tasks:
       compiling_for_test: true
       task_compile_flags: >-
         --allocator=system
-        --enterprise-features=fle,search,vector_search
+        --enterprise-features=fle
         --js-engine=none
         --link-model=static
         DESTDIR='$BUILD_ROOT/crypt-lib-$MONGO_VERSION'
@@ -6303,6 +6304,12 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
+  name: replica_sets_uninitialized_fcv_jscore_passthrough_gen
+  tags: ["replica_sets", "san", "large"]
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_task_template
   name: replica_sets_fcbis_jscore_passthrough_gen
   tags: ["replica_sets", "fcbis", "large"]
   commands:
@@ -6454,6 +6461,12 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
+  name: sharded_collections_uninitialized_fcv_jscore_passthrough_gen
+  tags: ["sharding", "jscore", "initsync"]
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_task_template
   name: unsplittable_collections_created_on_any_shard_jscore_passthrough_gen
   # TODO SERVER-83445 Enable on non-all-feature-flag variants.
   tags: ["unsplittable_collections"]
@@ -6486,7 +6499,19 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
+  name: sharding_uninitialized_fcv_jscore_passthrough_gen
+  tags: ["sharding", "jscore", "common", "initsync"]
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_task_template
   name: embedded_router_jscore_passthrough_gen
+  tags: []
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_task_template
+  name: embedded_router_jscore_passthrough_with_config_shard_gen
   tags: []
   commands:
   - func: "generate resmoke tasks"
@@ -8021,26 +8046,6 @@ tasks:
   - func: "upload pip requirements"
   - func: "run idl tests"
 
-- name: blackduck_scanner
-  tags: []
-  patchable: false
-  commands:
-  - *f_expansions_write
-  - func: "do non-compile setup"
-  - command: subprocess.exec
-    type: setup
-    params:
-      binary: bash
-      silent: true
-      args:
-      - "src/evergreen/blackduck_setup.sh"
-  - command: subprocess.exec
-    type: test
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/blackduck_hub.sh"
-
 - name: tla_plus
   tags: []
   commands:
@@ -8139,7 +8144,14 @@ tasks:
         ${additional_package_targets|}
       task_compile_flags: >-
         --legacy-tarball
-      sign_macos_archive: true
+  - command: subprocess.exec
+    params:
+      binary: bash
+      add_expansions_to_env: true
+      args:
+      - "src/evergreen/run_python_script.sh"
+      - "evergreen/macos_notary.py"
+      - "mongodb-dist.${ext|tgz}"
   - func: "f_expansions_write"
   - command: subprocess.exec
     params:
@@ -9426,11 +9438,13 @@ task_groups:
   tasks:
   - compile_bazel_dist_test_windows
   - run_bazel_program_windows
+  - compile_ninja_bazel
 
 - <<: *compile_bazel_task_group_template
   name: compile_bazel_macos_TG
   tasks:
   - compile_bazel_dist_test_macos
+  - compile_ninja_bazel
 
 - <<: *compile_task_group_template
   name: compile_upload_benchmarks_TG

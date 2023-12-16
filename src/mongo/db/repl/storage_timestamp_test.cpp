@@ -516,15 +516,12 @@ public:
     }
 
     BSONObj findOne(const CollectionPtr& coll) {
-        auto cursor = coll->getRecordStore()->getCursor(_opCtx);
-        auto optRecord = cursor->next();
+        auto optRecord = coll->getRecordStore()->getCursor(_opCtx)->next();
         if (optRecord == boost::none) {
             // Print a stack trace to help disambiguate which `findOne` failed.
             printStackTrace();
             FAIL("Did not find any documents.");
         }
-
-        optRecord.value().data.makeOwned();
         return optRecord.value().data.toBson();
     }
 
@@ -666,7 +663,7 @@ public:
 
     void setReplCoordAppliedOpTime(const repl::OpTime& opTime, Date_t wallTime = Date_t()) {
         repl::ReplicationCoordinator::get(_opCtx->getServiceContext())
-            ->setMyLastAppliedOpTimeAndWallTime({opTime, wallTime});
+            ->setMyLastAppliedOpTimeAndWallTimeForward({opTime, wallTime});
         ASSERT_OK(repl::ReplicationCoordinator::get(_opCtx->getServiceContext())
                       ->updateTerm(_opCtx, opTime.getTerm()));
     }

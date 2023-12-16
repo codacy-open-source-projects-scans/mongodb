@@ -193,9 +193,13 @@ auto makeRpcServiceMethod(CommandService* service, const char* name, HandlerType
                 CommandService* service,
                 ::grpc::ServerContext* nativeServerCtx,
                 ::grpc::ServerReaderWriter<ConstSharedBuffer, SharedBuffer>* nativeServerStream) {
-                GRPCServerContext ctx{nativeServerCtx};
-                GRPCServerStream stream{nativeServerStream};
-                return handler(service, ctx, stream);
+                try {
+                    GRPCServerContext ctx{nativeServerCtx};
+                    GRPCServerStream stream{nativeServerStream};
+                    return handler(service, ctx, stream);
+                } catch (const DBException& e) {
+                    return util::convertStatus(e.toStatus());
+                }
             },
             service));
 }
@@ -204,11 +208,16 @@ auto makeRpcServiceMethod(CommandService* service, const char* name, HandlerType
 
 CommandService::CommandService(TransportLayer* tl,
                                RPCHandler callback,
-                               std::shared_ptr<WireVersionProvider> wvProvider)
+                               std::shared_ptr<WireVersionProvider> wvProvider,
+                               std::shared_ptr<ClientCache> clientCache)
     : _tl{tl},
       _callback{std::move(callback)},
       _wvProvider{std::move(wvProvider)},
-      _clientCache{std::make_unique<ClientCache>()} {
+      _clientCache{std::move(clientCache)} {
+
+    if (!_clientCache) {
+        _clientCache = std::make_shared<ClientCache>();
+    }
 
     AddMethod(makeRpcServiceMethod(
         this,

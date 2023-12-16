@@ -722,6 +722,10 @@ Status storeMongodOptions(const moe::Environment& params) {
         }
     }
 
+    if (!feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot)) {
+        serverGlobalParams.configdbs = ConnectionString{};
+    }
+
     if (!params.count("net.port")) {
         if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             serverGlobalParams.port = ServerGlobalParams::ConfigServerPort;
@@ -794,6 +798,9 @@ Status storeMongodOptions(const moe::Environment& params) {
                                         << " and set requireApiVersion=true");
         }
     }
+
+    serverGlobalParams.upgradeBackCompat = params.count("upgradeBackCompat");
+    serverGlobalParams.downgradeBackCompat = params.count("downgradeBackCompat");
 
     setGlobalReplSettings(replSettings);
     return Status::OK();

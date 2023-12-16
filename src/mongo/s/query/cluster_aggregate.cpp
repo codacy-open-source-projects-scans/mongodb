@@ -70,8 +70,10 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/query_stats/agg_key_generator.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/query_shape/agg_cmd_shape.h"
+#include "mongo/db/query/query_stats/agg_key.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/server_options.h"
@@ -182,7 +184,7 @@ void appendEmptyResultSetWithStatus(OperationContext* opCtx,
 void updateHostsTargetedMetrics(OperationContext* opCtx,
                                 const NamespaceString& executionNss,
                                 const boost::optional<ChunkManager>& cm,
-                                stdx::unordered_set<NamespaceString> involvedNamespaces) {
+                                const stdx::unordered_set<NamespaceString>& involvedNamespaces) {
     if (!cm)
         return;
 
@@ -332,6 +334,16 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
                 request, *pipeline, expCtx, involvedNamespaces, executionNss);
         });
     }
+
+    // Perform the query settings lookup and attach it to the ExpressionContext.
+    auto serializationContext = request.getSerializationContext();
+    expCtx->setQuerySettings(
+        query_settings::lookupQuerySettings(expCtx, executionNss, serializationContext, [&]() {
+            query_shape::AggCmdShape shape(
+                request, executionNss, involvedNamespaces, *pipeline, expCtx);
+            return shape.sha256Hash(opCtx, serializationContext);
+        }));
+
     return pipeline;
 }
 
@@ -389,7 +401,7 @@ Status ClusterAggregate::runAggregate(OperationContext* opCtx,
     liteParsedPipeline.verifyIsSupported(
         opCtx, isSharded, request.getExplain(), serverGlobalParams.enableMajorityReadConcern);
     auto hasChangeStream = liteParsedPipeline.hasChangeStream();
-    auto involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
+    const auto& involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
     auto shouldDoFLERewrite = ::mongo::shouldDoFLERewrite(request);
     auto startsWithQueue = liteParsedPipeline.startsWithQueue();
     auto requiresCollationForParsingUnshardedAggregate =

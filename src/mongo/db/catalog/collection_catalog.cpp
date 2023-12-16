@@ -932,17 +932,11 @@ Status CollectionCatalog::dropView(OperationContext* opCtx, const NamespaceStrin
         ViewsForDatabase writable{viewsForDb};
         writable.remove(opCtx, systemViews, viewName);
 
-        // Reload the view catalog with the changes applied.
-        result = writable.reload(opCtx, systemViews);
-        if (result.isOK()) {
-            auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
-            uncommittedCatalogUpdates.removeView(viewName);
-            uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(),
-                                                              std::move(writable));
+        auto& uncommittedCatalogUpdates = UncommittedCatalogUpdates::get(opCtx);
+        uncommittedCatalogUpdates.removeView(viewName);
+        uncommittedCatalogUpdates.replaceViewsForDatabase(viewName.dbName(), std::move(writable));
 
-            PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx,
-                                                                    uncommittedCatalogUpdates);
-        }
+        PublishCatalogUpdates::ensureRegisteredWithRecoveryUnit(opCtx, uncommittedCatalogUpdates);
     }
 
     return result;
@@ -988,6 +982,39 @@ const Collection* CollectionCatalog::establishConsistentCollection(
 
     return lookupCollectionByNamespaceOrUUID(opCtx, nssOrUUID);
 }
+
+std::vector<const Collection*> CollectionCatalog::establishConsistentCollections(
+    OperationContext* opCtx,
+    const DatabaseName& dbName,
+    boost::optional<Timestamp> readTimestamp) const {
+    std::vector<const Collection*> result;
+    stdx::unordered_set<const Collection*> visitedCollections;
+    auto appendIfUnique = [&result, &visitedCollections](const Collection* col) {
+        auto [_, isNewCollection] = visitedCollections.emplace(col);
+        if (col && isNewCollection) {
+            result.push_back(col);
+        }
+    };
+
+    // We iterate both already committed and uncommitted changes and validate them with
+    // the storage snapshot
+    for (const auto& coll : range(dbName)) {
+        const Collection* currentCollection =
+            establishConsistentCollection(opCtx, coll->ns(), readTimestamp);
+        appendIfUnique(currentCollection);
+    }
+
+    for (auto const& [ns, coll] : _pendingCommitNamespaces) {
+        if (ns.dbName() == dbName) {
+            const Collection* currentCollection =
+                establishConsistentCollection(opCtx, ns, readTimestamp);
+            appendIfUnique(currentCollection);
+        }
+    }
+
+    return result;
+}
+
 
 bool CollectionCatalog::_needsOpenCollection(OperationContext* opCtx,
                                              const NamespaceStringOrUUID& nsOrUUID,

@@ -1135,6 +1135,14 @@ var ReplSetTest = function ReplSetTest(opts) {
             this._unbridgedPorts.push(this._allocatePortForBridge());
         }
 
+        if (this.isRouterServer) {
+            const nextPort = this._allocatePortForNode();
+            print("ReplSetTest Next router port: " + nextPort);
+
+            this.routerPorts.push(nextPort);
+            printjson(this.routerPorts);
+        }
+
         var nextId = this.nodes.length;
         printjson(this.nodes);
 
@@ -1155,6 +1163,9 @@ var ReplSetTest = function ReplSetTest(opts) {
         if (this._useBridge) {
             this._unbridgedPorts.splice(nodeId, 1);
             this._unbridgedNodes.splice(nodeId, 1);
+        }
+        if (this.isRouterServer) {
+            this.routerPorts.splice(nodeId, 1);
         }
     };
 
@@ -1274,11 +1285,20 @@ var ReplSetTest = function ReplSetTest(opts) {
         let db = primary.getDB('admin');
         runFnWithAuthOnPrimary(this, function() {
             assert.soon(function() {
-                const getConfigRes = assert.commandWorked(db.adminCommand({
-                    replSetGetConfig: 1,
-                    commitmentStatus: true,
-                    $_internalIncludeNewlyAdded: true
-                }));
+                const getConfigRes =
+                    assert.commandWorkedOrFailedWithCode(db.adminCommand({
+                        replSetGetConfig: 1,
+                        commitmentStatus: true,
+                        $_internalIncludeNewlyAdded: true
+                    }),
+                                                         ErrorCodes.NotWritablePrimary);
+
+                if (!getConfigRes.ok) {
+                    print("waitForAllNewlyAddedRemovals: Retrying because the old primary " +
+                          " stepped down");
+                    return false;
+                }
+
                 const config = getConfigRes.config;
                 for (let i = 0; i < config.members.length; i++) {
                     const memberConfig = config.members[i];
@@ -3175,6 +3195,9 @@ var ReplSetTest = function ReplSetTest(opts) {
             port: this._useBridge ? this._unbridgedPorts[n] : this.ports[n],
             dbpath: "$set-$node"
         };
+        if (this.isRouterServer) {
+            defaults.routerPort = this.routerPorts[n];
+        }
 
         if (this.useAutoBootstrapProcedure) {
             if (n == 0) {
@@ -3705,6 +3728,7 @@ var ReplSetTest = function ReplSetTest(opts) {
             ? opts.seedRandomNumberGenerator
             : true;
         rst.isConfigServer = opts.isConfigServer;
+        rst.isRouterServer = opts.isRouterServer || false;
 
         rst._useBridge = opts.useBridge || false;
         rst._bridgeOptions = opts.bridgeOptions || {};
@@ -3790,6 +3814,10 @@ var ReplSetTest = function ReplSetTest(opts) {
             rst._unbridgedNodes = [];
         } else {
             rst.ports = Array.from({length: numNodes}, rst._allocatePortForNode);
+        }
+
+        if (rst.isRouterServer) {
+            rst.routerPorts = Array.from({length: numNodes}, rst._allocatePortForNode);
         }
     }
 

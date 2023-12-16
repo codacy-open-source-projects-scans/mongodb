@@ -40,7 +40,7 @@ class AsioSessionManager : public SessionManagerCommon {
 public:
     using SessionManagerCommon::SessionManagerCommon;
 
-    void appendStats(BSONObjBuilder* bob) const override;
+    void appendStats(BSONObjBuilder* bob) const;
 
 protected:
     std::string getClientThreadName(const Session&) const override;

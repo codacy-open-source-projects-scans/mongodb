@@ -10,16 +10,16 @@
 //   simulate_atlas_proxy_incompatible,
 //   cqf_incompatible,
 //   # 'planCacheClear' command is not allowed with the security token.
-//   not_allowed_with_security_token,
+//   not_allowed_with_signed_security_token,
 // ]
 //
 
 import {getPlanStages, getWinningPlan} from "jstests/libs/analyze_plan.js";
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
+import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
 
-const isSBE = checkSBEEnabled(db);
+const isSBE = checkSbeFullyEnabled(db);
 
 // Create the collection, because some sharding passthrough suites are failing when explain
 // command is issued on the nonexistent database and collection.
@@ -43,6 +43,11 @@ const query = {
     // a sharded cluster. Nevertheless, the shards should use the query settings matching the
     // original query shape.
     skip: 3,
+};
+const aggQuery = {
+    aggregate: coll.getName(),
+    pipeline: [{$match: {a: 1}}],
+    cursor: {}
 };
 const querySettingsQuery = qsutils.makeFindQueryInstance({filter: {a: 1, b: 1}, skip: 3});
 const querySettingsA = {
@@ -130,5 +135,8 @@ function assertQuerySettingsApplication(findCmd, settings, shouldCheckPlanCache 
 // Ensure that users can not pass query settings to the commands explicitly.
 {
     assert.commandFailedWithCode(db.runCommand({...query, querySettings: querySettingsAB}),
-                                 [7746900, 7746901])
+                                 [7746900, 7746901]);
+
+    assert.commandFailedWithCode(db.runCommand({...aggQuery, querySettings: querySettingsAB}),
+                                 [7708000, 7708001])
 }

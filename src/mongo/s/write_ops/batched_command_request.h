@@ -183,6 +183,11 @@ public:
     const boost::optional<LegacyRuntimeConstants>& getLegacyRuntimeConstants() const;
     const boost::optional<BSONObj>& getLet() const;
 
+    /**
+     * Utility which handles evaluating and storing any let parameters based on the request type.
+     */
+    void evaluateAndReplaceLetParams(OperationContext* opCtx);
+
     const write_ops::WriteCommandRequestBase& getWriteCommandRequestBase() const;
     void setWriteCommandRequestBase(write_ops::WriteCommandRequestBase writeCommandBase);
 
@@ -269,8 +274,6 @@ private:
 };
 
 
-// TODO SERVER-76655: Update getter names to be consistent with the names we choose for arguments in
-// bulkWrite.
 /**
  * Provides access to information for an update operation. Used to abstract over whether a
  * BatchItemRef is pointing to a `mongo::write_ops::UpdateOpEntry` (if it's from an `update`
@@ -367,8 +370,6 @@ private:
     boost::optional<const mongo::BulkWriteUpdateOp&> _bulkWriteUpdateRequest;
 };
 
-// TODO SERVER-76655: Update getter names to be consistent with the names we choose for arguments in
-// bulkWrite.
 /**
  * Provides access to information for an update operation. Used to abstract over whether a
  * BatchItemRef is pointing to a `mongo::write_ops::DeleteOpEntry` (if it's from a `delete`

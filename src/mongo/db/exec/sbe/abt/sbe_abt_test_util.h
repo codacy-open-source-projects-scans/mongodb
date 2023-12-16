@@ -46,6 +46,10 @@
 
 namespace mongo::optimizer {
 
+bool compareResults(const std::vector<BSONObj>& expected,
+                    const std::vector<BSONObj>& actual,
+                    bool preserveFieldOrder);
+
 class NodeSBE : public ServiceContextTest {};
 
 class ABTRecorder : public ce::SamplingExecutor {
@@ -56,6 +60,7 @@ public:
     boost::optional<optimizer::SelectivityType> estimateSelectivity(
         const Metadata& /*metadata*/,
         int64_t /*sampleSize*/,
+        const QueryParameterMap& /*queryParameters*/,
         const PlanAndProps& planAndProps) final;
 
 private:

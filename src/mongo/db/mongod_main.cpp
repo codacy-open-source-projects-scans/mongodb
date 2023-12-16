@@ -86,7 +86,6 @@
 #include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/change_streams_cluster_parameter_gen.h"
 #include "mongo/db/client.h"
-#include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/clientcursor.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
@@ -882,49 +881,43 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
             logStartup(startupOpCtx.get());
         }
 
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
+            serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
             {
                 TimeElapsedBuilderScopedTimer scopedTimer(
                     serviceContext->getFastClockSource(),
-                    "Initialize the sharding components for a config server",
+                    "Initialize the sharding components for a config server and/or an embedded "
+                    "router",
                     &startupTimeElapsedBuilder);
 
-                initializeGlobalShardingStateForConfigServerIfNeeded(startupOpCtx.get());
+                initializeGlobalShardingStateForMongoD(startupOpCtx.get());
             }
 
-            // TODO: SERVER-82965 We shouldn't need to read the doc multiple times once we are
-            // in sharding only development since config servers can always create it themselves.
+            // TODO: SERVER-82965 We shouldn't need to read the doc multiple times once we are in
+            // sharding only development since config servers can always create it themselves.
             if (auto shardIdentityDoc =
                     ShardingInitializationMongoD::getShardIdentityDoc(startupOpCtx.get())) {
                 // This function will take the global lock.
                 initializeShardingAwarenessAndLoadGlobalSettings(
                     startupOpCtx.get(), *shardIdentityDoc, &startupTimeElapsedBuilder);
-
-                // Sharding is always ready when there is at least one shard at startup (either the
-                // config shard or a dedicated shard server).
-                ShardingReady::get(startupOpCtx.get())->setIsReadyIfShardExists(startupOpCtx.get());
-            }
-        } else if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
-            // TODO SERVER-83135: Replace this 'else if' with an 'if' once we support
-            // config shard + embedded router.
-            initializeGlobalShardingStateForEmbeddedRouterIfNeeded(startupOpCtx.get());
-
-            // Router role should use SEPMongos
-            serviceContext->getService(ClusterRole::RouterServer)
-                ->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongos>());
-
-            // TODO: SERVER-82965 We shouldn't need to read the doc multiple times
-            if (auto shardIdentityDoc =
-                    ShardingInitializationMongoD::getShardIdentityDoc(startupOpCtx.get())) {
-                // This function will take the global lock.
-                initializeShardingAwarenessAndLoadGlobalSettings(
-                    startupOpCtx.get(), *shardIdentityDoc, nullptr);
             }
         } else {
             // On a dedicated shard server, ShardingReady is always set because there is guaranteed
             // to be at least one shard in the sharded cluster (either the config shard or a
             // dedicated shard server).
             ShardingReady::get(startupOpCtx.get())->setIsReady();
+        }
+
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+            // Sharding is always ready when there is at least one shard at startup (either the
+            // config shard or a dedicated shard server).
+            ShardingReady::get(startupOpCtx.get())->setIsReadyIfShardExists(startupOpCtx.get());
+        }
+
+        if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+            // Router role should use SEPMongos
+            serviceContext->getService(ClusterRole::RouterServer)
+                ->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongos>());
         }
 
         if (replSettings.isReplSet() &&
@@ -1372,12 +1365,10 @@ auto makeReplicaSetNodeExecutor(ServiceContext* serviceContext) {
         stdx::lock_guard<Client> lk(cc());
         cc().setSystemOperationUnkillableByStepdown(lk);
     };
-    auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
-    hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(serviceContext));
-    hookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
     return std::make_unique<executor::ThreadPoolTaskExecutor>(
         std::make_unique<ThreadPool>(tpOptions),
-        executor::makeNetworkInterface("ReplNodeDbWorkerNetwork", nullptr, std::move(hookList)));
+        executor::makeNetworkInterface(
+            "ReplNodeDbWorkerNetwork", nullptr, makeShardingEgressHooksList(serviceContext)));
 }
 
 auto makeReplicationExecutor(ServiceContext* serviceContext) {
@@ -1942,6 +1933,18 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         validator->shutDown();
     }
 
+    // The migrationutil executor must be shut down before shutting down the CatalogCacheLoader and
+    // the ExecutorPool. Otherwise, it may try to schedule work on those components and fail.
+    LOGV2_OPTIONS(4784921, {LogComponent::kSharding}, "Shutting down the MigrationUtilExecutor");
+    auto migrationUtilExecutor = migrationutil::getMigrationUtilExecutor(serviceContext);
+    {
+        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                  "Shut down the migration util executor",
+                                                  &shutdownTimeElapsedBuilder);
+        migrationUtilExecutor->shutdown();
+        migrationUtilExecutor->join();
+    }
+
     if (TestingProctor::instance().isEnabled()) {
         auto pool = Grid::get(serviceContext)->isInitialized()
             ? Grid::get(serviceContext)->getExecutorPool()
@@ -1953,18 +1956,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
             LOGV2_OPTIONS(6773200, {LogComponent::kSharding}, "Shutting down the ExecutorPool");
             pool->shutdownAndJoin();
         }
-    }
-
-    // The migrationutil executor must be shut down before shutting down the CatalogCacheLoader.
-    // Otherwise, it may try to schedule work on the CatalogCacheLoader and fail.
-    LOGV2_OPTIONS(4784921, {LogComponent::kSharding}, "Shutting down the MigrationUtilExecutor");
-    auto migrationUtilExecutor = migrationutil::getMigrationUtilExecutor(serviceContext);
-    {
-        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
-                                                  "Shut down the migration util executor",
-                                                  &shutdownTimeElapsedBuilder);
-        migrationUtilExecutor->shutdown();
-        migrationUtilExecutor->join();
     }
 
     if (Grid::get(serviceContext)->isShardingInitialized()) {

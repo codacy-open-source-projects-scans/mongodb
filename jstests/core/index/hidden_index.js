@@ -12,7 +12,7 @@
  *   tenant_migration_incompatible,
  *   does_not_support_stepdowns,
  *   does_not_support_transactions,
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  * ]
  */
 
@@ -25,11 +25,8 @@ import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recr
 import {setUpServerForColumnStoreIndexTest} from "jstests/libs/columnstore_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {IndexCatalogHelpers} from "jstests/libs/index_catalog_helpers.js";
-import {checkSBEEnabled} from "jstests/libs/sbe_util.js";
 
-const columnstoreEnabled =
-    checkSBEEnabled(db, ["featureFlagColumnstoreIndexes"], true /* checkAllNodes */) &&
-    setUpServerForColumnStoreIndexTest(db);
+const columnstoreEnabled = setUpServerForColumnStoreIndexTest(db);
 
 const collName = "hidden_index";
 let coll = assertDropAndRecreateCollection(db, collName);

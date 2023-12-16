@@ -721,7 +721,7 @@ public:
      *
      * TODO SERVER-81069: Remove this since it's intrinsically tied to encryption options only.
      */
-    virtual StatusWith<BSONObj> getSanitizedStorageOptionsForSecondaryReplication(
+    virtual BSONObj getSanitizedStorageOptionsForSecondaryReplication(
         const BSONObj& options) const = 0;
     /**
      * Instructs the storage engine to dump its internal state.
@@ -733,6 +733,7 @@ public:
      */
     struct AutoCompactOptions {
         bool enable = false;
+        bool runOnce = false;
         boost::optional<int64_t> freeSpaceTargetMB;
         std::vector<StringData> excludedIdents;
     };

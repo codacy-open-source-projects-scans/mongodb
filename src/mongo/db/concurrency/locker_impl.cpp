@@ -50,6 +50,7 @@
 #include "mongo/bson/json.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/lock_manager.h"
+#include "mongo/db/dump_lock_manager.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -260,14 +261,12 @@ void LockerImpl::_dumpLockerAndLockManagerRequests() {
     // reference with the LockManager dump below for extra information.
     dump();
 
+    LOGV2_ERROR(5736000, "Operation ending while holding locks.");
+
     // Log the LockManager's lock information. Given the locker 'dump()' above, we should be able to
     // easily cross reference to find the lock info matching this operation. The LockManager can
     // safely access (under internal locks) the LockRequest data that the locker cannot.
-    BSONObjBuilder builder;
-    auto lockToClientMap = LockManager::getLockToClientMap(getGlobalServiceContext());
-    getGlobalLockManager()->getLockInfoBSON(lockToClientMap, &builder);
-    auto lockInfo = builder.done();
-    LOGV2_ERROR(5736000, "Operation ending while holding locks.", "LockInfo"_attr = lockInfo);
+    dumpLockManager();
 }
 
 
@@ -844,7 +843,8 @@ void LockerImpl::saveLockStateAndUnlock(Locker::LockSnapshot* stateOut) {
 
         // We should never have to save and restore metadata locks.
         invariant(RESOURCE_DATABASE == resType || RESOURCE_COLLECTION == resType ||
-                  RESOURCE_TENANT == resType || resId == resourceIdFeatureCompatibilityVersion ||
+                  RESOURCE_TENANT == resType ||
+                  resId == resourceIdMultiDocumentTransactionsBarrier ||
                   resId == resourceIdReplicationStateTransitionLock);
 
         // And, stuff the info into the out parameter.
@@ -870,9 +870,9 @@ void LockerImpl::restoreLockState(OperationContext* opCtx, const Locker::LockSna
 
     std::vector<OneLock>::const_iterator it = state.locks.begin();
 
-    // If we locked the FCV lock, it must be locked before the
+    // If we locked the MultiDocumentTransactionsBarrier lock, it must be locked before the
     // resourceIdReplicationStateTransitionLock and resourceIdGlobal resources.
-    if (it != state.locks.end() && it->resourceId == resourceIdFeatureCompatibilityVersion) {
+    if (it != state.locks.end() && it->resourceId == resourceIdMultiDocumentTransactionsBarrier) {
         lock(opCtx, it->resourceId, it->mode);
         it++;
     }

@@ -41,7 +41,6 @@
 namespace mongo {
 using boolean_simplification::BitsetTreeNode;
 using boolean_simplification::Maxterm;
-using boolean_simplification::Minterm;
 
 namespace {
 struct Context {
@@ -154,7 +153,7 @@ bool isExpressionValid(const MatchExpression* root) {
 }
 
 bool containsNegations(const Maxterm& dnf) {
-    return std::any_of(dnf.minterms.begin(), dnf.minterms.end(), [](const Minterm& minterm) {
+    return std::any_of(dnf.minterms.begin(), dnf.minterms.end(), [](const auto& minterm) {
         return minterm.mask != minterm.predicates;
     });
 }
@@ -187,7 +186,7 @@ boost::optional<BitsetTreeNode> handleRootedAndCase(Maxterm dnfExpression) {
     auto [commonPredicates, maxterm] =
         boolean_simplification::extractCommonPredicates(std::move(dnfExpression));
 
-    if (commonPredicates.isAlwaysTrue()) {
+    if (commonPredicates.isConjunctionAlwaysTrue()) {
         return {boolean_simplification::convertToBitsetTree(maxterm)};
     }
 
@@ -233,9 +232,7 @@ boost::optional<std::unique_ptr<MatchExpression>> simplifyMatchExpression(
                 "expression"_attr = root->debugString());
 
     auto bitsetAndExpressions =
-        transformToBitsetTree(root,
-                              std::min(boolean_simplification::kBitsetNumberOfBits,
-                                       settings.maximumNumberOfUniquePredicates));
+        transformToBitsetTree(root, settings.maximumNumberOfUniquePredicates);
 
     if (MONGO_unlikely(!bitsetAndExpressions.has_value())) {
         LOGV2_DEBUG(8113911,

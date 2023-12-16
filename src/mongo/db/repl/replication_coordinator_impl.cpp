@@ -75,6 +75,7 @@
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
+#include "mongo/db/dump_lock_manager.h"
 #include "mongo/db/locker_api.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/mongod_options_storage_gen.h"
@@ -1487,27 +1488,6 @@ void ReplicationCoordinatorImpl::setMyLastDurableOpTimeAndWallTimeForward(
     }
 }
 
-void ReplicationCoordinatorImpl::setMyLastAppliedOpTimeAndWallTime(
-    const OpTimeAndWallTime& opTimeAndWallTime) {
-    const auto opTime = opTimeAndWallTime.opTime;
-    // Update the global timestamp before setting the last applied opTime forward so the last
-    // applied optime is never greater than the latest cluster time in the logical clock.
-    _externalState->setGlobalTimestamp(getServiceContext(), opTime.getTimestamp());
-
-    stdx::unique_lock<Latch> lock(_mutex);
-    // The optime passed to this function is required to represent a consistent database state.
-    _setMyLastAppliedOpTimeAndWallTime(lock, opTimeAndWallTime, false);
-    signalOplogWaiters();
-    _reportUpstream_inlock(std::move(lock));
-}
-
-void ReplicationCoordinatorImpl::setMyLastDurableOpTimeAndWallTime(
-    const OpTimeAndWallTime& opTimeAndWallTime) {
-    stdx::unique_lock<Latch> lock(_mutex);
-    _setMyLastDurableOpTimeAndWallTime(lock, opTimeAndWallTime, false);
-    _reportUpstream_inlock(std::move(lock));
-}
-
 void ReplicationCoordinatorImpl::resetMyLastOpTimes() {
     stdx::unique_lock<Latch> lock(_mutex);
     _resetMyLastOpTimes(lock);
@@ -1594,6 +1574,10 @@ void ReplicationCoordinatorImpl::_setMyLastAppliedOpTimeAndWallTime(
 
 void ReplicationCoordinatorImpl::_setMyLastDurableOpTimeAndWallTime(
     WithLock lk, const OpTimeAndWallTime& opTimeAndWallTime, bool isRollbackAllowed) {
+    // On secondary it is not possible for lastDurable to be set beyond lastApplied, because
+    // lastApplied is only updated at the completion of an oplog batch. But on primary it is
+    // possible because we only update lastApplied as part of the onCommit hook of the storage
+    // transaction, which may be delayed, but this should be fine.
     _topCoord->setMyLastDurableOpTimeAndWallTime(
         opTimeAndWallTime, _replExecutor->now(), isRollbackAllowed);
     // If we are using durable times to calculate the commit level, update it now.
@@ -2684,7 +2668,7 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
         }
 
         // Dump all locks to identify which thread(s) are holding RSTL.
-        shard_role_details::dumpLockManager();
+        dumpLockManager();
 
         auto lockerInfo = shard_role_details::getLocker(opCtx)->getLockerInfo(
             CurOp::get(opCtx)->getLockStatsBase());
@@ -4443,7 +4427,7 @@ Status ReplicationCoordinatorImpl::processReplSetInitiate(OperationContext* opCt
 
     // Since the JournalListener has not yet been set up, we must manually set our
     // durableOpTime.
-    setMyLastDurableOpTimeAndWallTime(lastAppliedOpTimeAndWallTime);
+    setMyLastDurableOpTimeAndWallTimeForward(lastAppliedOpTimeAndWallTime);
 
     // Sets the initial data timestamp on the storage engine so it can assign a timestamp
     // to data on disk. We do this after writing the "initiating set" oplog entry.
@@ -4601,7 +4585,7 @@ void ReplicationCoordinatorImpl::_fulfillTopologyChangePromise(WithLock lock) {
         }
         _sniToValidConfigPromiseMap.clear();
     }
-    HelloMetrics::get(getGlobalServiceContext())->resetNumAwaitingTopologyChanges();
+    HelloMetrics::resetNumAwaitingTopologyChangesForAllSessionManagers(getGlobalServiceContext());
 
     if (_inQuiesceMode) {
         // No more hello requests will wait for a topology change, so clear _horizonToPromiseMap.

@@ -101,6 +101,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeSendingPrepare);
 MONGO_FAIL_POINT_DEFINE(hangBeforeWritingDecision);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSendingCommit);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSendingAbort);
+MONGO_FAIL_POINT_DEFINE(hangBeforeWritingEndOfTransaction);
 MONGO_FAIL_POINT_DEFINE(hangBeforeDeletingCoordinatorDoc);
 MONGO_FAIL_POINT_DEFINE(hangAfterDeletingCoordinatorDoc);
 
@@ -242,16 +243,20 @@ Future<repl::OpTime> persistParticipantsList(
         boost::none /* no need for a backoff */,
         [](const StatusWith<repl::OpTime>& s) { return shouldRetryPersistingCoordinatorState(s); },
         [&scheduler, lsid, txnNumberAndRetryCounter, participants] {
-            return scheduler.scheduleWork(
-                [lsid, txnNumberAndRetryCounter, participants](OperationContext* opCtx) {
-                    getTransactionCoordinatorWorkerCurOpRepository()->set(
-                        opCtx,
-                        lsid,
-                        txnNumberAndRetryCounter,
-                        CoordinatorAction::kWritingParticipantList);
-                    return persistParticipantListBlocking(
-                        opCtx, lsid, txnNumberAndRetryCounter, participants);
-                });
+            return scheduler.scheduleWork([lsid, txnNumberAndRetryCounter, participants](
+                                              OperationContext* opCtx) {
+                // Skip ticket acquisition in order to prevent possible deadlock when
+                // participants are in the prepared state. See SERVER-82883 and SERVER-60682.
+                ScopedAdmissionPriorityForLock skipTicketAcquisition(
+                    shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kImmediate);
+                getTransactionCoordinatorWorkerCurOpRepository()->set(
+                    opCtx,
+                    lsid,
+                    txnNumberAndRetryCounter,
+                    CoordinatorAction::kWritingParticipantList);
+                return persistParticipantListBlocking(
+                    opCtx, lsid, txnNumberAndRetryCounter, participants);
+            });
         });
 }
 
@@ -393,16 +398,6 @@ repl::OpTime persistDecisionBlocking(OperationContext* opCtx,
         sessionInfo.setTxnRetryCounter(*txnNumberAndRetryCounter.getTxnRetryCounter());
     }
 
-    // The transaction participant is already holding a global IX lock (and therefore an FCV IX
-    // lock) when we get to this point. Since the setFCV command takes an FCV S lock, we can hit a
-    // deadlock if the setFCV enqueues its lock after the transaction participant has already
-    // acquired its lock, but before we (the transaction coordinator) acquire ours. To remedy this,
-    // we choose to bypass this barrier that setFCV creates. This is safe because the setFCV command
-    // drains any outstanding cross-shard transactions before completing an FCV upgrade/downgrade.
-    // It does so by waiting for the participant portion of the cross-shard transaction to have
-    // released its FCV IX lock.
-    ShouldNotConflictWithSetFeatureCompatibilityVersionBlock noFCVLock{
-        shard_role_details::getLocker(opCtx)};
     DBDirectClient client(opCtx);
 
     // Throws if serializing the request or deserializing the response fails.
@@ -939,6 +934,11 @@ Future<void> writeEndOfTransaction(txn::AsyncWorkScheduler& scheduler,
                                    const LogicalSessionId& lsid,
                                    const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
                                    const std::vector<NamespaceString>& affectedNamespaces) {
+    if (MONGO_unlikely(hangBeforeWritingEndOfTransaction.shouldFail())) {
+        LOGV2(8288302, "Hit hangBeforeWritingEndOfTransaction failpoint");
+        hangBeforeWritingEndOfTransaction.pauseWhileSet();
+    }
+
     if (!feature_flags::gFeatureFlagEndOfTransactionChangeEvent.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return Future<void>::makeReady();

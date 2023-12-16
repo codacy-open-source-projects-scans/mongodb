@@ -31,7 +31,7 @@
 
 #include <memory>
 
-#include "mongo/db/concurrency/locker_impl.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/operation_context.h"
 
 namespace mongo {
@@ -62,11 +62,6 @@ std::unique_ptr<Locker> swapLocker(OperationContext* opCtx, std::unique_ptr<Lock
 std::unique_ptr<Locker> swapLocker(OperationContext* opCtx,
                                    std::unique_ptr<Locker> newLocker,
                                    WithLock lk);
-
-/**
- * Dumps the contents of all locks to the log.
- */
-void dumpLockManager();
 
 }  // namespace shard_role_details
 }  // namespace mongo

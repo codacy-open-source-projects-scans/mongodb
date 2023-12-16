@@ -28,6 +28,18 @@ env.Library(
     ],
 )
 
+env.Program(
+    target="bson_column_encoder",
+    source=[
+        "bson_column_encoder.cpp",
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        'bson_column',
+        'bson_extract',
+    ],
+)
+
 env.Benchmark(
     target='simple8b_bm',
     source=[
@@ -44,6 +56,7 @@ env.CppUnitTest(
     source=[
         'bson_check_test.cpp',
         'bson_extract_test.cpp',
+        'bsoncolumn_blockbased_test.cpp',
         'bsoncolumn_test.cpp',
         'builder_test.cpp',
         'simple8b_test.cpp',

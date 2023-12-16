@@ -33,8 +33,10 @@
 #include <climits>
 #include <initializer_list>
 #include <ostream>
+#include <type_traits>
 
 #include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 /**
@@ -44,7 +46,7 @@ namespace mongo {
  * then stored in the heap.
  */
 template <typename BT, size_t InlinedCapacity>
-class InlinedStorage {
+requires std::is_trivial_v<BT> &&(InlinedCapacity > static_cast<size_t>(0)) class InlinedStorage {
 public:
     using BlockType = BT;
     static constexpr size_t kBlockSize = sizeof(BlockType) * CHAR_BIT;
@@ -174,6 +176,53 @@ public:
         return H::combine_contiguous(std::move(h), storage.data(), storage.size());
     }
 
+    /**
+     * Returns true if the predicate returns true for all correspondong blocks of the storages.
+     */
+    template <typename Predicate, typename... Storage>
+    friend bool allOf(Predicate predicate, const InlinedStorage& s, const Storage&... ss) {
+        (s.assertSize(ss), ...);
+
+        if (s.isInlined()) {
+            for (size_t i = 0; i < s.size(); ++i) {
+                if (!predicate(s._buffer.inlined[i], ss._buffer.inlined[i]...)) {
+                    return false;
+                }
+            }
+        } else {
+            for (size_t i = 0; i < s.size(); ++i) {
+                if (!predicate(s._buffer.onHeap[i], ss._buffer.onHeap[i]...)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Returns true if the predicate returns true for att least a pair of correspondong blocks of
+     * the storages.
+     */
+    template <class Predicate, typename... Storage>
+    friend bool anyOf(Predicate predicate, const InlinedStorage& s, const Storage&... ss) {
+        (s.assertSize(ss), ...);
+
+        if (s.isInlined()) {
+            for (size_t i = 0; i < s.size(); ++i) {
+                if (predicate(s._buffer.inlined[i], ss._buffer.inlined[i]...)) {
+                    return true;
+                }
+            }
+        } else {
+            for (size_t i = 0; i < s.size(); ++i) {
+                if (predicate(s._buffer.onHeap[i], ss._buffer.onHeap[i]...)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
 private:
     MONGO_COMPILER_ALWAYS_INLINE bool isInlined() const noexcept {
         return _size <= InlinedCapacity;
@@ -208,9 +257,9 @@ private:
             // so the buffer will be freed safely.
             auto oldBuffer = _buffer.onHeap;
             std::copy(oldBuffer, oldBuffer + newSize, _buffer.inlined);
-            delete[] oldBuffer;  // No exceptions are expected here, otherwise we have to
-                                 // update
-                                 // '_size' before.
+
+            // No exceptions are expected here, otherwise we have to update '_size' before.
+            delete[] oldBuffer;
         }
 
         _size = newSize;
@@ -233,8 +282,8 @@ private:
                 std::fill(_buffer.onHeap + _size, _buffer.onHeap + newSize, BlockType(0));
             }
         } else {
-            // On heap -> Allocated: Allocate new buffer, copy the data, zero new data, free the
-            // old buffer.
+            // On heap -> Allocated: Allocate new buffer, copy the data, zero new
+            // data, free the old buffer.
             BlockType* newBuffer = new BlockType[newSize];
             // Copy old blocks.
             std::copy(_buffer.onHeap, _buffer.onHeap + _size, newBuffer);
@@ -247,6 +296,12 @@ private:
         }
 
         _size = newSize;
+    }
+
+    MONGO_COMPILER_ALWAYS_INLINE void assertSize(const InlinedStorage& other) const {
+        if constexpr (kDebugBuild) {
+            fassert(8271603, size() == other.size());
+        }
     }
 
     union {

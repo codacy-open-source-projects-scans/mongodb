@@ -3,7 +3,7 @@
  * that they can be correctly recovered from the cache with new parameter values.
  *
  * @tags: [
- *   not_allowed_with_security_token,
+ *   not_allowed_with_signed_security_token,
  *   assumes_read_concern_unchanged,
  *   assumes_read_preference_unchanged,
  *   assumes_unsharded_collection,
@@ -14,7 +14,7 @@
  *   tenant_migration_incompatible,
  *   # This test is specifically verifying the behavior of the SBE plan cache, which is only enabled
  *   # when SBE is enabled.
- *   requires_sbe,
+ *   featureFlagSbeFull,
  * ]
  */
 import {getPlanCacheKeyFromExplain, getQueryHashFromExplain} from "jstests/libs/analyze_plan.js";

@@ -2,7 +2,6 @@
 
 variables:
 # THIS HAS COPIES IN:
-# - etc/evergreen.yml
 # - etc/evergreen_yml_components/variants/amazon/test_dev.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &amazon_linux2_arm64_dynamic_compile_variant_dependency
@@ -18,7 +17,6 @@ variables:
     variant: amazon-linux2-arm64-dynamic-compile
 
 # THIS HAS COPIES IN:
-# - etc/evergreen.yml
 # - etc/evergreen_yml_components/variants/perf.yml
 # - etc/evergreen_yml_components/variants/amazon/test_dev.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
@@ -93,6 +91,7 @@ buildvariants:
     - amazon2-arm64-large
   - name: disk_wiredtiger
   - name: embedded_router_jscore_passthrough_gen
+  - name: embedded_router_jscore_passthrough_with_config_shard_gen
   - name: .encrypt
   - name: feature_flag_multiversion_gen
   - name: idl_tests
@@ -133,9 +132,9 @@ buildvariants:
   - name: search_ssl
   - name: secondary_reads_passthrough_gen
   - name: .serverless
-  - name: .timeseries_crud
     distros:
     - amazon2-arm64-large
+  - name: .timeseries_crud
   - name: session_jscore_passthrough
   - name: .shard_split
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt
@@ -256,9 +255,9 @@ buildvariants:
   - name: search_ssl
   - name: secondary_reads_passthrough_gen
   - name: .serverless
-  - name: .timeseries_crud
     distros:
     - amazon2-arm64-large
+  - name: .timeseries_crud
   - name: session_jscore_passthrough
   - name: .shard_split
   - name: .sharding .jscore !.wo_snapshot !.multi_stmt

@@ -46,49 +46,6 @@ using ColumnOpType = value::ColumnOpType;
 
 namespace {
 
-static constexpr auto existsOpType = ColumnOpType{
-    // TODO SERVER-82852 kOutputNonNothingOnMissingInput is already set by ReturnBoolOnMissing{}.
-    ColumnOpType::kOutputNonNothingOnMissingInput | ColumnOpType::kOutputNonNothingOnExistingInput,
-    value::TypeTags::Nothing,
-    value::TypeTags::Boolean,
-    ColumnOpType::ReturnBoolOnMissing{}};
-
-static const auto existsOp =
-    value::makeColumnOp<existsOpType>([](value::TypeTags tag, value::Value val) {
-        return std::pair(value::TypeTags::Boolean,
-                         value::bitcastFrom<bool>(tag != value::TypeTags::Nothing));
-    });
-}  // namespace
-/*
- * Given a ValueBlock as input, returns a ValueBlock of true/false values indicating whether
- * each value in the input was non-Nothing (true) or Nothing (false).
- */
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockExists(ArityType arity) {
-    invariant(arity == 1);
-    auto [inputOwned, inputTag, inputVal] = getFromStack(0);
-
-    invariant(inputTag == value::TypeTags::valueBlock);
-    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
-
-    // Avoid extracting the block if we know every value is non-Nothing.
-    if (valueBlockIn->tryDense().get_value_or(false) && valueBlockIn->tryCount()) {
-        // Block was dense and we could determine the number of the values in the block without
-        // extracting so we can just return a MonoBlock of true.
-        auto out = std::make_unique<value::MonoBlock>(
-            *valueBlockIn->tryCount(), value::TypeTags::Boolean, value::bitcastFrom<bool>(true));
-        return {true,
-                value::TypeTags::valueBlock,
-                value::bitcastFrom<value::ValueBlock*>(out.release())};
-    }
-
-    auto out = valueBlockIn->map(existsOp);
-
-    return {
-        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release())};
-}
-
-namespace {
-
 bool allBools(const value::TypeTags* tag, size_t sz) {
     for (size_t i = 0; i < sz; ++i) {
         if (tag[i] != value::TypeTags::Boolean) {
@@ -102,34 +59,24 @@ bool emptyPositionInfo(const std::vector<char>& positionInfo) {
     return positionInfo.empty() ||
         std::all_of(positionInfo.begin(), positionInfo.end(), [](const char& c) { return c == 1; });
 }
-
-struct FillEmptyFunctor {
-    FillEmptyFunctor(value::TypeTags fillTag, value::Value fillVal)
-        : _fillTag(fillTag), _fillVal(fillVal) {}
-
-    std::pair<value::TypeTags, value::Value> operator()(value::TypeTags tag,
-                                                        value::Value val) const {
-        if (tag == value::TypeTags::Nothing) {
-            return value::copyValue(_fillTag, _fillVal);
-        }
-        return value::copyValue(tag, val);
-    }
-
-    value::TypeTags _fillTag;
-    value::Value _fillVal;
-};
-
-// Currently have an invariant that prevents the fill value being Nothing, need to change this flag
-// if that invariant gets removed.
-static constexpr auto fillEmptyNonNothingOpType = ColumnOpType{
-    ColumnOpType::kOutputNonNothingOnMissingInput | ColumnOpType::kOutputNonNothingOnExistingInput,
-    value::TypeTags::Nothing,
-    value::TypeTags::Nothing,
-    ColumnOpType::ReturnNonNothingOnMissing{}};
-
-static const auto fillEmptyOp =
-    value::makeColumnOpWithParams<fillEmptyNonNothingOpType, FillEmptyFunctor>();
 }  // namespace
+
+/*
+ * Given a ValueBlock as input, returns a BoolBlock indicating whether each value in the input was
+ * non-Nothing (true) or Nothing (false).
+ */
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockExists(ArityType arity) {
+    invariant(arity == 1);
+    auto [inputOwned, inputTag, inputVal] = getFromStack(0);
+
+    invariant(inputTag == value::TypeTags::valueBlock);
+    auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(inputVal);
+
+    auto out = valueBlockIn->exists();
+
+    return {
+        true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release())};
+}
 
 /**
  * Implementation of the valueBlockFillEmpty builtin. This instruction takes a block and an
@@ -148,13 +95,11 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillEm
     invariant(blockTag == value::TypeTags::valueBlock);
     auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(blockVal);
 
-    if (valueBlockIn->tryDense().get_value_or(false) && valueBlockIn->tryCount()) {
-        // Block was dense and we could determine the number of the values in the block without
-        // extracting so we can just return the input block.
+    auto out = valueBlockIn->fillEmpty(fillTag, fillVal);
+    if (!out) {
+        // Input block was dense so we can just return it unmodified.
         return moveFromStack(0);
     }
-
-    auto out = valueBlockIn->map(fillEmptyOp.bindParams(fillTag, fillVal));
 
     return {
         true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release())};
@@ -179,6 +124,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockFillEm
 
     auto* fillBlockIn = value::bitcastTo<value::ValueBlock*>(fillVal);
     auto* valueBlockIn = value::bitcastTo<value::ValueBlock*>(blockVal);
+
+    if (valueBlockIn->tryDense().get_value_or(false)) {
+        return moveFromStack(0);
+    }
 
     auto extractedFill = fillBlockIn->extract();
     auto extractedValue = valueBlockIn->extract();
@@ -543,8 +492,8 @@ static const auto invokeLambdaOp =
 /**
  * Implementation of the valueBlockApplyLambda instruction. This instruction takes a mask, a block
  * and an SBE lambda f(), and produces a new block with the result of f() applied to each element of
- * the input for which the mask has, in the same position, a 'true' value.
- * A mask value of Nothing is equivalent to a mask full of 'true' values.
+ * the input for which the mask has, in the same position, a 'true' value. A mask value of Nothing
+ * is equivalent to a mask full of 'true' values.
  */
 void ByteCode::valueBlockApplyLambda(const CodeFragment* code) {
     auto [lamOwn, lamTag, lamVal] = moveFromStack(0);
@@ -610,24 +559,67 @@ template <class Op>
 std::unique_ptr<value::ValueBlock> applyBoolBinOp(value::ValueBlock* leftBlock,
                                                   value::ValueBlock* rightBlock,
                                                   Op op = {}) {
-    auto left = leftBlock->extract();
-    auto right = rightBlock->extract();
+    auto leftBoolBlock = leftBlock->as<value::BoolBlock>();
+    auto rightBoolBlock = rightBlock->as<value::BoolBlock>();
+    if (leftBoolBlock && rightBoolBlock) {
+        // Fast path for two homogeneous blocks. Any MonoBlock input should have already returned a
+        // result before calling this function. This code path should almost always be taken.
+        const auto& left = leftBoolBlock->getVector();
+        const auto& right = rightBoolBlock->getVector();
+        tassert(8378900, "Mismatch on size", left.size() == right.size());
 
-    tassert(7953531, "Mismatch on size", left.count == right.count);
-    // Check that both contain all booleans.
-    bool allBool = allBools(left.tags, left.count) && allBools(right.tags, right.count);
-    tassert(7953532, "Expected all bool inputs", allBool);
+        std::vector<bool> boolOut(left.size());
 
-    std::vector<value::Value> boolOut(left.count);
-    std::vector<value::TypeTags> tagOut(left.count, value::TypeTags::Boolean);
+        for (size_t i = 0; i < left.size(); ++i) {
+            boolOut[i] = op(left[i], right[i]);
+        }
 
-    for (size_t i = 0; i < left.count; ++i) {
-        const auto leftBool = value::bitcastTo<bool>(left.vals[i]);
-        const auto rightBool = value::bitcastTo<bool>(right.vals[i]);
-        boolOut[i] = value::bitcastFrom<bool>(op(leftBool, rightBool));
+        bool allSame = boolOut.size() > 0;
+        bool firstBool = allSame ? boolOut[0] : false;
+        for (size_t i = 1; i < boolOut.size() && allSame; ++i) {
+            allSame = firstBool == boolOut[i];
+        }
+
+        if (allSame) {
+            // All resulting bools were the same so we can return a MonoBlock.
+            return std::make_unique<value::MonoBlock>(
+                left.size(), value::TypeTags::Boolean, value::bitcastFrom<bool>(firstBool));
+        } else {
+            return std::make_unique<value::BoolBlock>(std::move(boolOut));
+        }
+    } else {
+        // Naive implementation for when at least one input block is not a BoolBlock.
+        auto left = leftBlock->extract();
+        auto right = rightBlock->extract();
+
+        tassert(7953531, "Mismatch on size", left.count == right.count);
+        // Check that both contain all booleans.
+        bool allBool = allBools(left.tags, left.count) && allBools(right.tags, right.count);
+        tassert(7953532, "Expected all bool inputs", allBool);
+
+        std::vector<bool> boolOut(left.count);
+        std::vector<value::TypeTags> tagOut(left.count, value::TypeTags::Boolean);
+
+        for (size_t i = 0; i < left.count; ++i) {
+            const auto leftBool = value::bitcastTo<bool>(left.vals[i]);
+            const auto rightBool = value::bitcastTo<bool>(right.vals[i]);
+            boolOut[i] = op(leftBool, rightBool);
+        }
+
+        bool allSame = boolOut.size() > 0;
+        bool firstBool = allSame ? boolOut[0] : false;
+        for (size_t i = 1; i < boolOut.size() && allSame; ++i) {
+            allSame = firstBool == boolOut[i];
+        }
+
+        if (allSame) {
+            // All resulting bools were the same so we can return a MonoBlock.
+            return std::make_unique<value::MonoBlock>(
+                left.count, value::TypeTags::Boolean, value::bitcastFrom<bool>(firstBool));
+        } else {
+            return std::make_unique<value::BoolBlock>(std::move(boolOut));
+        }
     }
-
-    return std::make_unique<value::HeterogeneousBlock>(std::move(tagOut), std::move(boolOut));
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogicalAnd(
@@ -642,12 +634,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogica
     invariant(rightTag == value::TypeTags::valueBlock);
     auto* rightValueBlock = value::bitcastTo<value::ValueBlock*>(rightVal);
 
-    auto leftRun = leftValueBlock->tryIsSingleRun();
-    auto rightRun = rightValueBlock->tryIsSingleRun();
+    auto leftMonoBlock = leftValueBlock->as<value::MonoBlock>();
+    auto rightMonoBlock = rightValueBlock->as<value::MonoBlock>();
 
-    if (leftRun || rightRun) {
-        if (!leftRun) {
-            std::swap(leftRun, rightRun);
+    if (leftMonoBlock || rightMonoBlock) {
+        if (!leftMonoBlock) {
+            std::swap(leftMonoBlock, rightMonoBlock);
             swapStack();
         }
 
@@ -655,7 +647,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogica
         tassert(8256900,
                 "Mismatch on size",
                 *leftValueBlock->tryCount() == *rightValueBlock->tryCount());
-        if (value::bitcastTo<bool>(leftRun->val)) {
+
+        if (value::bitcastTo<bool>(leftMonoBlock->getValue())) {
             // and True is a noop.
             return moveFromStack(0);
         }
@@ -681,12 +674,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogica
     invariant(rightTag == value::TypeTags::valueBlock);
     auto* rightValueBlock = value::bitcastTo<value::ValueBlock*>(rightVal);
 
-    auto leftRun = leftValueBlock->tryIsSingleRun();
-    auto rightRun = rightValueBlock->tryIsSingleRun();
+    auto leftMonoBlock = leftValueBlock->as<value::MonoBlock>();
+    auto rightMonoBlock = rightValueBlock->as<value::MonoBlock>();
 
-    if (leftRun || rightRun) {
-        if (!leftRun) {
-            std::swap(leftRun, rightRun);
+    if (leftMonoBlock || rightMonoBlock) {
+        if (!leftMonoBlock) {
+            std::swap(leftMonoBlock, rightMonoBlock);
             swapStack();
         }
 
@@ -695,7 +688,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockLogica
                 "Mismatch on size",
                 *leftValueBlock->tryCount() == *rightValueBlock->tryCount());
 
-        if (value::bitcastTo<bool>(leftRun->val)) {
+        if (value::bitcastTo<bool>(leftMonoBlock->getValue())) {
             // or True returns a block of all trues.
             return moveFromStack(1);
         }
@@ -721,9 +714,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockNewFil
 
     // Take ownership of the value, we are transferring it to the block.
     auto [leftOwned, leftTag, leftVal] = moveFromStack(0);
-    if (!leftOwned) {
-        std::tie(leftTag, leftVal) = value::copyValue(leftTag, leftVal);
-    }
     auto blockOut =
         std::make_unique<value::MonoBlock>(value::bitcastTo<int32_t>(countVal), leftTag, leftVal);
     return {true,
@@ -839,13 +829,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCellFoldValues_F
     // The last run is implicitly ended.
     ++runsSeen;
 
-    std::vector<value::Value> folded(runsSeen);
+    std::vector<bool> folded(runsSeen);
     for (size_t i = 0; i < folded.size(); ++i) {
-        folded[i] = value::bitcastFrom<bool>(static_cast<bool>(foldCounts[i]));
+        folded[i] = static_cast<bool>(foldCounts[i]);
     }
 
-    auto blockOut = std::make_unique<value::HeterogeneousBlock>(
-        std::vector<value::TypeTags>(folded.size(), value::TypeTags::Boolean), std::move(folded));
+    auto blockOut = std::make_unique<value::BoolBlock>(std::move(folded));
 
     return {true,
             value::TypeTags::valueBlock,

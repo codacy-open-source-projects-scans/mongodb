@@ -10,6 +10,8 @@ load(
     "use_wait_for_debugger", 
     "use_disable_ref_track", 
     "use_ocsp_stapling",
+    "use_wiredtiger",
+    "build_grpc",
 )
 
 package(default_visibility = ["//visibility:public"])
@@ -65,10 +67,10 @@ config_setting(
 )
 
 config_setting(
-    name = "linux_ppc",
+    name = "linux_ppc64le",
     constraint_values = [
         "@platforms//os:linux",
-        "@platforms//cpu:ppc",
+        "@platforms//cpu:ppc64le",
     ],
 )
 
@@ -85,6 +87,22 @@ config_setting(
     constraint_values = [
         "@platforms//os:windows",
         "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "macos_x86_64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "macos_aarch64",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
     ],
 )
 
@@ -363,7 +381,7 @@ config_setting(
 )
 
 # --------------------------------------
-# wait-for-debugger options
+# disable-ref-track options
 # --------------------------------------
 
 use_disable_ref_track(
@@ -375,5 +393,40 @@ config_setting(
     name = "use_disable_ref_track_enabled",
     flag_values = {
         "//bazel/config:use_disable_ref_track": "True",
+    },
+)
+
+# --------------------------------------
+# wiredtiger options
+# --------------------------------------
+
+use_wiredtiger(
+    name = "use_wiredtiger",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "use_wiredtiger_enabled",
+    flag_values = {
+        "//bazel/config:use_wiredtiger": "True",
+    },
+)
+
+# --------------------------------------
+# grpc options
+# --------------------------------------
+
+build_grpc(
+    name = "build_grpc",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "build_grpc_enabled",
+    constraint_values = [
+        "@platforms//os:linux",
+    ],
+    flag_values = {
+        "//bazel/config:build_grpc": "True",
     },
 )

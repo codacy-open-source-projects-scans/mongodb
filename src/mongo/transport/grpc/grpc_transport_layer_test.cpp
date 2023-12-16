@@ -36,6 +36,7 @@
 
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
+#include "mongo/transport/grpc/client_cache.h"
 #include "mongo/transport/grpc/grpc_session.h"
 #include "mongo/transport/grpc/grpc_session_manager.h"
 #include "mongo/transport/grpc/grpc_transport_layer_impl.h"
@@ -98,11 +99,15 @@ public:
         CommandService::RPCHandler serverCb = makeNoopRPCHandler(),
         GRPCTransportLayer::Options options = CommandServiceTestFixtures::makeTLOptions()) {
         auto* svcCtx = getServiceContext();
-        auto sm = std::make_unique<GRPCSessionManager>(svcCtx);
+        auto clientCache = std::make_shared<ClientCache>();
+        auto sm = std::make_unique<GRPCSessionManager>(svcCtx, clientCache);
         auto tl =
             std::make_unique<GRPCTransportLayerImpl>(svcCtx, std::move(options), std::move(sm));
-        uassertStatusOK(tl->registerService(std::make_unique<CommandService>(
-            tl.get(), std::move(serverCb), std::make_unique<WireVersionProvider>())));
+        uassertStatusOK(tl->registerService(
+            std::make_unique<CommandService>(tl.get(),
+                                             std::move(serverCb),
+                                             std::make_unique<WireVersionProvider>(),
+                                             std::move(clientCache))));
         return tl;
     }
 
@@ -139,7 +144,7 @@ public:
             uassertStatusOK(tl->setup());
             uassertStatusOK(tl->start());
             ON_BLOCK_EXIT([&] { tl->shutdown(); });
-            cb(*tl);
+            ASSERT_DOES_NOT_THROW(cb(*tl));
         });
     }
 
@@ -283,7 +288,7 @@ public:
     void setUp() override {
         GRPCTransportLayerTest::setUp();
         auto* svcCtx = getServiceContext();
-        auto sm = std::make_unique<GRPCSessionManager>(svcCtx);
+        auto sm = std::make_unique<GRPCSessionManager>(svcCtx, std::make_shared<ClientCache>());
         _tl = std::make_unique<GRPCTransportLayerImpl>(
             getServiceContext(), CommandServiceTestFixtures::makeTLOptions(), std::move(sm));
         uassertStatusOK(_tl->setup());
@@ -340,8 +345,9 @@ TEST_F(GRPCTransportLayerTest, ConnectAndListen) {
                 auto addrs = tl.getListeningAddresses();
                 std::vector<stdx::thread> threads;
                 for (size_t i = 0; i < addrs.size() * 5; i++) {
-                    threads.push_back(monitor.spawn(
-                        [&, i] { assertConnectSucceeds(tl, addrs[i % addrs.size()]); }));
+                    threads.push_back(monitor.spawn([&, i] {
+                        ASSERT_DOES_NOT_THROW(assertConnectSucceeds(tl, addrs[i % addrs.size()]));
+                    }));
                 }
 
                 for (auto& thread : threads) {

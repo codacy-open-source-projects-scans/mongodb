@@ -78,7 +78,6 @@
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/pipeline/search_helper.h"
 #include "mongo/db/query/analyze_regex.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -92,6 +91,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
+#include "mongo/platform/overflow_arithmetic.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/decorable.h"
@@ -638,17 +638,56 @@ void encodeKeyForProj(const projection_ast::Projection* proj, StringBuilder* key
     }
 }
 
-void encodeFindCommandRequest(const FindCommandRequest& findCommand, BufBuilder* bufBuilder) {
-    if (auto skip = findCommand.getSkip()) {
-        bufBuilder->appendNum(*skip);
-    } else {
-        bufBuilder->appendNum(0);
+/**
+ * Approximate the number of documents to be processed into a small, medium or large category. Best
+ * plans for limit: 10 and limit: 1000 may be different. This allows us to cache different plans for
+ * different cases without unbounded growth of plan cache for each skip and limit value.
+ */
+char getLimitSkipCategory(OperationContext* opCtx,
+                          boost::optional<int64_t> skip,
+                          boost::optional<int64_t> limit) {
+    if (limit.value_or(0) == 1 && !skip) {
+        return '1';
     }
-    if (auto limit = findCommand.getLimit()) {
-        bufBuilder->appendNum(*limit);
-    } else {
-        bufBuilder->appendNum(0);
+
+    size_t limitSkipSum;
+    bool hasOverflowed = overflow::add(static_cast<size_t>(skip.value_or(0)),
+                                       static_cast<size_t>(limit.value_or(0)),
+                                       &limitSkipSum);
+    if (hasOverflowed) {
+        return 'l';
     }
+    size_t planEvaluationMaxResults =
+        QueryKnobConfiguration::decoration(opCtx).getPlanEvaluationMaxResultsForOp();
+    if (limitSkipSum < planEvaluationMaxResults) {
+        return 's';
+    } else if (limitSkipSum < 10 * planEvaluationMaxResults) {
+        return 'm';
+    } else {
+        return 'l';
+    }
+}
+
+void encodeLimitSkip(const CanonicalQuery& cq, BufBuilder* bufBuilder) {
+    boost::optional<int64_t> skip = cq.getFindCommandRequest().getSkip();
+    boost::optional<int64_t> limit = cq.getFindCommandRequest().getLimit();
+    if (!limit && !skip) {
+        return;
+    }
+    if (cq.shouldParameterizeLimitSkip()) {
+        bufBuilder->appendChar('p');
+        bufBuilder->appendChar(skip ? 1 : 0);
+        bufBuilder->appendChar(limit ? 1 : 0);
+        bufBuilder->appendChar(getLimitSkipCategory(cq.getOpCtx(), skip, limit));
+    } else {
+        bufBuilder->appendChar('c');
+        bufBuilder->appendNum(skip.value_or(0));
+        bufBuilder->appendNum(limit.value_or(0));
+    }
+}
+
+void encodeFindCommandRequest(const CanonicalQuery& cq, BufBuilder* bufBuilder) {
+    encodeLimitSkip(cq, bufBuilder);
 
     // Encode a OptionalBool value - 'n' if the value is not specified, 't' for true, and 'f' for
     // false.
@@ -661,6 +700,7 @@ void encodeFindCommandRequest(const FindCommandRequest& findCommand, BufBuilder*
             bufBuilder->appendChar('f');
         }
     };
+    const auto& findCommand = cq.getFindCommandRequest();
     encodeOptionalBool(findCommand.getAllowDiskUse());
     encodeOptionalBool(findCommand.getReturnKey());
     encodeOptionalBool(findCommand.getRequestResumeToken());
@@ -1095,12 +1135,12 @@ void encodeKeyForAutoParameterizedMatchSBE(OperationContext* opCtx,
  * Encode the stages pushed down to SBE via CanonicalQuery::cqPipeline.
  */
 void encodePipeline(const ExpressionContext* expCtx,
-                    const std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline,
+                    const std::vector<boost::intrusive_ptr<DocumentSource>>& cqPipeline,
                     BufBuilder* bufBuilder) {
     bufBuilder->appendChar(kEncodeSectionDelimiter);
     std::vector<Value> serializedArray;
     for (auto& stage : cqPipeline) {
-        auto documentSource = stage->documentSource();
+        auto documentSource = stage.get();
         if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(documentSource)) {
             // Match expressions are parameterized so need to be encoded differently.
             encodeKeyForAutoParameterizedMatchSBE(
@@ -1190,7 +1230,7 @@ std::string encodeSBE(const CanonicalQuery& cq) {
     const bool needsMerge = cq.getExpCtx()->needsMerge;
     bufBuilder.appendChar(needsMerge ? 1 : 0);
 
-    encodeFindCommandRequest(cq.getFindCommandRequest(), &bufBuilder);
+    encodeFindCommandRequest(cq, &bufBuilder);
 
     encodePipeline(cq.getExpCtxRaw(), cq.cqPipeline(), &bufBuilder);
 

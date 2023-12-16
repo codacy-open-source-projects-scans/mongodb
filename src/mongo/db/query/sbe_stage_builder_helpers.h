@@ -214,13 +214,6 @@ std::unique_ptr<sbe::EExpression> buildMultiBranchConditionalFromCaseValuePairs(
     std::vector<CaseValuePair> caseValuePairs, std::unique_ptr<sbe::EExpression> defaultValue);
 
 /**
- * Insert a limit stage on top of the 'input' stage.
- */
-std::unique_ptr<sbe::PlanStage> makeLimitTree(std::unique_ptr<sbe::PlanStage> inputStage,
-                                              PlanNodeId planNodeId,
-                                              long long limit = 1);
-
-/**
  * Create tree consisting of coscan stage followed by limit stage.
  */
 std::unique_ptr<sbe::PlanStage> makeLimitCoScanTree(PlanNodeId planNodeId, long long limit = 1);
@@ -1137,7 +1130,7 @@ inline StringData getTopLevelField(const T& path) {
     return StringData(getRawStringData(path), idx != std::string::npos ? idx : path.size());
 }
 
-inline std::vector<std::string> getTopLevelFields(std::vector<std::string> setOfPaths) {
+inline std::vector<std::string> getTopLevelFields(const std::vector<std::string>& setOfPaths) {
     StringDataSet topLevelFieldsSet;
     std::vector<std::string> topLevelFields;
 
@@ -1147,11 +1140,7 @@ inline std::vector<std::string> getTopLevelFields(std::vector<std::string> setOf
 
         auto [_, inserted] = topLevelFieldsSet.insert(field);
         if (inserted) {
-            if (path.find('.') == std::string::npos) {
-                topLevelFields.emplace_back(std::move(path));
-            } else {
-                topLevelFields.emplace_back(field.toString());
-            }
+            topLevelFields.emplace_back(field.toString());
         }
     }
 
@@ -1234,7 +1223,7 @@ makeKeyStringPair(const BSONObj& lowKey,
 }
 
 /**
- * The 'ProjectionEffects' class is used to represented the "effects" that projection (either
+ * The 'ProjectionEffects' class is used to represented the "effects" that a projection (either
  * (a single projection or multiple projections combined together) has on the set of all possible
  * top-level field names.
  *
@@ -1248,12 +1237,11 @@ makeKeyStringPair(const BSONObj& lowKey,
  *
  * A ProjectionEffects object can be constructed from a projection, or it can be constructed
  * using a single FieldSet (a "keep" set), or it can be constructed using 3 FieldSets (a
- * "nonDropped" set, a "modifiedOrCreated" set, and a "created" set).
+ * "allowed" set, a "modifiedOrCreated" set, and a "created" set).
  *
  * Two ProjectionEffects objects can also be combined together using the merge() method (to
  * merge two ProjectionEffects) or the compose() method (to "compose" a parent ProjectionEffects
- * and a child ProjectionEffects). Two ProjectionEffects objects can also be compared using the
- * difference() method.
+ * and a child ProjectionEffects).
  */
 class ProjectionEffects {
 public:
@@ -1332,13 +1320,13 @@ public:
     /**
      * Creates a ProjectionEffects that has a Create Effect for fields in 'createdFieldSet',
      * that has a Modify Effect for fields in 'modifiedOrCreatedFieldSet' that are not present
-     * in 'createdFieldSet', that has a Keep Effect for fields in 'nonDroppedFieldSet' that are
+     * in 'createdFieldSet', that has a Keep Effect for fields in 'allowedFieldSet' that are
      * not present in 'modifiedOrCreatedFieldSet' or 'createdFieldSet', and that has a Drop
      * Effect for all other fields.
      *
      * Note that 'createdFieldSet' must be a "closed" FieldSet.
      */
-    ProjectionEffects(const FieldSet& nonDroppedFieldSet,
+    ProjectionEffects(const FieldSet& allowedFieldSet,
                       const FieldSet& modifiedOrCreatedFieldSet,
                       const FieldSet& createdFieldSet = FieldSet::makeEmptySet(),
                       std::vector<std::string> displayOrder = {});
@@ -1349,7 +1337,7 @@ public:
      *
      * Note that the second and third parameters will be treated as "closed" field lists.
      */
-    ProjectionEffects(const FieldSet& nonDroppedFieldSet,
+    ProjectionEffects(const FieldSet& allowedFieldSet,
                       const std::vector<std::string>& modifiedOrCreatedFields,
                       const std::vector<std::string>& createdFields = {},
                       std::vector<std::string> displayOrder = {});
@@ -1394,15 +1382,6 @@ public:
      *    (A*B)+(C*D) == (A+C)*(B+D)                    (where '+' is merge and '*' is compose)
      */
     ProjectionEffects& compose(const ProjectionEffects& child);
-
-    /**
-     * This method compares two ProjectionEffects objects and returns a pair that indicates
-     * what is different between the two objects. The first part of the pair is a list of all
-     * the fields present in '_fields' or 'other._fields' that have different Effects in
-     * '*this' vs. 'other'. The second part of the pair is a bool that indicates if the
-     * '_defaultEffect' is different from 'other._defaultEffect'.
-     */
-    std::pair<std::vector<std::string>, bool> difference(const ProjectionEffects& other) const;
 
     /**
      * Returns the list of fields whose Effect is not equal to the "default" Effect.
@@ -1461,7 +1440,7 @@ public:
      * If there are a _finite_ number of fields whose effect is not kDrop, then this function will
      * return a "closed" FieldSet, otherwise it will return an "open" FieldSet.
      */
-    FieldSet getNonDroppedFieldSet() const;
+    FieldSet getAllowedFieldSet() const;
 
     /**
      * Returns a FieldSet containing all the fields whose effect is kModify or kCreate.
@@ -1491,9 +1470,9 @@ private:
     Effect _defaultEffect = kKeep;
 };
 
-FieldSet makeNonDroppedFieldSet(bool isInclusion,
-                                const std::vector<std::string>& paths,
-                                const std::vector<ProjectNode>& nodes);
+FieldSet makeAllowedFieldSet(bool isInclusion,
+                             const std::vector<std::string>& paths,
+                             const std::vector<ProjectNode>& nodes);
 
 FieldSet makeModifiedOrCreatedFieldSet(bool isInclusion,
                                        const std::vector<std::string>& paths,

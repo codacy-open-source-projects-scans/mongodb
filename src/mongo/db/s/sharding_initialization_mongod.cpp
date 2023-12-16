@@ -54,7 +54,6 @@
 #include "mongo/db/audit.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/client_metadata_propagation_egress_hook.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
@@ -90,7 +89,6 @@
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
@@ -99,7 +97,6 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/sharding_catalog_client_impl.h"
@@ -137,14 +134,6 @@ const auto getInstance = ServiceContext::declareDecoration<ShardingInitializatio
 
 const ReplicaSetAwareServiceRegistry::Registerer<ShardingInitializationMongoD> _registryRegisterer(
     "ShardingInitializationMongoDRegistry");
-
-auto makeEgressHooksList(ServiceContext* service) {
-    auto unshardedHookList = std::make_unique<rpc::EgressMetadataHookList>();
-    unshardedHookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(service));
-    unshardedHookList->addHook(std::make_unique<rpc::ClientMetadataPropagationEgressHook>());
-
-    return unshardedHookList;
-}
 
 /**
  * Updates the config server field of the shardIdentity document with the given connection string if
@@ -339,6 +328,107 @@ private:
     stdx::unordered_map<std::string, ReplSetConfigUpdateState> _updateStates;
 };
 
+/**
+ * Internal function to initialize the global objects that define the sharding state given an
+ * operation context and a config server connection string.
+ */
+void _initializeGlobalShardingState(OperationContext* opCtx,
+                                    const boost::optional<ConnectionString>& configCS) {
+    if (configCS) {
+        uassert(ErrorCodes::BadValue, "Unrecognized connection string.", *configCS);
+    }
+
+    auto targeterFactory = std::make_unique<RemoteCommandTargeterFactoryImpl>();
+    auto targeterFactoryPtr = targeterFactory.get();
+
+    ShardFactory::BuildersMap buildersMap{
+        {ConnectionString::ConnectionType::kReplicaSet,
+         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
+             return std::make_unique<ShardRemote>(
+                 shardId, connStr, targeterFactoryPtr->create(connStr));
+         }},
+        {ConnectionString::ConnectionType::kLocal,
+         [](const ShardId& shardId, const ConnectionString& connStr) {
+             return std::make_unique<ShardLocal>(shardId);
+         }},
+        {ConnectionString::ConnectionType::kStandalone,
+         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
+             return std::make_unique<ShardRemote>(
+                 shardId, connStr, targeterFactoryPtr->create(connStr));
+         }},
+    };
+
+    auto shardFactory =
+        std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
+
+    auto const service = opCtx->getServiceContext();
+
+    auto validator = LogicalTimeValidator::get(service);
+    if (validator) {  // The keyManager may be existing if the node was a part of a standalone RS.
+        validator->stopKeyManager();
+    }
+
+    globalConnPool.addHook(new ShardingConnectionHook(makeShardingEgressHooksList(service)));
+
+    auto catalogCache = std::make_unique<CatalogCache>(service, CatalogCacheLoader::get(opCtx));
+
+    // List of hooks which will be called by the ShardRegistry when it discovers a shard has been
+    // removed.
+    std::vector<ShardRegistry::ShardRemovalHook> shardRemovalHooks = {
+        // Invalidate appropriate entries in the CatalogCache when a shard is removed. It's safe to
+        // capture the CatalogCache pointer since the Grid (and therefore CatalogCache and
+        // ShardRegistry) are never destroyed.
+        [catCache = catalogCache.get()](const ShardId& removedShard) {
+            catCache->invalidateEntriesThatReferenceShard(removedShard);
+        }};
+
+    auto shardRegistry = std::make_unique<ShardRegistry>(
+        service, std::move(shardFactory), configCS, std::move(shardRemovalHooks));
+
+    auto initKeysClient =
+        [service](ShardingCatalogClient* catalogClient) -> std::unique_ptr<KeysCollectionClient> {
+        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+            // The direct keys client must use local read concern if the storage engine can't
+            // support majority read concern.
+            bool keysClientMustUseLocalReads =
+                !service->getStorageEngine()->supportsReadConcernMajority();
+            return std::make_unique<KeysCollectionClientDirect>(keysClientMustUseLocalReads);
+        }
+        return std::make_unique<KeysCollectionClientSharded>(catalogClient);
+    };
+
+    uassertStatusOK(initializeGlobalShardingState(
+        opCtx,
+        std::move(catalogCache),
+        std::move(shardRegistry),
+        [service] { return makeShardingEgressHooksList(service); },
+        // We only need one task executor here because sharding task
+        // executors aren't used for user queries in mongod.
+        1,
+        initKeysClient));
+
+    if (replica_set_endpoint::isFeatureFlagEnabledIgnoreFCV() &&
+        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        // The feature flag check here needs to ignore the FCV since the
+        // ReplicaSetEndpointShardingState needs to be maintained even before the FCV is fully
+        // upgraded.
+        DBDirectClient client(opCtx);
+        FindCommandRequest request(NamespaceString::kConfigsvrShardsNamespace);
+        request.setFilter(BSON("_id" << ShardId::kConfigServerId));
+        auto cursor = client.find(request);
+        if (cursor->more()) {
+            replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsConfigShard(
+                true);
+        }
+    }
+
+    auto const replCoord = repl::ReplicationCoordinator::get(service);
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+        replCoord->getMemberState().primary()) {
+        LogicalTimeValidator::get(opCtx)->enableKeyGenerator(opCtx, true);
+    }
+}
+
 }  // namespace
 
 ShardingInitializationMongoD::ShardingInitializationMongoD()
@@ -504,7 +594,7 @@ void ShardingInitializationMongoD::onSetCurrentConfig(OperationContext* opCtx) {
 void ShardingInitializationMongoD::onInitialDataAvailable(OperationContext* opCtx,
                                                           bool isMajorityDataAvailable) {
     if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        initializeGlobalShardingStateForConfigServerIfNeeded(opCtx);
+        initializeGlobalShardingStateForMongoD(opCtx);
     }
 
     if (auto shardIdentityDoc = getShardIdentityDoc(opCtx)) {
@@ -513,17 +603,29 @@ void ShardingInitializationMongoD::onInitialDataAvailable(OperationContext* opCt
     }
 }
 
-void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCtx) {
+void initializeGlobalShardingStateForMongoD(OperationContext* opCtx) {
     if (Grid::get(opCtx)->isShardingInitialized()) {
         return;
+    }
+
+    // TODO SERVER-83059: Remove --configdb argument from mongod
+    if (!serverGlobalParams.configdbs &&
+        !serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        uasserted(ErrorCodes::BadValue,
+                  "Embedded router requires --configdb if it is not the config shard");
     }
 
     const auto service = opCtx->getServiceContext();
 
     auto configCS = []() -> boost::optional<ConnectionString> {
-        // When the config server can operate as a shard, it sets up a ShardRemote for the
-        // config shard, which is created later after loading the local replica set config.
-        return boost::none;
+        if (!serverGlobalParams.configdbs) {
+            // When the config server can operate as a shard, it sets up a ShardRemote for the
+            // config shard, which is created later after loading the local replica set config.
+            return boost::none;
+        }
+
+        invariant(serverGlobalParams.clusterRole.has(ClusterRole::RouterServer));
+        return serverGlobalParams.configdbs;
     }();
 
     CatalogCacheLoader::set(service,
@@ -539,149 +641,24 @@ void initializeGlobalShardingStateForConfigServerIfNeeded(OperationContext* opCt
         !isReplSet || (replCoord->getMemberState() == repl::MemberState::RS_PRIMARY);
     CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
 
-    initializeGlobalShardingStateForMongoD(opCtx, configCS);
+    _initializeGlobalShardingState(opCtx, configCS);
 
     ShardingInitializationMongoD::get(opCtx)->installReplicaSetChangeListener(service);
 
-    // ShardLocal to use for explicitly local commands on the config server.
-    auto localConfigShard = Grid::get(opCtx)->shardRegistry()->createLocalConfigShard();
-    auto localCatalogClient = std::make_unique<ShardingCatalogClientImpl>(localConfigShard);
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        // ShardLocal to use for explicitly local commands on the config server.
+        auto localConfigShard = Grid::get(opCtx)->shardRegistry()->createLocalConfigShard();
+        auto localCatalogClient = std::make_unique<ShardingCatalogClientImpl>(localConfigShard);
 
-    ShardingCatalogManager::create(
-        service,
-        makeShardingTaskExecutor(executor::makeNetworkInterface("AddShard-TaskExecutor")),
-        std::move(localConfigShard),
-        std::move(localCatalogClient));
+        ShardingCatalogManager::create(
+            service,
+            makeShardingTaskExecutor(executor::makeNetworkInterface("AddShard-TaskExecutor")),
+            std::move(localConfigShard),
+            std::move(localCatalogClient));
+    }
 
     Grid::get(opCtx)->setShardingInitialized();
 }
-
-void initializeGlobalShardingStateForEmbeddedRouterIfNeeded(OperationContext* opCtx) {
-    if (!serverGlobalParams.configdbs) {
-        uasserted(ErrorCodes::BadValue, "Embedded router requires --configdb");
-    }
-
-    const auto service = opCtx->getServiceContext();
-
-    auto& configCS = serverGlobalParams.configdbs;
-
-    CatalogCacheLoader::set(service,
-                            std::make_unique<ShardServerCatalogCacheLoader>(
-                                std::make_unique<ConfigServerCatalogCacheLoader>()));
-
-    // This is only called in startup when there shouldn't be replication state changes, but to
-    // be safe we take the RSTL anyway.
-    repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
-    const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    bool isReplSet = replCoord->getSettings().isReplSet();
-    bool isStandaloneOrPrimary =
-        !isReplSet || (replCoord->getMemberState() == repl::MemberState::RS_PRIMARY);
-    CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
-
-    initializeGlobalShardingStateForMongoD(opCtx, configCS);
-
-    ShardingInitializationMongoD::get(opCtx)->installReplicaSetChangeListener(service);
-
-    Grid::get(opCtx)->setShardingInitialized();
-}
-
-void initializeGlobalShardingStateForMongoD(OperationContext* opCtx,
-                                            const boost::optional<ConnectionString>& configCS) {
-    if (configCS) {
-        uassert(ErrorCodes::BadValue, "Unrecognized connection string.", *configCS);
-    }
-
-    auto targeterFactory = std::make_unique<RemoteCommandTargeterFactoryImpl>();
-    auto targeterFactoryPtr = targeterFactory.get();
-
-    ShardFactory::BuildersMap buildersMap{
-        {ConnectionString::ConnectionType::kReplicaSet,
-         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
-             return std::make_unique<ShardRemote>(
-                 shardId, connStr, targeterFactoryPtr->create(connStr));
-         }},
-        {ConnectionString::ConnectionType::kLocal,
-         [](const ShardId& shardId, const ConnectionString& connStr) {
-             return std::make_unique<ShardLocal>(shardId);
-         }},
-        {ConnectionString::ConnectionType::kStandalone,
-         [targeterFactoryPtr](const ShardId& shardId, const ConnectionString& connStr) {
-             return std::make_unique<ShardRemote>(
-                 shardId, connStr, targeterFactoryPtr->create(connStr));
-         }},
-    };
-
-    auto shardFactory =
-        std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
-
-    auto const service = opCtx->getServiceContext();
-
-    auto validator = LogicalTimeValidator::get(service);
-    if (validator) {  // The keyManager may be existing if the node was a part of a standalone RS.
-        validator->stopKeyManager();
-    }
-
-    globalConnPool.addHook(new ShardingConnectionHook(makeEgressHooksList(service)));
-
-    auto catalogCache = std::make_unique<CatalogCache>(service, CatalogCacheLoader::get(opCtx));
-
-    // List of hooks which will be called by the ShardRegistry when it discovers a shard has been
-    // removed.
-    std::vector<ShardRegistry::ShardRemovalHook> shardRemovalHooks = {
-        // Invalidate appropriate entries in the CatalogCache when a shard is removed. It's safe to
-        // capture the CatalogCache pointer since the Grid (and therefore CatalogCache and
-        // ShardRegistry) are never destroyed.
-        [catCache = catalogCache.get()](const ShardId& removedShard) {
-            catCache->invalidateEntriesThatReferenceShard(removedShard);
-        }};
-
-    auto shardRegistry = std::make_unique<ShardRegistry>(
-        service, std::move(shardFactory), configCS, std::move(shardRemovalHooks));
-
-    auto initKeysClient =
-        [service](ShardingCatalogClient* catalogClient) -> std::unique_ptr<KeysCollectionClient> {
-        if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            // The direct keys client must use local read concern if the storage engine can't
-            // support majority read concern.
-            bool keysClientMustUseLocalReads =
-                !service->getStorageEngine()->supportsReadConcernMajority();
-            return std::make_unique<KeysCollectionClientDirect>(keysClientMustUseLocalReads);
-        }
-        return std::make_unique<KeysCollectionClientSharded>(catalogClient);
-    };
-
-    uassertStatusOK(initializeGlobalShardingState(
-        opCtx,
-        std::move(catalogCache),
-        std::move(shardRegistry),
-        [service] { return makeEgressHooksList(service); },
-        // We only need one task executor here because sharding task
-        // executors aren't used for user queries in mongod.
-        1,
-        initKeysClient));
-
-    if (replica_set_endpoint::isFeatureFlagEnabledIgnoreFCV() &&
-        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        // The feature flag check here needs to ignore the FCV since the
-        // ReplicaSetEndpointShardingState needs to be maintained even before the FCV is fully
-        // upgraded.
-        DBDirectClient client(opCtx);
-        FindCommandRequest request(NamespaceString::kConfigsvrShardsNamespace);
-        request.setFilter(BSON("_id" << ShardId::kConfigServerId));
-        auto cursor = client.find(request);
-        if (cursor->more()) {
-            replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsConfigShard(
-                true);
-        }
-    }
-
-    auto const replCoord = repl::ReplicationCoordinator::get(service);
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        replCoord->getMemberState().primary()) {
-        LogicalTimeValidator::get(opCtx)->enableKeyGenerator(opCtx, true);
-    }
-}
-
 
 void ShardingInitializationMongoD::installReplicaSetChangeListener(ServiceContext* service) {
     _replicaSetChangeListener =
@@ -711,8 +688,7 @@ void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
             }
 
             CatalogCacheLoader::get(opCtx).initializeReplicaSetRole(isStandaloneOrPrimary);
-            initializeGlobalShardingStateForMongoD(opCtx,
-                                                   {shardIdentity.getConfigsvrConnectionString()});
+            _initializeGlobalShardingState(opCtx, {shardIdentity.getConfigsvrConnectionString()});
 
             installReplicaSetChangeListener(service);
         }

@@ -50,6 +50,7 @@
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/concurrency/locker_impl.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/locker_api.h"
 #include "mongo/db/read_write_concern_defaults.h"
@@ -1691,8 +1692,8 @@ TEST_F(ReplCoordTest, UpdatePositionArgsAdvancesWallTimes) {
     OpTimeWithTermOne opTime1(100, 1);
     OpTimeWithTermOne opTime2(200, 1);
 
-    repl->setMyLastAppliedOpTimeAndWallTime({opTime2, Date_t() + Seconds(1)});
-    repl->setMyLastAppliedOpTimeAndWallTime({opTime2, Date_t() + Seconds(2)});
+    repl->setMyLastAppliedOpTimeAndWallTimeForward({opTime2, Date_t() + Seconds(1)});
+    repl->setMyLastAppliedOpTimeAndWallTimeForward({opTime2, Date_t() + Seconds(2)});
 
     // Secondaries not caught up yet.
     ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 1, opTime1, Date_t()));
@@ -8361,8 +8362,8 @@ TEST_F(ReplCoordTest, IgnoreNonNullDurableOpTimeOrWallTimeForArbiterFromReplSetU
 
     // Node 1 is ahead, nodes 2 and 3 a bit behind.
     // Node 3 should not have a durable optime/walltime as they are an arbiter.
-    repl->setMyLastAppliedOpTimeAndWallTime({opTime2, wallTime2});
-    repl->setMyLastDurableOpTimeAndWallTime({opTime2, wallTime2});
+    repl->setMyLastAppliedOpTimeAndWallTimeForward({opTime2, wallTime2});
+    repl->setMyLastDurableOpTimeAndWallTimeForward({opTime2, wallTime2});
     ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, opTime1, wallTime1));
     ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 3, opTime1, wallTime1));
     ASSERT_OK(repl->setLastDurableOptime_forTest(1, 2, opTime1, wallTime1));
@@ -8447,8 +8448,8 @@ TEST_F(ReplCoordTest, IgnoreNonNullDurableOpTimeOrWallTimeForArbiterFromHeartbea
 
     // Node 1 is ahead, nodes 2 is a bit behind.
     // Node 2 should not have a durable optime/walltime as they are an arbiter.
-    repl->setMyLastAppliedOpTimeAndWallTime({opTime2, wallTime2});
-    repl->setMyLastDurableOpTimeAndWallTime({opTime2, wallTime2});
+    repl->setMyLastAppliedOpTimeAndWallTimeForward({opTime2, wallTime2});
+    repl->setMyLastDurableOpTimeAndWallTimeForward({opTime2, wallTime2});
     ASSERT_OK(repl->setLastAppliedOptime_forTest(1, 2, opTime1, wallTime1));
     ASSERT_OK(repl->setLastDurableOptime_forTest(1, 2, OpTime(), Date_t()));
 

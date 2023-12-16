@@ -102,8 +102,8 @@
 #include "mongo/db/query/query_settings/query_settings_utils.h"
 #include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/query_stats/find_key_generator.h"
-#include "mongo/db/query/query_stats/key_generator.h"
+#include "mongo/db/query/query_stats/find_key.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/read_concern_support_result.h"
@@ -193,16 +193,30 @@ void beginQueryOp(OperationContext* opCtx, const NamespaceString& nss, const BSO
     curOp->setNS_inlock(nss);
 }
 
-// TODO: SERVER-73632 Remove Feature Flag for PM-635.
+// TODO: SERVER-73632 Remove feature flag for PM-635.
 // Remove query settings lookup as it is only done on mongos.
 query_settings::QuerySettings lookupQuerySettingsForFind(
     boost::intrusive_ptr<ExpressionContext> expCtx,
-    const ParsedFindCommand& parsedRequest,
+    const ParsedFindCommand& parsedFind,
     const NamespaceString& nss) {
     auto opCtx = expCtx->opCtx;
-    return ShardingState::get(opCtx)->enabled()
-        ? parsedRequest.findCommandRequest->getQuerySettings().get_value_or({})
-        : query_settings::lookupForFind(expCtx, parsedRequest, nss);
+    auto serializationContext = parsedFind.findCommandRequest->getSerializationContext();
+
+    // If part of the sharded cluster, use the query settings passed as part of the command
+    // arguments.
+    if (ShardingState::get(opCtx)->enabled()) {
+        return parsedFind.findCommandRequest->getQuerySettings().get_value_or({});
+    }
+
+    // No query settings lookup for IDHACK queries.
+    if (isIdHackEligibleQueryWithoutCollator(*parsedFind.findCommandRequest)) {
+        return query_settings::QuerySettings();
+    }
+
+    return query_settings::lookupQuerySettings(expCtx, nss, serializationContext, [&]() {
+        query_shape::FindCmdShape findCmdShape(parsedFind, expCtx);
+        return findCmdShape.sha256Hash(opCtx, serializationContext);
+    });
 }
 
 /**

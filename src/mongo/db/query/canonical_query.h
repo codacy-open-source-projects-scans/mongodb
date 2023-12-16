@@ -52,7 +52,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/inner_pipeline_stage_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/parsed_find_command.h"
@@ -71,7 +70,7 @@ class OperationContext;
 struct CanonicalQueryParams {
     boost::intrusive_ptr<ExpressionContext> expCtx;
     std::variant<std::unique_ptr<ParsedFindCommand>, ParsedFindCommandParams> parsedFind;
-    std::vector<std::unique_ptr<InnerPipelineStageInterface>> pipeline = {};
+    std::vector<boost::intrusive_ptr<DocumentSource>> pipeline = {};
     bool explain = false;
     bool isCountLike = false;
     bool isSearchQuery = false;
@@ -101,22 +100,18 @@ public:
     static StatusWith<std::unique_ptr<CanonicalQuery>> make(CanonicalQueryParams&& params);
 
     /**
-     * Used for creating sub-queries from an existing CanonicalQuery.
-     *
-     * 'matchExpr' must be an expression in baseQuery.getPrimaryMatchExpression().
-     *
-     * Does not take ownership of 'root'.
+     * Used for creating sub-queries from an existing CanonicalQuery, only for use by
+     * 'makeForSubplanner()'.
      */
-    CanonicalQuery(OperationContext* opCtx,
-                   const CanonicalQuery& baseQuery,
-                   MatchExpression* matchExpr);
+    CanonicalQuery(OperationContext* opCtx, const CanonicalQuery& baseQuery, size_t i);
 
     /**
-     * Deprecated factory method for creating CanonicalQuery.
+     * Construct a 'CanonicalQuery' for a subquery of the given query. This function should only be
+     * invoked by the subplanner. 'baseQuery' must contain a MatchExpression with rooted $or. This
+     * function returns a 'CanonicalQuery' housing a copy of the i'th child of the root.
      */
-    static StatusWith<std::unique_ptr<CanonicalQuery>> make(OperationContext* opCtx,
-                                                            const CanonicalQuery& baseQuery,
-                                                            MatchExpression* matchExpr);
+    static StatusWith<std::unique_ptr<CanonicalQuery>> makeForSubplanner(
+        OperationContext* opCtx, const CanonicalQuery& baseQuery, size_t i);
 
     /**
      * Returns true if "query" describes an exact-match query on _id.
@@ -281,16 +276,22 @@ public:
         return _expCtx.get();
     }
 
-    void setCqPipeline(std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline) {
+    void setCqPipeline(std::vector<boost::intrusive_ptr<DocumentSource>> cqPipeline,
+                       bool containsEntirePipeline) {
         _cqPipeline = std::move(cqPipeline);
+        _containsEntirePipeline = containsEntirePipeline;
     }
 
-    const std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline() const {
+    const std::vector<boost::intrusive_ptr<DocumentSource>>& cqPipeline() const {
         return _cqPipeline;
     }
 
-    std::vector<std::unique_ptr<InnerPipelineStageInterface>>& cqPipeline() {
+    std::vector<boost::intrusive_ptr<DocumentSource>>& cqPipeline() {
         return _cqPipeline;
+    }
+
+    bool containsEntirePipeline() const {
+        return _containsEntirePipeline;
     }
 
     /**
@@ -324,9 +325,16 @@ public:
         return _isUncacheableSbe;
     }
 
-    // Tests whether a 'matchExpr' from this query should be parameterized for the SBE plan cache.
-    // There is no reason to do so if the execution plan will not be cached.
+    /**
+     * Tests whether a 'matchExpr' from this query should be parameterized for the SBE plan cache.
+     */
     bool shouldParameterizeSbe(MatchExpression* matchExpr) const;
+
+    /**
+     * Tests if limit and skip amounts from find command request should be parameterized for the SBE
+     * plan cache.
+     */
+    bool shouldParameterizeLimitSkip() const;
 
     /**
      * Add parameters for match expressions that were pushed down via '_cqPipeline'.
@@ -348,9 +356,10 @@ public:
 private:
     void initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                 std::unique_ptr<ParsedFindCommand> parsedFind,
-                std::vector<std::unique_ptr<InnerPipelineStageInterface>> cqPipeline,
+                std::vector<boost::intrusive_ptr<DocumentSource>> cqPipeline,
                 bool isCountLike,
-                bool isSearchQuery);
+                bool isSearchQuery,
+                bool optimizeMatchExpression);
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
@@ -365,7 +374,12 @@ private:
 
     // A query can include a post-processing pipeline here. Logically it is applied after all the
     // other operations (filter, sort, project, skip, limit).
-    std::vector<std::unique_ptr<InnerPipelineStageInterface>> _cqPipeline;
+    std::vector<boost::intrusive_ptr<DocumentSource>> _cqPipeline;
+
+    // True iff '_cqPipeline' contains all aggregation pipeline stages in the query. When
+    // '_containsEntirePipeline' is false, the output of '_cqPipeline' may need to be processed by
+    // further 'DocumentSource' stages.
+    bool _containsEntirePipeline{false};
 
     // Keeps track of what metadata has been explicitly requested.
     QueryMetadataBitSet _metadataDeps;
