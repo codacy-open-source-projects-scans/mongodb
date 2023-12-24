@@ -175,6 +175,7 @@
 #include "mongo/db/s/config/configsvr_coordinator_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/config_server_op_observer.h"
+#include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
@@ -441,6 +442,7 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
                 std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
             services.push_back(std::make_unique<repl::ShardMergeRecipientService>(serviceContext));
         }
+        services.push_back(std::make_unique<MultiUpdateCoordinatorService>(serviceContext));
     }
 
     if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
@@ -1337,17 +1339,6 @@ void startupConfigActions(const std::vector<std::string>& args) {
 #endif
 }
 
-void setUpCollectionShardingState(ServiceContext* serviceContext) {
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
-        CollectionShardingStateFactory::set(
-            serviceContext, std::make_unique<CollectionShardingStateFactoryShard>(serviceContext));
-    } else {
-        CollectionShardingStateFactory::set(
-            serviceContext,
-            std::make_unique<CollectionShardingStateFactoryStandalone>(serviceContext));
-    }
-}
-
 void setUpCatalog(ServiceContext* serviceContext) {
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
     Collection::Factory::set(serviceContext, std::make_unique<CollectionImpl::FactoryImpl>());
@@ -1523,6 +1514,18 @@ void setUpObservers(ServiceContext* serviceContext) {
     }
 
     serviceContext->setOpObserver(std::move(opObserverRegistry));
+}
+
+void setUpSharding(ServiceContext* service) {
+    ShardingState::create(service);
+
+    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+        CollectionShardingStateFactory::set(
+            service, std::make_unique<CollectionShardingStateFactoryShard>(service));
+    } else {
+        CollectionShardingStateFactory::set(
+            service, std::make_unique<CollectionShardingStateFactoryStandalone>(service));
+    }
 }
 
 namespace {
@@ -2143,13 +2146,11 @@ int mongod_main(int argc, char* argv[]) {
         quickExit(ExitCode::auditRotateError);
     }
 
-    setUpCollectionShardingState(service);
     setUpCatalog(service);
     setUpReplication(service);
     setUpObservers(service);
     setUpMultitenancyCheck(service, gMultitenancySupport);
-    service->getService(ClusterRole::ShardServer)
-        ->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>());
+    setUpSharding(service);
 
     ErrorExtraInfo::invariantHaveAllParsers();
 

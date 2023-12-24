@@ -78,7 +78,9 @@ CounterMetric queryStatsStoreWriteErrorsMetric("queryStats.numQueryStatsStoreWri
  * Indicates whether or not query stats is enabled via the feature flag.
  */
 bool isQueryStatsFeatureEnabled() {
-    return feature_flags::gFeatureFlagQueryStats.isEnabled(
+    // We need to use isEnabledUseLastLTSFCVWhenUninitialized instead of isEnabled because
+    // this could run during startup while the FCV is still uninitialized.
+    return feature_flags::gFeatureFlagQueryStats.isEnabledUseLastLTSFCVWhenUninitialized(
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
 }
 
@@ -163,7 +165,7 @@ ServiceContext::ConstructorActionRegisterer queryStatsStoreManagerRegisterer{
         // small enough to allow us to shrink the overall memory footprint of the data structure if
         // the user requested that we do so.
         constexpr double approxEntrySize = 0.004 * 1024 * 1024;  // 4KB
-        if (numPartitions < ProcessInfo::getNumCores()) {
+        if (numPartitions < ProcessInfo::getNumLogicalCores()) {
             numPartitions = std::ceil(double(size) / (approxEntrySize * 10));
         }
 

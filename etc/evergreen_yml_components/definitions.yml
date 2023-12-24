@@ -286,7 +286,9 @@ variables:
 # If a variant is listed here and has a push task, mongocryptd is pushed
 - mongocryptd_variants: &mongocryptd_variants
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-lto
   - enterprise-amazon2023-arm64
@@ -321,10 +323,14 @@ variables:
   - amazon
   - enterprise-linux-64-amazon-ami
   - amazon2
+  - amazon2-openssl111
+  - amazon2-arm64-openssl111
   - amazon2023
   - amazon2023-arm64
   - enterprise-amazon2
+  - enterprise-amazon2-openssl111
   - enterprise-amazon2-arm64
+  - enterprise-amazon2-arm64-openssl111
   - enterprise-amazon2023
   - enterprise-amazon2023-arm64
   - debian11
@@ -6517,6 +6523,12 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
+  name: replica_sets_jscore_passthrough_with_auto_bootstrap_and_replica_set_endpoint_gen
+  tags: []
+  commands:
+  - func: "generate resmoke tasks"
+
+- <<: *gen_task_template
   name: sharding_jscore_passthrough_with_auto_bootstrap_gen
   tags: ["sharding", "jscore", "common"]
   commands:
@@ -6894,6 +6906,16 @@ tasks:
       use_large_distro: "true"
 
 - <<: *gen_task_template
+  name: concurrency_multitenancy_with_atlas_proxy_jscore_passthrough_gen
+  tags: ["serverless"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      suite: multitenancy_with_atlas_proxy_jscore_passthrough
+      resmoke_args: "--numClientsPerFixture=2 --useTenantClient --excludeWithAnyTags=multi_clients_incompatible"
+
+- <<: *gen_task_template
   name: concurrency_multitenancy_replication_with_atlas_proxy_gen
   tags: ["serverless"]
   commands:
@@ -7012,34 +7034,6 @@ tasks:
   tags: ["concurrency", "common", "repl", "txn", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
-    vars:
-      resmoke_jobs_max: 1
-
-  # TODO: SERVER-35964 revert the addition of UBSAN concurrency_replication suites.
-- <<: *task_template
-  name: concurrency_replication_ubsan
-  tags: ["concurrency", "ubsan", "repl"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *task_template
-  name: concurrency_replication_causal_consistency_ubsan
-  tags: ["concurrency", "ubsan", "repl"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_jobs_max: 1
-
-- <<: *task_template
-  name: concurrency_replication_multi_stmt_txn_ubsan
-  tags: ["concurrency", "ubsan", "repl"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
     vars:
       resmoke_jobs_max: 1
 
@@ -9072,6 +9066,22 @@ tasks:
   - func: "do setup"
   - func: "run tests"
 
+# TODO SERVER-84203: Delete this temporary suite
+- <<: *task_template
+  name: cqf_parameterization_passthrough
+  tags: [cqf]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+# TODO SERVER-84203: Delete this temporary suite
+- <<: *task_template
+  name: cqf_parameterization_query_golden_passthrough
+  tags: [cqf]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - <<: *gen_task_template
   name: cqf_experimental_no_passthrough_gen
   tags: ["cqf"]
@@ -9099,6 +9109,22 @@ tasks:
       suite: cqf_experimental_sharded_collections_jscore_passthrough
       use_large_distro: "true"
 
+# TODO SERVER-84203: Delete this temporary suite
+- <<: *task_template
+  name: cqf_parameterization_jscore_passthrough
+  tags: [cqf]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
+# TODO SERVER-84203: Delete this temporary suite
+- <<: *task_template
+  name: cqf_parameterization_aggregation_passthrough
+  tags: [cqf]
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+
 - <<: *task_template
   name: streams
   tags: []
@@ -9125,8 +9151,8 @@ tasks:
   tags: ["timeseries_crud"]
   commands:
   - func: "generate resmoke tasks"
-  vars:
-    suite: timeseries_crud_jscore_passthrough
+    vars:
+      suite: timeseries_crud_jscore_passthrough
 
 
 - name: shared_scons_cache_pruning

@@ -36,7 +36,7 @@ buildvariants:
 - &enterprise-amazon-linux2-arm64-all-feature-flags-template
   <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
   name: &enterprise-amazon-linux2-arm64-all-feature-flags enterprise-amazon-linux2-arm64-all-feature-flags
-  display_name: "! Amazon Linux 2 arm64 (all feature flags)"
+  display_name: "! Amazon Linux 2 arm64 Enterprise (all feature flags)"
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
   modules:
     - enterprise
@@ -80,8 +80,8 @@ buildvariants:
   - name: .cqf
   - name: .misc_js
   - name: .clustered_collections
-  - name: .concurrency !.large !.ubsan !.no_txns
-  - name: .concurrency .large !.ubsan !.no_txns
+  - name: .concurrency !.large !.no_txns
+  - name: .concurrency .large !.no_txns
   - name: .config_fuzzer !.large
   - name: .config_fuzzer .large
     distros:
@@ -114,6 +114,7 @@ buildvariants:
   - name: .read_write_concern !.large
   - name: .replica_sets !.encrypt !.auth
   - name: replica_sets_api_version_jscore_passthrough_gen
+  - name: replica_sets_jscore_passthrough_with_auto_bootstrap_and_replica_set_endpoint_gen
   - name: replica_sets_reconfig_jscore_passthrough_gen
   - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
   - name: replica_sets_reconfig_kill_primary_jscore_passthrough_gen
@@ -209,8 +210,8 @@ buildvariants:
   - name: cqf_parallel
   - name: .misc_js
   - name: .clustered_collections
-  - name: .concurrency !.large !.ubsan !.no_txns
-  - name: .concurrency .large !.ubsan !.no_txns
+  - name: .concurrency !.large !.no_txns
+  - name: .concurrency .large !.no_txns
   - name: .config_fuzzer !.large
   - name: .config_fuzzer .large
     distros:

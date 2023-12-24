@@ -363,6 +363,31 @@ export function getExecutionStages(root) {
 }
 
 /**
+ * Returns an array of "executionStats" from the given replset or sharded explain output.
+ *
+ * This helper function can be used for any optimizer.
+ */
+export function getExecutionStats(root) {
+    const allExecutionStats = [];
+    if (root.hasOwnProperty("shards")) {
+        // This test assumes that there is only one shard in the cluster.
+        for (let shardExplain of getAllNodeExplains(root)) {
+            allExecutionStats.push(shardExplain.executionStats);
+        }
+        return allExecutionStats;
+    }
+    assert(root.hasOwnProperty("executionStats"), root);
+    if (root.executionStats.hasOwnProperty("executionStages") &&
+        root.executionStats.executionStages.hasOwnProperty("shards")) {
+        for (let shardExecutionStats of root.executionStats.executionStages.shards) {
+            allExecutionStats.push(shardExecutionStats);
+        }
+        return allExecutionStats;
+    }
+    return [root.executionStats];
+}
+
+/**
  * Returns the winningPlan.queryPlan of each shard in the explain in a list.
  *
  * This helper function can be used for any optimizer.
@@ -382,6 +407,31 @@ export function getShardQueryPlans(root) {
     }
 
     return result;
+}
+
+/**
+ * Performs the given fn on each shard's explain output in root or the top-level explain, if root
+ * comes from a standalone explain. fn should accept a single node's top-level explain as input.
+ *
+ * This helper function currently only works for CQF queries. It can be extended to work for
+ * aggregation-like explains.
+ */
+export function runOnAllTopLevelExplains(root, fn) {
+    if (root.hasOwnProperty("shards")) {
+        // Sharded agg explain, where the aggregations get pushed down to find on the shards.
+        for (let shardName of Object.keys(root.shards)) {
+            let shard = root.shards[shardName];
+            fn(shard);
+        }
+    } else if (root.queryPlanner.winningPlan.hasOwnProperty("shards")) {
+        // Sharded find explain.
+        for (let shard of root.queryPlanner.winningPlan.shards) {
+            fn(shard);
+        }
+    } else {
+        // Standalone find explain.
+        fn(root);
+    }
 }
 
 /**
@@ -853,8 +903,8 @@ export function getFieldValueFromExplain(explainRes, getValueCallback) {
 export function getPlanCacheKeyFromExplain(explainRes, db) {
     explainRes = getSingleNodeExplain(explainRes);
     return getFieldValueFromExplain(explainRes, function(plannerOutput) {
-        return FixtureHelpers.isMongos(db) && plannerOutput.hasOwnProperty("winningPlan") &&
-                plannerOutput.winningPlan.hasOwnProperty("shards")
+        return (plannerOutput.hasOwnProperty("winningPlan") &&
+                plannerOutput.winningPlan.hasOwnProperty("shards"))
             ? plannerOutput.winningPlan.shards[0].planCacheKey
             : plannerOutput.planCacheKey;
     });
@@ -867,8 +917,10 @@ export function getPlanCacheKeyFromExplain(explainRes, db) {
  */
 export function getQueryHashFromExplain(explainRes, db) {
     return getFieldValueFromExplain(explainRes, function(plannerOutput) {
-        return FixtureHelpers.isMongos(db) ? plannerOutput.winningPlan.shards[0].queryHash
-                                           : plannerOutput.queryHash;
+        return (plannerOutput.hasOwnProperty("winningPlan") &&
+                plannerOutput.winningPlan.hasOwnProperty("shards"))
+            ? plannerOutput.winningPlan.shards[0].queryHash
+            : plannerOutput.queryHash;
     });
 }
 

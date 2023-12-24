@@ -363,8 +363,12 @@ StatusWith<MutableOplogEntry> MutableOplogEntry::parse(const BSONObj& object) {
 
     try {
         MutableOplogEntry oplogEntry;
-        oplogEntry.parseProtected(IDLParserContext("OplogEntryBase", false /* apiStrict */, tid),
-                                  object);
+        const auto vts = tid
+            ? boost::make_optional(auth::ValidatedTenancyScope(
+                  *tid, auth::ValidatedTenancyScope::TrustedForInnerOpMsgRequestTag{}))
+            : boost::none;
+        oplogEntry.parseProtected(
+            IDLParserContext("OplogEntryBase", false /* apiStrict */, vts, tid), object);
         return oplogEntry;
     } catch (...) {
         return exceptionToStatus();
@@ -377,7 +381,8 @@ ReplOperation MutableOplogEntry::toReplOperation() const noexcept {
 }
 
 void MutableOplogEntry::setTid(boost::optional<mongo::TenantId> value) & {
-    if (gMultitenancySupport &&
+    // Only set Tid if we have a TenantId value and the server parameter and feature flag are on.
+    if (value && gMultitenancySupport &&
         gFeatureFlagRequireTenantID.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
         getDurableReplOperation().setTid(std::move(value));
@@ -420,7 +425,10 @@ DurableOplogEntry::DurableOplogEntry(BSONObj rawInput) : _raw(std::move(rawInput
     if (_raw.hasElement("tid"))
         tid = TenantId::parseFromBSON(_raw["tid"]);
 
-    parseProtected(IDLParserContext("OplogEntryBase", false /* apiStrict */, tid), _raw);
+    const auto vts = tid ? boost::make_optional(auth::ValidatedTenancyScope(
+                               *tid, auth::ValidatedTenancyScope::TrustedForInnerOpMsgRequestTag{}))
+                         : boost::none;
+    parseProtected(IDLParserContext("OplogEntryBase", false /* apiStrict */, vts, tid), _raw);
 
     // Parse command type from 'o' and 'o2' fields.
     if (isCommand()) {

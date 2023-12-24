@@ -226,13 +226,17 @@ TokenizedBlock HomogeneousBlock<T, TypeTag>::tokenize() {
     return {std::make_unique<HeterogeneousBlock>(std::move(tokenTags), std::move(tokenVals)), idxs};
 }
 
+template TokenizedBlock Int32Block::tokenize();
+template TokenizedBlock Int64Block::tokenize();
+template TokenizedBlock DateBlock::tokenize();
+
 template <>
-TokenizedBlock HomogeneousBlock<double, TypeTags::NumberDouble>::tokenize() {
+TokenizedBlock DoubleBlock::tokenize() {
     return ValueBlock::tokenize();
 }
 
 template <>
-TokenizedBlock HomogeneousBlock<bool, TypeTags::Boolean>::tokenize() {
+TokenizedBlock BoolBlock::tokenize() {
     return ValueBlock::tokenize();
 }
 
@@ -285,6 +289,12 @@ std::unique_ptr<ValueBlock> HomogeneousBlock<T, TypeTag>::fillEmpty(TypeTags fil
     return ValueBlock::fillEmpty(fillTag, fillVal);
 }
 
+template std::unique_ptr<ValueBlock> Int32Block::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> Int64Block::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> DateBlock::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> DoubleBlock::fillEmpty(TypeTags fillTag, Value fillVal);
+template std::unique_ptr<ValueBlock> BoolBlock::fillEmpty(TypeTags fillTag, Value fillVal);
+
 std::unique_ptr<ValueBlock> ValueBlock::exists() {
     if (tryDense().get_value_or(false) && tryCount()) {
         return std::make_unique<MonoBlock>(
@@ -317,11 +327,4 @@ void HeterogeneousBlock::push_back(TypeTags t, Value v) {
 
     guard.reset();
 }
-
-template class HomogeneousBlock<int32_t, TypeTags::NumberInt32>;
-template class HomogeneousBlock<int64_t, TypeTags::NumberInt64>;
-template class HomogeneousBlock<int64_t, TypeTags::Date>;
-template class HomogeneousBlock<double, TypeTags::NumberDouble>;
-template class HomogeneousBlock<bool, TypeTags::Boolean>;
-
 }  // namespace mongo::sbe::value

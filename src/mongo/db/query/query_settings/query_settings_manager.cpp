@@ -65,7 +65,9 @@ public:
 
     bool includeByDefault() const override {
         // Only include if Query Settings are enabled.
-        return feature_flags::gFeatureFlagQuerySettings.isEnabled(
+        // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
+        // this could run during startup while the FCV is still uninitialized.
+        return feature_flags::gFeatureFlagQuerySettings.isEnabledUseLatestFCVWhenUninitialized(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     }
 
@@ -282,19 +284,6 @@ void QuerySettingsClusterParameter::append(OperationContext* opCtx,
                                            const boost::optional<TenantId>& tenantId) {
     auto& querySettingsManager = QuerySettingsManager::get(getGlobalServiceContext());
     querySettingsManager.appendQuerySettingsClusterParameterValue(opCtx, bob, tenantId);
-}
-
-Status QuerySettingsClusterParameter::validate(const BSONElement& newValueElement,
-                                               const boost::optional<TenantId>& tenantId) const {
-    try {
-        (void)QuerySettingsClusterParameterValue::parse(
-            IDLParserContext("querySettingsParameterValue"), newValueElement.Obj());
-        return Status::OK();
-    } catch (const AssertionException&) {
-        return {ErrorCodes::BadValue,
-                "Call setQuerySettings or removeQuerySettings commands in order to set or remove "
-                "query settings for a given query shape"};
-    }
 }
 
 Status QuerySettingsClusterParameter::set(const BSONElement& newValueElement,

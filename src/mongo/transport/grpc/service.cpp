@@ -156,11 +156,11 @@ inline Status makeShutdownTerminationStatus() {
 void logClientMetadataDocument(const IngressSession& session) {
     try {
         if (auto metadata = session.getClientMetadata()) {
-            if (session.clientId()) {
+            if (session.getRemoteClientId()) {
                 LOGV2_INFO(7401301,
                            "Received client metadata for gRPC stream",
                            "remote"_attr = session.remote(),
-                           "remoteClientId"_attr = session.clientIdStr(),
+                           "remoteClientId"_attr = session.remoteClientIdToString(),
                            "streamId"_attr = session.id(),
                            "doc"_attr = metadata->getDocument());
             } else {
@@ -168,7 +168,7 @@ void logClientMetadataDocument(const IngressSession& session) {
                             2,
                             "Received client metadata for gRPC stream",
                             "remote"_attr = session.remote(),
-                            "remoteClientId"_attr = session.clientIdStr(),
+                            "remoteClientId"_attr = session.remoteClientIdToString(),
                             "streamId"_attr = session.id(),
                             "doc"_attr = metadata->getDocument());
             }
@@ -177,7 +177,7 @@ void logClientMetadataDocument(const IngressSession& session) {
         LOGV2_WARNING(7401303,
                       "Received invalid client metadata for gRPC stream",
                       "remote"_attr = session.remote(),
-                      "remoteClientId"_attr = session.clientIdStr(),
+                      "remoteClientId"_attr = session.remoteClientIdToString(),
                       "streamId"_attr = session.id(),
                       "error"_attr = e);
     }
@@ -267,7 +267,7 @@ CommandService::CommandService(TransportLayer* tl,
         stdx::lock_guard lk{_mutex};
 
         if (_shutdown || !_acceptNewRequests) {
-            session->terminate(makeShutdownTerminationStatus());
+            session->setTerminationStatus(makeShutdownTerminationStatus());
             return util::convertStatus(*session->terminationStatus());
         }
         it = _sessions.insert(_sessions.begin(), session);

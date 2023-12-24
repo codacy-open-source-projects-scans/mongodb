@@ -135,7 +135,10 @@ TEST_F(MockClientTest, MockClientShutdown) {
     Notification<void> rpcsFinished;
 
     auto serverHandler = [&](HostAndPort local, std::shared_ptr<IngressSession> session) {
-        ASSERT_EQ(session->sourceMessage().getStatus().code(), ErrorCodes::StreamTerminated);
+        const auto status = session->sourceMessage().getStatus();
+        ASSERT_EQ(status, ErrorCodes::CallbackCanceled);
+        ASSERT_TRUE(session->terminationStatus().has_value());
+        ASSERT_EQ(*session->terminationStatus(), status);
         ASSERT_FALSE(session->isConnected());
 
         if (numRpcsRemaining.subtractAndFetch(1) == 0) {
@@ -187,8 +190,8 @@ TEST_F(MockClientTest, MockClientMetadata) {
     auto serverHandler = [&](HostAndPort local, std::shared_ptr<IngressSession> session) {
         ASSERT_TRUE(session->getClientMetadata());
         ASSERT_BSONOBJ_EQ(session->getClientMetadata()->getDocument(), metadataDoc);
-        ASSERT_TRUE(session->clientId());
-        ASSERT_EQ(session->clientId(), clientId.get());
+        ASSERT_TRUE(session->getRemoteClientId());
+        ASSERT_EQ(session->getRemoteClientId(), clientId.get());
     };
 
     auto clientThreadBody = [&](MockClient& client, auto& monitor) {

@@ -122,9 +122,7 @@ runWithFastPathsDisabled(() => {
     const res = runWithParams(
         [
             {key: 'internalCascadesOptimizerExplainVersion', value: "v2"},
-            {key: "internalCascadesOptimizerUseDescriptiveVarNames", value: true},
-            // TODO SERVER-83441: Implement top-level fields pushdown from Filter into CollScan.
-            {key: "internalCascadesOptimizerDisableSargableWhenNoIndexes", value: false}
+            {key: "internalCascadesOptimizerUseDescriptiveVarNames", value: true}
         ],
         () => t.explain("executionStats").find({a: 2}).hint({$natural: -1}).finish());
 
@@ -149,9 +147,7 @@ PhysicalScan [{'<root>': scan_0, 'a': evalTemp_0}, cqf_index_hints_, Reverse]
     const res = runWithParams(
         [
             {key: 'internalCascadesOptimizerExplainVersion', value: "v2"},
-            {key: "internalCascadesOptimizerUseDescriptiveVarNames", value: true},
-            // TODO SERVER-83441: Implement top-level fields pushdown from Filter into CollScan.
-            {key: "internalCascadesOptimizerDisableSargableWhenNoIndexes", value: false}
+            {key: "internalCascadesOptimizerUseDescriptiveVarNames", value: true}
         ],
         () => t.explain("executionStats").find({b: 2}).hint({$natural: -1}).finish());
 
@@ -208,9 +204,7 @@ IndexScan [{'<rid>': rid_1}, scanDefName: cqf_index_hints_, indexDefName: a_1, i
     const res = runWithParams(
         [
             {key: 'internalCascadesOptimizerExplainVersion', value: "v2"},
-            {key: "internalCascadesOptimizerUseDescriptiveVarNames", value: true},
-            // TODO SERVER-83441: Implement top-level fields pushdown from Filter into CollScan.
-            {key: "internalCascadesOptimizerDisableSargableWhenNoIndexes", value: false}
+            {key: "internalCascadesOptimizerUseDescriptiveVarNames", value: true}
         ],
         () => t.explain("executionStats").find({b: 2}).hint({$natural: -1}).finish());
 

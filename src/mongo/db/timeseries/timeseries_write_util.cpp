@@ -660,11 +660,14 @@ write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
     auto after = compressionResult.compressedBucket ? *compressionResult.compressedBucket : updated;
 
     // Generates a delta update request using the before and after compressed bucket documents.
+    // (Generic FCV reference): Only do this when running in the latest FCV version as older
+    // binaries cannot interpret the binary diff format.
     // TODO SERVER-80653: Remove compressed bucket check. The operation should retry if compression
     // fails before we get here.
+    auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
     if (compressionResult.compressedBucket &&
-        feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(fcvSnapshot) &&
+        fcvSnapshot.getVersion() == multiversion::GenericFCV::kLatest) {
         const auto updateEntry =
             makeTimeseriesCompressedDiffEntry(opCtx, batch, before, after, metadata);
 

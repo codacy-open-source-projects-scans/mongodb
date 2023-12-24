@@ -33,4 +33,6 @@ namespace mongo {
 
 Locker::Locker() = default;
 
+Locker::~Locker() = default;
+
 }  // namespace mongo

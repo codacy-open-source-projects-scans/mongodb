@@ -217,8 +217,8 @@ buildvariants:
   - name: .change_streams !.no_debug_mode
   - name: .change_stream_fuzzer
   - name: .misc_js !.no_debug_mode
-  - name: .concurrency !.large !.ubsan !.no_txns !.no_debug_mode
-  - name: .concurrency .large !.ubsan !.no_txns !.no_debug_mode
+  - name: .concurrency !.large !.no_txns !.no_debug_mode
+  - name: .concurrency .large !.no_txns !.no_debug_mode
     distros:
     - rhel80-medium
   - name: .config_fuzzer !.large
@@ -355,7 +355,7 @@ buildvariants:
   - name: .causally_consistent !.sharding
   - name: .change_streams
   - name: .misc_js !.non_win_dbg
-  - name: .concurrency !.ubsan
+  - name: .concurrency
     distros:
     - windows-vsCurrent-large
   - name: .config_fuzzer !.large !.linux_only
@@ -638,6 +638,7 @@ buildvariants:
   - name: .query_fuzzer !.cqf_only
   - name: .read_write_concern
   - name: replica_sets_large_txns_format_jscore_passthrough
+  - name: replica_sets_jscore_passthrough_with_auto_bootstrap_and_replica_set_endpoint_gen
   - name: .replica_sets !.multi_oplog
   - name: .replica_sets .encrypt
   - name: .resharding_fuzzer
@@ -733,8 +734,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   # - name: .misc_js # Not passing
-  # - name: .concurrency !.large !.ubsan !.no_txns # Not passing
-  # - name: .concurrency .large !.ubsan !.no_txns # Not passing
+  # - name: .concurrency !.large !.no_txns # Not passing
+  # - name: .concurrency .large !.no_txns # Not passing
   #   distros:
   #   - rhel80-medium
   - name: disk_wiredtiger
@@ -840,7 +841,7 @@ buildvariants:
   - name: .auth
   - name: unittest_shell_hang_analyzer_gen
   - name: .misc_js
-  - name: .concurrency !.ubsan !.no_txns !.compute_mode
+  - name: .concurrency !.no_txns !.compute_mode
   - name: .config_fuzzer
   - name: .encrypt
   - name: .jscore .common !jsCore

@@ -167,6 +167,7 @@ functions:
           ${CMAKE_INSTALL_PREFIX|-DCMAKE_INSTALL_PREFIX=$(pwd)/cmake_build/LOCAL_INSTALL} \
           ${CMAKE_PREFIX_PATH|-DCMAKE_PREFIX_PATH="$(pwd)/TCMALLOC_LIB"} \
           ${CMAKE_TOOLCHAIN_FILE|-DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/mongodbtoolchain_stable_gcc.cmake} \
+          ${ENABLE_LAZYFS|} \
           ${ENABLE_TCMALLOC|} \
           ${NONSTANDALONE|} \
           ${ENABLE_SHARED|} \
@@ -2060,6 +2061,54 @@ tasks:
 
             ./test_timestamp_abort -PT -Po s3_store
 
+  - name: csuite-random-abort-lazyfs
+    commands:
+      - func: "get project"
+      - func: "compile wiredtiger"
+        vars:
+          ENABLE_LAZYFS: -DENABLE_LAZYFS=1
+      - command: shell.exec
+        params:
+          working_dir: "wiredtiger/cmake_build/test/csuite/random_abort"
+          shell: bash
+          script: |
+            set -o errexit
+            set -o verbose
+
+            ./smoke_lazyfs.sh
+
+  - name: csuite-schema-abort-lazyfs
+    commands:
+      - func: "get project"
+      - func: "compile wiredtiger"
+        vars:
+          ENABLE_LAZYFS: -DENABLE_LAZYFS=1
+      - command: shell.exec
+        params:
+          working_dir: "wiredtiger/cmake_build/test/csuite/schema_abort"
+          shell: bash
+          script: |
+            set -o errexit
+            set -o verbose
+
+            ./smoke_lazyfs.sh
+
+  - name: csuite-timestamp-abort-lazyfs
+    commands:
+      - func: "get project"
+      - func: "compile wiredtiger"
+        vars:
+          ENABLE_LAZYFS: -DENABLE_LAZYFS=1
+      - command: shell.exec
+        params:
+          working_dir: "wiredtiger/cmake_build/test/csuite/timestamp_abort"
+          shell: bash
+          script: |
+            set -o errexit
+            set -o verbose
+
+            ./smoke_lazyfs.sh
+
   - name: csuite-wt12015-backup-corruption-test
     tags: ["pull_request"]
     depends_on:
@@ -2501,7 +2550,7 @@ tasks:
           script: |
             set -o errexit
             set -o verbose
-            sh -x s_all -A -E 2>&1
+            sh -x s_all -E 2>&1
             # Run s_string with the "-r" option to remove no-longer-needed words from s_string.ok
             # This is run separately from s_all as it can be too proactive when run as part of
             # developers local workflow, but needs to be run in PR builds before the code is merged.
@@ -2770,13 +2819,13 @@ tasks:
       - func: "get project"
       - command: shell.exec
         params:
-          working_dir: "wiredtiger"
+          working_dir: "wiredtiger/dist"
           shell: bash
           script: |
             set -o errexit
             set -o verbose
-            # FIXME-WT-12144 Turn off noisy test failures until s_clang_scan is fixed.
-            # sh dist/s_clang_scan 2>&1
+            ${PREPARE_PATH}
+            sh s_clang_scan 2>&1
 
   - name: configure-combinations
     commands:

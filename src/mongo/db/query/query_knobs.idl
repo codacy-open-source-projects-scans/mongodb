@@ -852,7 +852,7 @@ server_parameters:
     set_at: [ startup, runtime ]
     cpp_varname: "internalCascadesOptimizerDisableSargableWhenNoIndexes"
     cpp_vartype: AtomicWord<bool>
-    default: false
+    default: true
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
 
   internalCascadesOptimizerFastIndexNullHandling:
@@ -975,6 +975,15 @@ server_parameters:
     cpp_varname: "internalCascadesOptimizerDisableFastPath"
     cpp_vartype: AtomicWord<bool>
     default: false
+
+  internalCascadesOptimizerEnableParameterization:
+    description: "Enables query parameterization of constants."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalCascadesOptimizerEnableParameterization"
+    cpp_vartype: AtomicWord<bool>
+    default: false
+    test_only: true
+    on_update: plan_cache_util::clearSbeCacheOnParameterChange
 
   internalQueryFrameworkControl:
     description: "Knob to control the optimizer/execution engine to use."
@@ -1425,6 +1434,13 @@ server_parameters:
     default: 1000
     validator:
       gte: 0
+
+  internalQueryCollectOptimizerMetrics:
+   description: "If true, collect query optimizer metrics in queryStats."
+   set_at: [ startup, runtime ]
+   cpp_varname:  internalQueryCollectOptimizerMetrics
+   cpp_vartype: AtomicWord<bool>
+   default: false
 
 # Note for adding additional query knobs:
 #
