@@ -268,8 +268,9 @@ public:
         storageGlobalParams.ephemeral = false;
 
         auto uniqueOpCtx = _svcCtx->makeOperationContext(&cc());
-        uniqueOpCtx->setRecoveryUnit(std::make_unique<RecoveryUnitNoop>(),
-                                     WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+        shard_role_details::setRecoveryUnit(uniqueOpCtx.get(),
+                                            std::make_unique<RecoveryUnitNoop>(),
+                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
         initializeStorageEngine(uniqueOpCtx.get(),
                                 StorageEngineInitFlags::kAllowNoLockFile |
                                     StorageEngineInitFlags::kSkipMetadataFile |
@@ -541,7 +542,7 @@ public:
 
             // Advance timestamps.
             _testSvcCtx->getReplCoordMock()->setMyLastAppliedOpTimeAndWallTimeForward(
-                {lastOpTimeInBatch, lastWallTimeInBatch}, true);
+                {lastOpTimeInBatch, lastWallTimeInBatch});
             _testSvcCtx->getReplCoordMock()->setMyLastDurableOpTimeAndWallTimeForward(
                 {lastOpTimeInBatch, lastWallTimeInBatch});
             repl::StorageInterface::get(opCtx)->setStableTimestamp(

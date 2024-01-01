@@ -28,6 +28,11 @@ ignore:
 variables:
 
 # Used when the tests it runs depend only on mongod, mongos, the jstestshell and the tools.
+# THIS HAS COPIES IN
+# - etc/evergreen_yml_components/definitions.yml
+# - etc/evergreen_yml_components/tasks/components/aggregation_framework/resmoke_tasks.yml
+# - etc/evergreen_yml_components/tasks/components/change_streams/resmoke_tasks.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &task_template
   name: template
   depends_on:
@@ -39,6 +44,12 @@ variables:
       resmoke_args: --help
       resmoke_jobs_max: 0  # No cap on number of jobs.
 
+# THIS HAS COPIES IN
+# - etc/evergreen_yml_components/definitions.yml
+# - etc/evergreen_yml_components/tasks/components/aggregation_framework/resmoke_tasks.yml
+# - etc/evergreen_yml_components/tasks/components/change_streams/resmoke_tasks.yml
+# - etc/evergreen_yml_components/tasks/components/replication/resmoke_tasks.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &gen_task_template
   name: gen_task_template
   depends_on:
@@ -107,6 +118,11 @@ variables:
     vars:
       <<: *jepsen_config_vars
 
+# THIS HAS COPIES IN
+# - etc/evergreen_yml_components/definitions.yml
+# - etc/evergreen_yml_components/tasks/components/aggregation_framework/resmoke_tasks.yml
+# - etc/evergreen_yml_components/tasks/components/change_streams/resmoke_tasks.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &jstestfuzz_config_vars
   is_jstestfuzz: true
   num_files: 15
@@ -127,6 +143,11 @@ variables:
   timeout_secs: 1800
 
 # Used for tests that invoke 'resmoke.py --suites=jstestfuzz*'.
+# THIS HAS COPIES IN
+# - etc/evergreen_yml_components/definitions.yml
+# - etc/evergreen_yml_components/tasks/components/aggregation_framework/resmoke_tasks.yml
+# - etc/evergreen_yml_components/tasks/components/change_streams/resmoke_tasks.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &jstestfuzz_template
   name: jstestfuzz_template
   exec_timeout_secs: 14400 # Time out the task if it runs for more than 4 hours.
@@ -4458,155 +4479,6 @@ tasks:
       suite: initial_sync_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
-## Standalone generational fuzzer for multiversion aggregation pipelines ##
-- <<: *jstestfuzz_template
-  name: aggregation_multiversion_fuzzer_gen
-  tags: ["aggfuzzer", "common", "multiversion", "require_npm", "random_name", "future_git_tag_incompatible"]
-  commands:
-  - func: "initialize multiversion tasks"
-    vars:
-      aggregation_multiversion_fuzzer_last_lts: last_lts
-      aggregation_multiversion_fuzzer_last_continuous: last_continuous
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      npm_command: agg-fuzzer
-      run_no_feature_flag_tests: "true"
-
-## Standalone generational fuzzer for multiversion aggregation expressions ##
-- <<: *jstestfuzz_template
-  name: aggregation_expression_multiversion_fuzzer_gen
-  tags: ["aggfuzzer", "multiversion", "require_npm", "random_name"]
-  commands:
-  - func: "initialize multiversion tasks"
-    vars:
-      aggregation_expression_multiversion_fuzzer_last_lts: last_lts
-      aggregation_expression_multiversion_fuzzer_last_continuous: last_continuous
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      npm_command: agg-expr-fuzzer
-      run_no_feature_flag_tests: "true"
-
-## Standalone generational fuzzer for checking optimized and unoptimized expression equivalence
-- <<: *jstestfuzz_template
-  name: aggregation_expression_optimization_fuzzer_gen
-  tags: ["aggfuzzer", "require_npm", "random_name"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      jstestfuzz_vars: --diffTestingMode optimization
-      suite: generational_fuzzer
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      npm_command: agg-expr-fuzzer
-
-## Standalone generational fuzzer for checking optimized and unoptimized aggregation pipelines
-- <<: *jstestfuzz_template
-  name: aggregation_optimization_fuzzer_gen
-  tags: ["aggfuzzer", "require_npm", "random_name"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      jstestfuzz_vars: --diffTestingMode optimization
-      suite: generational_fuzzer
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-      npm_command: agg-fuzzer
-
-## Standalone fuzzer for checking wildcard index correctness ##
-- <<: *jstestfuzz_template
-  name: aggregation_wildcard_fuzzer_gen
-  tags: ["aggfuzzer", "common", "wildcard", "require_npm", "random_name"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      jstestfuzz_vars: --diffTestingMode wildcard
-      npm_command: agg-fuzzer
-      suite: generational_fuzzer
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-
-# Disabled under SERVER-81088
-# ## Standalone fuzzer for checking columnstore index correctness ##
-# - <<: *jstestfuzz_template
-#   name: aggregation_columnstore_fuzzer_gen
-#   tags: ["aggfuzzer", "common", "columnstore", "require_npm", "random_name", "sbe_only", "feature_flag_guarded"]
-#   commands:
-#   - func: "generate resmoke tasks"
-#     vars:
-#       <<: *jstestfuzz_config_vars
-#       num_files: 20
-#       num_tasks: 20
-#       jstestfuzz_vars: --diffTestingMode columnstore
-#       npm_command: agg-fuzzer
-#       suite: generational_fuzzer
-#       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-
-## Standalone fuzzer for checking timeseries optimizations correctness ##
-- <<: *jstestfuzz_template
-  name: aggregation_timeseries_fuzzer_gen
-  tags: ["aggfuzzer", "common", "timeseries", "require_npm", "random_name", "no_debug_mode"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      # We have seen some common scenarios where the generated pipelines take a while to run and can
-      # hit some timeouts. We'll split 80000 pipelines across 80 files, compared to 80000 pipelines
-      # across 20 files in the other generational agg fuzzers. This approach can be considered if we
-      # see similar timeouts elsewhere. It is not well understood whether/how we could pass
-      # 'numPipelines' as an argument in the yaml here, but it works as part of the
-      # 'jstestfuzz_vars' argument string. If a future reader better understands this evergreen
-      # integration, please update this comment and/or move numPipelines to a yaml arg here.
-      num_files: 80
-      num_tasks: 20
-      jstestfuzz_vars: --diffTestingMode timeseries --numPipelines=1000
-      npm_command: agg-fuzzer
-      suite: generational_fuzzer
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-
-## Standalone fuzzer for checking Bonsai optimizations correctness vs SBE stage-builders ##
-- <<: *jstestfuzz_template
-  name: aggregation_bonsai_m2_vs_sbe_stagebuilders_fuzzer_gen
-  tags: ["aggfuzzer", "common", "bonsai", "require_npm", "random_name", "no_debug_mode", "feature_flag_guarded", "cqf_only"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      jstestfuzz_vars: --diffTestingMode bonsai_m2_vs_sbe_stagebuilders
-      npm_command: agg-fuzzer
-      suite: generational_fuzzer
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-
-## Standalone fuzzer for checking Bonsai optimizations correctness vs Classic ##
-- <<: *jstestfuzz_template
-  name: aggregation_bonsai_m2_vs_classic_fuzzer_gen
-  tags: ["aggfuzzer", "common", "bonsai", "require_npm", "random_name", "no_debug_mode", "feature_flag_guarded", "cqf_only"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      jstestfuzz_vars: --diffTestingMode bonsai_m2_vs_classic
-      npm_command: agg-fuzzer
-      suite: generational_fuzzer
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-
 ## Standalone fuzzer comparing find query results of Bonsai optimizations vs SBE stage-builders ##
 - <<: *jstestfuzz_template
   name: query_fuzzer_bonsai_m2_vs_sbe_stagebuilders_gen
@@ -4634,21 +4506,6 @@ tasks:
       num_tasks: 20
       jstestfuzz_vars: --diffTestingMode bonsai_m2_vs_classic
       npm_command: query-fuzzer
-      suite: generational_fuzzer
-      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-
-## Standalone generational fuzzer for checking optimized and unoptimized change stream pipelines ##
-- <<: *jstestfuzz_template
-  name: change_stream_optimization_fuzzer_gen
-  tags: ["change_stream_fuzzer", "require_npm", "random_name"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      <<: *jstestfuzz_config_vars
-      num_files: 20
-      num_tasks: 20
-      jstestfuzz_vars: --diffTestingMode optimization
-      npm_command: change-stream-fuzzer
       suite: generational_fuzzer
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
@@ -5399,143 +5256,6 @@ tasks:
 ## integration test suites ##
 
 - <<: *task_template
-  name: aggregation
-  tags: ["aggregation", "common"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_repeat_queries
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_disabled_optimization
-  tags: ["aggregation", "common"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_ese
-  tags: ["aggregation", "encrypt"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_ese_gcm
-  tags: ["aggregation", "encrypt", "gcm"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_auth
-  tags: ["aggregation", "auth", "common"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_facet_unwind_passthrough
-  tags: ["aggregation", "unwind"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_mongos_passthrough
-  tags: ["aggregation", "no_async"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_one_shard_sharded_collections
-  tags: ["aggregation", "no_async", "sharded"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_read_concern_majority_passthrough
-  tags: ["aggregation", "read_write_concern", "no_debug_mode"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_jobs_factor: 0.5
-
-- <<: *gen_task_template
-  name: aggregation_secondary_reads_gen
-  tags: ["aggregation", "secondary_reads"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-      resmoke_jobs_max: 1
-
-- <<: *task_template
-  name: aggregation_sharded_collections_passthrough
-  tags: ["aggregation", "common", "sharded"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_sharded_collections_causally_consistent_passthrough
-  tags: ["aggregation", "secondary_reads", "sharded"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *gen_task_template
-  name: aggregation_unsplittable_collections_on_random_shard_passthrough
-  # TODO SERVER-83445 Enable on non-all-feature-flag variants.
-  tags: ["unsplittable_collections"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: aggregation_column_store_index_passthrough
-  # TODO SERVER-75026 Remove the 'feature_flag_guarded' tag and ensure this suite is run on all
-  # variants.
-  tags: ["aggregation", "sbe_only", "feature_flag_guarded"]
-  depends_on:
-  - name: aggregation
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
   name: audit
   tags: ["audit", "patch_build"]
   commands:
@@ -5607,73 +5327,6 @@ tasks:
   commands:
   - func: "generate resmoke tasks"
 
-- <<: *task_template
-  name: change_streams
-  tags: ["change_streams"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *gen_task_template
-  name: change_streams_multiversion_gen
-  tags: ["multiversion", "multiversion_passthrough"]
-  commands:
-  - func: "initialize multiversion tasks"
-    vars:
-      change_streams_last_continuous_new_new_old: last_continuous
-      change_streams_last_continuous_new_old_new: last_continuous
-      change_streams_last_continuous_old_new_new: last_continuous
-      change_streams_last_lts_new_new_old: last_lts
-      change_streams_last_lts_new_old_new: last_lts
-      change_streams_last_lts_old_new_new: last_lts
-  - func: "generate resmoke tasks"
-    vars:
-      suite: change_streams
-      run_no_feature_flag_tests: "true"
-
-- <<: *gen_task_template
-  name: change_streams_downgrade_gen
-  tags: ["multiversion_passthrough", "multiversion"]
-  commands:
-  - func: "initialize multiversion tasks"
-    vars:
-      change_streams_downgrade_last_continuous_new_old_old_new: last_continuous
-      change_streams_downgrade_last_lts_new_old_old_new: last_lts
-  - func: "generate resmoke tasks"
-    vars:
-      run_no_feature_flag_tests: "true"
-
-- <<: *task_template
-  name: change_streams_mongos_sessions_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_secondary_reads_sharded_collections
-  tags: ["change_streams", "secondary_reads"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *gen_task_template
-  name: change_streams_sharded_collections_multiversion_gen
-  tags: ["multiversion_passthrough", "multiversion"]
-  commands:
-  - func: "initialize multiversion tasks"
-    vars:
-      change_streams_sharded_collections_passthrough_last_continuous_new_old_old_new: last_continuous
-      change_streams_sharded_collections_passthrough_last_lts_new_old_old_new: last_lts
-  - func: "generate resmoke tasks"
-    vars:
-      suite: change_streams_sharded_collections_passthrough
-      run_no_feature_flag_tests: "true"
-
 - <<: *gen_task_template
   name: multiversion_future_git_tag_gen
   tags: ["multiversion", "no_multiversion_generate_tasks", "multiversion_future_git_tag"]
@@ -5689,90 +5342,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       suite: multiversion_auth_future_git_tag
-
-- <<: *task_template
-  name: change_streams_whole_db_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_whole_db_secondary_reads_sharded_collections
-  tags: ["change_streams", "secondary_reads"]
-  depends_on:
-  - name: change_streams_secondary_reads_sharded_collections
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_whole_cluster_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_whole_cluster_secondary_reads_sharded_collections
-  tags: ["change_streams", "secondary_reads"]
-  depends_on:
-  - name: change_streams_secondary_reads_sharded_collections
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_multi_stmt_txn_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_multi_stmt_txn_mongos_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_multi_stmt_txn_sharded_collections_passthrough
-  tags: ["change_streams"]
-  depends_on:
-  - name: change_streams
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_per_shard_cursor_passthrough
-  tags: ["change_streams"]
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_multitenant_passthrough
-  tags: []  # TODO SERVER-57866: Add the "change_streams" tag here.
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-
-- <<: *task_template
-  name: change_streams_multitenant_sharded_collections_passthrough
-  tags: []  # TODO SERVER-57866: Add the "change_streams" tag here.
-  commands:
-  - func: "do setup"
-  - func: "run tests"
 
 - <<: *task_template
   name: disk_wiredtiger
@@ -6229,30 +5798,6 @@ tasks:
   - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
-  name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
-  tags: []
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
-  name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
-  tags: []
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
-  name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
-  tags: []
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
-  name: change_streams_change_collection_replica_sets_kill_secondary_jscore_passthrough_gen
-  tags: []
-  commands:
-  - func: "generate resmoke tasks"
-
-- <<: *gen_task_template
   name: replica_sets_api_version_jscore_passthrough_gen
   tags: []
   commands:
@@ -6600,111 +6145,6 @@ tasks:
   - func: "generate resmoke tasks"
     vars:
       use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_replica_sets_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_replica_sets_multi_stmt_txn_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_replica_sets_multi_stmt_txn_kill_stepdown_terminate_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_replica_sets_kill_stepdown_terminate_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_causally_consistent_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_multi_op_causally_consistent_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_targeted_override_gen
-  tags: ["bulk_write"]
-  commands:
-    - func: "generate resmoke tasks"
-      vars:
-        use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_sharded_collections_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_sharded_causally_consistent_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_sharded_multi_stmt_txn_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: bulk_write_multi_op_sharded_collections_jscore_passthrough_gen
-  tags: ["bulk_write"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: concurrency_replication_bulk_write_gen
-  tags: ["bulk_write"]
-  commands:
-    - func: "generate resmoke tasks"
-      vars:
-        use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: concurrency_sharded_replication_bulk_write_gen
-  tags: ["bulk_write"]
-  commands:
-    - func: "generate resmoke tasks"
-      vars:
-        use_large_distro: "true"
-        resmoke_jobs_max: 1
 
 - <<: *gen_task_template
   name: shard_split_jscore_passthrough_gen

@@ -95,7 +95,6 @@
 #include "mongo/db/global_index.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/locker_api.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_util.h"
@@ -481,36 +480,31 @@ void logOplogRecords(OperationContext* opCtx,
     }
 
     // Set replCoord last optime only after we're sure the WUOW didn't abort and roll back.
-    opCtx->recoveryUnit()->onCommit(
-        [replCoord, finalOpTime, wallTime](OperationContext* opCtx,
-                                           boost::optional<Timestamp> commitTime) {
-            if (commitTime) {
-                // The `finalOpTime` may be less than the `commitTime` if multiple oplog entries
-                // are logging within one WriteUnitOfWork.
-                invariant(finalOpTime.getTimestamp() <= *commitTime,
-                          str::stream() << "Final OpTime: " << finalOpTime.toString()
-                                        << ". Commit Time: " << commitTime->toString());
-            }
+    shard_role_details::getRecoveryUnit(opCtx)->onCommit([replCoord, finalOpTime, wallTime](
+                                                             OperationContext* opCtx,
+                                                             boost::optional<Timestamp>
+                                                                 commitTime) {
+        if (commitTime) {
+            // The `finalOpTime` may be less than the `commitTime` if multiple oplog entries
+            // are logging within one WriteUnitOfWork.
+            invariant(finalOpTime.getTimestamp() <= *commitTime,
+                      str::stream() << "Final OpTime: " << finalOpTime.toString()
+                                    << ". Commit Time: " << commitTime->toString());
+        }
 
-            // Optionally hang before advancing lastApplied.
-            if (MONGO_unlikely(hangBeforeLogOpAdvancesLastApplied.shouldFail())) {
-                LOGV2(21243, "hangBeforeLogOpAdvancesLastApplied fail point enabled");
-                hangBeforeLogOpAdvancesLastApplied.pauseWhileSet(opCtx);
-            }
+        // Optionally hang before advancing lastApplied.
+        if (MONGO_unlikely(hangBeforeLogOpAdvancesLastApplied.shouldFail())) {
+            LOGV2(21243, "hangBeforeLogOpAdvancesLastApplied fail point enabled");
+            hangBeforeLogOpAdvancesLastApplied.pauseWhileSet(opCtx);
+        }
 
-            // As an optimization, we skip advancing the global timestamp. In this path on the
-            // primary, the caller will have already advanced the clock to at least this value when
-            // allocating the timestamp.
-            const bool advanceGlobalTimestamp = false;
+        // Optimes on the primary should always represent consistent database states.
+        replCoord->setMyLastAppliedAndLastWrittenOpTimeAndWallTimeForward({finalOpTime, wallTime});
 
-            // Optimes on the primary should always represent consistent database states.
-            replCoord->setMyLastAppliedOpTimeAndWallTimeForward({finalOpTime, wallTime},
-                                                                advanceGlobalTimestamp);
-
-            // We set the last op on the client to 'finalOpTime', because that contains the
-            // timestamp of the operation that the client actually performed.
-            ReplClientInfo::forClient(opCtx->getClient()).setLastOp(opCtx, finalOpTime);
-        });
+        // We set the last op on the client to 'finalOpTime', because that contains the
+        // timestamp of the operation that the client actually performed.
+        ReplClientInfo::forClient(opCtx->getClient()).setLastOp(opCtx, finalOpTime);
+    });
 }
 
 OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
@@ -550,7 +544,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
 
     // TODO SERVER-51301 to remove this block.
     if (oplogEntry->getOpType() == repl::OpTypeEnum::kNoop) {
-        opCtx->recoveryUnit()->ignoreAllMultiTimestampConstraints();
+        shard_role_details::getRecoveryUnit(opCtx)->ignoreAllMultiTimestampConstraints();
     }
 
     // Use OplogAccessMode::kLogOp to avoid recursive locking.
@@ -1770,7 +1764,9 @@ Status applyOperation_inlock(OperationContext* opCtx,
                         WriteUnitOfWork wuow(opCtx);
                         // If `haveWrappingWriteUnitOfWork` is true, do not timestamp the write.
                         if (assignOperationTimestamp && timestamp != Timestamp::min()) {
-                            uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(timestamp));
+                            uassertStatusOK(
+                                shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(
+                                    timestamp));
                         }
 
                         UpdateResult res = update(opCtx, collectionAcquisition, request);
@@ -1882,7 +1878,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
             auto status = writeConflictRetryWithLimit(opCtx, "applyOps_update", op.getNss(), [&] {
                 WriteUnitOfWork wuow(opCtx);
                 if (timestamp != Timestamp::min()) {
-                    uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(timestamp));
+                    uassertStatusOK(
+                        shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(timestamp));
                 }
 
                 if (recordChangeStreamPreImage && request.shouldReturnNewDocs()) {
@@ -2039,7 +2036,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
             writeConflictRetryWithLimit(opCtx, "applyOps_delete", op.getNss(), [&] {
                 WriteUnitOfWork wuow(opCtx);
                 if (timestamp != Timestamp::min()) {
-                    uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(timestamp));
+                    uassertStatusOK(
+                        shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(timestamp));
                 }
 
                 DeleteRequest request;
@@ -2172,7 +2170,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 opCtx, "applyOps_insertGlobalIndexKey", collection->ns(), [&] {
                     WriteUnitOfWork wuow(opCtx);
                     if (timestamp != Timestamp::min()) {
-                        uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(timestamp));
+                        uassertStatusOK(
+                            shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(timestamp));
                     }
 
                     global_index::insertKey(
@@ -2197,7 +2196,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
                 opCtx, "applyOps_deleteGlobalIndexKey", collection->ns(), [&] {
                     WriteUnitOfWork wuow(opCtx);
                     if (timestamp != Timestamp::min()) {
-                        uassertStatusOK(opCtx->recoveryUnit()->setTimestamp(timestamp));
+                        uassertStatusOK(
+                            shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(timestamp));
                     }
 
                     global_index::deleteKey(
@@ -2413,7 +2413,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
                     IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
                         opCtx, swUUID.get());
 
-                    opCtx->recoveryUnit()->abandonSnapshot();
+                    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
                     opCtx->checkForInterrupt();
 
                     LOGV2_DEBUG(

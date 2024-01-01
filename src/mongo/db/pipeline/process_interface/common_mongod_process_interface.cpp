@@ -57,6 +57,7 @@
 #include "mongo/db/collection_index_usage_tracker.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/concurrency/fill_locker_info.h"
 #include "mongo/db/concurrency/flow_control_ticketholder.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
@@ -65,7 +66,6 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/locker_api.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
@@ -88,7 +88,6 @@
 #include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/shard_id.h"
-#include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
@@ -101,6 +100,7 @@
 #include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_resource_yielder.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/db/views/view.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -156,7 +156,7 @@ void assertIgnorePrepareConflictsBehavior(const boost::intrusive_ptr<ExpressionC
     tassert(5996900,
             "Expected operation to either be blocking on prepare conflicts or ignoring prepare "
             "conflicts and allowing writes",
-            expCtx->opCtx->recoveryUnit()->getPrepareConflictBehavior() !=
+            shard_role_details::getRecoveryUnit(expCtx->opCtx)->getPrepareConflictBehavior() !=
                 PrepareConflictBehavior::kIgnoreConflicts);
 }
 
