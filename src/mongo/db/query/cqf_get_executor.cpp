@@ -370,6 +370,8 @@ QueryHints getHintsFromQueryKnobs() {
         internalCascadesOptimizerSamplingCEFallBackForFilterNode.load();
     hints._samplingCollectionSizeMin = internalCascadesOptimizerSampleSizeMin.load();
     hints._samplingCollectionSizeMax = internalCascadesOptimizerSampleSizeMax.load();
+    hints._sampleIndexedFields = internalCascadesOptimizerSampleIndexedFields.load();
+    hints._sampleTwoFields = internalCascadesOptimizerSampleTwoFields.load();
     hints._sqrtSampleSizeEnabled = internalCascadesOptimizerEnableSqrtSampleSize.load();
 
     return hints;
@@ -389,41 +391,37 @@ void setupShardFiltering(OperationContext* opCtx,
         : collections.getMainCollection().isSharded_DEPRECATED();
     if (isSharded) {
         // Allocate a global slot for shard filtering and register it in 'runtimeEnv'.
-        sbe::value::SlotId shardFiltererSlot = runtimeEnv.registerSlot(
+        runtimeEnv.registerSlot(
             kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &slotIdGenerator);
-        populateShardFiltererSlot(opCtx, runtimeEnv, shardFiltererSlot, collections);
     }
 }
+
+struct PlanWithData {
+    bool fromCache;
+    std::unique_ptr<sbe::PlanStage> plan;
+    stage_builder::PlanStageData planData;
+};
 
 bool shouldCachePlan(const sbe::PlanStage& plan) {
     // TODO SERVER-84385: Investigate ExchangeConsumer hangups when inserting into SBE plan cache.
     return typeid(plan) != typeid(sbe::ExchangeConsumer);
 }
 
-template <typename QueryType>
-static ExecParams createExecutor(
-    OptPhaseManager phaseManager,
-    PlanAndProps planAndProps,
-    OperationContext* opCtx,
-    boost::intrusive_ptr<ExpressionContext> expCtx,
-    const NamespaceString& nss,
-    const MultipleCollectionAccessor& collections,
-    const bool requireRID,
-    const boost::optional<MatchExpression*> pipelineMatchExpr,
-    const QueryType& query,
-    const boost::optional<sbe::PlanCacheKey>& planCacheKey,
-    PlanYieldPolicy::YieldPolicy yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO) {
-    auto env = VariableEnvironment::build(planAndProps._node);
+/*
+ * This function either creates a plan or fetches one from cache.
+ */
+PlanWithData plan(OptPhaseManager& phaseManager,
+                  PlanAndProps& planAndProps,
+                  OperationContext* opCtx,
+                  const MultipleCollectionAccessor& collections,
+                  const bool requireRID,
+                  const std::unique_ptr<PlanYieldPolicySBE>& sbeYieldPolicy,
+                  VariableEnvironment& env) {
+
     SlotVarMap slotMap;
     auto runtimeEnvironment = std::make_unique<sbe::RuntimeEnvironment>();  // TODO use factory
     sbe::value::SlotIdGenerator ids;
     boost::optional<sbe::value::SlotId> ridSlot;
-
-    std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy;
-    if (!phaseManager.getMetadata().isParallelExecution()) {
-        // TODO SERVER-80311: Enable yielding for parallel scan plans.
-        sbeYieldPolicy = PlanYieldPolicySBE::make(opCtx, yieldPolicy, collections, nss);
-    }
 
     // Construct the ShardFilterer and bind it to the correct slot.
     setupShardFiltering(opCtx, collections, *runtimeEnvironment, ids);
@@ -454,6 +452,35 @@ static ExecParams createExecutor(
 
     stage_builder::PlanStageData data(stage_builder::Environment(std::move(runtimeEnvironment)),
                                       std::move(staticData));
+
+    return {false, std::move(sbePlan), data};
+}
+
+template <typename QueryType>
+static ExecParams createExecutor(
+    OptPhaseManager phaseManager,
+    PlanAndProps planAndProps,
+    OperationContext* opCtx,
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    const NamespaceString& nss,
+    const MultipleCollectionAccessor& collections,
+    const bool requireRID,
+    const boost::optional<MatchExpression*> pipelineMatchExpr,
+    const QueryType& query,
+    const boost::optional<sbe::PlanCacheKey>& planCacheKey,
+    OptimizerCounterInfo optCounterInfo,
+    PlanYieldPolicy::YieldPolicy yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO) {
+    auto env = VariableEnvironment::build(planAndProps._node);
+
+    std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy;
+    if (!phaseManager.getMetadata().isParallelExecution()) {
+        // TODO SERVER-80311: Enable yielding for parallel scan plans.
+        sbeYieldPolicy = PlanYieldPolicySBE::make(opCtx, yieldPolicy, collections, nss);
+    }
+
+    // Get the plan either from cache or by lowering + optimization.
+    auto [fromCache, sbePlan, data] =
+        plan(phaseManager, planAndProps, opCtx, collections, requireRID, sbeYieldPolicy, env);
 
     sbePlan->attachToOperationContext(opCtx);
     if (expCtx->explain || expCtx->mayDbProfile) {
@@ -527,7 +554,8 @@ static ExecParams createExecutor(
             std::move(sbeYieldPolicy),
             false /*isFromPlanCache*/,
             true /* generatedByBonsai */,
-            pipelineMatchExpr};
+            pipelineMatchExpr,
+            std::move(optCounterInfo)};
 }
 
 bool isIndexDefinitionId(const IndexDefinition& idx) {
@@ -597,6 +625,14 @@ OptPhaseManager createSamplingPhaseManager(const cost_model::CostModelCoefficien
         entry.second.shardingMetadata().setMayContainOrphans(false);
     }
 
+    QueryHints samplingHints{._numSamplingChunks = hints._numSamplingChunks,
+                             ._samplingCollectionSizeMin = hints._samplingCollectionSizeMin,
+                             ._samplingCollectionSizeMax = hints._samplingCollectionSizeMax,
+                             ._sampleIndexedFields = hints._sampleIndexedFields,
+                             ._sampleTwoFields = hints._sampleTwoFields,
+                             ._sqrtSampleSizeEnabled = hints._sqrtSampleSizeEnabled};
+
+    OptimizerCounterInfo optCounterInfo;
     return {OptPhaseManager::PhasesAndRewrites::getDefaultForSampling(),
             prefixId,
             false /*requireRID*/,
@@ -607,11 +643,9 @@ OptPhaseManager createSamplingPhaseManager(const cost_model::CostModelCoefficien
             defaultConvertPathToInterval,
             constFold,
             DebugInfo::kDefaultForProd,
-            {._numSamplingChunks = hints._numSamplingChunks,
-             ._samplingCollectionSizeMin = hints._samplingCollectionSizeMin,
-             ._samplingCollectionSizeMax = hints._samplingCollectionSizeMax,
-             ._sqrtSampleSizeEnabled = hints._sqrtSampleSizeEnabled} /*hints*/,
-            queryParameters};
+            samplingHints,
+            queryParameters,
+            optCounterInfo};
 }
 
 // Helper to construct an appropriate 'CardinalityEstimator'.
@@ -909,7 +943,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     const MultipleCollectionAccessor& collections,
     QueryHints queryHints,
     const boost::optional<BSONObj>& indexHint,
-    const Pipeline* pipeline,
+    Pipeline* pipeline,
     const CanonicalQuery* canonicalQuery) {
     if (MONGO_unlikely(failConstructingBonsaiExecutor.shouldFail())) {
         uasserted(620340, "attempting to use CQF while it is disabled");
@@ -982,25 +1016,32 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     if (pipeline) {
         _isCacheable &= [&]() -> bool {
             auto& sources = pipeline->getSources();
-            if (sources.empty())
+
+            // Sources cannot be empty or contain more than two stages.
+            if (sources.empty() || sources.size() > 2) {
                 return false;
+            }
 
             // First stage must be a DocumentSourceMatch.
-            const auto& it = sources.begin();
-            auto firstStageName = it->get()->getSourceName();
-            if (firstStageName != DocumentSourceMatch::kStageName)
+            const auto& firstStageItr = sources.begin();
+            auto firstStageName = firstStageItr->get()->getSourceName();
+            if (firstStageName != DocumentSourceMatch::kStageName) {
                 return false;
+            }
 
             // If optional second stage exists, must be a projection stage.
-            auto secondStageItr = std::next(it);
-            if (secondStageItr != sources.end())
+            auto secondStageItr = std::next(firstStageItr);
+            if (secondStageItr != sources.end()) {
                 return secondStageItr->get()->getSourceName() == DocumentSourceProject::kStageName;
+            }
 
             return true;
         }();
+
+        // TODO SERVER-84528: Perform parameterization before calling
+        // getSBEExecutorViaCascadesOptimizer
         if (_isCacheable) {
-            MatchExpression::parameterize(
-                dynamic_cast<DocumentSourceMatch*>(pipeline->peekFront())->getMatchExpression());
+            pipeline->parameterize();
         }
 
         abt = translatePipelineToABT(metadata,
@@ -1048,6 +1089,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                                                            queryHints,
                                                            collectionExists,
                                                            queryParameters);
+    OptimizerCounterInfo optCounterInfo;
     OptPhaseManager phaseManager{std::move(phasesAndRewrites),
                                  prefixId,
                                  requireRID,
@@ -1059,7 +1101,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                                  constFold,
                                  DebugInfo::kDefaultForProd,
                                  std::move(queryHints),
-                                 std::move(queryParameters)};
+                                 std::move(queryParameters),
+                                 optCounterInfo};
 
     auto resultPlans = phaseManager.optimizeNoAssert(std::move(abt), false /*includeRejected*/);
     if (resultPlans.empty()) {
@@ -1117,7 +1160,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                               requireRID,
                               pipelineMatchExpr,
                               *pipeline,
-                              planCacheKey);
+                              planCacheKey,
+                              std::move(optCounterInfo));
     } else if (canonicalQuery) {
         return createExecutor(std::move(phaseManager),
                               std::move(planAndProps),
@@ -1128,7 +1172,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                               requireRID,
                               pipelineMatchExpr,
                               *canonicalQuery,
-                              planCacheKey);
+                              planCacheKey,
+                              std::move(optCounterInfo));
     } else {
         MONGO_UNREACHABLE;
     }
@@ -1160,12 +1205,19 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> makeExecFromParams(
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+    const MultipleCollectionAccessor& collections,
     ExecParams execArgs) {
     if (cq) {
         input_params::bind(cq->getPrimaryMatchExpression(), execArgs.root.second, false);
     } else if (execArgs.pipelineMatchExpr != boost::none) {
         // If pipeline contains a parameterized MatchExpression, bind constants.
         input_params::bind(execArgs.pipelineMatchExpr.get(), execArgs.root.second, false);
+    }
+
+    if (auto shardFiltererSlot =
+            execArgs.root.second.env->getSlotIfExists(kshardFiltererSlotName)) {
+        populateShardFiltererSlot(
+            execArgs.opCtx, *execArgs.root.second.env, *shardFiltererSlot, collections);
     }
 
     return plan_executor_factory::make(execArgs.opCtx,
@@ -1179,6 +1231,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> makeExecFromPar
                                        std::move(execArgs.yieldPolicy),
                                        execArgs.planIsFromCache,
                                        false, /* matchesCachedPlan */
-                                       execArgs.generatedByBonsai);
+                                       execArgs.generatedByBonsai,
+                                       std::move(execArgs.optCounterInfo));
 }
 }  // namespace mongo

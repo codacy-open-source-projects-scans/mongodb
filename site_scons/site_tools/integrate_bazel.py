@@ -27,6 +27,15 @@ _SUPPORTED_PLATFORM_MATRIX = [
     "macos:arm64:clang",
 ]
 
+_SANITIZER_MAP = {
+    "address": "asan",
+    "fuzzer": "fsan",
+    "memory": "msan",
+    "leak": "lsan",
+    "thread": "tsan",
+    "undefined": "ubsan",
+}
+
 
 class Globals:
 
@@ -410,6 +419,7 @@ def generate(env: SCons.Environment.Environment) -> None:
         bazel_internal_flags = [
             f'--//bazel/config:compiler_type={env.ToolchainName()}',
             f'--//bazel/config:build_mode={build_mode}',
+            f'--//bazel/config:separate_debug={True if env.GetOption("separate-debug") == "on" else False}',
             f'--//bazel/config:use_libunwind={env["USE_VENDORED_LIBUNWIND"]}',
             f'--//bazel/config:use_gdbserver={False if env.GetOption("gdbserver") is None else True}',
             f'--//bazel/config:spider_monkey_dbg={True if env.GetOption("spider-monkey-dbg") == "on" else False}',
@@ -420,6 +430,7 @@ def generate(env: SCons.Environment.Environment) -> None:
             f'--//bazel/config:use_disable_ref_track={False if env.GetOption("disable-ref-track") is None else True}',
             f'--//bazel/config:use_wiredtiger={True if env.GetOption("wiredtiger") == "on" else False}',
             f'--//bazel/config:build_grpc={True if env["ENABLE_GRPC_BUILD"] else False}',
+            f'--//bazel/config:use_libcxx={env.GetOption("libc++") is not None}',
             f'--dynamic_mode={"off" if static_link else "fully"}',
             f'--platforms=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
             f'--host_platform=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
@@ -430,7 +441,7 @@ def generate(env: SCons.Environment.Environment) -> None:
 
         if sanitizer_option is not None:
             options = sanitizer_option.split(",")
-            formatted_options = [f'--//bazel/config:sanitize={opt}' for opt in options]
+            formatted_options = [f'--//bazel/config:{_SANITIZER_MAP[opt]}=True' for opt in options]
             bazel_internal_flags.extend(formatted_options)
 
         if normalized_os != "linux" or normalized_arch not in ["arm64", 'amd64']:

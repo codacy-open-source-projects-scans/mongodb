@@ -31,6 +31,7 @@
 
 #include "mongo/db/curop.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/query/query_shape/agg_cmd_shape.h"
 #include "mongo/db/query/query_shape/distinct_cmd_shape.h"
@@ -67,14 +68,23 @@ RepresentativeQueryInfo createRepresentativeInfoFind(
                                                    kSerializationContext),
                                   queryInstance));
 
+    // Add the '$recordId' meta-projection field if needed. The 'addShowRecordIdMetaProj()' helper
+    // function modifies the request in-place, therefore affecting the query shape.
+    if (findCommandRequest->getShowRecordId()) {
+        query_request_helper::addShowRecordIdMetaProj(findCommandRequest.get());
+    }
+
     // Populate encryption information.
     auto& encryptionInformation = findCommandRequest->getEncryptionInformation();
 
     // Check if the find command is eligible for IDHACK.
     auto isIdHackEligibleQuery = isIdHackEligibleQueryWithoutCollator(*findCommandRequest);
 
-    auto parsedFindCommand =
-        uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(findCommandRequest)}));
+    auto parsedFindCommand = uassertStatusOK(parsed_find_command::parse(
+        expCtx,
+        ParsedFindCommandParams{.findCommand = std::move(findCommandRequest),
+                                .allowedFeatures =
+                                    MatchExpressionParser::kAllowAllSpecialFeatures}));
 
     // Extract namespace from find command.
     auto& nssOrUuid = parsedFindCommand->findCommandRequest->getNamespaceOrUUID();
@@ -215,31 +225,6 @@ RepresentativeQueryInfo createRepresentativeInfo(const BSONObj& cmd,
         return createRepresentativeInfoDistinct(cmd, expCtx, tenantId);
     }
     uasserted(7746402, str::stream() << "QueryShape can not be computed for command: " << cmd);
-}
-
-QuerySettings lookupQuerySettings(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                  const NamespaceString& nss,
-                                  const mongo::SerializationContext& serializationContext,
-                                  std::function<query_shape::QueryShapeHash()> queryShapeHashFn) {
-    // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
-    // this could run during startup while the FCV is still uninitialized.
-    if (!feature_flags::gFeatureFlagQuerySettings.isEnabledUseLatestFCVWhenUninitialized(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        return query_settings::QuerySettings();
-    }
-
-    auto* opCtx = expCtx->opCtx;
-    auto& manager = QuerySettingsManager::get(opCtx);
-    auto& opDebug = CurOp::get(opCtx)->debug();
-    auto hashFn = [&]() {
-        if (opDebug.queryStatsInfo.key) {
-            return opDebug.queryStatsInfo.key->getQueryShapeHash(opCtx, serializationContext);
-        }
-        return queryShapeHashFn();
-    };
-
-    // Return the found query settings or an empty one.
-    return manager.getQuerySettingsForQueryShapeHash(opCtx, hashFn, nss).get_value_or({}).first;
 }
 
 namespace utils {

@@ -93,7 +93,7 @@
 #include "mongo/db/pipeline/pipeline_d.h"
 #include "mongo/db/pipeline/plan_executor_pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
-#include "mongo/db/pipeline/search_helper.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -180,6 +180,7 @@ CounterMetric allowDiskUseFalseCounter("query.allowDiskUseFalse");
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangAfterCreatingAggregationPlan);
+MONGO_FAIL_POINT_DEFINE(hangAfterAcquiringCollectionCatalog);
 
 /**
  * If a pipeline is empty (assuming that a $cursor stage hasn't been created yet), it could mean
@@ -721,15 +722,14 @@ std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createAdditionalPipeline
     auto expCtx = pipeline->getContext();
 
     // Exchange is not allowed to be specified if there is a $search stage.
-    if (auto& searchHelpers = getSearchHelpers(expCtx->opCtx->getServiceContext());
-        searchHelpers && searchHelpers->isSearchPipeline(pipeline.get())) {
+    if (search_helpers::isSearchPipeline(pipeline.get())) {
         // Release locks early, before we generate the search pipeline, so that we don't hold them
         // during network calls to mongot. This is fine for search pipelines since they are not
         // reading any local (lock-protected) data in the main pipeline.
         resetContextFn();
         pipelines.push_back(std::move(pipeline));
 
-        if (auto metadataPipe = searchHelpers->generateMetadataPipelineForSearch(
+        if (auto metadataPipe = search_helpers::generateMetadataPipelineForSearch(
                 expCtx->opCtx, expCtx, request, pipelines.back().get(), expCtx->uuid)) {
             pipelines.push_back(std::move(metadataPipe));
         }
@@ -792,8 +792,7 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
         // have gotten from find command.
         execs.emplace_back(std::move(executor));
     } else {
-        getSearchHelpers(expCtx->opCtx->getServiceContext())
-            ->prepareSearchForTopLevelPipeline(pipeline.get());
+        search_helpers::prepareSearchForTopLevelPipeline(pipeline.get());
         // Complete creation of the initial $cursor stage, if needed.
         PipelineD::attachInnerQueryExecutorToPipeline(
             collections, attachCallback, std::move(executor), pipeline.get());
@@ -1248,7 +1247,13 @@ Status _runAggregate(OperationContext* opCtx,
     // must never hold open storage cursors while ignoring interrupt.
     InterruptibleLockGuard interruptibleLockAcquisition(shard_role_details::getLocker(opCtx));
 
-    auto initContext = [&](auto_get_collection::ViewMode m) -> void {
+    auto catalog = CollectionCatalog::latest(opCtx);
+
+    hangAfterAcquiringCollectionCatalog.executeIf(
+        [&](const auto&) { hangAfterAcquiringCollectionCatalog.pauseWhileSet(); },
+        [&](const BSONObj& data) { return nss.coll() == data["collection"].valueStringData(); });
+
+    auto initContext = [&](auto_get_collection::ViewMode m) {
         ctx.emplace(opCtx,
                     nss,
                     AutoGetCollection::Options{}.viewMode(m).secondaryNssOrUUIDs(
@@ -1259,6 +1264,10 @@ Status _runAggregate(OperationContext* opCtx,
                                                  ctx->getNss(),
                                                  ctx->isAnySecondaryNamespaceAViewOrSharded(),
                                                  secondaryExecNssList);
+        // Return the catalog that gets implicitly stashed during the collection acquisition above,
+        // which also implicitly opened a storage snapshot. This catalog object can be potentially
+        // different than the one obtained before and will be in sync with the opened snapshot.
+        return CollectionCatalog::get(opCtx);
     };
 
     auto resetContext = [&]() -> void {
@@ -1269,7 +1278,6 @@ Status _runAggregate(OperationContext* opCtx,
     std::vector<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> execs;
     boost::intrusive_ptr<ExpressionContext> expCtx;
     auto curOp = CurOp::get(opCtx);
-    auto catalog = CollectionCatalog::get(opCtx);
 
     {
         // If we are in a transaction, check whether the parsed pipeline supports being in
@@ -1317,6 +1325,9 @@ Status _runAggregate(OperationContext* opCtx,
             // Upgrade and wait for read concern if necessary.
             _adjustChangeStreamReadConcern(opCtx);
 
+            // Obtain collection locks on the execution namespace; that is, the oplog.
+            catalog = initContext(auto_get_collection::ViewMode::kViewsForbidden);
+
             // Raise an error if 'origNss' is a view. We do not need to check this if we are opening
             // a stream on an entire db or across the cluster.
             if (!origNss.isCollectionlessAggregateNS()) {
@@ -1339,8 +1350,6 @@ Status _runAggregate(OperationContext* opCtx,
             collatorToUse.emplace(std::move(collator));
             collatorToUseMatchesDefault = match;
 
-            // Obtain collection locks on the execution namespace; that is, the oplog.
-            initContext(auto_get_collection::ViewMode::kViewsForbidden);
             uassert(ErrorCodes::ChangeStreamNotEnabled,
                     "Change streams must be enabled before being used",
                     !isServerless ||
@@ -1367,7 +1376,7 @@ Status _runAggregate(OperationContext* opCtx,
                     ctx == boost::none);
         } else {
             // This is a regular aggregation. Lock the collection or view.
-            initContext(auto_get_collection::ViewMode::kViewsPermitted);
+            catalog = initContext(auto_get_collection::ViewMode::kViewsPermitted);
             auto [collator, match] = resolveCollator(opCtx,
                                                      request.getCollation().get_value_or(BSONObj()),
                                                      collections.getMainCollection());
@@ -1543,8 +1552,8 @@ Status _runAggregate(OperationContext* opCtx,
                 // DocumentSourceMatch in the Pipeline), so we can avoid copying them into the SBE
                 // runtime environment. We must ensure that the MatchExpression lives at least as
                 // long as the executor.
-                execs.emplace_back(uassertStatusOK(
-                    makeExecFromParams(nullptr, std::move(pipeline), std::move(*maybeExec))));
+                execs.emplace_back(uassertStatusOK(makeExecFromParams(
+                    nullptr, std::move(pipeline), collections, std::move(*maybeExec))));
             } else {
                 // If we had an optimization failure, only error if we're not in tryBonsai.
                 bonsaiExecSuccess = false;

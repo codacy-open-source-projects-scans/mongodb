@@ -53,6 +53,7 @@
 #include "mongo/db/query/plan_explainer_factory.h"
 #include "mongo/db/query/plan_insert_listener.h"
 #include "mongo/db/query/plan_ranker.h"
+#include "mongo/db/query/plan_yield_policy_remote_cursor.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
 #include "mongo/db/query/sbe_stage_builder.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -89,6 +90,7 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  bool isOpen,
                                  std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
                                  bool generatedByBonsai,
+                                 OptimizerCounterInfo optCounterInfo,
                                  std::unique_ptr<RemoteCursorMap> remoteCursors,
                                  std::unique_ptr<RemoteExplainVector> remoteExplains)
     : _state{isOpen ? State::kOpened : State::kClosed},
@@ -129,7 +131,11 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
     _minRecordIdSlot = env->getSlotIfExists("minRecordId"_sd);
     _maxRecordIdSlot = env->getSlotIfExists("maxRecordId"_sd);
 
-    initializeAccessors(_metadataAccessors, _rootData.staticData->metadataSlots);
+    if (_cq) {
+        initializeAccessors(_metadataAccessors,
+                            _rootData.staticData->metadataSlots,
+                            _cq->remainingSearchMetadata());
+    }
 
     if (!_stash.empty()) {
         // The PlanExecutor keeps an extra reference to the last object pulled out of the PlanStage
@@ -169,12 +175,14 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                                   isCachedCandidate,
                                                   matchesCachedPlan,
                                                   _rootData.debugInfo,
+                                                  std::move(optCounterInfo),
                                                   _remoteExplains.get());
     _cursorType = _rootData.staticData->cursorType;
 
     if (_remoteCursors) {
         for (auto& it : *_remoteCursors) {
-            if (auto yieldPolicy = it.second->getYieldPolicy()) {
+            if (auto yieldPolicy =
+                    dynamic_cast<PlanYieldPolicyRemoteCursor*>(it.second->getYieldPolicy())) {
                 yieldPolicy->registerPlanExecutor(this);
             }
         }
@@ -607,17 +615,25 @@ Document convertToDocument(const sbe::value::Object& obj) {
 }  // namespace
 
 void PlanExecutorSBE::initializeAccessors(
-    MetaDataAccessor& accessor, const stage_builder::PlanStageMetadataSlots& metadataSlots) {
-    if (auto slot = metadataSlots.searchScoreSlot) {
+    MetaDataAccessor& accessor,
+    const stage_builder::PlanStageMetadataSlots& metadataSlots,
+    const QueryMetadataBitSet& metadataBit) {
+    bool needsMerge = _cq->getExpCtxRaw()->needsMerge;
+
+    if (auto slot = metadataSlots.searchScoreSlot;
+        slot && (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchScore))) {
         accessor.metadataSearchScore = _root->getAccessor(_rootData.env.ctx, *slot);
     }
-    if (auto slot = metadataSlots.searchHighlightsSlot) {
+    if (auto slot = metadataSlots.searchHighlightsSlot; slot &&
+        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchHighlights))) {
         accessor.metadataSearchHighlights = _root->getAccessor(_rootData.env.ctx, *slot);
     }
-    if (auto slot = metadataSlots.searchDetailsSlot) {
+    if (auto slot = metadataSlots.searchDetailsSlot; slot &&
+        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchScoreDetails))) {
         accessor.metadataSearchDetails = _root->getAccessor(_rootData.env.ctx, *slot);
     }
-    if (auto slot = metadataSlots.searchSortValuesSlot) {
+    if (auto slot = metadataSlots.searchSortValuesSlot; slot &&
+        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchSortValues))) {
         accessor.metadataSearchSortValues = _root->getAccessor(_rootData.env.ctx, *slot);
     }
     if (auto slot = metadataSlots.sortKeySlot) {
@@ -634,14 +650,15 @@ void PlanExecutorSBE::initializeAccessors(
             }
         }
     }
-    if (auto slot = metadataSlots.searchSequenceToken) {
+    if (auto slot = metadataSlots.searchSequenceToken; slot &&
+        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchSequenceToken))) {
         accessor.metadataSearchSequenceToken = _root->getAccessor(_rootData.env.ctx, *slot);
     }
 }
 
 BSONObj PlanExecutorSBE::MetaDataAccessor::appendToBson(BSONObj doc) const {
     if (metadataSearchScore || metadataSearchHighlights || metadataSearchDetails ||
-        metadataSearchSortValues || sortKey) {
+        metadataSearchSortValues || sortKey || metadataSearchSequenceToken) {
         BSONObjBuilder bb(std::move(doc));
         if (metadataSearchScore) {
             auto [tag, val] = metadataSearchScore->getViewOfValue();
@@ -678,7 +695,7 @@ BSONObj PlanExecutorSBE::MetaDataAccessor::appendToBson(BSONObj doc) const {
 
 Document PlanExecutorSBE::MetaDataAccessor::appendToDocument(Document doc) const {
     if (metadataSearchScore || metadataSearchHighlights || metadataSearchDetails ||
-        metadataSearchSortValues || sortKey) {
+        metadataSearchSortValues || sortKey || metadataSearchSequenceToken) {
         MutableDocument out(std::move(doc));
         if (metadataSearchScore) {
             auto [tag, val] = metadataSearchScore->getViewOfValue();

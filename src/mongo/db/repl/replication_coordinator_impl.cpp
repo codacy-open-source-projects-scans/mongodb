@@ -386,6 +386,7 @@ ReplicationCoordinatorImpl::ReplicationCoordinatorImpl(
       _splitSessionManager(InternalSessionPool::get(service)) {
 
     _termShadow.store(OpTime::kUninitializedTerm);
+    _electionIdTermShadow.store(_topCoord->getElectionIdTerm());
 
     invariant(_service);
 
@@ -1757,12 +1758,22 @@ Status ReplicationCoordinatorImpl::waitUntilOpTimeForReadUntil(OperationContext*
 Status ReplicationCoordinatorImpl::_waitUntilOpTime(OperationContext* opCtx,
                                                     OpTime targetOpTime,
                                                     boost::optional<Date_t> deadline) {
-    if (!_externalState->oplogExists(opCtx)) {
-        return {ErrorCodes::NotYetInitialized, "The oplog does not exist."};
-    }
-
     {
         stdx::unique_lock lock(_mutex);
+
+        // During rollback the oplog collection gets reset, this non-lock protected access of the
+        // oplog collection is racey with it being set. We do not want to acquire a lock here since
+        // this is a blocking call, so we opt to fail the wait if we are in rollback since we cannot
+        // guarantee the oplog contents.
+        if (_memberState.rollback()) {
+            return {ErrorCodes::InterruptedDueToReplStateChange,
+                    "Unable to wait for wait for op time while node is in rollback."};
+        }
+
+        if (!_externalState->oplogExists(opCtx)) {
+            return {ErrorCodes::NotYetInitialized, "The oplog does not exist."};
+        }
+
         if (targetOpTime > _getMyLastAppliedOpTime_inlock()) {
             if (_inShutdown) {
                 return {ErrorCodes::ShutdownInProgress, "Shutdown in progress"};
@@ -3298,7 +3309,10 @@ bool ReplicationCoordinatorImpl::shouldRelaxIndexConstraints(OperationContext* o
 }
 
 OID ReplicationCoordinatorImpl::getElectionId() {
-    return OID::fromTerm(_electionIdTerm.load());
+    auto electionIdTerm = _electionIdTermShadow.load();
+    if (electionIdTerm == OpTime::kUninitializedTerm)
+        return OID();
+    return OID::fromTerm(electionIdTerm);
 }
 
 int ReplicationCoordinatorImpl::getMyId() const {
@@ -4799,15 +4813,15 @@ void ReplicationCoordinatorImpl::_performPostMemberStateUpdateAction(
 void ReplicationCoordinatorImpl::_postWonElectionUpdateMemberState(WithLock lk) {
     invariant(_topCoord->getTerm() != OpTime::kUninitializedTerm);
 
-    // Get the term from the topology coordinator, which we then use to generate the election ID.
-    // We intentionally wait until the end of this function
-    int64_t electionIdTerm = _topCoord->getTerm();
-    OID electionId = OID::fromTerm(electionIdTerm);
-
-    ON_BLOCK_EXIT([&] { _electionIdTerm.store(electionIdTerm); });
-
     auto ts = VectorClockMutable::get(getServiceContext())->tickClusterTime(1).asTimestamp();
-    _topCoord->processWinElection(electionId, ts);
+    _topCoord->processWinElection(ts);
+
+    // Get the term from the topology coordinator, which we use to generate the election ID.
+    // We intentionally wait until the end of this function to store the term in the
+    // atomic shadow variable.
+    auto electionIdTerm = _topCoord->getElectionIdTerm();
+
+    ON_BLOCK_EXIT([&] { _electionIdTermShadow.store(electionIdTerm); });
 
     const PostMemberStateUpdateAction nextAction = _updateMemberStateFromTopologyCoordinator(lk);
 

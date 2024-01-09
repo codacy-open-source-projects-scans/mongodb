@@ -142,6 +142,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/query/query_settings/manager',
         '$BUILD_DIR/mongo/db/query/query_settings/utils',
         '$BUILD_DIR/mongo/db/query/query_shape/query_shape',
+        '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'cluster_server_parameter_cmds_idl',
         'set_cluster_parameter_impl',
@@ -284,6 +285,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/repl/repl_settings',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/shard_role',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
     ],
 )
 
@@ -542,6 +544,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/stats/server_read_concern_write_concern_metrics',
         '$BUILD_DIR/mongo/db/stats/top',
         '$BUILD_DIR/mongo/db/storage/storage_engine_common',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/db/storage/two_phase_index_build_knobs_idl',
         '$BUILD_DIR/mongo/db/timeseries/catalog_helper',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_collmod',
@@ -922,8 +925,9 @@ env.Library(
         '$BUILD_DIR/mongo/db/pipeline/process_interface/mongod_process_interface_factory',
         '$BUILD_DIR/mongo/db/query/map_reduce_output_format',
         '$BUILD_DIR/mongo/db/query_exec',
+        '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/shard_role',
-        '$BUILD_DIR/mongo/idl/idl_parser',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         'map_reduce_parser',
     ],
 )
@@ -963,14 +967,13 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/auth_checks',
         '$BUILD_DIR/mongo/db/commands',
-        '$BUILD_DIR/mongo/db/query/search/manage_search_index_request',
+        '$BUILD_DIR/mongo/db/query/search/search_index_common',
         '$BUILD_DIR/mongo/db/query/search/search_index_helpers_interface',
         '$BUILD_DIR/mongo/db/query/search/search_index_options',
         '$BUILD_DIR/mongo/db/query/search/search_task_executors',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
-        '$BUILD_DIR/mongo/util/net/network',
     ],
 )
 

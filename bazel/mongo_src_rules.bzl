@@ -4,6 +4,9 @@ load("@poetry//:dependencies.bzl", "dependency")
 # config selection
 load("@bazel_skylib//lib:selects.bzl", "selects")
 
+load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
+
+load("//bazel:separate_debug.bzl", "extract_debuginfo" , "WITH_DEBUG_SUFFIX")
 # === Windows-specific compilation settings ===
 
 # /RTC1              Enable Stack Frame Run-Time Error Checking; Reports when a variable is used without having been initialized (implies /Od: no optimizations)
@@ -12,18 +15,30 @@ load("@bazel_skylib//lib:selects.bzl", "selects")
 # /Oy-               disable frame pointer optimization (overrides /O2, only affects 32-bit)
 # /INCREMENTAL: NO - disable incremental link - avoid the level of indirection for function calls
 
+# /pdbpagesize:16384
+#     windows non optimized builds will cause the PDB to blow up in size,
+#     this allows a larger PDB. The flag is undocumented at the time of writing
+#     but the microsoft thread which brought about its creation can be found here:
+#     https://developercommunity.visualstudio.com/t/pdb-limit-of-4-gib-is-likely-to-be-a-problem-in-a/904784
+#
+#     Without this flag MSVC will report a red herring error message, about disk space or invalid path.
+
 WINDOWS_DBG_COPTS = [
     "/MDd",
     "/RTC1",
     "/Od",
+    "/pdbpagesize:16384"
 ]
+
 WINDOWS_OPT_ON_COPTS = [
     "/MD",
     "/O2",
     "/Oy-",
 ]
+
 WINDOWS_OPT_OFF_COPTS = [
-    "-O0",
+    "/Od",
+    "/pdbpagesize:16384"
 ]
 
 WINDOWS_OPT_DBG_COPTS = [
@@ -33,17 +48,38 @@ WINDOWS_OPT_DBG_COPTS = [
     "/Zo",
     "/Oy-",
 ]
+
 WINDOWS_OPT_SIZE_COPTS = [
     "/MD",
     "/Os",
     "/Oy-",
 ]
+
 WINDOWS_RELEASE_COPTS = [
     "/MD",
     "/Od",
 ]
 
-MONGO_GLOBAL_COPTS = ["-Isrc"] + select({
+LIBCXX_ERROR_MESSAGE = (
+    "\nError:\n" +
+    "    libc++ requires these configuration:\n"+
+    "    --//bazel/config:compiler_type=clang\n"
+)
+
+LIBCXX_COPTS = select({
+    ("//bazel/config:use_libcxx_required_settings"): ["-stdlib=libc++"],
+    ("//bazel/config:use_libcxx_disabled"): [],
+}, no_match_error = LIBCXX_ERROR_MESSAGE)
+
+LIBCXX_LINKFLAGS = LIBCXX_COPTS
+
+# TODO SERVER-54659 - ASIO depends on std::result_of which was removed in C++ 20
+LIBCXX_DEFINES = select({
+    ("//bazel/config:use_libcxx_required_settings"): ["ASIO_HAS_STD_INVOKE_RESULT"],
+    ("//bazel/config:use_libcxx_disabled"): [],
+}, no_match_error = LIBCXX_ERROR_MESSAGE)
+
+WINDOWS_COPTS = select({
     "//bazel/config:windows_dbg": WINDOWS_DBG_COPTS,
     "//bazel/config:windows_opt_on": WINDOWS_OPT_ON_COPTS,
     "//bazel/config:windows_opt_off": WINDOWS_OPT_OFF_COPTS,
@@ -53,7 +89,7 @@ MONGO_GLOBAL_COPTS = ["-Isrc"] + select({
     "//conditions:default": [],
 })
 
-MONGO_GLOBAL_DEFINES = select({
+DEBUG_DEFINES = select({
     "//bazel/config:dbg": ["MONGO_CONFIG_DEBUG_BUILD"],
     "//conditions:default": ["NDEBUG"],
 })
@@ -68,23 +104,38 @@ LIBUNWIND_DEFINES = select({
     "//conditions:default": [],
 })
 
-ADDRESS_SANITIZER_ERROR_MESSAGE = (
+REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE = (
     "\nError:\n" +
-    "    address sanitizer requires these configurations:\n"+
+    "    any sanitizer requires these configurations:\n"+
     "    --//bazel/config:compiler_type=clang\n" +
-    "    --//bazel/config:allocator=system\n" +
     "    --//bazel/config:build_mode=opt_on [OR] --//bazel/config:build_mode=opt_debug"
 )
 
+# -fno-omit-frame-pointer should be added if any sanitizer flag is used by user
+ANY_SANITIZER_AVAILABLE_COPTS = select({
+    "//bazel/config:no_enabled_sanitizer": [],
+    "//bazel/config:any_sanitizer_required_setting": ["-fno-omit-frame-pointer"],
+},
+no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE)
+
+
+ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE = (
+    "\nError:\n" +
+    "    address and memory sanitizers require these configurations:\n"+
+    "    --//bazel/config:allocator=system\n"
+)
+
 ADDRESS_SANITIZER_COPTS = select({
-    ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address", "-fno-omit-frame-pointer"],
-    ("//bazel/config:sanitize_disabled"): [],
-}, no_match_error = ADDRESS_SANITIZER_ERROR_MESSAGE)
+    ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
+    "//bazel/config:asan_disabled": [],
+}
+, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
 
 ADDRESS_SANITIZER_LINKFLAGS = select({
     ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
-    ("//bazel/config:sanitize_disabled"): [],
-}, no_match_error = ADDRESS_SANITIZER_ERROR_MESSAGE)
+    "//bazel/config:asan_disabled": [],
+}
+, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
 
 # Unfortunately, abseil requires that we make these macros
 # (this, and THREAD_ and UNDEFINED_BEHAVIOR_ below) set,
@@ -93,9 +144,43 @@ ADDRESS_SANITIZER_LINKFLAGS = select({
 # basically pervasive via the 'base' library.
 ADDRESS_SANITIZER_DEFINES = select({
     ("//bazel/config:sanitize_address_required_settings"): ["ADDRESS_SANITIZER"],
-    ("//bazel/config:sanitize_disabled"): [],
-}, no_match_error = ADDRESS_SANITIZER_ERROR_MESSAGE)
+    "//bazel/config:asan_disabled": [],
+}
+, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
 
+# Makes it easier to debug memory failures at the cost of some perf: -fsanitize-memory-track-origins
+MEMORY_SANITIZER_COPTS = select({
+    ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory", "-fsanitize-memory-track-origins"],
+    ("//bazel/config:msan_disabled"): [],
+}
+, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
+
+# Makes it easier to debug memory failures at the cost of some perf: -fsanitize-memory-track-origins
+MEMORY_SANITIZER_LINKFLAGS = select({
+    ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory"],
+    ("//bazel/config:msan_disabled"): [],
+}
+, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
+
+
+SEPARATE_DEBUG_ENABLED = select({
+    "//bazel/config:separate_debug_enabled": True,
+    "//conditions:default": False,
+})
+
+TCMALLOC_DEPS = select({
+    "//bazel/config:tcmalloc_allocator": ["//src/third_party/gperftools:tcmalloc_minimal"],
+    "//bazel/config:auto_allocator_windows": ["//src/third_party/gperftools:tcmalloc_minimal"],
+    "//bazel/config:auto_allocator_linux": ["//src/third_party/gperftools:tcmalloc_minimal"],
+    "//conditions:default": [],
+})
+
+MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES
+
+MONGO_GLOBAL_COPTS = ["-Isrc"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS \
+                    + MEMORY_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS
+
+MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + LIBCXX_LINKFLAGS
 
 def force_includes_copt(package_name, name):
 
@@ -194,30 +279,43 @@ def mongo_cc_library(
     """
 
     # Avoid injecting into unwind/libunwind_asm to avoid a circular dependency.
-    if name not in ["unwind", "libunwind_asm"]:
+    if name not in ["unwind", "tcmalloc_minimal"]:
         deps += LIBUNWIND_DEPS
         local_defines += LIBUNWIND_DEFINES
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
 
+    all_deps = deps
+    if name != "tcmalloc_minimal":
+        all_deps += TCMALLOC_DEPS
+
     native.cc_library(
-        name = name,
+        name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs,
         hdrs = hdrs + fincludes_hdr,
-        deps = deps,
+        deps = all_deps,
         visibility = visibility,
         testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + ADDRESS_SANITIZER_COPTS + copts + fincludes_copt,
+        copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
         data = data,
         tags = tags,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
         linkstatic = select({
             "@platforms//os:windows": True,
             "//conditions:default": linkstatic,
         }),
-        local_defines = MONGO_GLOBAL_DEFINES + ADDRESS_SANITIZER_DEFINES + local_defines,
+        local_defines = MONGO_GLOBAL_DEFINES + local_defines,
         includes = [],
     )
+
+    extract_debuginfo(
+        name=name,
+        binary_with_debug=":" + name + WITH_DEBUG_SUFFIX,
+        type="library",
+        enabled = SEPARATE_DEBUG_ENABLED,
+        deps = all_deps)
+
 
 def mongo_cc_binary(
         name,
@@ -251,28 +349,33 @@ def mongo_cc_binary(
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
 
+    all_deps = deps + LIBUNWIND_DEPS + TCMALLOC_DEPS
+
     native.cc_binary(
-        name = name,
+        name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs + fincludes_hdr,
-        deps = deps + LIBUNWIND_DEPS,
+        deps = all_deps,
         visibility = visibility,
         testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + ADDRESS_SANITIZER_COPTS + copts + fincludes_copt,
+        copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
         data = data,
         tags = tags,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
         linkstatic = select({
             "@platforms//os:windows": True,
             "//conditions:default": linkstatic,
         }),
-        local_defines = MONGO_GLOBAL_DEFINES + ADDRESS_SANITIZER_DEFINES + LIBUNWIND_DEFINES + local_defines,
-        malloc = select({
-          "//bazel/config:tcmalloc_allocator": "//src/third_party/gperftools:tcmalloc_minimal",
-          "//bazel/config:auto_allocator_windows": "//src/third_party/gperftools:tcmalloc_minimal",
-          "//bazel/config:auto_allocator_linux": "//src/third_party/gperftools:tcmalloc_minimal",
-          "//conditions:default": "@bazel_tools//tools/cpp:malloc",
-        }),
+        local_defines = MONGO_GLOBAL_DEFINES + LIBUNWIND_DEFINES + local_defines,
         includes = [],
     )
+
+    extract_debuginfo(
+        name=name,
+        binary_with_debug=":" + name + WITH_DEBUG_SUFFIX,
+        type="program",
+        enabled = SEPARATE_DEBUG_ENABLED,
+        deps = all_deps)
+
 
 IdlInfo = provider(
     fields = {

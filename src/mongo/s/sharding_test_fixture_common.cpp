@@ -40,6 +40,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/executor/network_interface.h"
@@ -59,9 +60,7 @@ namespace mongo {
 using executor::NetworkTestEnv;
 using unittest::assertGet;
 
-ShardingTestFixtureCommon::ShardingTestFixtureCommon() : _tempDir("sharding_test_fixture_common") {
-    storageGlobalParams.dbpath = _tempDir.path();
-}
+ShardingTestFixtureCommon::ShardingTestFixtureCommon() = default;
 
 ShardingTestFixtureCommon::~ShardingTestFixtureCommon() {
     invariant(!_opCtxHolder,
@@ -74,6 +73,12 @@ void ShardingTestFixtureCommon::setUp() {
 
 void ShardingTestFixtureCommon::tearDown() {
     _opCtxHolder.reset();
+}
+
+OperationContext* ShardingTestFixtureCommon::operationContext() const {
+    invariant(_opCtxHolder,
+              "ShardingTestFixtureCommon::setUp() must have been called before this method");
+    return _opCtxHolder.get();
 }
 
 RoutingTableHistoryValueHandle ShardingTestFixtureCommon::makeStandaloneRoutingTableHistory(

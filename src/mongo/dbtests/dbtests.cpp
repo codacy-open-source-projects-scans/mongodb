@@ -88,10 +88,9 @@
 namespace mongo {
 namespace dbtests {
 namespace {
-const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
-}  // namespace
 
-namespace {
+const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
+
 ServiceContext::ConstructorActionRegisterer registerWireSpec{
     "RegisterWireSpec", [](ServiceContext* service) {
         WireSpec::Specification spec;
@@ -111,7 +110,8 @@ ServiceContext::ConstructorActionRegisterer registerWireSpec{
 
         WireSpec::getWireSpec(service).initialize(std::move(spec));
     }};
-}
+
+}  // namespace
 
 Status createIndex(OperationContext* opCtx, StringData ns, const BSONObj& keys, bool unique) {
     BSONObjBuilder specBuilder;
@@ -280,7 +280,8 @@ int dbtestsMain(int argc, char** argv) {
 // and makes them available through the argv() and envp() members.  This enables dbtestsMain()
 // to process UTF-8 encoded arguments and environment variables without regard to platform.
 int wmain(int argc, wchar_t* argvW[]) {
-    mongo::quickExit(mongo::dbtests::dbtestsMain(argc, WindowsCommandLine(argc, argvW).argv()));
+    mongo::quickExit(
+        mongo::dbtests::dbtestsMain(argc, mongo::WindowsCommandLine(argc, argvW).argv()));
 }
 #else
 int main(int argc, char* argv[]) {

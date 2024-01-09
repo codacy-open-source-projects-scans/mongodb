@@ -54,6 +54,8 @@
 namespace mongo {
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(hangAfterCompletingWriteWithoutShardKeyWithId);
+
 bool isRetryErrCode(int errCode) {
     return errCode == ErrorCodes::StaleConfig || errCode == ErrorCodes::StaleDbVersion ||
         errCode == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
@@ -350,7 +352,9 @@ void WriteOp::noteWriteWithoutShardKeyWithIdResponse(
     int n,
     boost::optional<const BulkWriteReplyItem&> bulkWriteReplyItem) {
     dassert(n == 0 || n == 1);
-    invariant(!bulkWriteReplyItem || bulkWriteReplyItem->getN() == n);
+    tassert(8346300,
+            "BulkWriteReplyItem 'n' value does not match supplied 'n' value",
+            !bulkWriteReplyItem || bulkWriteReplyItem->getN() == n);
     const WriteOpRef& ref = targetedWrite.writeOpRef;
     auto& currentChildOp = _childOps[ref.second];
     if (n == 0) {
@@ -379,6 +383,9 @@ void WriteOp::noteWriteWithoutShardKeyWithIdResponse(
             }
         }
         noteWriteComplete(targetedWrite, bulkWriteReplyItem);
+        if (MONGO_unlikely(hangAfterCompletingWriteWithoutShardKeyWithId.shouldFail())) {
+            hangAfterCompletingWriteWithoutShardKeyWithId.pauseWhileSet();
+        }
     }
 }
 

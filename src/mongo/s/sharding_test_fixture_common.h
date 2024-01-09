@@ -47,7 +47,6 @@
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/grid.h"
 #include "mongo/transport/session.h"
-#include "mongo/unittest/temp_dir.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
@@ -73,17 +72,7 @@ protected:
     void setUp() override;
     void tearDown() override;
 
-    OperationContext* operationContext() const {
-        invariant(_opCtxHolder,
-                  "ShardingTestFixtureCommon::setUp() must have been called before this method");
-        return _opCtxHolder.get();
-    }
-
-    template <typename Lambda>
-    executor::NetworkTestEnv::FutureHandle<typename std::invoke_result<Lambda>::type> launchAsync(
-        Lambda&& func) const {
-        return _networkTestEnv->launchAsync(std::forward<Lambda>(func));
-    }
+    OperationContext* operationContext() const;
 
     executor::NetworkInterfaceMock* network() const {
         invariant(_mockNetwork);
@@ -93,6 +82,12 @@ protected:
     RemoteCommandTargeterFactoryMock* targeterFactory() const {
         invariant(_targeterFactory);
         return _targeterFactory;
+    }
+
+    template <typename Lambda>
+    executor::NetworkTestEnv::FutureHandle<typename std::invoke_result<Lambda>::type> launchAsync(
+        Lambda&& func) const {
+        return _networkTestEnv->launchAsync(std::forward<Lambda>(func));
     }
 
     /**
@@ -129,9 +124,6 @@ protected:
 private:
     // Keeps the lifetime of the operation context
     ServiceContext::UniqueOperationContext _opCtxHolder;
-
-    // The temporary dbpath for the tests in this fixture.
-    unittest::TempDir _tempDir;
 };
 
 }  // namespace mongo

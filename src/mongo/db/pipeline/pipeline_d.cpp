@@ -103,7 +103,7 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/search_helper.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/skip_and_limit.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/transformer_interface.h"
@@ -315,9 +315,8 @@ bool pushDownPipelineStageIfCompatible(
 
         stagesForPushdown.emplace_back(std::move(stage));
         return true;
-    } else if (const auto& searchHelpers = getSearchHelpers(opCtx->getServiceContext());
-               searchHelpers->isSearchStage(stage.get()) ||
-               searchHelpers->isSearchMetaStage(stage.get())) {
+    } else if (search_helpers::isSearchStage(stage.get()) ||
+               search_helpers::isSearchMetaStage(stage.get())) {
         if (!allowedStages.search) {
             return false;
         }
@@ -1131,9 +1130,8 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutor(
         sources.empty() ? nullptr : dynamic_cast<DocumentSourceGeoNear*>(sources.front().get());
     if (geoNearStage) {
         return buildInnerQueryExecutorGeoNear(collections, nss, aggRequest, pipeline);
-    } else if (auto& searchHelper = getSearchHelpers(expCtx->opCtx->getServiceContext());
-               searchHelper->isSearchPipeline(pipeline) ||
-               searchHelper->isSearchMetaPipeline(pipeline)) {
+    } else if (search_helpers::isSearchPipeline(pipeline) ||
+               search_helpers::isSearchMetaPipeline(pipeline)) {
         return buildInnerQueryExecutorSearch(collections, nss, aggRequest, pipeline);
     } else {
         return buildInnerQueryExecutorGeneric(collections, nss, aggRequest, pipeline);
@@ -1422,6 +1420,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
 
     if (cq.isOK()) {
         cq.getValue()->requestAdditionalMetadata(deps.metadataDeps());
+        cq.getValue()->setSearchMetadata(deps.searchMetadataDeps());
     }
     return cq;
 }
@@ -1534,17 +1533,20 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> prepareExecutor
     // call this lambda in two phases: 1) determine compatible stages and attach them to the
     // canonical query, and 2) finalize the push down and trim the pushed-down stages from the
     // original pipeline.
-    auto extractAndAttachPipelineStages = [&collections, &pipeline, needsMerge{expCtx->needsMerge}](
-                                              auto* canonicalQuery, bool attachOnly) {
-        if (attachOnly) {
-            std::vector<boost::intrusive_ptr<DocumentSource>> stagesForPushdown;
-            bool allStagesPushedDown = findSbeCompatibleStagesForPushdown(
-                collections, canonicalQuery, needsMerge, pipeline, stagesForPushdown);
-            canonicalQuery->setCqPipeline(std::move(stagesForPushdown), allStagesPushedDown);
-        } else {
-            trimPipelineStages(pipeline, canonicalQuery->cqPipeline().size());
-        }
-    };
+    auto extractAndAttachPipelineStages =
+        [&collections, &pipeline, &unavailableMetadata, needsMerge{expCtx->needsMerge}](
+            auto* canonicalQuery, bool attachOnly) {
+            if (attachOnly) {
+                std::vector<boost::intrusive_ptr<DocumentSource>> stagesForPushdown;
+                bool allStagesPushedDown = findSbeCompatibleStagesForPushdown(
+                    collections, canonicalQuery, needsMerge, pipeline, stagesForPushdown);
+                canonicalQuery->setCqPipeline(std::move(stagesForPushdown), allStagesPushedDown);
+            } else {
+                trimPipelineStages(pipeline, canonicalQuery->cqPipeline().size());
+                canonicalQuery->setRemainingSearchMetadata(
+                    pipeline->getDependencies(unavailableMetadata).searchMetadataDeps());
+            }
+        };
 
     // For performance, we pass a null callback instead of 'extractAndAttachPipelineStages' when
     // 'pipeline' is empty. The 'extractAndAttachPipelineStages' is a no-op when there are no
@@ -1827,17 +1829,17 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSearch(
             !aggRequest || !aggRequest->getExchange());
 
     auto expCtx = pipeline->getContext();
-    auto& searchHelper = getSearchHelpers(expCtx->opCtx->getServiceContext());
 
     DocumentSource* searchStage = pipeline->peekFront();
     auto yieldPolicy = PlanYieldPolicyRemoteCursor::make(
         expCtx->opCtx, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, collections, nss);
 
     if (!expCtx->explain) {
-        if (searchHelper->isSearchPipeline(pipeline)) {
-            searchHelper->establishSearchQueryCursors(expCtx, searchStage, std::move(yieldPolicy));
-        } else if (searchHelper->isSearchMetaPipeline(pipeline)) {
-            searchHelper->establishSearchMetaCursor(expCtx, searchStage, std::move(yieldPolicy));
+        if (search_helpers::isSearchPipeline(pipeline)) {
+            search_helpers::establishSearchQueryCursors(
+                expCtx, searchStage, std::move(yieldPolicy));
+        } else if (search_helpers::isSearchMetaPipeline(pipeline)) {
+            search_helpers::establishSearchMetaCursor(expCtx, searchStage, std::move(yieldPolicy));
         } else {
             tasserted(7856008, "Not search pipeline in buildInnerQueryExecutorSearch");
         }
@@ -1848,9 +1850,10 @@ PipelineD::BuildQueryExecutorResult PipelineD::buildInnerQueryExecutorSearch(
 
     const CanonicalQuery* cq = executor->getCanonicalQuery();
 
-    if (!cq->cqPipeline().empty() && searchHelper->isSearchStage(cq->cqPipeline().front().get())) {
+    if (!cq->cqPipeline().empty() &&
+        search_helpers::isSearchStage(cq->cqPipeline().front().get())) {
         // The $search is pushed down into SBE executor.
-        if (auto cursor = searchHelper->getSearchMetadataCursor(searchStage)) {
+        if (auto cursor = search_helpers::getSearchMetadataCursor(searchStage)) {
             // Create a yield policy for metadata cursor.
             auto metadataYieldPolicy = PlanYieldPolicyRemoteCursor::make(
                 expCtx->opCtx, PlanYieldPolicy::YieldPolicy::YIELD_AUTO, collections, nss);
@@ -2259,9 +2262,8 @@ BSONObj PipelineD::getPostBatchResumeToken(const Pipeline* pipeline) {
 bool PipelineD::isSearchPresentAndEligibleForSbe(const Pipeline* pipeline) {
     auto expCtx = pipeline->getContext();
 
-    auto firstStageIsSearch =
-        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchPipeline(pipeline) ||
-        getSearchHelpers(expCtx->opCtx->getServiceContext())->isSearchMetaPipeline(pipeline);
+    auto firstStageIsSearch = search_helpers::isSearchPipeline(pipeline) ||
+        search_helpers::isSearchMetaPipeline(pipeline);
 
     auto searchInSbeEnabled = feature_flags::gFeatureFlagSearchInSbe.isEnabled(
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot());

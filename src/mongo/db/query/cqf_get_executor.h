@@ -45,6 +45,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/db/query/opt_counter_info.h"
 #include "mongo/db/query/optimizer/defs.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/explain_interface.h"
@@ -68,6 +69,7 @@ struct ExecParams {
     bool planIsFromCache;
     bool generatedByBonsai;
     const boost::optional<MatchExpression*> pipelineMatchExpr;
+    OptimizerCounterInfo optCounterInfo;
 };
 
 /**
@@ -99,7 +101,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     const MultipleCollectionAccessor& collections,
     optimizer::QueryHints queryHints,
     const boost::optional<BSONObj>& indexHint,
-    const Pipeline* pipeline,
+    Pipeline* pipeline,
     const CanonicalQuery* = nullptr);
 
 /**
@@ -116,6 +118,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> makeExecFromParams(
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+    const MultipleCollectionAccessor& collections,
     ExecParams execArgs);
 
 }  // namespace mongo

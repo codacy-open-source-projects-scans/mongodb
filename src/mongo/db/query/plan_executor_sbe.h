@@ -92,6 +92,7 @@ public:
                     bool isOpen,
                     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
                     bool generatedByBonsai,
+                    OptimizerCounterInfo optCounterInfo = {},
                     std::unique_ptr<RemoteCursorMap> remoteCursors = nullptr,
                     std::unique_ptr<RemoteExplainVector> remoteExplains = nullptr);
 
@@ -222,7 +223,8 @@ private:
     ExecState getNextImpl(ObjectType* out, RecordId* dlOut);
 
     void initializeAccessors(MetaDataAccessor& accessor,
-                             const stage_builder::PlanStageMetadataSlots& metadataSlots);
+                             const stage_builder::PlanStageMetadataSlots& metadataSlots,
+                             const QueryMetadataBitSet& metadataBit);
 
     enum class State { kClosed, kOpened };
 

@@ -30,9 +30,17 @@
 #pragma once
 
 #include <absl/numeric/int128.h>
+#include <string>
 
 using uint128_t = absl::uint128;
 using int128_t = absl::int128;
+
+namespace absl {
+
+std::string toString(const uint128& v);
+std::string toString(const int128& v);
+
+}  // namespace absl
 
 namespace mongo {
 template <typename T>

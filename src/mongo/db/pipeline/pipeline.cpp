@@ -64,7 +64,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/resume_token.h"
-#include "mongo/db/pipeline/search_helper.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/query/explain_options.h"
@@ -164,8 +164,7 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
     // Verify that usage of $searchMeta and $search is legal. Note that on mongos, we defer this
     // check until after we've established cursors on the shards to resolve any views.
     if (expCtx->opCtx->getServiceContext() && !expCtx->inMongos) {
-        getSearchHelpers(expCtx->opCtx->getServiceContext())
-            ->assertSearchMetaAccessValid(sources, expCtx.get());
+        search_helpers::assertSearchMetaAccessValid(sources, expCtx.get());
     }
 }
 
@@ -482,6 +481,17 @@ BSONObj Pipeline::getInitialQuery() const {
     return BSONObj{};
 }
 
+void Pipeline::parameterize() {
+    if (_sources.empty()) {
+        return;
+    }
+
+    auto firstStage = _sources.front().get();
+    if (auto matchStage = dynamic_cast<DocumentSourceMatch*>(firstStage)) {
+        MatchExpression::parameterize(matchStage->getMatchExpression());
+    }
+}
+
 bool Pipeline::needsPrimaryShardMerger() const {
     return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
         return stage->constraints(SplitState::kSplitForMerge).hostRequirement ==
@@ -713,6 +723,7 @@ DepsTracker Pipeline::getDependenciesForContainer(
             deps.requestMetadata(localDeps.metadataDeps());
             knowAllMeta = status & DepsTracker::State::EXHAUSTIVE_META;
         }
+        deps.requestMetadata(localDeps.searchMetadataDeps());
     }
 
     if (!knowAllFields)

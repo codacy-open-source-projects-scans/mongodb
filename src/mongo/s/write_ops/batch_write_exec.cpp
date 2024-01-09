@@ -89,8 +89,6 @@
 namespace mongo {
 namespace {
 
-MONGO_FAIL_POINT_DEFINE(hangBeforeCompletingWriteWithoutShardKeyWithId);
-
 const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOnly);
 
 // Helper to note several stale shard errors from a response
@@ -663,11 +661,11 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
 
         BatchedCommandResponse batchedCommandResponse;
         Status responseStatus = response.swResponse.getStatus();
+        std::string errMsg;
+        if (!batchedCommandResponse.parseBSON(response.swResponse.getValue().data, &errMsg)) {
+            responseStatus = {ErrorCodes::FailedToParse, errMsg};
+        }
         if (responseStatus.isOK()) {
-            std::string errMsg;
-            if (!batchedCommandResponse.parseBSON(response.swResponse.getValue().data, &errMsg)) {
-                responseStatus = {ErrorCodes::FailedToParse, errMsg};
-            }
             bool abortBatch = processResponseFromRemote(
                 opCtx, targeter, shardInfo, batchedCommandResponse, batchOp, batch, stats);
             // Since we are not in a transaction we can not abort on Write Errors and the following
@@ -701,8 +699,6 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
             dassert(abortBatch == false);
         }
     }
-
-    hangBeforeCompletingWriteWithoutShardKeyWithId.pauseWhileSet();
 }
 
 void executeNonOrdinaryWriteChildBatches(OperationContext* opCtx,

@@ -32,6 +32,7 @@ scripting_common_env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
+        '$BUILD_DIR/mongo/util/fail_point',
     ],
 )
 
@@ -177,6 +178,7 @@ env.CppUnitTest(
         'deadline_monitor_test.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         'scripting_common',
     ],
 )

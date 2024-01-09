@@ -40,8 +40,6 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/initializer.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
@@ -64,18 +62,7 @@
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/util/intrusive_counter.h"
 
-
 namespace mongo::optimizer {
-namespace {
-std::unique_ptr<unittest::TempDir> tempDir;
-
-MONGO_INITIALIZER_WITH_PREREQUISITES(ABTPipelineTestInitTempDir, ("SetTempDirDefaultRoot"))
-(InitializerContext*) {
-    if (!tempDir) {
-        tempDir = std::make_unique<unittest::TempDir>("ABTPipelineTest");
-    }
-}
-}  // namespace
 
 std::unique_ptr<mongo::Pipeline, mongo::PipelineDeleter> parsePipeline(
     const NamespaceString& nss,
@@ -99,7 +86,8 @@ std::unique_ptr<mongo::Pipeline, mongo::PipelineDeleter> parsePipeline(
         ctx->setResolvedNamespace(resolvedNss.ns, resolvedNss);
     }
 
-    ctx->tempDir = tempDir->path();
+    static unittest::TempDir tempDir("ABTPipelineTest");
+    ctx->tempDir = tempDir.path();
 
     return Pipeline::parse(request.getPipeline(), ctx);
 }
@@ -121,8 +109,7 @@ ABT translatePipeline(const Metadata& metadata,
                       involvedNss);
     pipeline->optimizePipeline();
     if (parameterized) {
-        MatchExpression::parameterize(
-            dynamic_cast<DocumentSourceMatch*>(pipeline.get()->peekFront())->getMatchExpression());
+        pipeline->parameterize();
     }
     QueryParameterMap qp;
     return translatePipelineToABT(metadata,
@@ -420,4 +407,5 @@ std::string ABTGoldenTestFixture::testParameterizedABTTranslation(StringData var
     formatGoldenTestQueryParameters(qp, stream);
     return formatGoldenTestExplain(translated, stream);
 }
+
 }  // namespace mongo::optimizer
