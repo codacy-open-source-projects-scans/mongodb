@@ -17,7 +17,8 @@ assert.commandWorked(
     db.adminCommand({enableSharding: db.getName(), primaryShard: st.rs0.getURL()}));
 
 CreateShardedCollectionUtil.shardCollectionWithChunks(coll, {x: 1}, [
-    {min: {x: MinKey}, max: {x: 0}, shard: st.shard0.shardName},
+    {min: {x: MinKey}, max: {x: -100}, shard: st.shard0.shardName},
+    {min: {x: -100}, max: {x: 0}, shard: st.shard0.shardName},
     {min: {x: 0}, max: {x: MaxKey}, shard: st.shard1.shardName},
 ]);
 
@@ -35,5 +36,8 @@ assert.commandWorked(
 const res = st.s1.getDB(jsTestName()).coll.updateOne({_id: -1}, {$inc: {counter: 1}});
 assert.commandWorked(res);
 assert.eq(res.modifiedCount, 1);
+let mongosServerStatus =
+    assert.commandWorked(st.s1.getDB(jsTestName()).adminCommand({serverStatus: 1}));
+assert.eq(1, mongosServerStatus.metrics.query.updateOneWithoutShardKeyWithIdRetryCount);
 
 st.stop();

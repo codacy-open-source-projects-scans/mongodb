@@ -103,22 +103,10 @@ TsBucketPathExtractor::extractCellBlocks(const BSONObj& bucketObj) {
     std::vector<std::unique_ptr<TsBlock>> outBlocks;
     std::vector<std::unique_ptr<CellBlock>> outCells(_pathReqs.size());
 
-    // The time series decoding API gives us the top level fields only, and our CellBlock
-    // extraction code expects full BSON objects. For now we resolve this mismatch by converting
-    // the decoded output into BSON, and then re-extracting. This is really awful in terms of
-    // performance, but the hope is that a new decoding API will be made available, and this
-    // code can be deleted.
-
-    // To avoid repeated allocations, we put all of the BSONObjs into one giant buffer (bsonBuffer).
-    // We keep track of their offsets in 'bsonOffsets'.
-    BufBuilder bsonBuffer;
-    std::vector<BSONObjBuilder> bsonBuilders;
-    std::vector<size_t> bsonOffsets;
-    std::vector<BSONObj> bsons;
-
-    bsonBuilders.reserve(noOfMeasurements);
-    bsonOffsets.reserve(noOfMeasurements);
-    bsons.reserve(noOfMeasurements);
+    // The time series decoding API gives us the top level fields only. To simulate an API
+    // which lets us extract more granular paths, we materialize each top level field as BSON,
+    // and then extract from that. This is awful in terms of performance, but it can be swapped
+    // out with a more efficient implementation when a more granular API becomes available.
 
     auto bucketControlMin = bucketControl.Obj()[timeseries::kBucketControlMinFieldName];
     auto bucketControlMax = bucketControl.Obj()[timeseries::kBucketControlMaxFieldName];
@@ -201,38 +189,25 @@ TsBucketPathExtractor::extractCellBlocks(const BSONObj& bucketObj) {
             continue;
         }
 
+        // This is the slow path. We materialize the top level field into BSON and then re-read
+        // that BSON to produce the results for nested paths.
+
         auto extracted = tsBlock->extract();
         invariant(extracted.count == static_cast<size_t>(noOfMeasurements));
-
-        for (size_t i = 0; i < extracted.count; ++i) {
-            bsonOffsets.push_back(bsonBuffer.len());
-            bsonBuilders.push_back(BSONObjBuilder(bsonBuffer));
-            bson::appendValueToBsonObj(bsonBuilders.back(),
-                                       columnElt.fieldNameStringData(),
-                                       extracted[i].first,
-                                       extracted[i].second);
-            bsonBuilders.back().doneFast();
-        }
-
-        for (size_t i = 0; i < extracted.count; ++i) {
-            bsons.push_back(BSONObj(bsonBuffer.buf() + bsonOffsets[i]));
-        }
 
         std::vector<CellBlock::PathRequest> reqs;
         for (auto idx : nonTopLevelIdxesForCurrentField) {
             reqs.push_back(_pathReqs[idx]);
         }
-        auto extractedCellBlocks = value::extractCellBlocksFromBsons(reqs, bsons);
+
+        auto extractor = value::BSONCellExtractor::make(reqs);
+        auto extractedCellBlocks = extractor->extractFromTopLevelField(
+            topLevelField, extracted.tagsSpan(), extracted.valsSpan());
         invariant(reqs.size() == extractedCellBlocks.size());
 
         for (size_t i = 0; i < extractedCellBlocks.size(); ++i) {
             outCells[nonTopLevelIdxesForCurrentField[i]] = std::move(extractedCellBlocks[i]);
         }
-
-        bsonBuilders.clear();
-        bsonOffsets.clear();
-        bsons.clear();
-        bsonBuffer.reset();
     }
 
     // Fill in any empty spots in the output with a block of [Nothing, Nothing...].
@@ -325,6 +300,66 @@ void TsBlock::deblockFromBsonColumn(std::vector<TypeTags>& deblockedTags,
     }
 }
 
+/**
+ * This is implicitly optimized for dense blocks but we may want to revisit this in the future.
+ */
+boost::optional<DeblockedHomogeneousVals> TsBlock::extractHomogeneous() {
+    // Check if we have already called extractHomogeneous on this block.
+    if (_decompressedBlock) {
+        return _decompressedBlock->extractHomogeneous();
+    }
+
+    ensureDeblocked();
+    invariant(_decompressedBlock);
+    auto deblocked = _decompressedBlock->extract();
+
+    bool foundNonNothing = false;
+    TypeTags acc = TypeTags::Nothing;
+    HomogeneousBlockBitset bitset;
+    bitset.resize(deblocked.count, true);
+    std::vector<Value> vals;
+    vals.resize(deblocked.count);
+    size_t valsIdx = 0;
+    for (size_t i = 0; i < deblocked.count; ++i) {
+        if (deblocked.tags[i] == TypeTags::Nothing) {
+            bitset[i] = false;
+            continue;
+        } else if (!foundNonNothing) {
+            // TODO SERVER-83799 Remove check for Boolean
+            if (!DeblockedHomogeneousVals::validHomogeneousType(deblocked.tags[i]) ||
+                deblocked.tags[i] == TypeTags::Boolean) {
+                return boost::none;
+            }
+            foundNonNothing = true;
+            acc = deblocked.tags[i];
+        } else if (foundNonNothing && deblocked.tags[i] != acc) {
+            return boost::none;
+        }
+        vals[valsIdx++] = deblocked.vals[i];
+    }
+    // Resize vals in case there were Nothings present in the block.
+    vals.resize(valsIdx);
+
+    switch (acc) {
+        case TypeTags::NumberInt32:
+            _decompressedBlock = std::make_unique<Int32Block>(std::move(vals), std::move(bitset));
+            break;
+        case TypeTags::NumberInt64:
+            _decompressedBlock = std::make_unique<Int64Block>(std::move(vals), std::move(bitset));
+            break;
+        case TypeTags::NumberDouble:
+            _decompressedBlock = std::make_unique<DoubleBlock>(std::move(vals), std::move(bitset));
+            break;
+        case TypeTags::Date:
+            _decompressedBlock = std::make_unique<DateBlock>(std::move(vals), std::move(bitset));
+            break;
+        default:
+            MONGO_UNREACHABLE;
+    }
+
+    return _decompressedBlock->extractHomogeneous();
+}
+
 std::unique_ptr<TsBlock> TsBlock::cloneStrongTyped() const {
     // TODO: If we've already decoded the output, there's no need to re-copy the entire bson
     // column. We could instead just copy the decoded values and metadata.
@@ -335,9 +370,14 @@ std::unique_ptr<TsBlock> TsBlock::cloneStrongTyped() const {
     auto cpy = std::make_unique<TsBlock>(_count, /*owned*/ true, cpyTag, cpyVal);
     guard.reset();
 
+    // TODO: This might not be necessary now that TsBlock doesn't really use _deblockedStorage
     // If the block has been deblocked, then we need to copy the deblocked values too to
     // avoid deblocking overhead again.
     cpy->_deblockedStorage = _deblockedStorage;
+
+    // If the block has been decompressed into a HeterogenousBlock or Homogeneous copy, we need to
+    // copy this decompressed block.
+    cpy->_decompressedBlock = _decompressedBlock->clone();
 
     return cpy;
 }
@@ -346,10 +386,10 @@ std::unique_ptr<ValueBlock> TsBlock::clone() const {
     return std::unique_ptr<ValueBlock>(cloneStrongTyped().release());
 }
 
-DeblockedTagVals TsBlock::deblock(boost::optional<DeblockedTagValStorage>& storage) const {
-    ensureDeblocked(storage);
+DeblockedTagVals TsBlock::deblock(boost::optional<DeblockedTagValStorage>& storage) {
+    ensureDeblocked();
 
-    return DeblockedTagVals{storage->vals.size(), storage->tags.data(), storage->vals.data()};
+    return _decompressedBlock->extract();
 }
 
 std::pair<TypeTags, Value> TsBlock::tryMin() const {
@@ -373,19 +413,18 @@ std::pair<TypeTags, Value> TsBlock::tryMin() const {
     return std::pair{TypeTags::Nothing, Value{0u}};
 }
 
-void TsBlock::ensureDeblocked(boost::optional<DeblockedTagValStorage>& storage) const {
-    if (!storage) {
-        storage = DeblockedTagValStorage{};
-
-        storage->owned = true;
-        storage->tags.reserve(_count);
-        storage->vals.reserve(_count);
+void TsBlock::ensureDeblocked() {
+    if (!_decompressedBlock) {
+        std::vector<TypeTags> tags;
+        std::vector<Value> vals;
 
         if (_blockTag == TypeTags::bsonObject) {
-            deblockFromBsonObj(storage->tags, storage->vals);
+            deblockFromBsonObj(tags, vals);
         } else {
-            deblockFromBsonColumn(storage->tags, storage->vals);
+            deblockFromBsonColumn(tags, vals);
         }
+
+        _decompressedBlock = std::make_unique<HeterogeneousBlock>(std::move(tags), std::move(vals));
     }
 }
 

@@ -67,6 +67,7 @@ const char kPostBatchResumeTokenField[] = "postBatchResumeToken";
 const char kPartialResultsReturnedField[] = "partialResultsReturned";
 const char kInvalidatedField[] = "invalidated";
 const char kWasStatementExecuted[] = "$_wasStatementExecuted";
+const char kMetricsField[] = "metrics";
 
 }  // namespace
 
@@ -81,6 +82,7 @@ CursorResponseBuilder::CursorResponseBuilder(rpc::ReplyBuilderInterface* replyBu
 
 void CursorResponseBuilder::done(CursorId cursorId,
                                  const NamespaceString& cursorNamespace,
+                                 boost::optional<CursorMetrics> metrics,
                                  const SerializationContext& serializationContext) {
     invariant(_active);
 
@@ -106,6 +108,11 @@ void CursorResponseBuilder::done(CursorId cursorId,
     if (_options.atClusterTime) {
         _cursorObject->append(kAtClusterTimeField, _options.atClusterTime->asTimestamp());
     }
+
+    if (metrics) {
+        _cursorObject->append(kMetricsField, metrics->toBSON());
+    }
+
     _cursorObject.reset();
 
     _bodyBuilder.reset();
@@ -139,17 +146,6 @@ void appendCursorResponseObject(long long cursorId,
     cursorObj.done();
 }
 
-void appendGetMoreResponseObject(long long cursorId,
-                                 StringData cursorNamespace,
-                                 BSONArray nextBatch,
-                                 BSONObjBuilder* builder) {
-    BSONObjBuilder cursorObj(builder->subobjStart(kCursorField));
-    cursorObj.append(kIdField, cursorId);
-    cursorObj.append(kNsField, cursorNamespace);
-    cursorObj.append(kBatchField, nextBatch);
-    cursorObj.done();
-}
-
 CursorResponse::CursorResponse(NamespaceString nss,
                                CursorId cursorId,
                                std::vector<BSONObj> batch,
@@ -157,7 +153,7 @@ CursorResponse::CursorResponse(NamespaceString nss,
                                boost::optional<BSONObj> postBatchResumeToken,
                                boost::optional<BSONObj> writeConcernError,
                                boost::optional<BSONObj> varsField,
-                               boost::optional<std::string> cursorType,
+                               boost::optional<CursorTypeEnum> cursorType,
                                boost::optional<CursorMetrics> metrics,
                                bool partialResultsReturned,
                                bool invalidated,
@@ -225,13 +221,6 @@ StatusWith<CursorResponse> CursorResponse::parseFromBSON(
 
     const auto& cursor = response.getCursor();
 
-    // TODO SERVER-84012: make this CursorType instead of string in the IDL.
-    // Callers use IDL to parse it from string to CursorTypeEnum, which can be avoided.
-    const boost::optional<StringData>& typeData = cursor.getCursorType();
-    boost::optional<std::string> type;
-    if (typeData)
-        type = boost::make_optional<std::string>(std::string{*typeData});
-
     auto maybeBatch = cursor.getFirstBatch();
     if (!maybeBatch)
         maybeBatch = cursor.getNextBatch();
@@ -266,7 +255,7 @@ StatusWith<CursorResponse> CursorResponse::parseFromBSON(
              getOwnedBSONObj(cursor.getPostBatchResumeToken()),
              getOwnedBSONObj(response.getWriteConcernError()),
              getOwnedBSONObj(response.getVars()),
-             std::move(type),
+             cursor.getCursorType(),
              std::move(metrics),
              cursor.getPartialResultsReturned(),
              cursor.getInvalidated(),
@@ -307,6 +296,10 @@ void CursorResponse::addToBSON(CursorResponse::ResponseType responseType,
 
     if (_wasStatementExecuted) {
         cursorBuilder.append(kWasStatementExecuted, _wasStatementExecuted);
+    }
+
+    if (_metrics) {
+        cursorBuilder.append(kMetricsField, _metrics->toBSON());
     }
 
     cursorBuilder.doneFast();

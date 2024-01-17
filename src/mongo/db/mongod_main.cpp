@@ -214,6 +214,7 @@
 #include "mongo/db/storage/flow_control.h"
 #include "mongo/db/storage/flow_control_parameters_gen.h"
 #include "mongo/db/storage/oplog_cap_maintainer_thread.h"
+#include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
@@ -436,23 +437,14 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
         services.push_back(std::make_unique<ShardingDDLCoordinatorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingDonorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingRecipientService>(serviceContext));
-        if (getGlobalReplSettings().isServerless()) {
-            services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
-            services.push_back(
-                std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
-            services.push_back(std::make_unique<repl::ShardMergeRecipientService>(serviceContext));
-        }
         services.push_back(std::make_unique<MultiUpdateCoordinatorService>(serviceContext));
     }
 
-    if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
-        if (getGlobalReplSettings().isServerless()) {
-            services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
-            services.push_back(
-                std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
-            services.push_back(std::make_unique<ShardSplitDonorService>(serviceContext));
-            services.push_back(std::make_unique<repl::ShardMergeRecipientService>(serviceContext));
-        }
+    if (getGlobalReplSettings().isServerless()) {
+        services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
+        services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
+        services.push_back(std::make_unique<ShardSplitDonorService>(serviceContext));
+        services.push_back(std::make_unique<repl::ShardMergeRecipientService>(serviceContext));
     }
 
     if (change_stream_serverless_helpers::canInitializeServices()) {
@@ -593,11 +585,19 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // Creating the operation context before initializing the storage engine allows the storage
     // engine initialization to make use of the lock manager. As the storage engine is not yet
     // initialized, a noop recovery unit is used until the initialization is complete.
-    auto startupOpCtx = serviceContext->makeOperationContext(&cc());
+    auto lastShutdownState = [&] {
+        auto initializeStorageEngineOpCtx = serviceContext->makeOperationContext(&cc());
+        shard_role_details::setRecoveryUnit(initializeStorageEngineOpCtx.get(),
+                                            std::make_unique<RecoveryUnitNoop>(),
+                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
 
-    auto lastShutdownState = initializeStorageEngine(
-        startupOpCtx.get(), StorageEngineInitFlags{}, &startupTimeElapsedBuilder);
-    StorageControl::startStorageControls(serviceContext);
+        auto lastShutdownState = initializeStorageEngine(initializeStorageEngineOpCtx.get(),
+                                                         StorageEngineInitFlags{},
+                                                         &startupTimeElapsedBuilder);
+
+        StorageControl::startStorageControls(serviceContext);
+        return lastShutdownState;
+    }();
 
     ScopeGuard logStartupStats([serviceContext,
                                 beginInitAndListen,
@@ -668,6 +668,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     startWatchdog(serviceContext);
+
+    auto startupOpCtx = serviceContext->makeOperationContext(&cc());
 
     try {
         startup_recovery::repairAndRecoverDatabases(

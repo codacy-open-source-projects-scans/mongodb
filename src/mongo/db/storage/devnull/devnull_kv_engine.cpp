@@ -48,6 +48,8 @@
 #include "mongo/db/storage/key_string.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/uuid.h"
@@ -311,8 +313,13 @@ DevNullKVEngine::DevNullKVEngine() {
     _mockBackupBlocks.push_back(BackupBlock(/*opCtx=*/nullptr,
                                             /*nss=*/boost::none,
                                             /*uuid=*/boost::none,
-                                            "filename.wt",
-                                            /*checkpointTimestamp=*/boost::none));
+                                            "filename.wt"));
+}
+
+DevNullKVEngine::~DevNullKVEngine() = default;
+
+RecoveryUnit* DevNullKVEngine::newRecoveryUnit() {
+    return new RecoveryUnitNoop();
 }
 
 std::unique_ptr<RecordStore> DevNullKVEngine::getRecordStore(OperationContext* opCtx,
@@ -388,9 +395,7 @@ private:
 }  // namespace
 
 StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> DevNullKVEngine::beginNonBlockingBackup(
-    OperationContext* opCtx,
-    boost::optional<Timestamp> checkpointTimestamp,
-    const StorageEngine::BackupOptions& options) {
+    OperationContext* opCtx, const StorageEngine::BackupOptions& options) {
     return std::make_unique<StreamingCursorImpl>(options, _mockBackupBlocks);
 }
 

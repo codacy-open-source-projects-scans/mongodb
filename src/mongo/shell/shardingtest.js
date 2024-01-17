@@ -114,6 +114,9 @@ var ShardingTest = function ShardingTest(params) {
     // concern (5 minutes)
     const kDefaultWTimeoutMs = 5 * 60 * 1000;
 
+    // Oplog collection name
+    const kOplogName = 'oplog.rs';
+
     // Ensure we don't mutate the passed-in parameters.
     params = Object.extend({}, params, true);
 
@@ -1143,6 +1146,17 @@ var ShardingTest = function ShardingTest(params) {
     };
 
     /**
+     * Query the oplog from a given node.
+     */
+    ShardingTest.prototype.findOplog = function(conn, query, limit) {
+        return conn.getDB('local')
+            .getCollection(kOplogName)
+            .find(query)
+            .sort({$natural: -1})
+            .limit(limit);
+    };
+
+    /**
      * Returns if there is a new feature compatibility version for the "latest" version. This must
      * be manually changed if and when there is a new feature compatibility version.
      */
@@ -1286,6 +1300,12 @@ var ShardingTest = function ShardingTest(params) {
     this._rsObjects = [];
 
     this._useBridge = otherParams.useBridge;
+    if (this._useBridge) {
+        assert(
+            !jsTestOptions().tlsMode,
+            'useBridge cannot be true when using TLS. Add the requires_mongobridge tag to the test to ensure it will be skipped on variants that use TLS.')
+    }
+
     this._unbridgedMongos = [];
     let _allocatePortForMongos;
     let _allocatePortForBridgeForMongos;

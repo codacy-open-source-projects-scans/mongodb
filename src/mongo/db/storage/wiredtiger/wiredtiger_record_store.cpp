@@ -1101,6 +1101,8 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
         }
     }
 
+    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
+
     int64_t totalLength = 0;
     for (size_t i = 0; i < nRecords; i++) {
         auto& record = records[i];
@@ -1157,8 +1159,6 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
         // Increment metrics for each insert separately, as opposed to outside of the loop. The API
         // requires that each record be accounted for separately.
         if (!_isOplog && !_isChangeCollection) {
-            auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-
             auto keyLength = computeRecordIdSize(record.id);
             metricsCollector.incrementOneDocWritten(_uri, value.size + keyLength);
         }
@@ -2032,6 +2032,7 @@ WiredTigerRecordStoreCursorBase::WiredTigerRecordStoreCursorBase(OperationContex
                                                                  bool forward)
     : _tableId(rs._tableId),
       _opCtx(opCtx),
+      _metrics(&ResourceConsumption::MetricsCollector::get(opCtx)),
       _uri(rs._uri),
       _ident(rs._ident->getIdent()),
       _keyFormat(rs._keyFormat),
@@ -2113,10 +2114,8 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::next() {
     WT_ITEM value;
     invariantWTOK(c->get_value(c, &value), c->session);
 
-    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocRead(_uri, value.size + keyLength);
+    _metrics->incrementOneDocRead(_uri, value.size + keyLength);
 
     _lastReturnedId = id;
     return {{std::move(id), {static_cast<const char*>(value.data), static_cast<int>(value.size)}}};
@@ -2198,14 +2197,13 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekExact(const RecordI
     }
     invariantWTOK(seekRet, c->session);
 
-    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementOneCursorSeek(c->uri);
+    _metrics->incrementOneCursorSeek(c->uri);
 
     WT_ITEM value;
     invariantWTOK(c->get_value(c, &value), c->session);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocRead(_uri, value.size + keyLength);
+    _metrics->incrementOneDocRead(_uri, value.size + keyLength);
 
     _lastReturnedId = id;
     _eof = false;
@@ -2243,8 +2241,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekNear(const RecordId
     }
     invariantWTOK(ret, c->session);
 
-    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(_opCtx);
-    metricsCollector.incrementOneCursorSeek(c->uri);
+    _metrics->incrementOneCursorSeek(c->uri);
 
     RecordId curId = getKey(c);
 
@@ -2297,7 +2294,7 @@ boost::optional<Record> WiredTigerRecordStoreCursorBase::seekNear(const RecordId
     invariantWTOK(c->get_value(c, &value), c->session);
 
     auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocRead(_uri, value.size + keyLength);
+    _metrics->incrementOneDocRead(_uri, value.size + keyLength);
 
     _lastReturnedId = curId;
     _eof = false;
@@ -2388,10 +2385,9 @@ bool WiredTigerRecordStoreCursorBase::restore(bool tolerateCappedRepositioning) 
         invariantWTOK(c->bound(c, "bound=upper"), c->session);
     }
 
-    int cmp;
-    int ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->search_near(c, &cmp); });
+    int ret =
+        wiredTigerPrepareConflictRetry(_opCtx, [&] { return _forward ? c->next(c) : c->prev(c); });
     invariantWTOK(c->bound(c, "action=clear"), c->session);
-
     if (ret == WT_NOTFOUND) {
         _eof = true;
 
@@ -2405,8 +2401,14 @@ bool WiredTigerRecordStoreCursorBase::restore(bool tolerateCappedRepositioning) 
     }
     invariantWTOK(ret, c->session);
 
-    if (cmp == 0)
+    // Our cursor can only move in one direction, so there's no need to clear the bound after
+    // seeking.
+
+    RecordId foundKey = getKey(c);
+    int cmp = foundKey.compare(_lastReturnedId);
+    if (cmp == 0) {
         return true;  // Landed right where we left off.
+    }
 
     if (_isCapped && !tolerateCappedRepositioning) {
         // The cursor has been repositioned as it was sitting on a document that has been
@@ -2418,21 +2420,17 @@ bool WiredTigerRecordStoreCursorBase::restore(bool tolerateCappedRepositioning) 
         return false;
     }
 
-    if (_forward && cmp > 0) {
-        // We landed after where we were. Return our new location on the next call to next().
-        _skipNextAdvance = true;
-    } else if (!_forward && cmp < 0) {
-        _skipNextAdvance = true;
-    } else {
-        // Check that the cursor hasn't landed before _lastReturnedId
-        dassert(_forward ? cmp >= 0 : cmp <= 0);
-    }
+    // With bounded cursors, we should always find a key greater than the one we searched for.
+    dassert(_forward ? cmp > 0 : cmp < 0);
 
+    // We landed after where we were. Return our new location on the next call to next().
+    _skipNextAdvance = true;
     return true;
 }
 
 void WiredTigerRecordStoreCursorBase::detachFromOperationContext() {
     _opCtx = nullptr;
+    _metrics = nullptr;
     if (!_saveStorageCursorOnDetachFromOperationContext) {
         _cursor = boost::none;
     }
@@ -2440,6 +2438,7 @@ void WiredTigerRecordStoreCursorBase::detachFromOperationContext() {
 
 void WiredTigerRecordStoreCursorBase::reattachToOperationContext(OperationContext* opCtx) {
     _opCtx = opCtx;
+    _metrics = &ResourceConsumption::MetricsCollector::get(opCtx);
     // _cursor recreated in restore() to avoid risk of WT_ROLLBACK issues.
 }
 

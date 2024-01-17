@@ -47,6 +47,176 @@ namespace {
 
 using namespace optimizer;
 
+TEST(VectorizerTest, ConvertDateTrunc) {
+    auto tree = make<FunctionCall>("dateTrunc",
+                                   makeSeq(make<Variable>("timezoneDB"),
+                                           make<Variable>("inputVar"),
+                                           Constant::str("hour"),
+                                           Constant::int32(1),
+                                           Constant::str("UTC"),
+                                           Constant::str("sunday")));
+
+    sbe::value::FrameIdGenerator generator;
+    Vectorizer::VariableTypes bindings;
+    bindings.emplace("inputVar"_sd,
+                     std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kDateTimeType),
+                                    boost::none));
+
+    auto processed =
+        Vectorizer{&generator, Vectorizer::Purpose::Project}.vectorize(tree, bindings, boost::none);
+
+    ASSERT_TRUE(processed.expr.has_value());
+    ASSERT_EXPLAIN_BSON_AUTO(
+        "{\n"
+        "    nodeType: \"FunctionCall\", \n"
+        "    name: \"valueBlockDateTrunc\", \n"
+        "    arguments: [\n"
+        "        {\n"
+        "            nodeType: \"Const\", \n"
+        "            tag: \"Nothing\"\n"
+        "        }, \n"
+        "        {\n"
+        "            nodeType: \"Variable\", \n"
+        "            name: \"inputVar\"\n"
+        "        }, \n"
+        "        {\n"
+        "            nodeType: \"Variable\", \n"
+        "            name: \"timezoneDB\"\n"
+        "        }, \n"
+        "        {\n"
+        "            nodeType: \"Const\", \n"
+        "            tag: \"StringSmall\", \n"
+        "            value: \"hour\"\n"
+        "        }, \n"
+        "        {\n"
+        "            nodeType: \"Const\", \n"
+        "            tag: \"NumberInt32\", \n"
+        "            value: 1\n"
+        "        }, \n"
+        "        {\n"
+        "            nodeType: \"Const\", \n"
+        "            tag: \"StringSmall\", \n"
+        "            value: \"UTC\"\n"
+        "        }, \n"
+        "        {\n"
+        "            nodeType: \"Const\", \n"
+        "            tag: \"StringSmall\", \n"
+        "            value: \"sunday\"\n"
+        "        }\n"
+        "    ]\n"
+        "}\n",
+        *processed.expr);
+}
+
+TEST(VectorizerTest, ConvertDateDiff) {
+    Vectorizer::VariableTypes bindings;
+    bindings.emplace("inputVar"_sd,
+                     std::make_pair(TypeSignature::kBlockType.include(TypeSignature::kDateTimeType),
+                                    boost::none));
+    {
+        auto tree = make<FunctionCall>("dateDiff",
+                                       makeSeq(make<Variable>("timezoneDB"),
+                                               make<Variable>("inputVar"),
+                                               Constant::str("2024-01-01T01:00:00"),
+                                               Constant::str("hour"),
+                                               Constant::str("UTC")));
+
+        sbe::value::FrameIdGenerator generator;
+        auto processed = Vectorizer{&generator, Vectorizer::Purpose::Project}.vectorize(
+            tree, bindings, boost::none);
+
+        ASSERT_TRUE(processed.expr.has_value());
+        ASSERT_EXPLAIN_BSON_AUTO(
+            "{\n"
+            "    nodeType: \"FunctionCall\", \n"
+            "    name: \"valueBlockDateDiff\", \n"
+            "    arguments: [\n"
+            "        {\n"
+            "            nodeType: \"Const\", \n"
+            "            tag: \"Nothing\"\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Variable\", \n"
+            "            name: \"inputVar\"\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Variable\", \n"
+            "            name: \"timezoneDB\"\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Const\", \n"
+            "            tag: \"StringBig\", \n"
+            "            value: \"2024-01-01T01:00:00\"\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Const\", \n"
+            "            tag: \"StringSmall\", \n"
+            "            value: \"hour\"\n"
+            "        }, \n"
+            "        {\n"
+            "            nodeType: \"Const\", \n"
+            "            tag: \"StringSmall\", \n"
+            "            value: \"UTC\"\n"
+            "        }\n"
+            "    ]\n"
+            "}\n",
+            *processed.expr);
+    }
+    {
+        auto tree = make<FunctionCall>("dateDiff",
+                                       makeSeq(make<Variable>("timezoneDB"),
+                                               Constant::str("2024-01-01T01:00:00"),
+                                               make<Variable>("inputVar"),
+                                               Constant::str("hour"),
+                                               Constant::str("UTC")));
+
+        sbe::value::FrameIdGenerator generator;
+        auto processed = Vectorizer{&generator, Vectorizer::Purpose::Project}.vectorize(
+            tree, bindings, boost::none);
+
+        ASSERT_TRUE(processed.expr.has_value());
+        ASSERT_EXPLAIN_BSON_AUTO(
+            "{\n"
+            "    nodeType: \"UnaryOp\", \n"
+            "    op: \"Neg\", \n"
+            "    input: {\n"
+            "        nodeType: \"FunctionCall\", \n"
+            "        name: \"valueBlockDateDiff\", \n"
+            "        arguments: [\n"
+            "            {\n"
+            "                nodeType: \"Const\", \n"
+            "                tag: \"Nothing\"\n"
+            "            }, \n"
+            "            {\n"
+            "                nodeType: \"Variable\", \n"
+            "                name: \"inputVar\"\n"
+            "            }, \n"
+            "            {\n"
+            "                nodeType: \"Variable\", \n"
+            "                name: \"timezoneDB\"\n"
+            "            }, \n"
+            "            {\n"
+            "                nodeType: \"Const\", \n"
+            "                tag: \"StringBig\", \n"
+            "                value: \"2024-01-01T01:00:00\"\n"
+            "            }, \n"
+            "            {\n"
+            "                nodeType: \"Const\", \n"
+            "                tag: \"StringSmall\", \n"
+            "                value: \"hour\"\n"
+            "            }, \n"
+            "            {\n"
+            "                nodeType: \"Const\", \n"
+            "                tag: \"StringSmall\", \n"
+            "                value: \"UTC\"\n"
+            "            }\n"
+            "        ]\n"
+            "    }\n"
+            "}\n",
+            *processed.expr);
+    }
+}
+
 TEST(VectorizerTest, ConvertGt) {
     auto tree1 = make<BinaryOp>(Operations::Gt, make<Variable>("inputVar"), Constant::int32(9));
 
@@ -128,7 +298,7 @@ TEST(VectorizerTest, ConvertGtOnCell) {
         *processed.expr);
 }
 
-TEST(VectorizerTest, ConvertBooleanOpOnCell) {
+TEST(VectorizerTest, ConvertBooleanAndOnCell) {
     auto tree1 = make<BinaryOp>(
         Operations::And,
         make<BinaryOp>(Operations::Lte, make<Variable>("inputVar"), Constant::int32(59)),
@@ -219,6 +389,128 @@ TEST(VectorizerTest, ConvertBooleanOpOnCell) {
         "                ]\n"
         "            }\n"
         "        ]\n"
+        "    }\n"
+        "}\n",
+        *processed.expr);
+}
+
+TEST(VectorizerTest, ConvertBooleanOrOnCell) {
+    auto tree1 = make<BinaryOp>(
+        Operations::Or,
+        make<BinaryOp>(Operations::Lte, make<Variable>("inputVar"), Constant::int32(59)),
+        make<BinaryOp>(Operations::Gt, make<Variable>("inputVar"), Constant::int32(9)));
+
+    sbe::value::FrameIdGenerator generator;
+    Vectorizer::VariableTypes bindings;
+    bindings.emplace("inputVar"_sd,
+                     std::make_pair(TypeSignature::kCellType.include(TypeSignature::kAnyScalarType),
+                                    boost::none));
+
+    auto processed =
+        Vectorizer{&generator, Vectorizer::Purpose::Filter}.vectorize(tree1, bindings, boost::none);
+
+    ASSERT_TRUE(processed.expr.has_value());
+
+    ASSERT_EXPLAIN_BSON_AUTO(
+        "{\n"
+        "    nodeType: \"Let\", \n"
+        "    variable: \"__l1_0\", \n"
+        "    bind: {\n"
+        "        nodeType: \"FunctionCall\", \n"
+        "        name: \"cellFoldValues_F\", \n"
+        "        arguments: [\n"
+        "            {\n"
+        "                nodeType: \"FunctionCall\", \n"
+        "                name: \"valueBlockLteScalar\", \n"
+        "                arguments: [\n"
+        "                    {\n"
+        "                        nodeType: \"FunctionCall\", \n"
+        "                        name: \"cellBlockGetFlatValuesBlock\", \n"
+        "                        arguments: [\n"
+        "                            {\n"
+        "                                nodeType: \"Variable\", \n"
+        "                                name: \"inputVar\"\n"
+        "                            }\n"
+        "                        ]\n"
+        "                    }, \n"
+        "                    {\n"
+        "                        nodeType: \"Const\", \n"
+        "                        tag: \"NumberInt32\", \n"
+        "                        value: 59\n"
+        "                    }\n"
+        "                ]\n"
+        "            }, \n"
+        "            {\n"
+        "                nodeType: \"Variable\", \n"
+        "                name: \"inputVar\"\n"
+        "            }\n"
+        "        ]\n"
+        "    }, \n"
+        "    expression: {\n"
+        "        nodeType: \"Let\", \n"
+        "        variable: \"__l2_0\", \n"
+        "        bind: {\n"
+        "            nodeType: \"FunctionCall\", \n"
+        "            name: \"valueBlockLogicalNot\", \n"
+        "            arguments: [\n"
+        "                {\n"
+        "                    nodeType: \"FunctionCall\", \n"
+        "                    name: \"valueBlockFillEmpty\", \n"
+        "                    arguments: [\n"
+        "                        {\n"
+        "                            nodeType: \"Variable\", \n"
+        "                            name: \"__l1_0\"\n"
+        "                        }, \n"
+        "                        {\n"
+        "                            nodeType: \"Const\", \n"
+        "                            tag: \"Boolean\", \n"
+        "                            value: false\n"
+        "                        }\n"
+        "                    ]\n"
+        "                }\n"
+        "            ]\n"
+        "        }, \n"
+        "        expression: {\n"
+        "            nodeType: \"FunctionCall\", \n"
+        "            name: \"valueBlockLogicalOr\", \n"
+        "            arguments: [\n"
+        "                {\n"
+        "                    nodeType: \"Variable\", \n"
+        "                    name: \"__l1_0\"\n"
+        "                }, \n"
+        "                {\n"
+        "                    nodeType: \"FunctionCall\", \n"
+        "                    name: \"cellFoldValues_F\", \n"
+        "                    arguments: [\n"
+        "                        {\n"
+        "                            nodeType: \"FunctionCall\", \n"
+        "                            name: \"valueBlockGtScalar\", \n"
+        "                            arguments: [\n"
+        "                                {\n"
+        "                                    nodeType: \"FunctionCall\", \n"
+        "                                    name: \"cellBlockGetFlatValuesBlock\", \n"
+        "                                    arguments: [\n"
+        "                                        {\n"
+        "                                            nodeType: \"Variable\", \n"
+        "                                            name: \"inputVar\"\n"
+        "                                        }\n"
+        "                                    ]\n"
+        "                                }, \n"
+        "                                {\n"
+        "                                    nodeType: \"Const\", \n"
+        "                                    tag: \"NumberInt32\", \n"
+        "                                    value: 9\n"
+        "                                }\n"
+        "                            ]\n"
+        "                        }, \n"
+        "                        {\n"
+        "                            nodeType: \"Variable\", \n"
+        "                            name: \"inputVar\"\n"
+        "                        }\n"
+        "                    ]\n"
+        "                }\n"
+        "            ]\n"
+        "        }\n"
         "    }\n"
         "}\n",
         *processed.expr);

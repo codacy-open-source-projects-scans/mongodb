@@ -94,6 +94,11 @@ DEBUG_DEFINES = select({
     "//conditions:default": ["NDEBUG"],
 })
 
+LINKER_LINKFLAGS = select({
+    "//bazel/config:linker_gold": ["-fuse-ld=gold"],
+    "//bazel/config:linker_lld": ["-fuse-ld=lld"],
+})
+
 LIBUNWIND_DEPS = select({
     "//bazel/config:use_libunwind_enabled": ["//src/third_party/unwind:unwind"],
     "//conditions:default": [],
@@ -119,7 +124,7 @@ ANY_SANITIZER_AVAILABLE_COPTS = select({
 no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE)
 
 
-ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE = (
+SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE = (
     "\nError:\n" +
     "    address and memory sanitizers require these configurations:\n"+
     "    --//bazel/config:allocator=system\n"
@@ -129,13 +134,13 @@ ADDRESS_SANITIZER_COPTS = select({
     ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
     "//bazel/config:asan_disabled": [],
 }
-, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
+, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
 
 ADDRESS_SANITIZER_LINKFLAGS = select({
     ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
     "//bazel/config:asan_disabled": [],
 }
-, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
+, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
 
 # Unfortunately, abseil requires that we make these macros
 # (this, and THREAD_ and UNDEFINED_BEHAVIOR_ below) set,
@@ -146,22 +151,51 @@ ADDRESS_SANITIZER_DEFINES = select({
     ("//bazel/config:sanitize_address_required_settings"): ["ADDRESS_SANITIZER"],
     "//bazel/config:asan_disabled": [],
 }
-, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
+, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
 
 # Makes it easier to debug memory failures at the cost of some perf: -fsanitize-memory-track-origins
 MEMORY_SANITIZER_COPTS = select({
     ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory", "-fsanitize-memory-track-origins"],
     ("//bazel/config:msan_disabled"): [],
 }
-, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
+, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
 
 # Makes it easier to debug memory failures at the cost of some perf: -fsanitize-memory-track-origins
 MEMORY_SANITIZER_LINKFLAGS = select({
     ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory"],
     ("//bazel/config:msan_disabled"): [],
 }
-, no_match_error = ADDRESS_AND_MEMORY_SANITIZER_ERROR_MESSAGE)
+, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
 
+
+GENERIC_SANITIZER_ERROR_MESSAGE = (
+    "Failed to enable sanitizers with flag: "
+)
+# We can't include the fuzzer flag with the other sanitize flags
+# The libfuzzer library already has a main function, which will cause the dependencies check
+# to fail
+FUZZER_SANITIZER_COPTS = select({
+    ("//bazel/config:sanitize_fuzzer_required_settings"): ["-fsanitize=fuzzer-no-link", "-fprofile-instr-generate", "-fcoverage-mapping"],
+    ("//bazel/config:fsan_disabled"): [],
+}
+, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer")
+
+# These flags are needed to generate a coverage report
+FUZZER_SANITIZER_LINKFLAGS = select({
+    ("//bazel/config:sanitize_fuzzer_required_settings"): ["-fsanitize=fuzzer-no-link", "-fprofile-instr-generate", "-fcoverage-mapping"],
+    ("//bazel/config:fsan_disabled"): [],
+}
+, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer")
+
+REQUIRED_SETTINGS_DYNAMIC_LINK_ERROR_MESSAGE = (
+    "\nError:\n" +
+    "    linking mongo dynamically is not currently supported on Windows"
+)
+
+LINKSTATIC_ENABLED = select({
+    "//bazel/config:linkstatic_enabled": True,
+    "//bazel/config:linkdynamic_required_settings": False,
+}, no_match_error = REQUIRED_SETTINGS_DYNAMIC_LINK_ERROR_MESSAGE)
 
 SEPARATE_DEBUG_ENABLED = select({
     "//bazel/config:separate_debug_enabled": True,
@@ -175,12 +209,27 @@ TCMALLOC_DEPS = select({
     "//conditions:default": [],
 })
 
-MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES
+#TODO SERVER-84714 add message about using the toolchain version of C++ libs
+GLIBCXX_DEBUG_ERROR_MESSAGE = (
+    "\nError:\n" +
+    "    glibcxx_debug requires these configurations:\n"+
+    "    --//bazel/config:build_mode=dbg\n"+
+    "    --//bazel/config:use_libcxx=False"
+)
+
+GLIBCXX_DEBUG_DEFINES = select({
+    ("//bazel/config:use_glibcxx_debug_required_settings"): ["_GLIBCXX_DEBUG"],
+    ("//bazel/config:use_glibcxx_debug_disabled"): [],
+}, no_match_error = GLIBCXX_DEBUG_ERROR_MESSAGE)
+
+MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES \
+                       + GLIBCXX_DEBUG_DEFINES
 
 MONGO_GLOBAL_COPTS = ["-Isrc"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS \
-                    + MEMORY_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS
+                    + MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS
 
-MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + LIBCXX_LINKFLAGS
+MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS \
+                         + LIBCXX_LINKFLAGS + LINKER_LINKFLAGS
 
 def force_includes_copt(package_name, name):
 
@@ -274,9 +323,15 @@ def mongo_cc_library(
       copts: Any extra compiler options to pass in.
       linkopts: Any extra link options to pass in.
       linkstatic: Whether or not linkstatic should be passed to the native bazel cc_test rule. This argument
-        is ignored on windows since linking into DLLs is not currently supported.
+        is currently not supported. The mongo build must link entirely statically or entirely dynamically. This can be
+        configured via //config/bazel:linkstatic.
       local_defines: macro definitions passed to all source and header files.
     """
+
+    if linkstatic == True:
+        fail("""Linking specific targets statically is not supported.
+        The mongo build must link entirely statically or entirely dynamically.
+        This can be configured via //config/bazel:linkstatic.""")
 
     # Avoid injecting into unwind/libunwind_asm to avoid a circular dependency.
     if name not in ["unwind", "tcmalloc_minimal"]:
@@ -290,6 +345,45 @@ def mongo_cc_library(
     if name != "tcmalloc_minimal":
         all_deps += TCMALLOC_DEPS
 
+    linux_rpath_flags = ['-Wl,-z,origin', '-Wl,--enable-new-dtags', '-Wl,-rpath,\\$$ORIGIN/../lib', "-Wl,-h,lib" + name + ".so"]
+    macos_rpath_flags = ['-Wl,-rpath,\\$$ORIGIN/../lib', "-Wl,-install_name,@rpath/lib" + name + ".so"]
+    rpath_flags = select({
+        "//bazel/config:linux_aarch64": linux_rpath_flags,
+        "//bazel/config:linux_x86_64": linux_rpath_flags,
+        "//bazel/config:linux_ppc64le":linux_rpath_flags,
+        "//bazel/config:linux_s390x": linux_rpath_flags,
+        "//bazel/config:windows_x86_64": [],
+        "//bazel/config:macos_x86_64": macos_rpath_flags,
+        "//bazel/config:macos_aarch64": macos_rpath_flags,
+    })
+
+    # Create a cc_library entry to generate a shared archive of the target.
+    native.cc_library(
+        name = name + ".so",
+        srcs = srcs,
+        hdrs = hdrs + fincludes_hdr,
+        deps = all_deps,
+        visibility = visibility,
+        testonly = testonly,
+        copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
+        data = data,
+        tags = tags,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
+        linkstatic = True,
+        local_defines = MONGO_GLOBAL_DEFINES + local_defines,
+        includes = [],
+        features = ["supports_pic", "pic"],
+        target_compatible_with = select({
+            "//bazel/config:shared_archive_enabled": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+
+    all_deps += select({
+        "//bazel/config:shared_archive_enabled": [":" + name + ".so"],
+        "//conditions:default": [],
+    })
+
     native.cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs,
@@ -300,13 +394,15 @@ def mongo_cc_library(
         copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
         data = data,
         tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
-        linkstatic = select({
-            "@platforms//os:windows": True,
-            "//conditions:default": linkstatic,
-        }),
+        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags,
+        linkstatic = LINKSTATIC_ENABLED,
         local_defines = MONGO_GLOBAL_DEFINES + local_defines,
         includes = [],
+        features = select({
+            "//bazel/config:linkstatic_disabled": ["supports_pic", "pic"],
+            "//bazel/config:shared_archive_enabled": ["supports_pic", "pic"],
+            "//conditions:default": ["pie"],
+        }),
     )
 
     extract_debuginfo(
@@ -342,9 +438,15 @@ def mongo_cc_binary(
       copts: Any extra compiler options to pass in.
       linkopts: Any extra link options to pass in.
       linkstatic: Whether or not linkstatic should be passed to the native bazel cc_test rule. This argument
-        is ignored on windows since linking into DLLs is not currently supported.
+        is currently not supported. The mongo build must link entirely statically or entirely dynamically. This can be
+        configured via //config/bazel:linkstatic.
       local_defines: macro definitions passed to all source and header files.
     """
+
+    if linkstatic == True:
+        fail("""Linking specific targets statically is not supported.
+        The mongo build must link entirely statically or entirely dynamically.
+        This can be configured via //config/bazel:linkstatic.""")
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
@@ -361,12 +463,10 @@ def mongo_cc_binary(
         data = data,
         tags = tags,
         linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
-        linkstatic = select({
-            "@platforms//os:windows": True,
-            "//conditions:default": linkstatic,
-        }),
+        linkstatic = LINKSTATIC_ENABLED,
         local_defines = MONGO_GLOBAL_DEFINES + LIBUNWIND_DEFINES + local_defines,
         includes = [],
+        features = ["pie"],
     )
 
     extract_debuginfo(

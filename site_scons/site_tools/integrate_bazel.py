@@ -85,6 +85,10 @@ def convert_scons_node_to_bazel_target(scons_node: SCons.Node.FS.File) -> str:
     prefix = env.subst(scons_node.get_builder().get_prefix(env), target=[scons_node],
                        source=scons_node.sources) if scons_node.has_builder() else ""
 
+    # the shared archive builder hides the prefix added by their parent builder, set it manually
+    if scons_node.name.endswith(".so.a"):
+        prefix = "lib"
+
     # now get just the file name without and prefix or suffix i.e.: libcommands.so -> 'commands'
     prefix_suffix_removed = os.path.splitext(scons_node.name[len(prefix):])[0]
 
@@ -319,7 +323,19 @@ def create_library_builder(env: SCons.Environment.Environment) -> None:
     if env.GetOption("link-model") in ["auto", "static"]:
         env['BUILDERS']['BazelLibrary'] = create_bazel_builder(env['BUILDERS']["StaticLibrary"])
     else:
-        env['BUILDERS']['BazelLibrary'] = create_bazel_builder(env['BUILDERS']["SharedLibrary"])
+        env['BUILDERS']['BazelSharedLibrary'] = create_bazel_builder(
+            env['BUILDERS']["SharedLibrary"])
+        env['BUILDERS']['BazelSharedArchive'] = create_bazel_builder(
+            env['BUILDERS']["SharedArchive"])
+
+        def sharedArchiveAndSharedLibrary(env, target, source, *args, **kwargs):
+            sharedLibrary = env.BazelSharedLibrary(target, source, *args, **kwargs)
+            sharedArchive = env.BazelSharedArchive(target, source=sharedLibrary[0].sources, *args,
+                                                   **kwargs)
+            sharedLibrary.extend(sharedArchive)
+            return sharedLibrary
+
+        env['BUILDERS']['BazelLibrary'] = sharedArchiveAndSharedLibrary
 
 
 def create_program_builder(env: SCons.Environment.Environment) -> None:
@@ -403,7 +419,7 @@ def generate(env: SCons.Environment.Environment) -> None:
 
         # === Build settings ===
 
-        static_link = env.GetOption("link-model") in ["auto", "static"]
+        linkstatic = env.GetOption("link-model") in ["auto", "static"]
 
         if env.GetOption("release") is not None:
             build_mode = "release"
@@ -429,13 +445,24 @@ def generate(env: SCons.Environment.Environment) -> None:
             f'--//bazel/config:use_ocsp_stapling={True if env.GetOption("ocsp-stapling") == "on" else False}',
             f'--//bazel/config:use_disable_ref_track={False if env.GetOption("disable-ref-track") is None else True}',
             f'--//bazel/config:use_wiredtiger={True if env.GetOption("wiredtiger") == "on" else False}',
+            f'--//bazel/config:use_glibcxx_debug={env.GetOption("use-glibcxx-debug") is not None}',
             f'--//bazel/config:build_grpc={True if env["ENABLE_GRPC_BUILD"] else False}',
             f'--//bazel/config:use_libcxx={env.GetOption("libc++") is not None}',
-            f'--dynamic_mode={"off" if static_link else "fully"}',
+            f'--//bazel/config:linkstatic={linkstatic}',
+            f'--//bazel/config:use_diagnostic_latches={True if env.GetOption("use-diagnostic-latches") == "on" else False}',
+            f'--//bazel/config:shared_archive={env.GetOption("link-model") == "dynamic-sdk"}',
+            f'--//bazel/config:linker={"lld" if env.GetOption("linker") == "auto" else env.GetOption("linker")}',
             f'--platforms=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
             f'--host_platform=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
             '--compilation_mode=dbg',  # always build this compilation mode as we always build with -g
         ]
+
+        http_client_option = env.GetOption("enable-http-client")
+        if http_client_option is not None:
+            if http_client_option in ["on", "auto"]:
+                bazel_internal_flags.append(f'--//bazel/config:http_client=True')
+            elif http_client_option == "off":
+                bazel_internal_flags.append(f'--//bazel/config:http_client=False')
 
         sanitizer_option = env.GetOption("sanitize")
 
@@ -491,3 +518,4 @@ def generate(env: SCons.Environment.Environment) -> None:
         env['BUILDERS']['BazelLibrary'] = env['BUILDERS']['Library']
         env['BUILDERS']['BazelProgram'] = env['BUILDERS']['Program']
         env['BUILDERS']['BazelIdlc'] = env['BUILDERS']['Idlc']
+        env['BUILDERS']['BazelSharedArchive'] = env['BUILDERS']['SharedArchive']

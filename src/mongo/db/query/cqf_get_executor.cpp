@@ -50,8 +50,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/curop.h"
@@ -74,7 +72,6 @@
 #include "mongo/db/pipeline/abt/match_expression_visitor.h"
 #include "mongo/db/pipeline/abt/utils.h"
 #include "mongo/db/pipeline/document_source_match.h"
-#include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/ce/heuristic_estimator.h"
@@ -89,9 +86,6 @@
 #include "mongo/db/query/cost_model/on_coefficients_change_updater_impl.h"
 #include "mongo/db/query/cqf_command_utils.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/optimizer/cascades/interfaces.h"
-#include "mongo/db/query/optimizer/cascades/memo.h"
-#include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/explain.h"
 #include "mongo/db/query/optimizer/metadata.h"
 #include "mongo/db/query/optimizer/metadata_factory.h"
@@ -118,7 +112,6 @@
 #include "mongo/db/query/shard_filterer_factory_impl.h"
 #include "mongo/db/query/stats/collection_statistics_impl.h"
 #include "mongo/db/query/yield_policy_callbacks_impl.h"
-#include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -523,23 +516,22 @@ static ExecParams createExecutor(
         phaseManager.getMetadata(), std::move(toExplain), explainVersion);
 
     // (Possibly) cache the SBE plan.
-    if constexpr (std::is_same_v<QueryType, CanonicalQuery>) {
-        if (planCacheKey && shouldCachePlan(*sbePlan)) {
-            sbe::getPlanCache(opCtx).setPinned(
-                *planCacheKey,
-                canonical_query_encoder::computeHash(query.encodeKeyForPlanCacheCommand()),
-                std::make_unique<sbe::CachedSbePlan>(sbePlan->clone(),
-                                                     // Make a copy of the plan stage data,
-                                                     // since it needs to be owned by the
-                                                     // cached plan.
-                                                     stage_builder::PlanStageData(data),
-                                                     // No query solution, so no query solution
-                                                     // hash either.
-                                                     0),
-                opCtx->getServiceContext()->getPreciseClockSource()->now(),
-                plan_cache_debug_info::DebugInfoSBE(),
-                CurOp::get(opCtx)->getShouldOmitDiagnosticInformation());
-        }
+    if (planCacheKey && shouldCachePlan(*sbePlan)) {
+        sbe::getPlanCache(opCtx).setPinned(
+            *planCacheKey,
+            canonical_query_encoder::computeHash(
+                canonical_query_encoder::encodeForPlanCacheCommand(query)),
+            std::make_unique<sbe::CachedSbePlan>(sbePlan->clone(),
+                                                 // Make a copy of the plan stage data,
+                                                 // since it needs to be owned by the
+                                                 // cached plan.
+                                                 stage_builder::PlanStageData(data),
+                                                 // No query solution, so no query solution
+                                                 // hash either.
+                                                 0),
+            opCtx->getServiceContext()->getPreciseClockSource()->now(),
+            plan_cache_debug_info::DebugInfoSBE(),
+            CurOp::get(opCtx)->getShouldOmitDiagnosticInformation());
     }
 
     sbePlan->prepare(data.env.ctx);
@@ -668,6 +660,8 @@ std::unique_ptr<CardinalityEstimator> createCardinalityEstimator(
                 createSamplingPhaseManager(
                     costModel, prefixId, metadata, constFold, hints, queryParameters),
                 collectionSize,
+                DebugInfo::kDefaultForProd,
+                prefixId,
                 std::make_unique<HeuristicEstimator>(),
                 std::make_unique<ce::SBESamplingExecutor>(opCtx));
         } else {
@@ -688,17 +682,22 @@ std::unique_ptr<CardinalityEstimator> createCardinalityEstimator(
 }
 
 /**
- * Creates a plan cache key from the provided CanonicalQuery.
+ * Creates a plan cache key from the provided CanonicalQuery or Pipeline.
  */
+template <typename QueryType>
 boost::optional<sbe::PlanCacheKey> createPlanCacheKey(
-    const CanonicalQuery& query, const MultipleCollectionAccessor& collections) {
+    const QueryType& query, const MultipleCollectionAccessor& collections) {
     if (!feature_flags::gFeatureFlagOptimizerPlanCache.isEnabledUseLatestFCVWhenUninitialized(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return boost::none;
     } else if (!static_cast<bool>(collections.getMainCollection())) {
         return boost::none;
-    } else {
+    }
+
+    if constexpr (std::is_same_v<QueryType, CanonicalQuery>) {
         return boost::make_optional(plan_cache_key_factory::make(query, collections, false));
+    } else {
+        return boost::make_optional(plan_cache_key_factory::make(query, collections));
     }
 }
 }  // namespace
@@ -943,6 +942,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     const MultipleCollectionAccessor& collections,
     QueryHints queryHints,
     const boost::optional<BSONObj>& indexHint,
+    BonsaiEligibility eligibility,
     Pipeline* pipeline,
     const CanonicalQuery* canonicalQuery) {
     if (MONGO_unlikely(failConstructingBonsaiExecutor.shouldFail())) {
@@ -959,8 +959,21 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
         involvedCollections = pipeline->getInvolvedCollections();
     }
 
-    const auto planCacheKey =
-        canonicalQuery ? createPlanCacheKey(*canonicalQuery, collections) : boost::none;
+    // TODO SERVER-82185: Update value of parameterizationOn based on M2-eligibility
+    // TODO SERVER-83414: Enable histogram CE with parameterization.
+    const auto parameterizationOn = (internalQueryCardinalityEstimatorMode != "histogram"_sd) &&
+        internalCascadesOptimizerEnableParameterization.load();
+
+    const auto planCacheKey = [&]() -> boost::optional<sbe::PlanCacheKey> {
+        if (canonicalQuery) {
+            return createPlanCacheKey(*canonicalQuery, collections);
+        } else if (pipeline->isParameterized()) {
+            // Create plan cache key for pipeline if was parameterized
+            return createPlanCacheKey(*pipeline, collections);
+        }
+
+        return boost::none;
+    }();
 
     const auto& collection = collections.getMainCollection();
 
@@ -1008,40 +1021,10 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
 
     QueryParameterMap queryParameters;
 
-    // Check if pipeline is eligible for plan caching.
-    // TODO SERVER-82185: Update value of _isCacheable based on M2-eligibility
-    // TODO SERVER-83414: Enable histogram CE with parameterization.
-    auto _isCacheable = (internalQueryCardinalityEstimatorMode != "histogram"_sd) &&
-        internalCascadesOptimizerEnableParameterization.load();
     if (pipeline) {
-        _isCacheable &= [&]() -> bool {
-            auto& sources = pipeline->getSources();
-
-            // Sources cannot be empty or contain more than two stages.
-            if (sources.empty() || sources.size() > 2) {
-                return false;
-            }
-
-            // First stage must be a DocumentSourceMatch.
-            const auto& firstStageItr = sources.begin();
-            auto firstStageName = firstStageItr->get()->getSourceName();
-            if (firstStageName != DocumentSourceMatch::kStageName) {
-                return false;
-            }
-
-            // If optional second stage exists, must be a projection stage.
-            auto secondStageItr = std::next(firstStageItr);
-            if (secondStageItr != sources.end()) {
-                return secondStageItr->get()->getSourceName() == DocumentSourceProject::kStageName;
-            }
-
-            return true;
-        }();
-
-        // TODO SERVER-84528: Perform parameterization before calling
-        // getSBEExecutorViaCascadesOptimizer
-        if (_isCacheable) {
-            pipeline->parameterize();
+        // Clear match expression auto-parameterization before pipeline to ABT translation
+        if (!parameterizationOn && pipeline->isParameterized()) {
+            pipeline->unparameterize();
         }
 
         abt = translatePipelineToABT(metadata,
@@ -1055,7 +1038,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     } else {
         // Clear match expression auto-parameterization by setting max param count to zero before
         // CQ to ABT translation
-        if (!_isCacheable) {
+        if (!parameterizationOn) {
             MatchExpression::unparameterize(canonicalQuery->getPrimaryMatchExpression());
         }
 
@@ -1068,8 +1051,9 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                                            maxFilterDepth);
     }
 
-    // If pipeline exists and is cacheable, save the MatchExpression in ExecParams for binding.
-    const auto pipelineMatchExpr = pipeline && _isCacheable
+    // If pipeline exists, is cacheable, and is parameterized, save the MatchExpression in
+    // ExecParams for binding.
+    const auto pipelineMatchExpr = pipeline && parameterizationOn && pipeline->isParameterized()
         ? boost::make_optional(
               dynamic_cast<DocumentSourceMatch*>(pipeline->peekFront())->getMatchExpression())
         : boost::none;
@@ -1182,6 +1166,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
 boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
     const MultipleCollectionAccessor& collections,
     QueryHints queryHints,
+    BonsaiEligibility eligibility,
     const CanonicalQuery* query) {
     boost::optional<BSONObj> indexHint;
     if (!query->getFindCommandRequest().getHint().isEmpty()) {
@@ -1198,6 +1183,7 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                                               collections,
                                               std::move(queryHints),
                                               indexHint,
+                                              eligibility,
                                               nullptr /* pipeline */,
                                               query);
 }

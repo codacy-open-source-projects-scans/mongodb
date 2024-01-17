@@ -335,8 +335,7 @@ std::string toString(const StorageEngine::OldestActiveTransactionTimestampResult
 
 StringData WiredTigerKVEngine::kTableUriPrefix = "table:"_sd;
 
-WiredTigerKVEngine::WiredTigerKVEngine(OperationContext* opCtx,
-                                       const std::string& canonicalName,
+WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
                                        const std::string& path,
                                        ClockSource* cs,
                                        const std::string& extraOpenOptions,
@@ -599,7 +598,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(OperationContext* opCtx,
     if (repair && _hasUri(session.getSession(), _sizeStorerUri)) {
         LOGV2(22316, "Repairing size cache");
 
-        auto status = _salvageIfNeeded(opCtx, _sizeStorerUri.c_str());
+        auto status = _salvageIfNeeded(_sizeStorerUri.c_str());
         if (status.code() != ErrorCodes::DataModifiedByRepair)
             fassertNoTrace(28577, status);
     }
@@ -837,10 +836,10 @@ Status WiredTigerKVEngine::repairIdent(OperationContext* opCtx, StringData ident
         return Status::OK();
     }
     _ensureIdentPath(ident);
-    return _salvageIfNeeded(opCtx, uri.c_str());
+    return _salvageIfNeeded(uri.c_str());
 }
 
-Status WiredTigerKVEngine::_salvageIfNeeded(OperationContext* opCtx, const char* uri) {
+Status WiredTigerKVEngine::_salvageIfNeeded(const char* uri) {
     // Using a side session to avoid transactional issues
     WiredTigerSession sessionWrapper(_conn);
     WT_SESSION* session = sessionWrapper.getSession();
@@ -864,7 +863,7 @@ Status WiredTigerKVEngine::_salvageIfNeeded(OperationContext* opCtx, const char*
                       "Data file is missing. Attempting to drop and re-create the collection.",
                       "uri"_attr = uri);
 
-        return _rebuildIdent(opCtx, session, uri);
+        return _rebuildIdent(session, uri);
     }
 
     LOGV2(22328, "Verify failed. Running a salvage operation.", "uri"_attr = uri);
@@ -886,12 +885,10 @@ Status WiredTigerKVEngine::_salvageIfNeeded(OperationContext* opCtx, const char*
                   "error"_attr = status);
 
     //  If the data is unsalvageable, we should completely rebuild the ident.
-    return _rebuildIdent(opCtx, session, uri);
+    return _rebuildIdent(session, uri);
 }
 
-Status WiredTigerKVEngine::_rebuildIdent(OperationContext* opCtx,
-                                         WT_SESSION* session,
-                                         const char* uri) {
+Status WiredTigerKVEngine::_rebuildIdent(WT_SESSION* session, const char* uri) {
     invariant(_inRepairMode);
 
     invariant(std::string(uri).find(kTableUriPrefix.rawData()) == 0);
@@ -1073,13 +1070,11 @@ public:
     StreamingCursorImpl() = delete;
     explicit StreamingCursorImpl(WT_SESSION* session,
                                  std::string path,
-                                 boost::optional<Timestamp> checkpointTimestamp,
                                  StorageEngine::BackupOptions options,
                                  WiredTigerBackup* wtBackup)
         : StorageEngine::StreamingCursor(options),
           _session(session),
           _path(path),
-          _checkpointTimestamp(checkpointTimestamp),
           _wtBackup(wtBackup){};
 
     ~StreamingCursorImpl() = default;
@@ -1155,7 +1150,6 @@ public:
                                                    nsAndUUID.first,
                                                    nsAndUUID.second,
                                                    filePath.string(),
-                                                   _checkpointTimestamp,
                                                    0 /* offset */,
                                                    length,
                                                    fileSize));
@@ -1226,7 +1220,6 @@ private:
                                                 nsAndUUID.first,
                                                 nsAndUUID.second,
                                                 filePath.string(),
-                                                _checkpointTimestamp,
                                                 offset,
                                                 size,
                                                 fileSize));
@@ -1240,7 +1233,6 @@ private:
                                                 nsAndUUID.first,
                                                 nsAndUUID.second,
                                                 filePath.string(),
-                                                _checkpointTimestamp,
                                                 0 /* offset */,
                                                 0 /* length */,
                                                 fileSize));
@@ -1263,7 +1255,6 @@ private:
     WT_SESSION* _session;
     std::string _path;
     stdx::unordered_map<std::string, std::pair<NamespaceString, UUID>> _identsToNsAndUUID;
-    boost::optional<Timestamp> _checkpointTimestamp;
     WiredTigerBackup* _wtBackup;  // '_wtBackup' is an out parameter.
 };
 
@@ -1271,7 +1262,6 @@ private:
 
 StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>>
 WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
-                                           boost::optional<Timestamp> checkpointTimestamp,
                                            const StorageEngine::BackupOptions& options) {
     uassert(51034, "Cannot open backup cursor with in-memory mode.", !isEphemeral());
 
@@ -1323,8 +1313,8 @@ WiredTigerKVEngine::beginNonBlockingBackup(OperationContext* opCtx,
     invariant(_wtBackup.logFilePathsSeenByExtendBackupCursor.empty());
     invariant(_wtBackup.logFilePathsSeenByGetNextBatch.empty());
 
-    auto streamingCursor = std::make_unique<StreamingCursorImpl>(
-        session, _path, checkpointTimestamp, options, &_wtBackup);
+    auto streamingCursor =
+        std::make_unique<StreamingCursorImpl>(session, _path, options, &_wtBackup);
 
     pinOplogGuard.dismiss();
     _backupSession = std::move(sessionRaii);
@@ -1581,7 +1571,7 @@ Status WiredTigerKVEngine::recoverOrphanedIdent(OperationContext* opCtx,
                   "error"_attr = status.reason());
 
     //  If the data is unsalvageable, we should completely rebuild the ident.
-    return _rebuildIdent(opCtx, session, _uri(ident).c_str());
+    return _rebuildIdent(session, _uri(ident).c_str());
 #endif
 }
 

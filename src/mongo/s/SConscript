@@ -254,6 +254,7 @@ env.Library(
         'request_types/move_primary.idl',
         'request_types/move_range_request.idl',
         'request_types/placement_history_commands.idl',
+        'request_types/remove_shard.idl',
         'request_types/remove_shard_from_zone_request_type.cpp',
         'request_types/reshard_collection.idl',
         'request_types/resharding_operation_time.idl',
@@ -444,7 +445,7 @@ env.Library(
         # NOTE: If you need to add a static or mongo initializer to mongos startup,
         # please add that library here, as a private library dependency.
         '$BUILD_DIR/mongo/db/audit',
-        '$BUILD_DIR/mongo/db/auth/authmongos',
+        '$BUILD_DIR/mongo/db/auth/authserver',
         '$BUILD_DIR/mongo/db/commands/server_status_core',
         '$BUILD_DIR/mongo/db/commands/server_status_servers',
         '$BUILD_DIR/mongo/db/dbdirectclient',
@@ -515,7 +516,7 @@ env.Library(
         # mongos_initializers.
         '$BUILD_DIR/mongo/client/remote_command_targeter',
         '$BUILD_DIR/mongo/db/audit',
-        '$BUILD_DIR/mongo/db/auth/authmongos',
+        '$BUILD_DIR/mongo/db/auth/authserver',
         '$BUILD_DIR/mongo/db/change_stream_options_manager',
         '$BUILD_DIR/mongo/db/change_streams_cluster_parameter',
         '$BUILD_DIR/mongo/db/commands/rwc_defaults_commands',
@@ -713,7 +714,6 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/service_context_non_d',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_conversion_util',
         '$BUILD_DIR/mongo/db/timeseries/timeseries_options',
-        '$BUILD_DIR/mongo/dbtests/mocklib',
         '$BUILD_DIR/mongo/executor/async_rpc',
         '$BUILD_DIR/mongo/util/net/network',
         '$BUILD_DIR/mongo/util/periodic_runner_factory',

@@ -1960,7 +1960,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMin(value::TypeTags 
         return {true, tag, val};
     }
 
-    auto [tag, val] = compare3way(accTag, accValue, fieldTag, fieldValue, collator);
+    auto [tag, val] = value::compare3way(accTag, accValue, fieldTag, fieldValue, collator);
 
     if (tag == value::TypeTags::NumberInt32 && value::bitcastTo<int>(val) < 0) {
         auto [tag, val] = value::copyValue(accTag, accValue);
@@ -1970,7 +1970,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMin(value::TypeTags 
         return {true, tag, val};
     }
 }
-
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMax(value::TypeTags accTag,
                                                                 value::Value accValue,
@@ -1989,7 +1988,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::aggMax(value::TypeTags 
         return {true, tag, val};
     }
 
-    auto [tag, val] = compare3way(accTag, accValue, fieldTag, fieldValue, collator);
+    auto [tag, val] = value::compare3way(accTag, accValue, fieldTag, fieldValue, collator);
 
     if (tag == value::TypeTags::NumberInt32 && value::bitcastTo<int>(val) > 0) {
         auto [tag, val] = value::copyValue(accTag, accValue);
@@ -2303,6 +2302,25 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewObj(ArityType
 
     guard.reset();
     return {true, tag, val};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinNewBsonObj(ArityType arity) {
+    UniqueBSONObjBuilder bob;
+
+    for (ArityType idx = 0; idx < arity; idx += 2) {
+        auto [_, nameTag, nameVal] = getFromStack(idx);
+        auto [__, fieldTag, fieldVal] = getFromStack(idx + 1);
+        if (!value::isString(nameTag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+
+        auto name = value::getStringView(nameTag, nameVal);
+        bson::appendValueToBsonObj(bob, name, fieldTag, fieldVal);
+    }
+
+    bob.doneFast();
+    char* data = bob.bb().release().release();
+    return {true, value::TypeTags::bsonObject, value::bitcastFrom<char*>(data)};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinKeyStringToString(ArityType arity) {
@@ -3160,66 +3178,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDate(ArityType a
         secondTuple,
         millisTuple,
         timezoneTuple);
-}
-
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateDiff(ArityType arity) {
-    invariant(arity == 5 || arity == 6);  // 6th parameter is 'startOfWeek'.
-
-    auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
-    if (timezoneDBTag != value::TypeTags::timeZoneDB) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezoneDB = value::getTimeZoneDBView(timezoneDBValue);
-
-    // Get startDate.
-    auto [startDateOwn, startDateTag, startDateValue] = getFromStack(1);
-    if (!coercibleToDate(startDateTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto startDate = getDate(startDateTag, startDateValue);
-
-    // Get endDate.
-    auto [endDateOwn, endDateTag, endDateValue] = getFromStack(2);
-    if (!coercibleToDate(endDateTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto endDate = getDate(endDateTag, endDateValue);
-
-    // Get unit.
-    auto [unitOwn, unitTag, unitValue] = getFromStack(3);
-    if (!value::isString(unitTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto unitString = value::getStringView(unitTag, unitValue);
-    if (!isValidTimeUnit(unitString)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto unit = parseTimeUnit(unitString);
-
-    // Get timezone.
-    auto [timezoneOwn, timezoneTag, timezoneValue] = getFromStack(4);
-    if (!isValidTimezone(timezoneTag, timezoneValue, timezoneDB)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezone = getTimezone(timezoneTag, timezoneValue, timezoneDB);
-
-    // Get startOfWeek, if 'startOfWeek' parameter was passed and time unit is the week.
-    DayOfWeek startOfWeek{kStartOfWeekDefault};
-    if (6 == arity) {
-        auto [startOfWeekOwn, startOfWeekTag, startOfWeekValue] = getFromStack(5);
-        if (!value::isString(startOfWeekTag)) {
-            return {false, value::TypeTags::Nothing, 0};
-        }
-        if (TimeUnit::week == unit) {
-            auto startOfWeekString = value::getStringView(startOfWeekTag, startOfWeekValue);
-            if (!isValidDayOfWeek(startOfWeekString)) {
-                return {false, value::TypeTags::Nothing, 0};
-            }
-            startOfWeek = parseDayOfWeek(startOfWeekString);
-        }
-    }
-    auto result = dateDiff(startDate, endDate, unit, timezone, startOfWeek);
-    return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateToString(ArityType arity) {
@@ -5858,7 +5816,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMinMaxFromArray(
     int sign_adjust = f == Builtin::internalLeast ? -1 : +1;
     while (!arrayEnum.atEnd()) {
         auto [itemTag, itemVal] = arrayEnum.getViewOfValue();
-        auto [tag, val] = compare3way(itemTag, itemVal, accTag, accVal, collator);
+        auto [tag, val] = value::compare3way(itemTag, itemVal, accTag, accVal, collator);
         if (tag == value::TypeTags::Nothing) {
             // The comparison returns Nothing if one of the arguments is Nothing or if a sort order
             // cannot be determined: bail out immediately and return Nothing.
@@ -9078,6 +9036,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinNewArrayFromRange(arity);
         case Builtin::newObj:
             return builtinNewObj(arity);
+        case Builtin::newBsonObj:
+            return builtinNewBsonObj(arity);
         case Builtin::ksToString:
             return builtinKeyStringToString(arity);
         case Builtin::newKs:
@@ -9480,6 +9440,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockMax(arity);
         case Builtin::valueBlockCount:
             return builtinValueBlockCount(arity);
+        case Builtin::valueBlockDateDiff:
+            return builtinValueBlockDateDiff(arity);
         case Builtin::valueBlockDateTrunc:
             return builtinValueBlockDateTrunc(arity);
         case Builtin::valueBlockSum:
@@ -9564,6 +9526,8 @@ std::string builtinToString(Builtin b) {
             return "newArrayFromRange";
         case Builtin::newObj:
             return "newObj";
+        case Builtin::newBsonObj:
+            return "newBsonObj";
         case Builtin::ksToString:
             return "ksToString";
         case Builtin::newKs:
@@ -10295,7 +10259,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::less<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericLt(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -10312,10 +10276,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] =
-                    genericCompare<std::less<>>(lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericLt(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::lessEq: {
@@ -10327,7 +10294,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::less_equal<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericLte(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -10344,10 +10311,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::less_equal<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericLte(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::greater: {
@@ -10359,7 +10329,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::greater<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericGt(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
 
@@ -10377,10 +10347,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::greater<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericGt(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::greaterEq: {
@@ -10392,8 +10365,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] =
-                    genericCompare<std::greater_equal<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericGte(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -10410,10 +10382,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::greater_equal<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericGte(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::eq: {
@@ -10425,7 +10400,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::genericEq(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -10442,10 +10417,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericEq(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::neq: {
@@ -10457,8 +10435,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(lhsTag, lhsVal, rhsTag, rhsVal);
-                std::tie(tag, val) = genericNot(tag, val);
+                auto [tag, val] = value::genericNeq(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
                 break;
@@ -10475,11 +10452,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = genericCompare<std::equal_to<>>(
-                    lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-                std::tie(tag, val) = genericNot(tag, val);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::genericNeq(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::cmp3w: {
@@ -10491,7 +10470,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [lhsOwned, lhsTag, lhsVal] = getFromStack(offsetLhs, popLhs);
                 value::ValueGuard lhsGuard(lhsOwned && popLhs, lhsTag, lhsVal);
 
-                auto [tag, val] = compare3way(lhsTag, lhsVal, rhsTag, rhsVal);
+                auto [tag, val] = value::compare3way(lhsTag, lhsVal, rhsTag, rhsVal);
 
                 pushStack(false, tag, val);
 
@@ -10509,9 +10488,13 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 auto [collOwned, collTag, collVal] = getFromStack(offsetColl, popColl);
                 value::ValueGuard collGuard(collOwned && popColl, collTag, collVal);
 
-                auto [tag, val] = compare3way(lhsTag, lhsVal, rhsTag, rhsVal, collTag, collVal);
-
-                pushStack(false, tag, val);
+                if (collTag == value::TypeTags::collator) {
+                    auto comp = static_cast<StringDataComparator*>(value::getCollatorView(collVal));
+                    auto [tag, val] = value::compare3way(lhsTag, lhsVal, rhsTag, rhsVal, comp);
+                    pushStack(false, tag, val);
+                } else {
+                    pushStack(false, value::TypeTags::Nothing, 0);
+                }
                 break;
             }
             case Instruction::fillEmpty: {

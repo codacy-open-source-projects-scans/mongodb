@@ -134,8 +134,7 @@ class WiredTigerKVEngine final : public KVEngine {
 public:
     static StringData kTableUriPrefix;
 
-    WiredTigerKVEngine(OperationContext* opCtx,
-                       const std::string& canonicalName,
+    WiredTigerKVEngine(const std::string& canonicalName,
                        const std::string& path,
                        ClockSource* cs,
                        const std::string& extraOpenOptions,
@@ -268,9 +267,7 @@ public:
     Status disableIncrementalBackup(OperationContext* opCtx) override;
 
     StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> beginNonBlockingBackup(
-        OperationContext* opCtx,
-        boost::optional<Timestamp> checkpointTimestamp,
-        const StorageEngine::BackupOptions& options) override;
+        OperationContext* opCtx, const StorageEngine::BackupOptions& options) override;
 
     void endNonBlockingBackup(OperationContext* opCtx) override;
 
@@ -486,7 +483,7 @@ private:
      */
     void _openWiredTiger(const std::string& path, const std::string& wtOpenConfig);
 
-    Status _salvageIfNeeded(OperationContext* opCtx, const char* uri);
+    Status _salvageIfNeeded(const char* uri);
     void _ensureIdentPath(StringData ident);
 
     /**
@@ -496,7 +493,7 @@ private:
      * Returns DataModifiedByRepair if the rebuild was successful, and any other error on failure.
      * This will never return Status::OK().
      */
-    Status _rebuildIdent(OperationContext* opCtx, WT_SESSION* session, const char* uri);
+    Status _rebuildIdent(WT_SESSION* session, const char* uri);
 
     bool _hasUri(WT_SESSION* session, const std::string& uri) const;
 

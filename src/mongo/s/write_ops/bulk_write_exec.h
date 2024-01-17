@@ -60,6 +60,10 @@ public:
     void noteTargetedShard(const BulkWriteCommandRequest& clientRequest,
                            const TargetedWriteBatch& targetedBatch);
     void noteNumShardsOwningChunks(size_t nsIdx, int nShardsOwningChunks);
+    void noteTwoPhaseWriteProtocol(const BulkWriteCommandRequest& clientRequest,
+                                   const TargetedWriteBatch& targetedBatch,
+                                   size_t nsIdx,
+                                   int nShardsOwningChunks);
 
     boost::optional<int> getNumShardsOwningChunks(size_t nsIdx) const;
 
@@ -115,6 +119,7 @@ std::pair<FLEBatchResult, BulkWriteReplyInfo> attemptExecuteFLE(
  */
 BulkWriteReplyInfo processFLEResponse(const BatchedCommandRequest& request,
                                       const BulkWriteCRUDOp::OpType& firstOpType,
+                                      bool errorsOnly,
                                       const BatchedCommandResponse& response);
 
 /**
@@ -287,7 +292,8 @@ public:
      * those operations are processed individually with the use of internal transactions.
      */
     void noteWriteOpFinalResponse(size_t opIdx,
-                                  const BulkWriteReplyItem& reply,
+                                  const boost::optional<BulkWriteReplyItem>& reply,
+                                  const BulkWriteCommandReply& response,
                                   const ShardWCError& shardWCError,
                                   const boost::optional<std::vector<StmtId>>& retriedStmtIds);
 
@@ -337,10 +343,13 @@ public:
      * Finalizes/resets state after executing (or attempting to execute) a write without shard key
      * with _id.
      */
-    void finishExecutingWriteWithoutShardKeyWithId();
+    void finishExecutingWriteWithoutShardKeyWithId(TargetedBatchMap& childBatches);
 
     void noteTargetedShard(const TargetedWriteBatch& targetedBatch);
     void noteNumShardsOwningChunks(size_t nsIdx, int nShardsOwningChunks);
+    void noteTwoPhaseWriteProtocol(const TargetedWriteBatch& targetedBatch,
+                                   size_t nsIdx,
+                                   int nShardsOwningChunks);
 
 private:
     // The OperationContext the client bulkWrite request is run on.

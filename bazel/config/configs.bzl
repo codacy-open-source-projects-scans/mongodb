@@ -36,6 +36,28 @@ build_mode = rule(
     build_setting = config.string(flag = True),
 )
 
+# ==========
+# linker
+# ==========
+
+linker_values = ["gold", "lld"]
+
+linker_provider = provider(
+    doc = "Specify the type of linker to use.",
+    fields = {"linker": "choose one of " + ".".join(linker_values)},
+)
+
+def linker_impl(ctx):
+    linker_value = ctx.build_setting_value
+    if linker_value not in linker_values:
+        fail(str(ctx.label) + " build_mode allowed to take values {" + ", ".join(linker_values) + "} but was set to unallowed value " + linker_value)
+    return linker_provider(linker = linker_value)
+
+linker = rule(
+    implementation = linker_impl,
+    build_setting = config.string(flag = True),
+)
+
 # =========
 # gdbserver
 # =========
@@ -166,6 +188,20 @@ use_wiredtiger = rule(
 )
 
 # =========
+# glibcxx-debug
+# =========
+
+use_glibcxx_debug_provider = provider(
+    doc = """Enable the glibc++ debug implementations of the C++ standard libary""",
+    fields = ["enabled"],
+)
+
+use_glibcxx_debug = rule(
+    implementation = lambda ctx: use_glibcxx_debug_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
 # libc++
 # =========
 
@@ -241,5 +277,61 @@ separate_debug_provider = provider(
 
 separate_debug = rule(
     implementation = lambda ctx: separate_debug_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# enable-http-client
+# =========
+
+http_client_provider = provider(
+    doc = "Enable HTTP client",
+    fields = ["enabled"],
+)
+
+http_client = rule(
+    implementation = lambda ctx: linkstatic_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# linkstatic
+# =========
+
+linkstatic_provider = provider(
+    doc = "Configures the entire build to link statically. Disabling this on windows is not supported.",
+    fields = ["enabled"],
+)
+
+linkstatic = rule(
+    implementation = lambda ctx: linkstatic_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# use-diagnostic-latches
+# =========
+
+use_diagnostic_latches_provider = provider(
+    doc = "Enable annotated Mutex types.",
+    fields = ["enabled"],
+)
+
+use_diagnostic_latches = rule(
+    implementation = lambda ctx: use_diagnostic_latches_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# shared_archive
+# =========
+
+shared_archive_provider = provider(
+    doc = "Enable generating a shared archive file for each shared library (e.g. '.so.a')",
+    fields = ["enabled"],
+)
+
+shared_archive = rule(
+    implementation = lambda ctx: shared_archive_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
 )

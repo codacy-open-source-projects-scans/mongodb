@@ -528,7 +528,6 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
                                                     cmd.getCollectionUUID()),
                                                 LockMode::MODE_IX);
 
-            validateTTLOptions(opCtx, collection.getCollectionPtr().get(), cmd);
             checkEncryptedFieldIndexRestrictions(opCtx, collection.getCollectionPtr().get(), cmd);
             addNoteForColumnstoreIndexPreview(cmd, &reply);
 
@@ -547,6 +546,8 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
                 indexesAlreadyExist(opCtx, collection.getCollectionPtr(), specs, &reply)) {
                 return boost::none;
             }
+
+            validateTTLOptions(opCtx, collection.getCollectionPtr().get(), cmd);
 
             if (collection.exists() &&
                 !UncommittedCatalogUpdates::get(opCtx).isCreatedCollection(opCtx, ns)) {
@@ -781,6 +782,11 @@ public:
         CreateIndexesReply typedRun(OperationContext* opCtx) {
             const auto& origCmd = request();
             const auto* cmd = &origCmd;
+
+            uassert(ErrorCodes::Error(8293400),
+                    str::stream() << "Cannot create index on special internal config collection "
+                                  << NamespaceString::kPreImagesCollectionName,
+                    !origCmd.getNamespace().isChangeStreamPreImagesCollection());
 
             // If the request namespace refers to a time-series collection, transforms the user
             // time-series index request to one on the underlying bucket.
