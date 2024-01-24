@@ -1,4 +1,5 @@
-# MacOS test release variants
+# MacOS build variants for testing release environments that should run on master,
+# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
 
 buildvariants:
 - name: macos
@@ -18,12 +19,11 @@ buildvariants:
       -j$(sysctl -n hw.logicalcpu)
       --libc++
       --variables-files=etc/scons/xcode_macosx.vars
-      --use-diagnostic-latches=off
     resmoke_jobs_max: 6
     compile_variant: macos
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: compile_build_tools_next_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: .aggregation !.auth !.encrypt !.unwind !.feature_flag_guarded
   - name: auth_gen
   - name: .causally_consistent !.sharding
@@ -71,12 +71,11 @@ buildvariants:
       -j$(sysctl -n hw.logicalcpu)
       --libc++
       --variables-files=etc/scons/xcode_macosx_arm.vars
-      --use-diagnostic-latches=off
     resmoke_jobs_max: 6
     compile_variant: macos-arm64
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: compile_build_tools_next_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: .aggregation !.auth !.encrypt !.unwind !.feature_flag_guarded
   - name: auth_gen
   - name: .causally_consistent !.sharding
@@ -129,12 +128,11 @@ buildvariants:
       -j$(sysctl -n hw.logicalcpu)
       --libc++
       --variables-files=etc/scons/xcode_macosx.vars
-      --use-diagnostic-latches=off
     resmoke_jobs_max: 6
     compile_variant: enterprise-macos
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: compile_build_tools_next_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough
@@ -171,12 +169,11 @@ buildvariants:
       -j$(sysctl -n hw.logicalcpu)
       --libc++
       --variables-files=etc/scons/xcode_macosx_arm.vars
-      --use-diagnostic-latches=off
     resmoke_jobs_max: 6
     compile_variant: enterprise-macos-arm64
   tasks:
   - name: compile_test_and_package_serial_TG
-  - name: compile_build_tools_next_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: audit
   - name: auth_audit_gen
   - name: causally_consistent_jscore_txns_passthrough

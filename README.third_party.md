@@ -23,7 +23,7 @@ a notice will be included in
 | ---------------------------| ----------------- | ------------------| :------------------: | :-----------------------------: |
 | [abseil-cpp]               | Apache-2.0        | 20230802.1        |                      |                ✗                |
 | [Aladdin MD5]              | Zlib              | Unknown           |          ✗           |                ✗                |
-| [ASIO]                     | BSL-1.0           | 22afb86087        |                      |                ✗                |
+| [ASIO]                     | BSL-1.0           | 1.12.2            |                      |                ✗                |
 | [benchmark]                | Apache-2.0        | 1.5.2             |                      |                                 |
 | [Boost]                    | BSL-1.0           | 1.79.0            |                      |                ✗                |
 | [c-ares]                   | MIT               | 1.19.1            |                      |                ✗                |
@@ -32,7 +32,7 @@ a notice will be included in
 | [GPerfTools]               | BSD-3-Clause      | 2.9.1             |                      |                ✗                |
 | [gRPC]                     | Apache-2.0        | 1.59.2            |                      |                ✗                |
 | [ICU4]                     | ICU               | 57.1              |          ✗           |                ✗                |
-| [immer]                    | BSL-1.0           | d98a68c           |                      |                ✗                |
+| [immer]                    | BSL-1.0           | d98a68c + changes |                      |                ✗                |
 | [Intel Decimal FP Library] | BSD-3-Clause      | 2.0 Update 1      |                      |                ✗                |
 | [JSON-Schema-Test-Suite]   | MIT               | 728066f9c5        |                      |                                 |
 | [libstemmer]               | BSD-3-Clause      | Unknown           |          ✗           |                ✗                |
@@ -41,7 +41,7 @@ a notice will be included in
 | [linenoise]                | BSD-3-Clause      | Unknown + changes |                      |                ✗                |
 | [mongo-c-driver]           | Apache-2.0        | 1.23.0            |          ✗           |                ✗                |
 | [MozJS]                    | MPL-2.0           | ESR 91.3.0        |                      |                ✗                |
-| [MurmurHash3]              | Public Domain     | Unknown + changes |          ✗           |                ✗                |
+| [MurmurHash3]              | Public Domain     | a6bd3ce + changes |          ✗           |                ✗                |
 | [ocspbuilder]              | MIT               | 0.10.2            |                      |                                 |
 | [ocspresponder]            | Apache-2.0        | 0.5.0             |                      |                                 |
 | [pcre2]                    | BSD-3-Clause      | 10.40             |                      |                ✗                |
@@ -80,7 +80,7 @@ a notice will be included in
 [linenoise]: https://github.com/antirez/linenoise
 [mongo-c-driver]: https://github.com/mongodb/mongo-c-driver
 [MozJS]: https://www.mozilla.org/en-US/security/known-vulnerabilities/firefox-esr
-[MurmurHash3]: https://github.com/aappleby/smhasher/blob/master/src/MurmurHash3.cpp
+[MurmurHash3]: https://github.com/aappleby/smhasher/blob/a6bd3ce/
 [ocspbuilder]: https://github.com/wbond/ocspbuilder
 [ocspresponder]: https://github.com/threema-ch/ocspresponder
 [pcre2]: http://www.pcre.org/

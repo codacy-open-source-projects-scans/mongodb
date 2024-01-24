@@ -453,7 +453,7 @@ add_option(
 add_option(
     'use-diagnostic-latches',
     choices=['on', 'off'],
-    default='on',
+    default='off',
     help='Enable annotated Mutex types',
     type='choice',
 )
@@ -795,6 +795,12 @@ add_option(
     default=False,
     action='store_true',
     help='Bypass link-model=dynamic check for macos versions <12.',
+)
+
+add_option(
+    'evergreen-tmp-dir',
+    help='Configures the path to the evergreen configured tmp directory.',
+    default=None,
 )
 
 try:
@@ -4382,7 +4388,7 @@ def doConfigure(myenv):
             # reporting thread leaks, which we have because we don't
             # do a clean shutdown of the ServiceContext.
             #
-            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
+            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
             myenv['ENV']['TSAN_OPTIONS'] = tsan_options + symbolizer_option
             myenv.AppendUnique(CPPDEFINES=['THREAD_SANITIZER'])
 
@@ -6570,11 +6576,22 @@ env.FinalizeInstallDependencies()
 # Create a install-all-meta alias that excludes unittests. This is most useful in
 # static builds where the resource requirements of linking 100s of static unittest
 # binaries is prohibitive.
-candidate_nodes = set([
-    str(gchild) for gchild in env.Flatten(
-        [child.all_children() for child in env.Alias('install-all-meta')[0].all_children()])
-])
-names = [f'install-{env["AIB_META_COMPONENT"]}', 'install-tests', env["UNITTEST_ALIAS"]]
+candidate_nodes = set()
+for child in env.Alias('install-all-meta')[0].all_children():
+    candidate_nodes.add(child)
+    for gchild in child.all_children():
+        candidate_nodes.add(gchild)
+
+names = [
+    f'install-{env["AIB_META_COMPONENT"]}',
+    'install-tests',
+    env["UNITTEST_ALIAS"],
+    'install-first-quarter-unittests',
+    'install-second-quarter-unittests',
+    'install-third-quarter-unittests',
+    'install-fourth-quarter-unittests',
+]
+
 env.Alias('install-all-meta-but-not-unittests', [
     node for node in candidate_nodes if str(node) not in names
     and not str(node).startswith(tuple([prefix_name + '-' for prefix_name in names]))

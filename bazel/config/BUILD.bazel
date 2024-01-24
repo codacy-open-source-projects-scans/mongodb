@@ -2,7 +2,7 @@ load(
     "//bazel/config:configs.bzl",
     "build_mode",
     "compiler_type",
-    "use_libunwind",
+    "libunwind",
     "use_gdbserver",
     "spider_monkey_dbg",
     "allocator",
@@ -26,6 +26,8 @@ load(
     "use_diagnostic_latches",
     "shared_archive",
     "linker",
+    "detect_odr_violations",
+    "build_enterprise",
 )
 
 load("@bazel_skylib//lib:selects.bzl", "selects")
@@ -290,19 +292,52 @@ config_setting(
 )
 
 # --------------------------------------
-# Libunwind options
+# libunwind options
 # --------------------------------------
 
-use_libunwind(
-    name = "use_libunwind",
-    build_setting_default = False,
+libunwind(
+    name = "libunwind",
+    build_setting_default = "auto",
+)
+
+# Underscored settings are for flagging configuration errors and for evaluating auto.
+# Use :libunwind_enabled to check the final result of whether or not it's enabled.
+config_setting(
+    name = "_libunwind_on",
+    flag_values = {
+        "//bazel/config:libunwind": "on",
+    },
 )
 
 config_setting(
-    name = "use_libunwind_enabled",
+    name = "_libunwind_off",
     flag_values = {
-        "//bazel/config:use_libunwind": "True",
+        "//bazel/config:libunwind": "off",
     },
+)
+
+config_setting(
+    name = "_libunwind_auto",
+    flag_values = {
+        "//bazel/config:libunwind": "auto",
+    },
+)
+
+selects.config_setting_group(
+    name = "_libunwind_enabled_by_auto",
+    match_all = [":_libunwind_auto", "@platforms//os:linux"],
+)
+
+selects.config_setting_group(
+    name = "_libunwind_enabled_by_on",
+    match_all = [":_libunwind_on", "@platforms//os:linux"],
+)
+
+# Final setting intended for external use.
+#   (libunwind == on && os == linux) || (libunwind == auto && os == linux)
+selects.config_setting_group(
+    name = "libunwind_enabled",
+    match_any = [":_libunwind_enabled_by_on", ":_libunwind_enabled_by_auto"],
 )
 
 # --------------------------------------
@@ -514,11 +549,15 @@ use_libcxx(
     build_setting_default = False,
 )
 
+# TODO SERVER-85340 when libc++ is readded remove the macos constraint
 config_setting(
     name = "use_libcxx_enabled",
     flag_values = {
         "//bazel/config:use_libcxx": "True",
     },
+    constraint_values = [
+        "@platforms//os:macos",
+    ],
 )
 
 config_setting(
@@ -552,6 +591,34 @@ config_setting(
     flag_values = {
         "//bazel/config:build_grpc": "True",
     },
+)
+
+# --------------------------------------
+# linkstatic options
+# --------------------------------------
+
+linkstatic(
+    name = "linkstatic",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "linkstatic_enabled",
+    flag_values = {
+        "//bazel/config:linkstatic": "True",
+    },
+)
+
+config_setting(
+    name = "linkstatic_disabled",
+    flag_values = {
+        "//bazel/config:linkstatic": "False",
+    },
+)
+
+selects.config_setting_group(
+    name = "linkdynamic_required_settings",
+    match_all = [":linkstatic_disabled", ":not_windows"],
 )
 
 # --------------------------------------
@@ -727,6 +794,21 @@ selects.config_setting_group(
     match_all = [":fsan_enabled"],
 )
 
+selects.config_setting_group(
+    name = "sanitize_thread_required_settings",
+    match_all = [":tsan_enabled", ":use_libunwind_disabled", ":linkdynamic_required_settings"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_undefined_without_fuzzer_settings",
+    match_all = [":ubsan_enabled", ":fsan_disabled"],
+)
+
+selects.config_setting_group(
+    name = "sanitize_undefined_dynamic_link_settings",
+    match_all = [":ubsan_enabled", ":linkdynamic_required_settings"],
+)
+
 # --------------------------------------
 # separate_debug options
 # --------------------------------------
@@ -767,34 +849,6 @@ config_setting(
 )
 
 # --------------------------------------
-# linkstatic options
-# --------------------------------------
-
-linkstatic(
-    name = "linkstatic",
-    build_setting_default = False,
-)
-
-config_setting(
-    name = "linkstatic_enabled",
-    flag_values = {
-        "//bazel/config:linkstatic": "True",
-    },
-)
-
-config_setting(
-    name = "linkstatic_disabled",
-    flag_values = {
-        "//bazel/config:linkstatic": "False",
-    },
-)
-
-selects.config_setting_group(
-    name = "linkdynamic_required_settings",
-    match_all = [":linkstatic_disabled", ":not_windows"],
-)
-
-# --------------------------------------
 # use_diagnostic_latches options
 # --------------------------------------
 
@@ -830,5 +884,56 @@ config_setting(
     name = "shared_archive_enabled",
     flag_values = {
         "//bazel/config:shared_archive": "True",
+    },
+)
+
+# --------------------------------------
+# detect-odr-violations options
+# --------------------------------------
+
+detect_odr_violations(
+    name = "detect_odr_violations",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "detect_odr_violations_enabled",
+    flag_values = {
+        "//bazel/config:detect_odr_violations": "True",
+    },
+)
+
+config_setting(
+    name = "detect_odr_violations_disabled",
+    flag_values = {
+        "//bazel/config:detect_odr_violations": "False",
+    },
+)
+
+selects.config_setting_group(
+    name = "detect_odr_violations_required_settings",
+    match_all = [":opt_off", ":detect_odr_violations_enabled", ":linker_gold"],
+)
+
+# --------------------------------------
+# build_enterprise
+# --------------------------------------
+
+build_enterprise(
+    name = "build_enterprise",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "build_enterprise_enabled",
+    flag_values = {
+        "//bazel/config:build_enterprise": "True",
+    },
+)
+
+config_setting(
+    name = "build_enterprise_disabled",
+    flag_values = {
+        "//bazel/config:build_enterprise": "False",
     },
 )

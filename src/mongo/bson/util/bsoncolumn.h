@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include "mongo/bson/timestamp.h"
 #include <absl/numeric/int128.h>
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
@@ -42,6 +41,7 @@
 #include <deque>
 #include <iterator>
 #include <memory>
+#include <span>
 #include <variant>
 #include <vector>
 
@@ -51,9 +51,13 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/bson/util/bsoncolumn_helpers.h"
+#include "mongo/bson/util/bsoncolumn_util.h"
 #include "mongo/bson/util/simple8b.h"
 #include "mongo/bson/util/simple8b_type_util.h"
 #include "mongo/platform/int128.h"
+#include "mongo/util/overloaded_visitor.h"
 
 namespace mongo {
 
@@ -465,10 +469,11 @@ private:
     bool _contiguousEnabled = false;
 };
 
-/**
- * Work in progress, do not use.
- */
 namespace bsoncolumn {
+
+/**
+ * Code below is work in progress, do not use.
+ */
 
 /**
  * Interface for a buffer to receive decoded elements from block-based
@@ -504,6 +509,7 @@ concept Appendable =
     t.template append<StringData>(bsonVal);
     t.template append<BSONBinData>(bsonVal);
     t.template append<BSONCode>(bsonVal);
+    t.template append<BSONElement>(bsonVal);
 
     t.appendMissing();
 };
@@ -640,11 +646,11 @@ private:
     CAllocator& _allocator;
 };
 
-
 class BSONColumnBlockBased {
 
 public:
     BSONColumnBlockBased(const char* buffer, size_t size);
+    explicit BSONColumnBlockBased(BSONBinData bin);
 
     /**
      * Decompress entire BSONColumn
@@ -663,6 +669,92 @@ public:
     void decompress(Container& collection, typename CMaterializer::Allocator& allocator) const {
         Collector<CMaterializer, Container> collector(collection, allocator);
         decompress(collector);
+    }
+
+    /**
+     * Version of decompress that accepts multiple paths decompressed to separate buffers.
+     */
+    template <class CMaterializer, class Container, typename Path>
+    requires Materializer<CMaterializer>
+    void decompress(ElementStorage& allocator, std::span<std::pair<Path, Container>> paths) const;
+
+    /*
+     * Decompress entire BSONColumn using the iteration-based implementation. This is used for
+     * testing and production uses should eventually be replaced.
+     */
+    template <class Buffer>
+    requires Appendable<Buffer>
+    void decompressIterative(Buffer& buffer) const {
+        BSONColumn blockColumn(_binary, _size);
+        for (auto&& elem : blockColumn) {
+            switch (elem.type()) {
+                case NumberInt:
+                    buffer.template append<int32_t>(elem);
+                    break;
+                case NumberLong:
+                    buffer.template append<int64_t>(elem);
+                    break;
+                case NumberDouble:
+                    buffer.template append<double>(elem);
+                    break;
+                case NumberDecimal:
+                    buffer.template append<Decimal128>(elem);
+                    break;
+                case Bool:
+                    buffer.template append<bool>(elem);
+                    break;
+                case jstOID:
+                    buffer.template append<OID>(elem);
+                    break;
+                case Date:
+                    buffer.template append<Date_t>(elem);
+                    break;
+                case Code:
+                    buffer.template append<BSONCode>(elem);
+                    break;
+                case String:
+                    buffer.template append<StringData>(elem);
+                    break;
+                case bsonTimestamp:
+                    buffer.template append<Timestamp>(elem);
+                    break;
+                case BinData:
+                    buffer.template append<BSONBinData>(elem);
+                    break;
+                // Below are types that cannot be compressed, so we will append the BSONElement.
+                case DBRef:
+                case RegEx:
+                case Symbol:
+                case CodeWScope:
+                case Object:
+                case Array:
+                case Undefined:
+                case jstNULL:
+                    buffer.template append<BSONElement>(elem);
+                    break;
+                case EOO:
+                    buffer.appendMissing();
+                    break;
+                // We don't store MinKey or MaxKey.
+                case MaxKey:
+                case MinKey:
+                default:
+                    MONGO_UNREACHABLE
+            }
+        }
+    }
+
+    /**
+     * Wrapper that expects the caller to define a Materializer and a Container to receive a
+     * collection of elements from block decoding. This calls the iteration-based implementation.
+     * This is used for testing and production uses should eventually be replaced.
+     */
+    template <class CMaterializer, class Container>
+    requires Materializer<CMaterializer>
+    void decompressIterative(Container& collection,
+                             typename CMaterializer::Allocator& allocator) const {
+        Collector<CMaterializer, Container> collector(collection, allocator);
+        decompressIterative(collector);
     }
 
     /**
@@ -717,45 +809,33 @@ public:
     bool contains(BSONType type) const;
 
 private:
+    const char* _binary;
+    size_t _size;
 };
 
 /**
- * Implements the "materializer" concept such that the output elements are BSONElements.
+ * Version of decompress() that accepts multiple paths decompressed to separate buffers.
  */
-class BSONElementMaterializer {
-public:
-    using Element = BSONElement;
-    using Allocator = ElementStorage;
-
-    static BSONElement materialize(Allocator& allocator, bool val);
-    static BSONElement materialize(Allocator& allocator, int32_t val);
-    static BSONElement materialize(Allocator& allocator, int64_t val);
-    static BSONElement materialize(Allocator& allocator, double val);
-    static BSONElement materialize(Allocator& allocator, const Decimal128& val);
-    static BSONElement materialize(Allocator& allocator, const Date_t& val);
-    static BSONElement materialize(Allocator& allocator, const Timestamp& val);
-    static BSONElement materialize(Allocator& allocator, StringData val);
-    static BSONElement materialize(Allocator& allocator, const BSONBinData& val);
-    static BSONElement materialize(Allocator& allocator, const BSONCode& val);
-    static BSONElement materialize(Allocator& allocator, const OID& val);
-
-    template <typename T>
-    static BSONElement materialize(Allocator& allocator, BSONElement val) {
-        return val;
+template <class CMaterializer, class Container, typename Path>
+requires Materializer<CMaterializer>
+void BSONColumnBlockBased::decompress(ElementStorage& allocator,
+                                      std::span<std::pair<Path, Container>> paths) const {
+    std::vector<std::pair<Path, Collector<CMaterializer, Container>>> pathCollectors;
+    for (auto&& p : paths) {
+        pathCollectors.push_back(
+            {p.first, Collector<CMaterializer, Container>{p.second, allocator}});
     }
 
-    static BSONElement materializeMissing(Allocator& allocator) {
-        return BSONElement();
+    const char* control = _binary;
+    const char* end = _binary + _size;
+    while (*control != EOO) {
+        invariant(bsoncolumn::isInterleavedStartControlByte(*control),
+                  "non-interleaved data is not yet handled via this API");
+        control = BlockBasedInterleavedDecompressor<CMaterializer>::decompress(
+            allocator, control, end, pathCollectors);
+        invariant(control < end);
     }
-
-private:
-    /**
-     * Helper function used by both BSONCode and String.
-     */
-    static BSONElement writeStringData(ElementStorage& allocator,
-                                       BSONType bsonType,
-                                       StringData val);
-};
+}
 
 }  // namespace bsoncolumn
 }  // namespace mongo

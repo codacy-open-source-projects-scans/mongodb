@@ -196,38 +196,15 @@ void removeCollAndChunksMetadataFromConfig(
 void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONObj& filter);
 
 /**
- * Ensure source collection uuid is consistent on every shard
- * Ensure target collection is not present on any shard when `dropTarget` is false
- */
-void checkCatalogConsistencyAcrossShardsForRename(
-    OperationContext* opCtx,
-    const NamespaceString& fromNss,
-    const NamespaceString& toNss,
-    bool dropTarget,
-    std::shared_ptr<executor::ScopedTaskExecutor> executor);
-
-/**
  * Ensures rename preconditions for collections are met:
  * - Check that the namespace of the destination collection is not too long
  * - Check that `dropTarget` is true if the destination collection exists
  * - Check that no tags exist for the destination collection
  */
 void checkRenamePreconditions(OperationContext* opCtx,
-                              const NamespaceString& fromNss,
-                              const boost::optional<CollectionType>& sourceCollType,
                               const NamespaceString& toNss,
                               const boost::optional<CollectionType>& optTargetCollType,
                               bool dropTarget);
-
-/**
- * Throws if the DB primary shards of the provided namespaces differs.
- *
- * Optimistically assume that no movePrimary is performed during the check: it's currently not
- * possible to ensure primary shard stability for both databases.
- */
-void checkDbPrimariesOnTheSameShard(OperationContext* opCtx,
-                                    const NamespaceString& fromNss,
-                                    const NamespaceString& toNss);
 
 /**
  * Throws an exception if the collection is already tracked with different options.
@@ -298,13 +275,15 @@ void performNoopMajorityWriteLocally(OperationContext* opCtx);
 /**
  * Sends the _shardsvrDropCollectionParticipant command to the specified shards.
  */
-void sendDropCollectionParticipantCommandToShards(OperationContext* opCtx,
-                                                  const NamespaceString& nss,
-                                                  const std::vector<ShardId>& shardIds,
-                                                  std::shared_ptr<executor::TaskExecutor> executor,
-                                                  const OperationSessionInfo& osi,
-                                                  bool fromMigrate,
-                                                  bool dropSystemCollections);
+void sendDropCollectionParticipantCommandToShards(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const std::vector<ShardId>& shardIds,
+    std::shared_ptr<executor::TaskExecutor> executor,
+    const OperationSessionInfo& osi,
+    bool fromMigrate,
+    bool dropSystemCollections,
+    const boost::optional<UUID>& collectionUUID = boost::none);
 
 BSONObj getCriticalSectionReasonForRename(const NamespaceString& from, const NamespaceString& to);
 

@@ -1,18 +1,11 @@
 import {
     checkCascadesOptimizerEnabled,
-    checkPlanCacheParameterization,
     removeUUIDsFromExplain,
     runWithParams
 } from "jstests/libs/optimizer_utils.js";
 
 if (!checkCascadesOptimizerEnabled(db)) {
     jsTestLog("Skipping test because the optimizer is not enabled");
-    quit();
-}
-
-// TODO SERVER-82185: Remove this once M2-eligibility checker + E2E parameterization implemented
-if (!checkPlanCacheParameterization(db)) {
-    jsTestLog("Skipping test because E2E plan cache parameterization not yet implemented");
     quit();
 }
 

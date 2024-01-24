@@ -1123,8 +1123,10 @@ query_settings::QuerySettings lookupQuerySettingsForAgg(
     const stdx::unordered_set<NamespaceString>& involvedNamespaces,
     const NamespaceString& nss) {
     auto opCtx = expCtx->opCtx;
+    const bool isInternalClient =
+        opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
     auto serializationContext = aggregateCommandRequest.getSerializationContext();
-    return ShardingState::get(opCtx)->enabled()
+    return isInternalClient
         ? aggregateCommandRequest.getQuerySettings().get_value_or({})
         : query_settings::lookupQuerySettings(expCtx, nss, serializationContext, [&]() {
               query_shape::AggCmdShape shape(
@@ -1616,7 +1618,8 @@ Status _runAggregate(OperationContext* opCtx,
                 };
 
                 if (internalCascadesOptimizerEnableParameterization.load() &&
-                    pipeline->canParameterize() && fullyEligible(pipeline->getSources())) {
+                    bonsaiEligibility.isFullyEligible() && pipeline->canParameterize() &&
+                    fullyEligible(pipeline->getSources())) {
                     pipeline->parameterize();
                 }
 

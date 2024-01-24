@@ -72,7 +72,7 @@
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/fill_locker_info.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker_impl.h"
+#include "mongo/db/concurrency/locker.h"
 #include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
@@ -91,6 +91,7 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -259,6 +260,7 @@ void rethrowPartialIndexQueryBadValueWithContext(const DBException& ex) {
 struct ActiveTransactionHistory {
     boost::optional<SessionTxnRecord> lastTxnRecord;
     TransactionParticipant::CommittedStatementTimestampMap committedStatements;
+    absl::flat_hash_set<NamespaceString> affectedNamespaces;
     bool hasIncompleteHistory{false};
 };
 
@@ -337,6 +339,7 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                                            entry.getOpTime());
             }
         }
+        result.affectedNamespaces.emplace(entry.getNss());
     };
 
     // Restore the current timestamp read source after fetching transaction history, which may
@@ -453,6 +456,9 @@ void updateSessionEntry(OperationContext* opCtx,
     dassert(updateRequest.getUpdateModification().type() ==
             write_ops::UpdateModification::Type::kReplacement);
     const auto updateMod = updateRequest.getUpdateModification().getUpdateReplacement();
+    auto idToFetch = updateRequest.getQuery().firstElement();
+    auto toUpdateIdDoc = idToFetch.wrap();
+    auto startingSnapshotId = shard_role_details::getRecoveryUnit(opCtx)->getSnapshotId();
 
     // TODO SERVER-58243: evaluate whether this is safe or whether acquiring the lock can block.
     AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(
@@ -475,27 +481,31 @@ void updateSessionEntry(OperationContext* opCtx,
 
     WriteUnitOfWork wuow(opCtx);
 
-    auto idIndex = collection.getCollectionPtr()->getIndexCatalog()->findIdIndex(opCtx);
+    RecordId recordId;
+    if (collection.getCollectionPtr()->isClustered()) {
+        recordId = record_id_helpers::keyForObj(toUpdateIdDoc);
+    } else {
+        auto idIndex = collection.getCollectionPtr()->getIndexCatalog()->findIdIndex(opCtx);
 
-    uassert(
-        40672,
-        str::stream() << "Failed to fetch _id index for "
-                      << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg(),
-        idIndex);
+        uassert(40672,
+                str::stream()
+                    << "Failed to fetch _id index for "
+                    << NamespaceString::kSessionTransactionsTableNamespace.toStringForErrorMsg(),
+                idIndex);
 
-    const IndexCatalogEntry* entry =
-        collection.getCollectionPtr()->getIndexCatalog()->getEntry(idIndex);
-    auto indexAccess = entry->accessMethod()->asSortedData();
-    // Since we are looking up a key inside the _id index, create a key object consisting of only
-    // the _id field.
-    auto idToFetch = updateRequest.getQuery().firstElement();
-    auto toUpdateIdDoc = idToFetch.wrap();
-    dassert(idToFetch.fieldNameStringData() == "_id"_sd);
-    auto recordId =
-        indexAccess->findSingle(opCtx, collection.getCollectionPtr(), entry, toUpdateIdDoc);
-    auto startingSnapshotId = shard_role_details::getRecoveryUnit(opCtx)->getSnapshotId();
+        const IndexCatalogEntry* entry =
+            collection.getCollectionPtr()->getIndexCatalog()->getEntry(idIndex);
+        auto indexAccess = entry->accessMethod()->asSortedData();
+        // Since we are looking up a key inside the _id index, create a key object consisting of
+        // only the _id field.
+        dassert(idToFetch.fieldNameStringData() == "_id"_sd);
+        recordId =
+            indexAccess->findSingle(opCtx, collection.getCollectionPtr(), entry, toUpdateIdDoc);
+    }
 
-    if (recordId.isNull()) {
+    RecordData originalRecordData;
+    if (!collection.getCollectionPtr()->getRecordStore()->findRecord(
+            opCtx, recordId, &originalRecordData)) {
         // Upsert case.
         auto status = collection_internal::insertDocument(
             opCtx, collection.getCollectionPtr(), InsertStatement(updateMod), nullptr, false);
@@ -511,9 +521,7 @@ void updateSessionEntry(OperationContext* opCtx,
         return;
     }
 
-    auto originalRecordData =
-        collection.getCollectionPtr()->getRecordStore()->dataFor(opCtx, recordId);
-    auto originalDoc = originalRecordData.toBson();
+    auto originalDoc = originalRecordData.releaseToBson();
 
     const auto parentLsidFieldName = SessionTxnRecord::kParentSessionIdFieldName;
     uassert(
@@ -1099,7 +1107,10 @@ void TransactionParticipant::Participant::beginOrContinueTransactionUnconditiona
 
     // We don't check or fetch any on-disk state, so treat the transaction as 'valid' for the
     // purposes of this method and continue the transaction unconditionally
-    p().isValid = true;
+    {
+        stdx::lock_guard<Client> lg(*opCtx->getClient());
+        o(lg).isValid = true;
+    }
 
     if (o().activeTxnNumberAndRetryCounter.getTxnNumber() !=
         txnNumberAndRetryCounter.getTxnNumber()) {
@@ -1273,7 +1284,7 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     opCtx->setWriteUnitOfWork(nullptr);
 
     _locker = shard_role_details::swapLocker(
-        opCtx, std::make_unique<LockerImpl>(opCtx->getServiceContext()), wl);
+        opCtx, std::make_unique<Locker>(opCtx->getServiceContext()), wl);
     _locker->releaseTicket();
     _locker->unsetThreadId();
     if (opCtx->getLogicalSessionId()) {
@@ -1670,7 +1681,7 @@ void TransactionParticipant::Participant::refreshLocksForPreparedTransaction(
     o(lk).txnResourceStash = TxnResources(lk, opCtx, stashStyle);
 }
 
-std::pair<Timestamp, std::vector<NamespaceString>>
+std::pair<Timestamp, absl::flat_hash_set<NamespaceString>>
 TransactionParticipant::Participant::prepareTransaction(
     OperationContext* opCtx, boost::optional<repl::OpTime> prepareOptime) {
 
@@ -1708,12 +1719,8 @@ TransactionParticipant::Participant::prepareTransaction(
     auto transactionOperationUuids = completedTransactionOperations->getCollectionUUIDs();
     auto catalog = CollectionCatalog::get(opCtx);
 
-    std::vector<NamespaceString> affectedNamespaces;
-    affectedNamespaces.reserve(transactionOperationUuids.size());
-
     for (const auto& uuid : transactionOperationUuids) {
         auto collection = catalog->lookupCollectionByUUID(opCtx, uuid);
-        affectedNamespaces.emplace_back(collection->ns());
         uassert(ErrorCodes::OperationNotSupportedInTransaction,
                 str::stream() << "prepareTransaction failed because one of the transaction "
                                  "operations was done against a temporary collection '"
@@ -1729,7 +1736,6 @@ TransactionParticipant::Participant::prepareTransaction(
         // prepared) transaction is killed, but it still ends up in the prepared state
         opCtx->checkForInterrupt();
         o(lk).txnState.transitionTo(TransactionState::kPrepared);
-        o(lk).affectedNamespaces = affectedNamespaces;
     }
 
     std::vector<OplogSlot> reservedSlots;
@@ -1834,7 +1840,7 @@ TransactionParticipant::Participant::prepareTransaction(
     const bool unlocked = shard_role_details::getLocker(opCtx)->unlockRSTLforPrepare();
     invariant(unlocked);
 
-    return {prepareOplogSlot.getTimestamp(), std::move(affectedNamespaces)};
+    return {prepareOplogSlot.getTimestamp(), o().affectedNamespaces};
 }
 
 void TransactionParticipant::Participant::setPrepareOpTimeForRecovery(OperationContext* opCtx,
@@ -1866,6 +1872,8 @@ void TransactionParticipant::Participant::addTransactionOperation(
 
     auto transactionSizeLimitBytes = static_cast<std::size_t>(gTransactionSizeLimitBytes.load());
     uassertStatusOK(p().transactionOperations.addOperation(operation, transactionSizeLimitBytes));
+
+    addToAffectedNamespaces(opCtx, operation.getNss());
 }
 
 TransactionOperations* TransactionParticipant::Participant::retrieveCompletedTransactionOperations(
@@ -2472,9 +2480,9 @@ void TransactionParticipant::Participant::_abortTransactionOnSession(OperationCo
         shard_role_details::getRecoveryUnit(opCtx)->getNoEvictionAfterRollback()) {
         o(lk).txnResourceStash->setNoEvictionAfterRollback();
     }
-    _resetTransactionStateAndUnlock(&lk, opCtx, nextState);
 
-    _resetRetryableWriteState();
+    _resetRetryableWriteState(lk);
+    _resetTransactionStateAndUnlock(&lk, opCtx, nextState);
 }
 
 void TransactionParticipant::Participant::_cleanUpTxnResourceOnOpCtx(
@@ -3005,7 +3013,7 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
     o(lk).lastWriteOpTime = repl::OpTime();
 
     // Reset the retryable writes state
-    _resetRetryableWriteState();
+    _resetRetryableWriteState(lk);
 
     // Reset the transactions metrics
     o(lk).transactionMetricsObserver.resetSingleTransactionStats(txnNumberAndRetryCounter);
@@ -3026,7 +3034,7 @@ void TransactionParticipant::Participant::_setNewTxnNumberAndRetryCounter(
 
 void RetryableWriteTransactionParticipantCatalog::addParticipant(
     const TransactionParticipant::Participant& participant) {
-    invariant(participant.p().isValid);
+    invariant(participant.o().isValid);
 
     const auto txnNumber = participant._activeRetryableWriteTxnNumber();
     invariant(*txnNumber >= _activeTxnNumber);
@@ -3050,7 +3058,7 @@ void RetryableWriteTransactionParticipantCatalog::reset() {
 
 void RetryableWriteTransactionParticipantCatalog::markAsValid() {
     invariant(std::all_of(_participants.begin(), _participants.end(), [](const auto& it) {
-        return it.second.p().isValid;
+        return it.second.o().isValid;
     }));
     _isValid = true;
 }
@@ -3062,7 +3070,7 @@ void RetryableWriteTransactionParticipantCatalog::invalidate() {
 
 bool RetryableWriteTransactionParticipantCatalog::isValid() const {
     return _isValid && std::all_of(_participants.begin(), _participants.end(), [](const auto& it) {
-               return it.second.p().isValid;
+               return it.second.o().isValid;
            });
 }
 
@@ -3180,7 +3188,7 @@ void TransactionParticipant::Participant::_refreshSelfFromStorageIfNeeded(Operat
     invariant(!opCtx->getClient()->isInDirectClient());
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
-    if (p().isValid) {
+    if (o().isValid) {
         return;
     }
 
@@ -3199,8 +3207,9 @@ void TransactionParticipant::Participant::_refreshSelfFromStorageIfNeeded(Operat
             return kUninitializedTxnRetryCounter;
         }());
         o(lg).lastWriteOpTime = lastTxnRecord->getLastWriteOpTime();
+        o(lg).affectedNamespaces = std::move(activeTxnHistory.affectedNamespaces);
         p().activeTxnCommittedStatements = std::move(activeTxnHistory.committedStatements);
-        p().hasIncompleteHistory = activeTxnHistory.hasIncompleteHistory;
+        o(lg).hasIncompleteHistory = activeTxnHistory.hasIncompleteHistory;
 
         if (!lastTxnRecord->getState()) {
             o(lg).txnState.transitionTo(
@@ -3235,7 +3244,10 @@ void TransactionParticipant::Participant::_refreshSelfFromStorageIfNeeded(Operat
         }
     }
 
-    p().isValid = true;
+    {
+        stdx::lock_guard<Client> lg(*opCtx->getClient());
+        o(lg).isValid = true;
+    }
 }
 
 void TransactionParticipant::Participant::_refreshActiveTransactionParticipantsFromStorageIfNeeded(
@@ -3364,6 +3376,12 @@ void TransactionParticipant::Participant::onWriteOpCompletedOnPrimary(
         opCtx, std::move(stmtIdsWritten), sessionTxnRecord.getLastWriteOpTime());
 }
 
+void TransactionParticipant::Participant::addToAffectedNamespaces(OperationContext* opCtx,
+                                                                  const NamespaceString& nss) {
+    stdx::lock_guard<Client> lk(*opCtx->getClient());
+    o(lk).affectedNamespaces.emplace(nss);
+}
+
 void TransactionParticipant::Participant::onRetryableWriteCloningCompleted(
     OperationContext* opCtx,
     std::vector<StmtId> stmtIdsWritten,
@@ -3387,7 +3405,7 @@ void TransactionParticipant::Participant::onRetryableWriteCloningCompleted(
 }
 
 void TransactionParticipant::Participant::_invalidate(WithLock wl) {
-    p().isValid = false;
+    o(wl).isValid = false;
     o(wl).activeTxnNumberAndRetryCounter = {kUninitializedTxnNumber, kUninitializedTxnRetryCounter};
     o(wl).lastWriteOpTime = repl::OpTime();
 
@@ -3396,9 +3414,9 @@ void TransactionParticipant::Participant::_invalidate(WithLock wl) {
         o().activeTxnNumberAndRetryCounter);
 }
 
-void TransactionParticipant::Participant::_resetRetryableWriteState() {
+void TransactionParticipant::Participant::_resetRetryableWriteState(WithLock wl) {
     p().activeTxnCommittedStatements.clear();
-    p().hasIncompleteHistory = false;
+    o(wl).hasIncompleteHistory = false;
 }
 
 void TransactionParticipant::Participant::_resetTransactionStateAndUnlock(
@@ -3416,6 +3434,7 @@ void TransactionParticipant::Participant::_resetTransactionStateAndUnlock(
     }
 
     p().transactionOperations.clear();
+    o(*lk).affectedNamespaces.clear();
     o(*lk).prepareOpTime = repl::OpTime();
     o(*lk).recoveryPrepareOpTime = repl::OpTime();
     p().autoCommit = boost::none;
@@ -3450,7 +3469,7 @@ void TransactionParticipant::Participant::invalidate(OperationContext* opCtx) {
     // this participant.
     _invalidate(lk);
 
-    _resetRetryableWriteState();
+    _resetRetryableWriteState(lk);
     // Get the RetryableWriteTransactionParticipantCatalog without checking the opCtx has checked
     // out this session since by design it is illegal to invalidate sessions with an opCtx that has
     // a session checked out.
@@ -3535,7 +3554,7 @@ boost::optional<repl::OpTime> TransactionParticipant::Participant::_checkStateme
 
 boost::optional<repl::OpTime> TransactionParticipant::Participant::_checkStatementExecutedSelf(
     StmtId stmtId) const {
-    invariant(p().isValid);
+    invariant(o().isValid);
     if (_isInternalSessionForRetryableWrite()) {
         invariant(!transactionIsAborted());
     }
@@ -3546,7 +3565,7 @@ boost::optional<repl::OpTime> TransactionParticipant::Participant::_checkStateme
                 str::stream() << "Incomplete history detected for transaction "
                               << o().activeTxnNumberAndRetryCounter.getTxnNumber() << " on session "
                               << _sessionId(),
-                !p().hasIncompleteHistory);
+                !o().hasIncompleteHistory);
 
         return boost::none;
     }
@@ -3590,7 +3609,7 @@ void TransactionParticipant::Participant::handleWouldChangeOwningShardError(
 
         invariant(opCtx->getTxnNumber());
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        _resetRetryableWriteState();
+        _resetRetryableWriteState(lk);
     } else if (_isInternalSessionForRetryableWrite() &&
                // (Ignore FCV check): The feature flag is fully disabled.
                feature_flags::gFeatureFlagUpdateDocumentShardKeyUsingTransactionApi
@@ -3640,7 +3659,7 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
         [stmtIdsWritten = std::move(stmtIdsWritten),
          lastStmtIdWriteOpTime](OperationContext* opCtx, boost::optional<Timestamp>) {
             TransactionParticipant::Participant participant(opCtx);
-            invariant(participant.p().isValid);
+            invariant(participant.o().isValid);
 
             RetryableWritesStats::get(opCtx->getServiceContext())
                 ->incrementTransactionsCollectionWriteCount();
@@ -3653,7 +3672,7 @@ void TransactionParticipant::Participant::_registerUpdateCacheOnCommit(
 
             for (const auto stmtId : stmtIdsWritten) {
                 if (stmtId == kIncompleteHistoryStmtId) {
-                    participant.p().hasIncompleteHistory = true;
+                    participant.o(lg).hasIncompleteHistory = true;
                     continue;
                 }
 

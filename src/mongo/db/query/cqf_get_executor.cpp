@@ -358,6 +358,7 @@ QueryHints getHintsFromQueryKnobs() {
     hints._minIndexEqPrefixes = internalCascadesOptimizerMinIndexEqPrefixes.load();
     hints._maxIndexEqPrefixes = internalCascadesOptimizerMaxIndexEqPrefixes.load();
     hints._numSamplingChunks = internalCascadesOptimizerSampleChunks.load();
+    hints._repeatableSample = internalCascadesOptimizerRepeatableSample.load();
     hints._enableNotPushdown = internalCascadesOptimizerEnableNotPushdown.load();
     hints._forceSamplingCEFallBackForFilterNode =
         internalCascadesOptimizerSamplingCEFallBackForFilterNode.load();
@@ -505,6 +506,7 @@ static ExecParams createExecutor(
     } else if (explainVersionStr == "bson"_sd &&
                frameworkControl == QueryFrameworkControlEnum::kTryBonsai) {
         explainVersion = ExplainVersion::UserFacingExplain;
+        toExplain = *phaseManager.getPostMemoPlan();
     } else if (explainVersionStr == "bson"_sd) {
         explainVersion = ExplainVersion::V3;
     } else {
@@ -512,8 +514,10 @@ static ExecParams createExecutor(
         MONGO_UNREACHABLE;
     }
 
-    abtPrinter = std::make_unique<ABTPrinter>(
-        phaseManager.getMetadata(), std::move(toExplain), explainVersion);
+    abtPrinter = std::make_unique<ABTPrinter>(phaseManager.getMetadata(),
+                                              std::move(toExplain),
+                                              explainVersion,
+                                              std::move(phaseManager.getQueryParameters()));
 
     // (Possibly) cache the SBE plan.
     if (planCacheKey && shouldCachePlan(*sbePlan)) {
@@ -618,6 +622,7 @@ OptPhaseManager createSamplingPhaseManager(const cost_model::CostModelCoefficien
     }
 
     QueryHints samplingHints{._numSamplingChunks = hints._numSamplingChunks,
+                             ._repeatableSample = hints._repeatableSample,
                              ._samplingCollectionSizeMin = hints._samplingCollectionSizeMin,
                              ._samplingCollectionSizeMax = hints._samplingCollectionSizeMax,
                              ._sampleIndexedFields = hints._sampleIndexedFields,
@@ -695,7 +700,8 @@ boost::optional<sbe::PlanCacheKey> createPlanCacheKey(
     }
 
     if constexpr (std::is_same_v<QueryType, CanonicalQuery>) {
-        return boost::make_optional(plan_cache_key_factory::make(query, collections, false));
+        return boost::make_optional(plan_cache_key_factory::make(
+            query, collections, canonical_query_encoder::Optimizer::kBonsai));
     } else {
         return boost::make_optional(plan_cache_key_factory::make(query, collections));
     }
@@ -959,12 +965,16 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
         involvedCollections = pipeline->getInvolvedCollections();
     }
 
-    // TODO SERVER-82185: Update value of parameterizationOn based on M2-eligibility
     // TODO SERVER-83414: Enable histogram CE with parameterization.
     const auto parameterizationOn = (internalQueryCardinalityEstimatorMode != "histogram"_sd) &&
-        internalCascadesOptimizerEnableParameterization.load();
+        internalCascadesOptimizerEnableParameterization.load() && eligibility.isFullyEligible();
 
     const auto planCacheKey = [&]() -> boost::optional<sbe::PlanCacheKey> {
+        // For now, only M2-eligible queries will be cached.
+        if (!eligibility.isFullyEligible()) {
+            return boost::none;
+        }
+
         if (canonicalQuery) {
             return createPlanCacheKey(*canonicalQuery, collections);
         } else if (pipeline->isParameterized()) {

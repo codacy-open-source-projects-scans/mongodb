@@ -1463,9 +1463,9 @@ TEST_F(BucketCatalogTest, ReopenUncompressedBucketAndInsertCompatibleMeasurement
                     "b":{"0":1,"1":2,"2":3}}})");
 
     AutoGetCollection autoColl(_opCtx, _ns1.makeTimeseriesBucketsNamespace(), MODE_IX);
-    auto memUsageBefore = _bucketCatalog->memoryUsage.load();
+    auto memUsageBefore = getMemoryUsage(*_bucketCatalog);
     Status status = _reopenBucket(autoColl.getCollection(), bucketDoc);
-    auto memUsageAfter = _bucketCatalog->memoryUsage.load();
+    auto memUsageAfter = getMemoryUsage(*_bucketCatalog);
     ASSERT_OK(status);
     ASSERT_EQ(1, _getExecutionStat(_ns1, kNumBucketsReopened));
     ASSERT_GT(memUsageAfter, memUsageBefore);
@@ -1563,9 +1563,9 @@ TEST_F(BucketCatalogTest, ReopenUncompressedBucketAndInsertIncompatibleMeasureme
                     "b":{"0":1,"1":2,"2":3}}})");
 
     AutoGetCollection autoColl(_opCtx, _ns1.makeTimeseriesBucketsNamespace(), MODE_IX);
-    auto memUsageBefore = _bucketCatalog->memoryUsage.load();
+    auto memUsageBefore = getMemoryUsage(*_bucketCatalog);
     Status status = _reopenBucket(autoColl.getCollection(), bucketDoc);
-    auto memUsageAfter = _bucketCatalog->memoryUsage.load();
+    auto memUsageAfter = getMemoryUsage(*_bucketCatalog);
     ASSERT_OK(status);
     ASSERT_EQ(1, _getExecutionStat(_ns1, kNumBucketsReopened));
     ASSERT_GT(memUsageAfter, memUsageBefore);
@@ -1614,9 +1614,9 @@ TEST_F(BucketCatalogTest, ReopenCompressedBucketAndInsertCompatibleMeasurement) 
     const BSONObj& compressedBucketDoc = compressionResult.compressedBucket.value();
 
     AutoGetCollection autoColl(_opCtx, _ns1.makeTimeseriesBucketsNamespace(), MODE_IX);
-    auto memUsageBefore = _bucketCatalog->memoryUsage.load();
+    auto memUsageBefore = getMemoryUsage(*_bucketCatalog);
     Status status = _reopenBucket(autoColl.getCollection(), compressedBucketDoc);
-    auto memUsageAfter = _bucketCatalog->memoryUsage.load();
+    auto memUsageAfter = getMemoryUsage(*_bucketCatalog);
     ASSERT_OK(status);
     ASSERT_EQ(1, _getExecutionStat(_ns1, kNumBucketsReopened));
     ASSERT_GT(memUsageAfter, memUsageBefore);
@@ -1671,9 +1671,9 @@ TEST_F(BucketCatalogTest, ReopenCompressedBucketAndInsertIncompatibleMeasurement
     const BSONObj& compressedBucketDoc = compressionResult.compressedBucket.value();
 
     AutoGetCollection autoColl(_opCtx, _ns1.makeTimeseriesBucketsNamespace(), MODE_IX);
-    auto memUsageBefore = _bucketCatalog->memoryUsage.load();
+    auto memUsageBefore = getMemoryUsage(*_bucketCatalog);
     Status status = _reopenBucket(autoColl.getCollection(), compressedBucketDoc);
-    auto memUsageAfter = _bucketCatalog->memoryUsage.load();
+    auto memUsageAfter = getMemoryUsage(*_bucketCatalog);
     ASSERT_OK(status);
     ASSERT_EQ(1, _getExecutionStat(_ns1, kNumBucketsReopened));
     ASSERT_GT(memUsageAfter, memUsageBefore);
@@ -1771,7 +1771,7 @@ TEST_F(BucketCatalogTest, ArchivingUnderMemoryPressure) {
 TEST_F(BucketCatalogTest, TryInsertWillNotCreateBucketWhenWeShouldTryToReopen) {
     RAIIServerParameterControllerForTest memoryController{
         "timeseriesIdleBucketExpiryMemoryUsageThreshold",
-        250};  // An absurdly low limit that only allows us one open bucket at a time.
+        500};  // An absurdly low limit that only allows us one open bucket at a time.
     FailPointEnableBlock failPoint("alwaysUseSameBucketCatalogStripe");
     AutoGetCollection autoColl(_opCtx, _ns1.makeTimeseriesBucketsNamespace(), MODE_IX);
 
@@ -1965,14 +1965,15 @@ TEST_F(BucketCatalogTest, InsertIntoReopenedBucket) {
     reopeningContext.bucketToReopen = BucketToReopen{bucketDoc, validator};
 
     // We should be able to pass in a valid bucket and insert into it.
-    result = insert(_opCtx,
-                    *_bucketCatalog,
-                    _ns1,
-                    _getCollator(_ns1),
-                    _getTimeseriesOptions(_ns1),
-                    ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:35:40.000Z"}})"),
-                    CombineWithInsertsFromOtherClients::kAllow,
-                    &reopeningContext);
+    result = insertWithReopeningContext(
+        _opCtx,
+        *_bucketCatalog,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:35:40.000Z"}})"),
+        CombineWithInsertsFromOtherClients::kAllow,
+        reopeningContext);
     ASSERT_OK(result.getStatus());
     ASSERT_TRUE(holds_alternative<SuccessfulInsertion>(result.getValue()));
     batch = get<SuccessfulInsertion>(result.getValue()).batch;
@@ -2050,14 +2051,15 @@ TEST_F(BucketCatalogTest, CannotInsertIntoOutdatedBucket) {
     reopeningContext.bucketToReopen = BucketToReopen{bucketDoc, validator};
 
     // We should get an WriteConflict back if we pass in an outdated bucket.
-    result = insert(_opCtx,
-                    *_bucketCatalog,
-                    _ns1,
-                    _getCollator(_ns1),
-                    _getTimeseriesOptions(_ns1),
-                    ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:35:40.000Z"}})"),
-                    CombineWithInsertsFromOtherClients::kAllow,
-                    &reopeningContext);
+    result = insertWithReopeningContext(
+        _opCtx,
+        *_bucketCatalog,
+        _ns1,
+        _getCollator(_ns1),
+        _getTimeseriesOptions(_ns1),
+        ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:35:40.000Z"}})"),
+        CombineWithInsertsFromOtherClients::kAllow,
+        reopeningContext);
     ASSERT_NOT_OK(result.getStatus());
     ASSERT_EQ(result.getStatus().code(), ErrorCodes::WriteConflict);
 }
@@ -2328,7 +2330,8 @@ TEST_F(BucketCatalogTest, ArchivingAndClosingUnderSideBucketCatalogMemoryPressur
 
     // Set the catalog memory usage to be above the memory usage threshold by the amount of memory
     // used by the idle bucket.
-    sideBucketCatalog->memoryUsage.store(getTimeseriesSideBucketCatalogMemoryUsageThresholdBytes() +
+    sideBucketCatalog->memoryUsage.store(getTimeseriesSideBucketCatalogMemoryUsageThresholdBytes() -
+                                         sideBucketCatalog->trackingContext.allocated() +
                                          (dummyBucket->memoryUsage) / 2);
 
     // When we exceed the memory usage threshold we will first try to archive idle buckets to try
@@ -2459,14 +2462,13 @@ TEST_F(BucketCatalogTest, InsertWithMultipleOpenBucketsPerMetadata) {
     // metadata that it could choose from. When the feature flag is enabled it should choose the
     // first bucket that it finds that also has a time range suitable for the document we are
     // inserting.
-    auto result = internal::insert(_opCtx,
-                                   *_bucketCatalog,
-                                   _ns1,
-                                   autoColl->getDefaultCollator(),
-                                   autoColl->getTimeseriesOptions().get(),
-                                   doc,
-                                   CombineWithInsertsFromOtherClients::kAllow,
-                                   internal::AllowBucketCreation::kNo);
+    auto result = insert(_opCtx,
+                         *_bucketCatalog,
+                         _ns1,
+                         autoColl->getDefaultCollator(),
+                         autoColl->getTimeseriesOptions().get(),
+                         doc,
+                         CombineWithInsertsFromOtherClients::kAllow);
 
     // Assert that the insert was successful, and that whichever bucket has the smaller
     // minTime is the one that received the measurement. This makes the test more resilient

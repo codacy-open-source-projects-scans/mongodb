@@ -1,4 +1,5 @@
-# Build variants corresponding to Atlas's OS
+# Build variants corresponding to Atlas's OS for testing release environments that should run on master,
+# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
 
 buildvariants:
 - name: enterprise-rhel-70-64-bit
@@ -21,7 +22,6 @@ buildvariants:
       --ssl MONGO_DISTMOD=rhel70
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
       CCFLAGS="-fno-gnu-unique"

@@ -17,6 +17,11 @@ env.InjectThirdParty(libraries=[
     's2',
 ])
 
+
+def shouldBuildGRPC(myEnv):
+    return myEnv.TargetOSIs('linux') and myEnv['ENABLE_GRPC_BUILD']
+
+
 env.SConscript(
     dirs=[
         'auth',
@@ -797,9 +802,9 @@ env.CppUnitTest(
         'client_out_of_line_executor_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/transport/transport_layer_common',
         'client_out_of_line_executor',
+        'concurrency/lock_manager',
     ],
 )
 
@@ -809,8 +814,8 @@ env.CppUnitTest(
         'mongod_options_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
+        'concurrency/lock_manager',
         'mongod_options',
         'server_base',
     ],
@@ -947,7 +952,6 @@ env.Library(
         'catalog/collection_operation_source.cpp',
         'direct_shard_client_tracker.cpp',
         'dump_lock_manager_impl.cpp',
-        'locker_api.cpp',
         'replica_set_endpoint_sharding_state.cpp',
         'replica_set_endpoint_util.cpp',
         's/collection_metadata.cpp',
@@ -957,6 +961,7 @@ env.Library(
         's/global_user_write_block_state.cpp',
         's/operation_sharding_state.cpp',
         's/range_arithmetic.cpp',
+        's/scoped_collection_metadata.cpp',
         's/shard_key_index_util.cpp',
         's/sharding_api_d_params.idl',
         's/sharding_migration_critical_section.cpp',
@@ -972,7 +977,6 @@ env.Library(
         '$BUILD_DIR/mongo/s/grid',
         'concurrency/lock_manager',
         'index/index_access_method',
-        'rw_concern_d',
         'shard_role_api_stor_ex',
         'views/views',
     ],
@@ -1537,6 +1541,17 @@ env.Library(
     ],
 )
 
+env.Library(
+    target='cursor_stats',
+    source=[
+        'cursor_stats.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        'commands/server_status_core',
+        'server_base',
+    ],
+)
+
 execEnv = env.Clone()
 execEnv.InjectThirdParty(libraries=['snappy'])
 execEnv.Library(
@@ -1603,6 +1618,7 @@ execEnv.Library(
         'query/all_indices_required_checker.cpp',
         'query/bind_input_params.cpp',
         'query/classic_stage_builder.cpp',
+        'query/classic_runtime_planner_for_sbe.cpp',
         'query/cost_model/on_coefficients_change_updater_impl.cpp',
         'query/cqf_command_utils.cpp',
         'query/cqf_fast_paths.cpp',
@@ -1701,6 +1717,7 @@ execEnv.Library(
         'commands/server_status_core',
         'concurrency/exception_util',
         'curop_failpoint_helpers',
+        'cursor_stats',
         'exec/sbe/query_sbe_abt',
         'internal_transactions_feature_flag',
         'not_primary_error_tracker',
@@ -1915,71 +1932,6 @@ env.Library(
 )
 
 env.Library(
-    target='service_liaison',
-    source=[
-        'service_liaison.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/crypto/sha1_block',
-        'keys_collection_document',
-        'vector_clock',
-    ],
-)
-
-envWithAsio = env.Clone()
-envWithAsio.InjectThirdParty(libraries=['asio'])
-
-envWithAsio.Library(
-    target='service_liaison_mock',
-    source=[
-        'service_liaison_mock.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/session/kill_sessions',
-        '$BUILD_DIR/mongo/util/periodic_runner_factory',
-        'service_liaison',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/executor/async_timer_mock',
-    ],
-)
-
-envWithAsio.Library(
-    target='service_liaison_mongod',
-    source=[
-        'service_liaison_mongod.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/session/logical_session_id',
-        '$BUILD_DIR/mongo/util/clock_sources',
-        '$BUILD_DIR/mongo/util/periodic_runner',
-        'query_exec',
-        'service_context',
-        'service_liaison',
-    ],
-)
-
-env.Library(
-    target='service_liaison_mongos',
-    source=[
-        'service_liaison_mongos.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/db/session/logical_session_id',
-        '$BUILD_DIR/mongo/s/grid',
-        '$BUILD_DIR/mongo/s/query/cluster_cursor_manager',
-        '$BUILD_DIR/mongo/util/clock_sources',
-        '$BUILD_DIR/mongo/util/periodic_runner',
-        'service_context',
-        'service_liaison',
-    ],
-    LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/util/concurrency/spin_lock',
-        'server_base',
-    ],
-)
-
-env.Library(
     target='index_commands_idl',
     source=[
         'create_indexes.idl',
@@ -2113,8 +2065,9 @@ env.Library(
         'rs_local_client.cpp',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        'concurrency/lock_manager',
         'dbdirectclient',
+        'repl/repl_coordinator_interface',
         'rw_concern_d',
     ],
 )
@@ -2222,6 +2175,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/s/grid',
+        'concurrency/lock_manager',
         'dbdirectclient',
         'repl/replica_set_aware_service',
         'rw_concern_d',
@@ -2417,9 +2371,9 @@ env.Program(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/rpc/message',
         '$BUILD_DIR/mongo/util/signal_handlers',
+        'concurrency/lock_manager',
         'traffic_reader',
     ],
 )
@@ -2456,6 +2410,8 @@ env.Library(
         '$BUILD_DIR/mongo/s/commands/sharded_cluster_commands',
         '$BUILD_DIR/mongo/s/commands/sharded_cluster_sharding_commands',
         '$BUILD_DIR/mongo/scripting/scripting_server',
+        '$BUILD_DIR/mongo/transport/grpc/grpc_transport_server_options'
+        if shouldBuildGRPC(env) else [],
         '$BUILD_DIR/mongo/transport/message_compressor_options_server',
         '$BUILD_DIR/mongo/transport/session_manager',
         '$BUILD_DIR/mongo/transport/transport_layer_manager',
@@ -2523,10 +2479,9 @@ env.Library(
         'repl/topology_coordinator',
         'rw_concern_d',
         'serverless/shard_split_commands',
-        'service_liaison_mongod',
         'session/kill_sessions_local',
+        'session/service_liaison_mongod',
         'session/sessions_collection_rs',
-        'session/sessions_collection_standalone',
         'shard_role',
         'startup_warnings_mongod',
         'stats/change_collection_server_status',
@@ -2647,13 +2602,11 @@ env.Library(
         'serverless/multitenancy_check',
         'serverless/shard_split_donor_service',
         'service_context_d',
-        'service_liaison_mongod',
         'session/kill_sessions',
         'session/kill_sessions_local',
-        'session/logical_session_cache_impl',
+        'session/service_liaison_mongod',
         'session/session_catalog_mongod',
         'session/sessions_collection_rs',
-        'session/sessions_collection_standalone',
         'set_change_stream_state_coordinator',
         'shard_role',
         'startup_recovery',
@@ -2825,6 +2778,7 @@ if wiredtiger:
             'read_write_concern_provenance_test.cpp',
             'record_id_test.cpp',
             'server_options_test.cpp',
+            'service_liaison_mock.cpp',
             'session/internal_session_pool_test.cpp',
             'session/internal_transactions_reap_service_test.cpp',
             'session/logical_session_cache_test.cpp',
@@ -2859,6 +2813,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/util/clock_source_mock',
             '$BUILD_DIR/mongo/util/net/network',
             '$BUILD_DIR/mongo/util/net/ssl_options_server',
+            '$BUILD_DIR/mongo/util/periodic_runner_factory',
             '$BUILD_DIR/mongo/util/progress_meter',
             'auth/auth',
             'auth/authmocks',
@@ -2911,7 +2866,6 @@ if wiredtiger:
             's/shard_server_test_fixture',
             'server_base',
             'server_options_servers',
-            'service_liaison_mock',
             'session/logical_session_cache_impl',
             'session/logical_session_id_helpers',
             'session/session_catalog_mongod',
@@ -2991,7 +2945,7 @@ env.Benchmark(
         'operation_cpu_timer_bm.cpp',
     ],
     LIBDEPS=[
-        'service_context',
+        'service_context_non_d',
         'shard_role_api',
     ],
 )
@@ -3013,7 +2967,6 @@ env.Benchmark(
         'service_entry_point_common_bm.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/idl/idl_parser',
         '$BUILD_DIR/mongo/util/periodic_runner_factory',
         'auth/authserver',
         'catalog/catalog_impl',
@@ -3041,5 +2994,18 @@ env.Benchmark(
     ],
     LIBDEPS=[
         'server_base',
+    ],
+)
+
+bmEnv = env.Clone()
+bmEnv.InjectThirdParty(libraries=["benchmark"])
+bmEnv.Library(
+    target='bonsai_query_bm_fixture',
+    source=[
+        'bonsai_query_bm_fixture.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/third_party/shim_benchmark',
     ],
 )

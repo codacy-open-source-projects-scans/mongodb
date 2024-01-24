@@ -36,8 +36,8 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/bonsai_query_bm_fixture.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/abt/abt_translate_bm_fixture.h"
 #include "mongo/db/pipeline/abt/canonical_query_translation.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/cqf_command_utils.h"
@@ -54,19 +54,19 @@ namespace {
 /**
  * Benchmarks translation from CanonicalQuery to ABT.
  */
-class CanonicalQueryABTTranslate : public ABTTranslateBenchmarkFixture {
+class CanonicalQueryABTTranslate : public BonsaiQueryBenchmarkFixture {
 public:
     CanonicalQueryABTTranslate() {}
 
-    void benchmarkABTTranslate(benchmark::State& state,
-                               const std::vector<BSONObj>& pipeline) override final {
-        state.SkipWithError("Find translation fixture cannot translate a pieline");
+    void benchmarkPipeline(benchmark::State& state,
+                           const std::vector<BSONObj>& pipeline) override final {
+        state.SkipWithError("Find translation fixture cannot translate a pipeline");
         return;
     }
 
-    void benchmarkABTTranslate(benchmark::State& state,
-                               BSONObj matchSpec,
-                               BSONObj projectSpec) override final {
+    void benchmarkQueryMatchProject(benchmark::State& state,
+                                    BSONObj matchSpec,
+                                    BSONObj projectSpec) override final {
         QueryTestServiceContext testServiceContext;
         auto opCtx = testServiceContext.makeOperationContext();
         auto nss = NamespaceString::createNamespaceString_forTest("test.bm");

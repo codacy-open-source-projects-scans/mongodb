@@ -1,4 +1,5 @@
-# SUSE/SLES test release variants
+# SUSE/SLES build variants for testing release environments that should run on master,
+# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
 
 buildvariants:
 - name: suse12
@@ -20,7 +21,6 @@ buildvariants:
       -j$(echo $(grep -c ^processor /proc/cpuinfo) / 2 | bc)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
       --linker=gold
-      --use-diagnostic-latches=off
     test_flags: --excludeWithAnyTags=requires_external_data_source,requires_increased_memlock_limits,requires_latch_analyzer
     multiversion_platform: suse12
     multiversion_edition: targeted
@@ -89,7 +89,6 @@ buildvariants:
       -j$(echo $(grep -c ^processor /proc/cpuinfo) / 2 | bc)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
       --linker=gold
-      --use-diagnostic-latches=off
     test_flags: --excludeWithAnyTags=requires_external_data_source,requires_latch_analyzer
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
@@ -149,7 +148,6 @@ buildvariants:
       MONGO_DISTMOD=suse15
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
     test_flags: --excludeWithAnyTags=requires_external_data_source,requires_latch_analyzer
     crypt_task_compile_flags: >-
       SHLINKFLAGS_EXTRA="-Wl,-Bsymbolic -Wl,--no-gnu-unique"
@@ -200,7 +198,6 @@ buildvariants:
       MONGO_DISTMOD=suse15
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --use-diagnostic-latches=off
     test_flags: --excludeWithAnyTags=requires_external_data_source,requires_increased_memlock_limits,requires_latch_analyzer
     multiversion_platform: suse15
     multiversion_edition: targeted

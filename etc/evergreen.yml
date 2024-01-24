@@ -56,42 +56,36 @@ include:
 - filename: etc/evergreen_yml_components/configuration.yml
 - filename: etc/evergreen_yml_components/definitions.yml
 
-- filename: etc/evergreen_yml_components/tasks/resmoke/clusters_and_integrations/tasks.yml
-- filename: etc/evergreen_yml_components/tasks/resmoke/durable_transactions_and_availability/tasks.yml
-
-- filename: etc/evergreen_yml_components/tasks/components/aggregation_framework/resmoke_tasks.yml
-- filename: etc/evergreen_yml_components/tasks/components/change_streams/resmoke_tasks.yml
-- filename: etc/evergreen_yml_components/tasks/components/querying/resmoke_tasks.yml
+- filename: etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
+- filename: etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
+- filename: etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
+- filename: etc/evergreen_yml_components/tasks/resmoke/non_server_teams/tasks.yml
+- filename: etc/evergreen_yml_components/tasks/compile_tasks.yml
+- filename: etc/evergreen_yml_components/tasks/misc_tasks.yml
 
 - filename: etc/evergreen_yml_components/variants/misc/task_generation.yml
 - filename: etc/evergreen_yml_components/variants/misc/misc.yml
-- filename: etc/evergreen_yml_components/variants/misc/misc_exclude_while_branching.yml
+- filename: etc/evergreen_yml_components/variants/misc/misc_master_branch_only.yml
 
-- filename: etc/evergreen_yml_components/variants/sanitizer/build_dev.yml
-- filename: etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
-- filename: etc/evergreen_yml_components/variants/sanitizer/test_dev_release.yml
-
-- filename: etc/evergreen_yml_components/variants/ninja/build.yml
-
-- filename: etc/evergreen_yml_components/variants/amazon/build_dev.yml
 - filename: etc/evergreen_yml_components/variants/amazon/test_dev.yml
+- filename: etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
 
-- filename: etc/evergreen_yml_components/variants/macos/build_dev.yml
-- filename: etc/evergreen_yml_components/variants/macos/test_dev.yml
+- filename: etc/evergreen_yml_components/variants/macos/test_dev_master_branch_only.yml
 
-- filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_branch.yml
-- filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_lts_branches.yml
-- filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_rapid_lts_branches.yml
+- filename: etc/evergreen_yml_components/variants/rhel/test_dev.yml
+- filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_and_lts_branches_only.yml
+- filename: etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
 
-- filename: etc/evergreen_yml_components/variants/ubuntu/build_dev.yml
-- filename: etc/evergreen_yml_components/variants/ubuntu/test_dev.yml
+- filename: etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
+- filename: etc/evergreen_yml_components/variants/sanitizer/test_dev_master_branch_only.yml
 
-- filename: etc/evergreen_yml_components/variants/windows/build_dev.yml
+- filename: etc/evergreen_yml_components/variants/ubuntu/test_dev_master_branch_only.yml
+
 - filename: etc/evergreen_yml_components/variants/windows/test_dev.yml
-- filename: etc/evergreen_yml_components/variants/windows/test_in_memory.yml
+- filename: etc/evergreen_yml_components/variants/windows/test_dev_master_and_lts_branches_only.yml
+- filename: etc/evergreen_yml_components/variants/windows/test_dev_master_branch_only.yml
 
-- filename: etc/evergreen_yml_components/variants/wiredtiger/build_dev.yml
-- filename: etc/evergreen_yml_components/variants/wiredtiger/test_dev.yml
+- filename: etc/evergreen_yml_components/variants/wiredtiger/test_dev_master_branch_only.yml
 
 
 parameters:

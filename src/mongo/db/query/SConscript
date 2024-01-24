@@ -296,7 +296,7 @@ env.Library(
         '$BUILD_DIR/mongo/crypto/fle_fields',
         '$BUILD_DIR/mongo/db/api_parameters',
         '$BUILD_DIR/mongo/db/auth/authprivilege',
-        '$BUILD_DIR/mongo/db/auth/security_token',
+        '$BUILD_DIR/mongo/db/auth/security_token_auth',
         '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
         '$BUILD_DIR/mongo/db/pipeline/runtime_constants_idl',
         '$BUILD_DIR/mongo/db/repl/read_concern_args',
@@ -510,6 +510,8 @@ env.CppUnitTest(
         'query_settings/query_settings_manager_test.cpp',
         'query_settings/query_settings_validation_test.cpp',
         'query_settings_test.cpp',
+        'query_shape/agg_cmd_shape_test.cpp',
+        'query_shape/cmd_with_let_shape_test.cpp',
         'query_shape/distinct_cmd_shape_test.cpp',
         'query_shape/find_cmd_shape_test.cpp',
         'query_solution_test.cpp',
@@ -580,5 +582,24 @@ env.Benchmark(
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/service_context_non_d',
         'query_test_service_context',
+    ],
+)
+
+env.Benchmark(
+    target='plan_cache_key_encoding_bm',
+    source=[
+        'plan_cache_key_encoding_agg_bm.cpp',
+        'plan_cache_key_encoding_find_bm.cpp',
+        'plan_cache_parse_encode_bm.cpp',
+        'plan_cache_parse_encode_pipeline_bm.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/bonsai_query_bm_fixture',
+        '$BUILD_DIR/mongo/db/pipeline/pipeline',
+        '$BUILD_DIR/mongo/db/query/canonical_query',
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
+        '$BUILD_DIR/mongo/db/query_exec',
+        '$BUILD_DIR/mongo/db/query_expressions',
+        '$BUILD_DIR/mongo/db/service_context_non_d',
     ],
 )

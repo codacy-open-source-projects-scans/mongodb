@@ -45,7 +45,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/cursor_manager.h"
 #include "mongo/db/cursor_server_params.h"
-#include "mongo/db/locker_api.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_knobs_gen.h"
@@ -124,6 +123,8 @@ ClientCursor::ClientCursor(ClientCursorParams params,
     invariant(_exec);
     invariant(_operationUsingCursor);
 
+    auto& cursorStats = CursorStats::getInstance();
+
     cursorStats.cursorStatsOpen.increment();
     cursorStats.cursorStatsTotalOpened.increment();
 
@@ -163,6 +164,7 @@ void ClientCursor::dispose(OperationContext* opCtx, boost::optional<Date_t> now)
         incrementCursorLifespanMetric(_createdDate, *now);
     }
 
+    auto& cursorStats = CursorStats::getInstance();
     cursorStats.cursorStatsOpen.decrement();
     if (isNoTimeout()) {
         cursorStats.cursorStatsOpenNoTimeout.decrement();

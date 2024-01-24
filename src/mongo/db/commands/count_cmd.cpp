@@ -50,7 +50,7 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/auth/validated_tenancy_scope.h"
+#include "mongo/db/auth/validated_tenancy_scope_factory.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -227,12 +227,10 @@ public:
                 return viewAggregation.getStatus();
             }
 
-            auto viewAggCmd = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                                  nss.dbName(),
-                                  opMsgRequest.validatedTenancyScope,
-                                  viewAggregation.getValue(),
-                                  serializationCtx)
-                                  .body;
+            auto viewAggCmd =
+                OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                    nss.dbName(), opMsgRequest.validatedTenancyScope, viewAggregation.getValue())
+                    .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
                 nss,
@@ -261,10 +259,9 @@ public:
         }
 
         auto expCtx = makeExpressionContextForGetExecutor(
-            opCtx, request.getCollation().value_or(BSONObj()), nss);
+            opCtx, request.getCollation().value_or(BSONObj()), nss, verbosity);
 
-        auto statusWithPlanExecutor =
-            getExecutorCount(expCtx, &collection, request, true /*explain*/, nss);
+        auto statusWithPlanExecutor = getExecutorCount(expCtx, &collection, request, nss);
         if (!statusWithPlanExecutor.isOK()) {
             return statusWithPlanExecutor.getStatus();
         }
@@ -335,27 +332,13 @@ public:
 
         if (ctx->getView()) {
             auto viewAggregation = countCommandAsAggregationCommand(request, nss);
-            const auto& requestSC = request.getSerializationContext();
-            SerializationContext aggRequestSC(
-                requestSC.getSource(), requestSC.getCallerType(), requestSC.getPrefix());
-
             // Relinquish locks. The aggregation command will re-acquire them.
             ctx.reset();
 
             uassertStatusOK(viewAggregation.getStatus());
-            using VTS = auth::ValidatedTenancyScope;
-            boost::optional<VTS> innerCmdVts = boost::none;
-            if (dbName.tenantId()) {
-                innerCmdVts = VTS(dbName.tenantId().value(), VTS::TrustedForInnerOpMsgRequestTag{});
-                aggRequestSC.setTenantIdSource(true);
-                // Use the original VTS to check the client connection tenant protocol.
-                if (vts != boost::none && vts->isFromAtlasProxy()) {
-                    aggRequestSC.setPrefixState(true);
-                }
-            }
 
             auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                dbName, innerCmdVts, std::move(viewAggregation.getValue()), aggRequestSC);
+                dbName, vts, std::move(viewAggregation.getValue()));
             BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
 
             uassertStatusOK(ViewResponseFormatter(aggResult).appendAsCountResponse(
@@ -383,13 +366,14 @@ public:
                         CollectionShardingState::OrphanCleanupPolicy::kDisallowOrphanCleanup));
         }
 
-        auto statusWithPlanExecutor =
-            getExecutorCount(makeExpressionContextForGetExecutor(
-                                 opCtx, request.getCollation().value_or(BSONObj()), nss),
-                             &collection,
-                             request,
-                             false /*explain*/,
-                             nss);
+        auto statusWithPlanExecutor = getExecutorCount(
+            makeExpressionContextForGetExecutor(opCtx,
+                                                request.getCollation().value_or(BSONObj()),
+                                                nss,
+                                                boost::none /* verbosity */),
+            &collection,
+            request,
+            nss);
         uassertStatusOK(statusWithPlanExecutor.getStatus());
 
         auto exec = std::move(statusWithPlanExecutor.getValue());

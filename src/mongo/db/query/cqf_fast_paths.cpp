@@ -81,6 +81,11 @@ public:
         return "COLLSCAN";
     }
 
+    BSONObj getQueryParameters() const override final {
+        // Fast path queries don't get parameterized.
+        return {};
+    }
+
 private:
     const BSONObj _explainBSON;
 };
@@ -820,7 +825,7 @@ boost::optional<ExecParams> tryGetSBEExecutorViaFastPath(
                                         query->getExpCtx(),
                                         query->nss(),
                                         collections,
-                                        query->getExplain(),
+                                        query->getExplain().has_value(),
                                         indexHint,
                                         nullptr /*pipeline*/,
                                         query);

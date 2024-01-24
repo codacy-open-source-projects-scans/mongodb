@@ -783,6 +783,12 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
     }
 
     result = createIndexOnConfigCollection(
+        opCtx, NamespaceString::kConfigDatabasesNamespace, BSON("_id" << 1), unique);
+    if (!result.isOK()) {
+        return result.withContext("couldn't create _id_ index on config db");
+    }
+
+    result = createIndexOnConfigCollection(
         opCtx, NamespaceString::kConfigsvrShardsNamespace, BSON(ShardType::host() << 1), unique);
     if (!result.isOK()) {
         return result.withContext("couldn't create host_1 index on config db");
@@ -1332,8 +1338,26 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx)
 
     // Delete any existing document that has been already majority committed.
     {
-        repl::ReadConcernArgs::get(opCtx) =
-            repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern);
+        // Set the needed read concern for the operation; since its execution through
+        // _localConfigShard involves the DBDirectClient, RecoveryUnit::ReadSource also needs to
+        // be restored upon exit.
+        auto originalReadConcern =
+            std::exchange(repl::ReadConcernArgs::get(opCtx),
+                          repl::ReadConcernArgs(repl::ReadConcernLevel::kMajorityReadConcern));
+
+        auto originalReadSource =
+            shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource();
+        boost::optional<Timestamp> originalReadTimestamp;
+        if (originalReadSource == RecoveryUnit::ReadSource::kProvided) {
+            originalReadTimestamp =
+                shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp(opCtx);
+        }
+
+        ScopeGuard resetopCtxStateGuard([&] {
+            repl::ReadConcernArgs::get(opCtx) = std::move(originalReadConcern);
+            shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
+                originalReadSource, originalReadTimestamp);
+        });
 
         write_ops::DeleteCommandRequest deleteOp(
             NamespaceString::kConfigsvrPlacementHistoryNamespace);

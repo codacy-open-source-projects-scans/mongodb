@@ -12,12 +12,6 @@ export function checkCascadesOptimizerEnabled(theDB) {
     return val == "tryBonsai" || val == "tryBonsaiExperimental" || val == "forceBonsai";
 }
 
-// TODO SERVER-82185: Remove this once M2-eligibility checker + E2E parameterization implemented
-export function checkPlanCacheParameterization(theDB) {
-    return theDB.adminCommand({getParameter: 1, internalCascadesOptimizerEnableParameterization: 1})
-        .internalCascadesOptimizerEnableParameterization;
-}
-
 /**
  * Utility for checking if the experimental Cascades optimizer code path is enabled (checks
  * framework control for M4+).
@@ -336,7 +330,9 @@ export function removeUUIDsFromExplain(db, explain) {
 
 export function navigateToPath(doc, path) {
     let result = doc;
-    let components = path.split(".");
+    // Drop empty path components so we can treat '' as a 0-element path,
+    // and also not worry about extra '.' when concatenating paths.
+    let components = path.split(".").filter(s => s.length > 0);
     try {
         for (; components.length > 0; components = components.slice(1)) {
             assert(result.hasOwnProperty(components[0]));

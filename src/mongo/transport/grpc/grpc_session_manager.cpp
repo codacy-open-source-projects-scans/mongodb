@@ -32,7 +32,7 @@
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/transport/grpc/grpc_parameters_gen.h"
+#include "mongo/transport/grpc/grpc_feature_flag_gen.h"
 #include "mongo/transport/grpc/grpc_session.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/service_executor.h"
@@ -127,10 +127,6 @@ void GRPCSessionManager::appendStats(BSONObjBuilder* bob) const {
     }
 
     appendI64(bob, "uniqueClientsSeen"_sd, _clientCache->getUniqueClientsSeen());
-
-    for (auto&& observer : _observers) {
-        observer->appendTransportServerStats(bob);
-    }
 }
 
 void GRPCSessionManager::endSessionByClient(mongo::Client* client) {

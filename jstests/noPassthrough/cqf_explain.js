@@ -176,6 +176,14 @@ function analyzeTopLevelExplain(
             expectedParsedQuery,
             `Expected the parsedQuery field to be ${tojson(expectedParsedQuery)} but got ${
                 tojson(path.parsedQuery)}. The whole top-level explain is ${tojson(nodeExplain)}.`);
+
+        // Assert that the queryParameters sub-object exists.
+        assert(
+            path.winningPlan.hasOwnProperty("queryParameters"),
+            `Explain does not have the "winningPlan.queryParameters" field. The whole top-level explain is ${
+                tojson(nodeExplain)}`);
+
+        // Assert that optimizationTimeMillis is present.
         assert(
             path.hasOwnProperty("optimizationTimeMillis"),
             `Explain does not have the "optimizationTimeMillis" field. The whole top-level explain is ${
@@ -214,13 +222,16 @@ function analyzeFindExplain(db,
                             projection = {},
                             hint = {},
                             disableSargableRewrites = true) {
-    let explain =
-        runWithParamsAllNodes(db,
-                              [{
-                                  key: "internalCascadesOptimizerDisableSargableWhenNoIndexes",
-                                  value: disableSargableRewrites
-                              }],
-                              () => coll.explain().find(query, projection).hint(hint).finish());
+    let explain = runWithParamsAllNodes(
+        db,
+        [
+            {
+                key: "internalCascadesOptimizerDisableSargableWhenNoIndexes",
+                value: disableSargableRewrites
+            },
+            {key: "internalCascadesOptimizerEnableParameterization", value: false}
+        ],
+        () => coll.explain().find(query, projection).hint(hint).finish());
     analyzeExplain(
         explain, expectedStandaloneStages, expectedShardedStages, expectedDir, isSharded);
 }
@@ -239,13 +250,16 @@ function analyzeAggExplain(db,
         cmd.hint = hint;
     }
 
-    let explain =
-        runWithParamsAllNodes(db,
-                              [{
-                                  key: "internalCascadesOptimizerDisableSargableWhenNoIndexes",
-                                  value: disableSargableRewrites
-                              }],
-                              () => coll.runCommand(cmd));
+    let explain = runWithParamsAllNodes(
+        db,
+        [
+            {
+                key: "internalCascadesOptimizerDisableSargableWhenNoIndexes",
+                value: disableSargableRewrites
+            },
+            {key: "internalCascadesOptimizerEnableParameterization", value: false}
+        ],
+        () => coll.runCommand(cmd));
     analyzeExplain(
         explain, expectedStandaloneStages, expectedShardedStages, expectedDir, isSharded);
 }
@@ -381,7 +395,10 @@ function runTest(db, coll, isSharded) {
 
     let explain = runWithParamsAllNodes(
         db,
-        [{key: "internalCascadesOptimizerDisableSargableWhenNoIndexes", value: false}],
+        [
+            {key: "internalCascadesOptimizerDisableSargableWhenNoIndexes", value: false},
+            {key: "internalCascadesOptimizerEnableParameterization", value: false}
+        ],
         () => coll.explain().find({$or: [{a: {$lt: 100}}]}).finish());
     analyzeTopLevelExplain(explain, isSharded, false /* expectedMaxPSRCountReached */, {
         "filter": {"a": {"$lt": 100}}
@@ -392,7 +409,10 @@ function runTest(db, coll, isSharded) {
     assert.commandWorked(coll.createIndex({a: 1}));
     explain = runWithParamsAllNodes(
         db,
-        [{key: "internalCascadesOptimizerDisableSargableWhenNoIndexes", value: false}],
+        [
+            {key: "internalCascadesOptimizerDisableSargableWhenNoIndexes", value: false},
+            {key: "internalCascadesOptimizerEnableParameterization", value: false}
+        ],
         () => coll.explain()
                   .find({
                       $or: [

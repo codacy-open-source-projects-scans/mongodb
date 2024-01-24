@@ -111,7 +111,6 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::make(CanonicalQueryP
 }
 
 CanonicalQuery::CanonicalQuery(CanonicalQueryParams&& params) {
-    setExplain(params.explain);
     auto parsedFind = uassertStatusOK(
         visit(OverloadedVisitor{[](std::unique_ptr<ParsedFindCommand> parsedFindRequest) {
                                     return StatusWith(std::move(parsedFindRequest));
@@ -143,9 +142,6 @@ CanonicalQuery::CanonicalQuery(OperationContext* opCtx, const CanonicalQuery& ba
     findCommand->setProjection(baseQuery.getFindCommandRequest().getProjection().getOwned());
     findCommand->setSort(baseQuery.getFindCommandRequest().getSort().getOwned());
     findCommand->setCollation(baseQuery.getFindCommandRequest().getCollation().getOwned());
-
-    // Make the CQ we'll hopefully return.
-    setExplain(baseQuery.getExplain());
 
     auto parsedFind = uassertStatusOK(ParsedFindCommand::withExistingFilter(
         baseQuery.getExpCtx(),
@@ -410,8 +406,10 @@ std::string CanonicalQuery::toStringShort(bool forErrMsg) const {
 }
 
 CanonicalQuery::QueryShapeString CanonicalQuery::encodeKey() const {
-    return (!_forceClassicEngine && _sbeCompatible) ? canonical_query_encoder::encodeSBE(*this)
-                                                    : canonical_query_encoder::encodeClassic(*this);
+    return (!_forceClassicEngine && _sbeCompatible)
+        ? canonical_query_encoder::encodeSBE(*this,
+                                             canonical_query_encoder::Optimizer::kSbeStageBuilders)
+        : canonical_query_encoder::encodeClassic(*this);
 }
 
 CanonicalQuery::QueryShapeString CanonicalQuery::encodeKeyForPlanCacheCommand() const {

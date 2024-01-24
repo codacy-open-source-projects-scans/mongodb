@@ -40,6 +40,7 @@
 #include "mongo/db/commands/compact_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -57,6 +58,10 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
+            uassert(ErrorCodes::CommandNotSupported,
+                    "AutoCompact command requires its feature flag to be enabled",
+                    gFeatureFlagAutoCompact.isEnabled(
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
             uassertStatusOK(autoCompact(opCtx,
                                         request().getCommandParameter(),
                                         request().getRunOnce(),
@@ -95,8 +100,10 @@ public:
                "warning: compact operation has blocking behaviour and is slow, enabling auto "
                "compact will allow compact to run on any collection at any time. You can cancel "
                "by disabling auto compact.\n"
-               "{ autoCompact : <bool>, [force:<bool>], [freeSpaceTargetMB:<int64_t>] }\n"
-               "  force - allows to run on a replica set primary\n";
+               "{ autoCompact : <bool>, [force:<bool>], [freeSpaceTargetMB:<int64_t>], "
+               "[runOnce:<bool>] }\n"
+               "  force - allows to run on a replica set primary\n"
+               "  runOnce - executes compaction on the database only once\n";
     }
 };
 

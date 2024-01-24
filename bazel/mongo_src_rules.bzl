@@ -60,8 +60,12 @@ WINDOWS_RELEASE_COPTS = [
     "/Od",
 ]
 
+# TODO SERVER-85340 fix this error message when libc++ is readded to the toolchain
 LIBCXX_ERROR_MESSAGE = (
     "\nError:\n" +
+    "    libc++ is not currently supported in the mongo toolchain.\n"+
+    "    Follow this ticket to see when support is being added SERVER-85340\n"+
+    "    We currently only support passing the libcxx config on macos for compatibility reasons.\n"+
     "    libc++ requires these configuration:\n"+
     "    --//bazel/config:compiler_type=clang\n"
 )
@@ -99,15 +103,25 @@ LINKER_LINKFLAGS = select({
     "//bazel/config:linker_lld": ["-fuse-ld=lld"],
 })
 
+REQUIRED_SETTINGS_LIBUNWIND_ERROR_MESSAGE = (
+    "\nError:\n" +
+    "    libunwind=on is only supported on linux"
+)
+
+# These will throw an error if the following condition is not met:
+# (libunwind == on && os == linux) || libunwind == off || libunwind == auto
 LIBUNWIND_DEPS = select({
-    "//bazel/config:use_libunwind_enabled": ["//src/third_party/unwind:unwind"],
-    "//conditions:default": [],
-})
+    "//bazel/config:libunwind_enabled": ["//src/third_party/unwind:unwind"],
+    "//bazel/config:_libunwind_off": [],
+    "//bazel/config:_libunwind_auto": [],
+}, no_match_error = REQUIRED_SETTINGS_LIBUNWIND_ERROR_MESSAGE)
 
 LIBUNWIND_DEFINES = select({
-    "//bazel/config:use_libunwind_enabled": ["MONGO_CONFIG_USE_LIBUNWIND"],
-    "//conditions:default": [],
-})
+    "//bazel/config:libunwind_enabled": ["MONGO_CONFIG_USE_LIBUNWIND"],
+    "//bazel/config:_libunwind_off": [],
+    "//bazel/config:_libunwind_auto": [],
+}, no_match_error = REQUIRED_SETTINGS_LIBUNWIND_ERROR_MESSAGE)
+
 
 REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE = (
     "\nError:\n" +
@@ -187,6 +201,74 @@ FUZZER_SANITIZER_LINKFLAGS = select({
 }
 , no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer")
 
+# Combines following two conditions -
+# 1.
+# TODO: SERVER-48622
+#
+# See https://github.com/google/sanitizers/issues/943
+# for why we disallow combining TSAN with
+# libunwind. We could, atlernatively, have added logic
+# to automate the decision about whether to enable
+# libunwind based on whether TSAN is enabled, but that
+# logic is already complex, and it feels better to
+# make it explicit that using TSAN means you won't get
+# the benefits of libunwind.
+# 2.
+# We add supressions based on the library file in etc/tsan.suppressions
+# so the link-model needs to be dynamic.
+
+THREAD_SANITIZER_ERROR_MESSAGE = (
+    "\nError:\n" +
+    "    Build failed due to either -\n" +
+    "    Cannot use libunwind with TSAN, please add --//bazel/config:use_libunwind=False to your compile flags or\n" +
+    "    TSAN is only supported with dynamic link models, please add --//bazel/config:linkstatic=False to your compile flags.\n"
+)
+
+THREAD_SANITIZER_COPTS = select({
+    ("//bazel/config:sanitize_thread_required_settings"): ["-fsanitize=thread"],
+    ("//bazel/config:tsan_disabled"): [],
+}, no_match_error = THREAD_SANITIZER_ERROR_MESSAGE)
+
+THREAD_SANITIZER_LINKFLAGS = select({
+    ("//bazel/config:sanitize_thread_required_settings"): ["-fsanitize=thread"],
+    ("//bazel/config:tsan_disabled"): [],
+}, no_match_error = THREAD_SANITIZER_ERROR_MESSAGE)
+
+THREAD_SANITIZER_DEFINES = select({
+    ("//bazel/config:sanitize_thread_required_settings"): ["THREAD_SANITIZER"],
+    ("//bazel/config:tsan_disabled"): [],
+}, no_match_error = THREAD_SANITIZER_ERROR_MESSAGE)
+
+
+UNDEFINED_SANITIZER_DEFINES = select({
+    ("//bazel/config:ubsan_enabled"): ["UNDEFINED_BEHAVIOR_SANITIZER"],
+    ("//bazel/config:ubsan_disabled"): [],
+})
+
+# By default, undefined behavior sanitizer doesn't stop on
+# the first error. Make it so. Newer versions of clang
+# have renamed the flag.
+# However, this flag cannot be included when using the fuzzer sanitizer
+# if we want to suppress errors to uncover new ones.
+UNDEFINED_SANITIZER_COPTS = select({
+    ("//bazel/config:sanitize_undefined_without_fuzzer_settings"): ["-fno-sanitize-recover"],
+    ("//conditions:default"): [],
+}) + select({
+    ("//bazel/config:sanitize_undefined_dynamic_link_settings"): ["-fno-sanitize=vptr"],
+    ("//conditions:default"): [],
+}) + select({
+    ("//bazel/config:ubsan_enabled"): ["-fsanitize=undefined"],
+    ("//bazel/config:ubsan_disabled"): [],
+}, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "undefined")
+
+UNDEFINED_SANITIZER_LINKFLAGS = select({
+    ("//bazel/config:sanitize_undefined_dynamic_link_settings"): ["-fno-sanitize=vptr"],
+    ("//conditions:default"): [],
+}) + select({
+    ("//bazel/config:ubsan_enabled"): ["-fsanitize=undefined"],
+    ("//bazel/config:ubsan_disabled"): [],
+}, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "undefined")
+
 REQUIRED_SETTINGS_DYNAMIC_LINK_ERROR_MESSAGE = (
     "\nError:\n" +
     "    linking mongo dynamically is not currently supported on Windows"
@@ -222,14 +304,29 @@ GLIBCXX_DEBUG_DEFINES = select({
     ("//bazel/config:use_glibcxx_debug_disabled"): [],
 }, no_match_error = GLIBCXX_DEBUG_ERROR_MESSAGE)
 
+DETECT_ODR_VIOLATIONS_ERROR_MESSAGE = (
+    "\nError:\n" +
+    "    detect_odr_violations requires these configurations:\n"+
+    "    --//bazel/config:build_mode=opt_off\n"+
+    "    --//bazel/config:linker=gold\n"
+)
+
+
+DETECT_ODR_VIOLATIONS_LINKFLAGS = select({
+    ("//bazel/config:detect_odr_violations_required_settings"): ["-Wl,--detect-odr-violations"],
+    ("//bazel/config:detect_odr_violations_disabled"): [],
+}, no_match_error = DETECT_ODR_VIOLATIONS_ERROR_MESSAGE)
+
 MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES \
-                       + GLIBCXX_DEBUG_DEFINES
+                       + THREAD_SANITIZER_DEFINES + UNDEFINED_SANITIZER_DEFINES + GLIBCXX_DEBUG_DEFINES
 
 MONGO_GLOBAL_COPTS = ["-Isrc"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS \
-                    + MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS
+                    + MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + UNDEFINED_SANITIZER_COPTS \
+                    + THREAD_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS
 
 MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS \
-                         + LIBCXX_LINKFLAGS + LINKER_LINKFLAGS
+                        + UNDEFINED_SANITIZER_LINKFLAGS + THREAD_SANITIZER_LINKFLAGS \
+                        + LIBCXX_LINKFLAGS + LINKER_LINKFLAGS + DETECT_ODR_VIOLATIONS_LINKFLAGS
 
 def force_includes_copt(package_name, name):
 

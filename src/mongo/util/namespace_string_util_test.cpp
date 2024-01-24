@@ -36,6 +36,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/tenant_id.h"
 #include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
@@ -154,6 +155,28 @@ TEST(NamespaceStringUtilTest,
         boost::none, tenantNsStr, SerializationContext::stateDefault());
     ASSERT_EQ(nss.tenantId(), boost::none);
     ASSERT_EQ(nss.dbName().toString_forTest(), dbNameStr);
+}
+
+TEST(NamespaceStringUtilTest, NamespaceStringToDatabaseNameRoundTrip) {
+    struct Scenario {
+        bool multitenancy;
+        boost::optional<TenantId> tenant;
+        std::string database;
+    };
+
+    for (auto& scenario : {
+             Scenario{false, boost::none, "foo"},
+             Scenario{true, boost::none, "config"},
+             Scenario{true, TenantId{OID::gen()}, "foo"},
+         }) {
+        RAIIServerParameterControllerForTest mc("multitenancySupport", scenario.multitenancy);
+
+        auto expected = NamespaceString::createNamespaceString_forTest(
+            scenario.tenant, scenario.database, "bar");
+        auto actual = NamespaceStringUtil::deserialize(expected.dbName(), "bar");
+
+        ASSERT_EQ(actual, expected);
+    }
 }
 
 // Deserialize NamespaceString when multitenancySupport and featureFlagRequireTenantID are disabled.
@@ -550,5 +573,27 @@ TEST(NamespaceStringUtilTest, SerializingEmptyNamespaceSting) {
         const std::string expectedSerialization = str::stream() << tid.toString() << "_";
         ASSERT_EQ(NamespaceStringUtil::serialize(emptyTenantIdDbNss, sc), expectedSerialization);
     }
+}
+
+TEST(NamespaceStringUtilTest, CheckEmptyCollectionSerialize) {
+    const auto serializeCtx = SerializationContext::stateDefault();
+    const TenantId tenantId(OID::gen());
+
+    const auto dbName = DatabaseName::createDatabaseName_forTest(tenantId, "dbTest");
+    const auto nssEmptyColl = NamespaceString::createNamespaceString_forTest(dbName, "");
+    const auto nssEmptySerialized = NamespaceStringUtil::serialize(nssEmptyColl, serializeCtx);
+    ASSERT_EQ(nssEmptySerialized, "dbTest");
+}
+
+TEST(NamespaceStringUtilTest, CheckEmptyCollectionSerializeMultitenancy) {
+    const auto authSerializeCtx = SerializationContext::stateAuthPrevalidated();
+    const TenantId tenantId(OID::gen());
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+
+    const auto dbName = DatabaseName::createDatabaseName_forTest(tenantId, "dbTestMulti");
+    const auto nssEmptyColl = NamespaceString::createNamespaceString_forTest(dbName, "");
+    const auto nssAuthEmptySerialized =
+        NamespaceStringUtil::serialize(nssEmptyColl, authSerializeCtx);
+    ASSERT_EQ(nssAuthEmptySerialized, (tenantId.toString() + "_dbTestMulti"));
 }
 }  // namespace mongo

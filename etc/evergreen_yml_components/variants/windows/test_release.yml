@@ -1,4 +1,5 @@
-# Windows build variants for testing release environments
+# Windows build variants for testing release environments that should run on master,
+# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
 
 buildvariants:
 - name: windows
@@ -21,7 +22,6 @@ buildvariants:
       MONGO_DISTMOD=windows
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
       --win-version-min=win10
-      --use-diagnostic-latches=off
     num_scons_link_jobs_available: 0.25
     python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
@@ -85,7 +85,6 @@ buildvariants:
       LIBPATH="c:/sasl/lib"
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
       --win-version-min=win10
-      --use-diagnostic-latches=off
     num_scons_link_jobs_available: 0.2
     python: '/cygdrive/c/python/python39/python.exe'
     ext: zip
@@ -105,6 +104,9 @@ buildvariants:
     compile_variant: enterprise-windows
   tasks:
   - name: compile_test_and_package_serial_TG
+    distros:
+    - windows-vsCurrent-xxlarge
+  - name: compile_test_parallel_unittest_stream_TG
     distros:
     - windows-vsCurrent-xxlarge
   - name: .aggfuzzer !.feature_flag_guarded

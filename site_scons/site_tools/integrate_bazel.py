@@ -119,6 +119,12 @@ def bazel_target_emitter(
             'bazel_output': bazel_out_target.replace('\\', '/')
         }
 
+        # scons isn't aware of bazel build definition files, so cache won't be invalidated when they change
+        # force scons to always request bazel to build any converted targets
+        # since bazel maintains its own cache, this won't result in redundant build executions
+        env.AlwaysBuild(t)
+        env.NoCache(t)
+
     return (target, source)
 
 
@@ -436,7 +442,7 @@ def generate(env: SCons.Environment.Environment) -> None:
             f'--//bazel/config:compiler_type={env.ToolchainName()}',
             f'--//bazel/config:build_mode={build_mode}',
             f'--//bazel/config:separate_debug={True if env.GetOption("separate-debug") == "on" else False}',
-            f'--//bazel/config:use_libunwind={env["USE_VENDORED_LIBUNWIND"]}',
+            f'--//bazel/config:libunwind={env.GetOption("use-libunwind")}',
             f'--//bazel/config:use_gdbserver={False if env.GetOption("gdbserver") is None else True}',
             f'--//bazel/config:spider_monkey_dbg={True if env.GetOption("spider-monkey-dbg") == "on" else False}',
             f'--//bazel/config:allocator={allocator}',
@@ -448,10 +454,12 @@ def generate(env: SCons.Environment.Environment) -> None:
             f'--//bazel/config:use_glibcxx_debug={env.GetOption("use-glibcxx-debug") is not None}',
             f'--//bazel/config:build_grpc={True if env["ENABLE_GRPC_BUILD"] else False}',
             f'--//bazel/config:use_libcxx={env.GetOption("libc++") is not None}',
+            f'--//bazel/config:detect_odr_violations={env.GetOption("detect-odr-violations") is not None}',
             f'--//bazel/config:linkstatic={linkstatic}',
-            f'--//bazel/config:use_diagnostic_latches={True if env.GetOption("use-diagnostic-latches") == "on" else False}',
+            f'--//bazel/config:use_diagnostic_latches={env.GetOption("use-diagnostic-latches") == "on"}',
             f'--//bazel/config:shared_archive={env.GetOption("link-model") == "dynamic-sdk"}',
             f'--//bazel/config:linker={"lld" if env.GetOption("linker") == "auto" else env.GetOption("linker")}',
+            f'--//bazel/config:build_enterprise={env.GetOption("modules") == "enterprise"}',
             f'--platforms=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
             f'--host_platform=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
             '--compilation_mode=dbg',  # always build this compilation mode as we always build with -g
@@ -473,6 +481,10 @@ def generate(env: SCons.Environment.Environment) -> None:
 
         if normalized_os != "linux" or normalized_arch not in ["arm64", 'amd64']:
             bazel_internal_flags.append('--config=local')
+
+        evergreen_tmp_dir = env.GetOption("evergreen-tmp-dir")
+        if normalized_os == "macos" and evergreen_tmp_dir:
+            bazel_internal_flags.append(f"--sandbox_writable_path={evergreen_tmp_dir}")
 
         Globals.bazel_base_build_command = [
             os.path.abspath("bazelisk"),

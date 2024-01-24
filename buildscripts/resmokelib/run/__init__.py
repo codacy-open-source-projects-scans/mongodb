@@ -377,8 +377,9 @@ class TestRunner(Subcommand):
             with open('resmoke_env_options.txt') as fin:
                 resmoke_env_options = fin.read().strip()
 
-        self._resmoke_logger.info("resmoke.py invocation for local usage: %s %s",
-                                  resmoke_env_options, local_resmoke_invocation)
+        local_resmoke_invocation = f"{resmoke_env_options} {local_resmoke_invocation}"
+        self._resmoke_logger.info("resmoke.py invocation for local usage: %s",
+                                  local_resmoke_invocation)
 
         lines = []
 
@@ -964,6 +965,9 @@ class RunPlugin(PluginInterface):
             help="Convenience form of --shellConnString for connecting to an"
             " existing MongoDB cluster with the URL mongodb://localhost:[PORT]."
             " This is useful for connecting to a server running in a debugger.")
+
+        parser.add_argument("--shellGRPC", dest="shell_grpc", action="store_true",
+                            help="Whether to use gRPC by default when connecting via the shell.")
 
         parser.add_argument("--shellTls", dest="shell_tls_enabled", action="store_true",
                             help="Whether to use TLS when connecting.")

@@ -179,7 +179,8 @@ repl::OpTime logMutableOplogEntry(OperationContext* opCtx,
  */
 void onWriteOpCompleted(OperationContext* opCtx,
                         std::vector<StmtId> stmtIdsWritten,
-                        SessionTxnRecord sessionTxnRecord) {
+                        SessionTxnRecord sessionTxnRecord,
+                        const NamespaceString& nss) {
     if (sessionTxnRecord.getLastWriteOpTime().isNull())
         return;
 
@@ -198,6 +199,10 @@ void onWriteOpCompleted(OperationContext* opCtx,
     }
     sessionTxnRecord.setTxnNum(*opCtx->getTxnNumber());
     txnParticipant.onWriteOpCompletedOnPrimary(opCtx, std::move(stmtIdsWritten), sessionTxnRecord);
+
+    if (!nss.isEmpty()) {
+        txnParticipant.addToAffectedNamespaces(opCtx, nss);
+    }
 }
 
 /**
@@ -318,6 +323,10 @@ void logGlobalIndexDDLOperation(OperationContext* opCtx,
                                 OperationLogger* operationLogger) {
     invariant(!opCtx->inMultiDocumentTransaction());
 
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, globalIndexNss)) {
+        return;
+    }
+
     BSONObjBuilder builder;
     // The rollback implementation requires the collection name to list affected namespaces.
     builder.append(commandString, globalIndexNss.coll());
@@ -357,7 +366,7 @@ void logGlobalIndexDDLOperation(OperationContext* opCtx,
     SessionTxnRecord sessionTxnRecord;
     sessionTxnRecord.setLastWriteOpTime(writeOpTime);
     sessionTxnRecord.setLastWriteDate(oplogEntry.getWallClockTime());
-    onWriteOpCompleted(opCtx, {stmtId}, sessionTxnRecord);
+    onWriteOpCompleted(opCtx, {stmtId}, sessionTxnRecord, NamespaceString());
 }
 
 }  // namespace
@@ -391,6 +400,10 @@ void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
                                    const UUID& uuid,
                                    BSONObj indexDoc,
                                    bool fromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     BSONObjBuilder builder;
     builder.append(CreateIndexesCommand::kCommandName, nss.coll());
     builder.appendElements(indexDoc);
@@ -405,8 +418,7 @@ void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
 
     auto opTime = logMutableOplogEntry(opCtx, &oplogEntry, _operationLogger.get());
 
-    if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss) &&
-        !serverGlobalParams.quiet.load()) {
+    if (!serverGlobalParams.quiet.load()) {
         if (opTime.isNull()) {
             LOGV2(7360100,
                   "Added oplog entry for createIndexes to transaction",
@@ -430,6 +442,10 @@ void OpObserverImpl::onStartIndexBuild(OperationContext* opCtx,
                                        const UUID& indexBuildUUID,
                                        const std::vector<BSONObj>& indexes,
                                        bool fromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     BSONObjBuilder oplogEntryBuilder;
     oplogEntryBuilder.append("startIndexBuild", nss.coll());
 
@@ -457,7 +473,6 @@ void OpObserverImpl::onStartIndexBuildSinglePhase(OperationContext* opCtx,
     if (!shouldTimestampIndexBuildSinglePhase(opCtx, nss)) {
         return;
     }
-
 
     onInternalOpMessage(
         opCtx,
@@ -499,6 +514,10 @@ void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
                                         const UUID& indexBuildUUID,
                                         const std::vector<BSONObj>& indexes,
                                         bool fromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     BSONObjBuilder oplogEntryBuilder;
     oplogEntryBuilder.append("commitIndexBuild", nss.coll());
 
@@ -528,6 +547,10 @@ void OpObserverImpl::onAbortIndexBuild(OperationContext* opCtx,
                                        const std::vector<BSONObj>& indexes,
                                        const Status& cause,
                                        bool fromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     BSONObjBuilder oplogEntryBuilder;
     oplogEntryBuilder.append("abortIndexBuild", nss.coll());
 
@@ -794,7 +817,7 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(lastOpTime);
         sessionTxnRecord.setLastWriteDate(lastWriteDate);
-        onWriteOpCompleted(opCtx, stmtIdsWritten, sessionTxnRecord);
+        onWriteOpCompleted(opCtx, stmtIdsWritten, sessionTxnRecord, nss);
     }
 
     if (opAccumulator) {
@@ -867,8 +890,8 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
     }
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     const auto& nss = args.coll->ns();
+    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     const bool isOplogDisabled = replCoord->isOplogDisabledFor(opCtx, nss);
     const bool inMultiDocumentTransaction =
         txnParticipant && !isOplogDisabled && txnParticipant.transactionIsOpen();
@@ -998,7 +1021,7 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
         sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
-        onWriteOpCompleted(opCtx, args.updateArgs->stmtIds, sessionTxnRecord);
+        onWriteOpCompleted(opCtx, args.updateArgs->stmtIds, sessionTxnRecord, nss);
     }
 
     if (opAccumulator) {
@@ -1015,7 +1038,7 @@ void OpObserverImpl::aboutToDelete(OperationContext* opCtx,
     const auto& nss = coll->ns();
     documentKeyDecoration(args).emplace(getDocumentKey(coll, doc));
 
-    // no need to create ShardingWriteRouter if isOplogDisabledFor is true
+    // No need to create ShardingWriteRouter if isOplogDisabledFor is true.
     if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         ShardingWriteRouter shardingWriteRouter(opCtx, nss);
         destinedRecipientDecoration(args) = shardingWriteRouter.getReshardingDestinedRecipient(doc);
@@ -1129,7 +1152,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         SessionTxnRecord sessionTxnRecord;
         sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
         sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
-        onWriteOpCompleted(opCtx, std::vector<StmtId>{stmtId}, sessionTxnRecord);
+        onWriteOpCompleted(opCtx, std::vector<StmtId>{stmtId}, sessionTxnRecord, nss);
     }
 }
 
@@ -1143,6 +1166,11 @@ void OpObserverImpl::onInternalOpMessage(
     const boost::optional<repl::OpTime> postImageOpTime,
     const boost::optional<repl::OpTime> prevWriteOpTimeInTransaction,
     const boost::optional<OplogSlot> slot) {
+
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
 
@@ -1167,8 +1195,7 @@ void OpObserverImpl::onCreateCollection(OperationContext* opCtx,
                                         const BSONObj& idIndex,
                                         const OplogSlot& createOpTime,
                                         bool fromMigrate) {
-    // do not replicate system.profile modifications
-    if (collectionName.isSystemDotProfile()) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
         return;
     }
 
@@ -1184,8 +1211,7 @@ void OpObserverImpl::onCreateCollection(OperationContext* opCtx,
         oplogEntry.setOpTime(createOpTime);
     }
     auto opTime = logMutableOplogEntry(opCtx, &oplogEntry, _operationLogger.get());
-    if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName) &&
-        !serverGlobalParams.quiet.load()) {
+    if (!serverGlobalParams.quiet.load()) {
         if (opTime.isNull()) {
             LOGV2(7360102,
                   "Added oplog entry for create to transaction",
@@ -1210,9 +1236,7 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
                                const CollectionOptions& oldCollOptions,
                                boost::optional<IndexCollModInfo> indexInfo) {
 
-    if (!nss.isSystemDotProfile()) {
-        // do not replicate system.profile modifications
-
+    if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         // Create the 'o2' field object. We save the old collection metadata and TTL expiration.
         BSONObjBuilder o2Builder;
         o2Builder.append("collectionOptions_old", oldCollOptions.toBSON());
@@ -1244,7 +1268,7 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
         oplogEntry.setObject2(o2Builder.done());
         auto opTime =
             logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
-        if (opCtx->writesAreReplicated() && !serverGlobalParams.quiet.load()) {
+        if (!serverGlobalParams.quiet.load()) {
             LOGV2(7360104,
                   "Wrote oplog entry for collMod",
                   logAttrs(oplogEntry.getNss()),
@@ -1269,11 +1293,16 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
 }
 
 void OpObserverImpl::onDropDatabase(OperationContext* opCtx, const DatabaseName& dbName) {
+    const auto nss = NamespaceString::makeCommandNamespace(dbName);
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
     oplogEntry.setTid(dbName.tenantId());
-    oplogEntry.setNss(NamespaceString::makeCommandNamespace(dbName));
+    oplogEntry.setNss(nss);
     oplogEntry.setObject(BSON("dropDatabase" << 1));
     auto opTime =
         logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
@@ -1294,32 +1323,33 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
                                               std::uint64_t numRecords,
                                               const CollectionDropType dropType,
                                               bool markFromMigrate) {
-    if (!collectionName.isSystemDotProfile() && opCtx->writesAreReplicated()) {
-        // Do not replicate system.profile modifications.
-        MutableOplogEntry oplogEntry;
-        oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-
-        oplogEntry.setTid(collectionName.tenantId());
-        oplogEntry.setNss(collectionName.getCommandNS());
-        oplogEntry.setUuid(uuid);
-        oplogEntry.setFromMigrateIfTrue(markFromMigrate);
-        oplogEntry.setObject(BSON("drop" << collectionName.coll()));
-        oplogEntry.setObject2(makeObject2ForDropOrRename(numRecords));
-        auto opTime =
-            logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
-        if (!serverGlobalParams.quiet.load()) {
-            LOGV2(7360106,
-                  "Wrote oplog entry for drop",
-                  logAttrs(oplogEntry.getNss()),
-                  "uuid"_attr = oplogEntry.getUuid(),
-                  "opTime"_attr = opTime,
-                  "object"_attr = oplogEntry.getObject());
-        }
-    }
-
     uassert(50715,
             "dropping the server configuration collection (admin.system.version) is not allowed.",
             collectionName != NamespaceString::kServerConfigurationNamespace);
+
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
+        return {};
+    }
+
+    MutableOplogEntry oplogEntry;
+    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+
+    oplogEntry.setTid(collectionName.tenantId());
+    oplogEntry.setNss(collectionName.getCommandNS());
+    oplogEntry.setUuid(uuid);
+    oplogEntry.setFromMigrateIfTrue(markFromMigrate);
+    oplogEntry.setObject(BSON("drop" << collectionName.coll()));
+    oplogEntry.setObject2(makeObject2ForDropOrRename(numRecords));
+    auto opTime =
+        logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
+    if (!serverGlobalParams.quiet.load()) {
+        LOGV2(7360106,
+              "Wrote oplog entry for drop",
+              logAttrs(oplogEntry.getNss()),
+              "uuid"_attr = oplogEntry.getUuid(),
+              "opTime"_attr = opTime,
+              "object"_attr = oplogEntry.getObject());
+    }
 
     return {};
 }
@@ -1329,6 +1359,10 @@ void OpObserverImpl::onDropIndex(OperationContext* opCtx,
                                  const UUID& uuid,
                                  const std::string& indexName,
                                  const BSONObj& indexInfo) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
@@ -1339,7 +1373,7 @@ void OpObserverImpl::onDropIndex(OperationContext* opCtx,
     oplogEntry.setObject2(indexInfo);
     auto opTime =
         logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
-    if (opCtx->writesAreReplicated() && !serverGlobalParams.quiet.load()) {
+    if (!serverGlobalParams.quiet.load()) {
         LOGV2(7360107,
               "Wrote oplog entry for dropIndexes",
               logAttrs(oplogEntry.getNss()),
@@ -1357,6 +1391,10 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
                                                  std::uint64_t numRecords,
                                                  bool stayTemp,
                                                  bool markFromMigrate) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, fromCollection)) {
+        return {};
+    }
+
     BSONObjBuilder builder;
 
     builder.append(
@@ -1381,7 +1419,7 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
         oplogEntry.setObject2(makeObject2ForDropOrRename(numRecords));
     auto opTime =
         logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
-    if (opCtx->writesAreReplicated() && !serverGlobalParams.quiet.load()) {
+    if (!serverGlobalParams.quiet.load()) {
         LOGV2(7360108,
               "Wrote oplog entry for renameCollection",
               logAttrs(oplogEntry.getNss()),
@@ -1431,6 +1469,10 @@ void OpObserverImpl::onImportCollection(OperationContext* opCtx,
                                         const BSONObj& catalogEntry,
                                         const BSONObj& storageMetadata,
                                         bool isDryRun) {
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
+        return;
+    }
+
     ImportCollectionOplogEntry importCollection(
         nss, importUUID, numRecords, dataSize, catalogEntry, storageMetadata, isDryRun);
 
@@ -1447,17 +1489,18 @@ void OpObserverImpl::onImportCollection(OperationContext* opCtx,
 void OpObserverImpl::onEmptyCapped(OperationContext* opCtx,
                                    const NamespaceString& collectionName,
                                    const UUID& uuid) {
-    if (!collectionName.isSystemDotProfile()) {
-        // Do not replicate system.profile modifications
-        MutableOplogEntry oplogEntry;
-        oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-
-        oplogEntry.setTid(collectionName.tenantId());
-        oplogEntry.setNss(collectionName.getCommandNS());
-        oplogEntry.setUuid(uuid);
-        oplogEntry.setObject(BSON("emptycapped" << collectionName.coll()));
-        logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
+    if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
+        return;
     }
+
+    MutableOplogEntry oplogEntry;
+    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+
+    oplogEntry.setTid(collectionName.tenantId());
+    oplogEntry.setNss(collectionName.getCommandNS());
+    oplogEntry.setUuid(uuid);
+    oplogEntry.setObject(BSON("emptycapped" << collectionName.coll()));
+    logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
 }
 
 namespace {
@@ -1529,7 +1572,8 @@ repl::OpTime logApplyOps(OperationContext* opCtx,
             if (txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
                 sessionTxnRecord.setTxnRetryCounter(*txnRetryCounter);
             }
-            onWriteOpCompleted(opCtx, std::move(stmtIdsWritten), sessionTxnRecord);
+            onWriteOpCompleted(
+                opCtx, std::move(stmtIdsWritten), sessionTxnRecord, NamespaceString());
         }
         return writeOpTime;
     } catch (const AssertionException& e) {
@@ -1584,7 +1628,7 @@ void logCommitOrAbortForPreparedTransaction(OperationContext* opCtx,
             if (!isDefaultTxnRetryCounter(txnRetryCounter)) {
                 sessionTxnRecord.setTxnRetryCounter(txnRetryCounter);
             }
-            onWriteOpCompleted(opCtx, {}, sessionTxnRecord);
+            onWriteOpCompleted(opCtx, {}, sessionTxnRecord, NamespaceString());
             wuow.commit();
         });
 }
