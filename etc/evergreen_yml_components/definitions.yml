@@ -153,9 +153,9 @@ variables:
   - debian12
   - enterprise-debian11-64
   - enterprise-debian12-64
-  - rhel70
-  - rhel76_compile_rhel70
-  - enterprise-rhel-70-64-bit
+  - rhel79
+  - rhel76_compile_rhel79
+  - enterprise-rhel-79-64-bit
   - enterprise-rhel-81-ppc64le
   - ubi8
   - rhel80
@@ -2523,6 +2523,20 @@ tasks:
   - func: "send benchmark results"
     vars:
       suite: benchmarks_second_half
+
+- <<: *benchmark_template
+  name: benchmarks_sep
+  tags: ["benchmarks_sep"]
+  commands:
+  - func: "do benchmark setup"
+  - func: "run tests"
+    vars:
+      suite: benchmarks_sep
+      exec_timeout_secs: 21600 # 6 hour timeout.
+      resmoke_jobs_max: 1
+  - func: "send benchmark results"
+    vars:
+      suite: benchmarks_sep
 
 ## jstestfuzz ##
 - <<: *jstestfuzz_template

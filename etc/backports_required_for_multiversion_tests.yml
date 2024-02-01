@@ -394,7 +394,7 @@ last-continuous:
   - test_file: jstests/sharding/query/sharded_lookup_execution.js
     ticket: SERVER-77427
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-82353
+    ticket: SERVER-84723
   - test_file: jstests/sharding/fsync_lock_unlock.js
     ticket: SERVER-73685
   - test_file: jstests/sharding/fsync_lock_ddl_lock.js
@@ -565,6 +565,10 @@ last-continuous:
     ticket: SERVER-83119
   - test_file: jstests/sharding/eof_plan.js
     ticket: SERVER-83119
+  - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
+    ticket: SERVER-84151
+  - test_file: jstests/core/timeseries/timeseries_collmod.js
+    ticket: SERVER-83370
   suites: null
 last-lts:
   all:
@@ -1015,7 +1019,7 @@ last-lts:
   - test_file: jstests/sharding/query/sharded_lookup_execution.js
     ticket: SERVER-77427
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-82353
+    ticket: SERVER-84723
   - test_file: jstests/sharding/fsync_lock_unlock.js
     ticket: SERVER-73685
   - test_file: jstests/sharding/fsync_lock_ddl_lock.js
@@ -1188,4 +1192,8 @@ last-lts:
     ticket: SERVER-83119
   - test_file: jstests/sharding/eof_plan.js
     ticket: SERVER-83119
+  - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
+    ticket: SERVER-84151
+  - test_file: jstests/core/timeseries/timeseries_collmod.js
+    ticket: SERVER-83370
   suites: null

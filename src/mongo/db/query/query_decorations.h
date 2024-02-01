@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/query/query_knobs_gen.h"
 
 namespace mongo {
@@ -42,6 +44,9 @@ public:
     bool getSbeDisableGroupPushdownForOp();
     bool getSbeDisableLookupPushdownForOp();
     bool getSbeDisableTimeSeriesForOp();
+    /** Returns true if internal query framework control knob is set to 'forceClassicEngine', false
+     * otherwise.*/
+    bool isForceClassicEngineEnabled();
     size_t getPlanEvaluationMaxResultsForOp();
     size_t getMaxScansToExplodeForOp();
     /**

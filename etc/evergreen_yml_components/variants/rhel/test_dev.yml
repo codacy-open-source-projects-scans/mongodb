@@ -44,8 +44,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-x86-dynamic-compile
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-x86-dynamic-compile
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
@@ -93,8 +93,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-debug-aubsan-compile-required
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-debug-aubsan-compile-required
 
 # If you add anything to san_options, make sure the appropriate changes are
 # also made to SConstruct.
@@ -333,6 +333,7 @@ buildvariants:
     max_sub_suites: 5
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
+      --excludeWithAnyTags=featureFlagSbeFull
     large_distro_name: rhel80-medium
   depends_on:
   - name: archive_dist_test_debug
@@ -454,7 +455,7 @@ buildvariants:
     <<: *aubsan-lite-required-expansions
     test_flags: >-
       --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
-      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
+      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits,featureFlagSbeFull
   tasks:
   - name: .aggregation !.sbe_only
   - name: .auth
@@ -489,10 +490,10 @@ buildvariants:
   - name: sasl
   - name: secondary_reads_passthrough_gen
   - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot
+  # TODO SERVER-85584 Reenable uninitialized_fcv passthrough
+  - name: .sharding .jscore !.wo_snapshot !.uninitialized_fcv
   - name: .sharding .common !.csrs !.jstestfuzz
   - name: .updatefuzzer
   - name: .serverless
   - name: unittest_shell_hang_analyzer_gen
   - name: .watchdog
-  - name: generate_buildid_to_debug_symbols_mapping

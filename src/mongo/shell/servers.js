@@ -1022,7 +1022,7 @@ MongoRunner.runningChildPids = function() {
  *
  * @see MongoRunner.arrOptions
  */
-MongoRunner.runMongod = function(opts) {
+MongoRunner.runMongod = function(opts, isMixedVersionCluster = false) {
     opts = opts || {};
     var env = undefined;
     var useHostName = true;
@@ -1033,6 +1033,11 @@ MongoRunner.runMongod = function(opts) {
     if (isObject(opts)) {
         opts = MongoRunner.mongodOptions(opts);
         fullOptions = opts;
+
+        if (isMixedVersionCluster &&
+            (!opts.binVersion || opts.binVersion == '' || opts.binVersion == shellVersion())) {
+            opts.upgradeBackCompat = '';
+        }
 
         if (opts.useHostName != undefined) {
             useHostName = opts.useHostName;
@@ -1087,7 +1092,7 @@ MongoRunner.runMongod = function(opts) {
     return mongod;
 };
 
-MongoRunner.runMongos = function(opts) {
+MongoRunner.runMongos = function(opts, isMixedVersionCluster = false) {
     opts = opts || {};
 
     var env = undefined;
@@ -1104,6 +1109,10 @@ MongoRunner.runMongos = function(opts) {
         runId = opts.runId;
         waitForConnect = opts.waitForConnect;
         env = opts.env;
+        if (isMixedVersionCluster &&
+            (!opts.binVersion || opts.binVersion == '' || opts.binVersion == shellVersion())) {
+            opts.upgradeBackCompat = '';
+        }
         opts = MongoRunner.arrOptions("mongos", opts);
     }
 
@@ -1464,13 +1473,20 @@ function appendSetParameterArgs(argArray) {
             // New mongod-specific option in 4.9.x.
             if (programMajorMinorVersion >= 490) {
                 const parameters = jsTest.options().setParameters;
-                if ((parameters === undefined ||
-                     parameters['reshardingMinimumOperationDurationMillis'] === undefined) &&
-                    !argArrayContainsSetParameterValue(
-                        'reshardingMinimumOperationDurationMillis=')) {
-                    argArray.push(
-                        ...['--setParameter', "reshardingMinimumOperationDurationMillis=5000"]);
-                }
+                const reshardingDefaults = {
+                    'reshardingMinimumOperationDurationMillis': '5000',
+                    'reshardingCriticalSectionTimeoutMillis': 24 * 60 * 60 * 1000  // 24 hours
+                };
+
+                Object.entries(reshardingDefaults).forEach(([key, value]) => {
+                    const keyIsNotParameter =
+                        (parameters === undefined || parameters[key] === undefined);
+                    const keyIsNotArgument = !argArrayContainsSetParameterValue(`${key}=`);
+
+                    if (keyIsNotParameter && keyIsNotArgument) {
+                        argArray.push('--setParameter', `${key}=${value}`);
+                    }
+                });
             }
 
             // New mongod-specific option in 4.5.x.

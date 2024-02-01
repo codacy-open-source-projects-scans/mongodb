@@ -9,11 +9,6 @@ variables:
   - name: package_new_compile
     variant: amazon2-arm64-compile
 
-- &rhel70_x86_compile_variant_dependency
-  depends_on:
-  - name: package_new_compile
-    variant: rhel70-x86-compile
-
 - &amazon_linux2_x86_streams_compile_variant_dependency
   depends_on:
   - name: package_new_compile
@@ -30,6 +25,13 @@ variables:
   depends_on:
   - name: package_new_compile
     variant: al2023-arm64-compile
+
+- &al2023_al2_arm64_compile_variant_dependency
+  depends_on:
+  - name: package_new_compile
+    variant: al2023-arm64-compile
+  - name: package_new_compile
+    variant: amazon2-arm64-compile
 
 - &amazon2_x86_expansions
   multiversion_platform: amazon2
@@ -107,6 +109,7 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
+    - name: ycsb_single_thread
     - name: ycsb_60GB.2023-09
     - name: ycsb_60GB.long.2023-09
     - name: crud_workloads_majority
@@ -164,6 +167,7 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
+    - name: ycsb_single_thread
     - name: ycsb_60GB.2023-09
     - name: ycsb_60GB.long.2023-09
     - name: crud_workloads_majority
@@ -278,7 +282,7 @@ buildvariants:
     - name: column_store_tpch_10_denormalized_unindexed
     - name: ssb_column_store_comparison
 
-- <<: *al2023_arm64_compile_variant_dependency
+- <<: *al2023_al2_arm64_compile_variant_dependency
   name: atlas-like-replica.2023-09
   display_name: PERF M60-like-replica.2023-09 3-Node ReplSet
   cron: &atlas-like-repl-cron "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
@@ -294,24 +298,25 @@ buildvariants:
     authentication: enabled
     storageEngine: wiredTiger
     compile_variant: al2023-arm64-compile
+    client_compile_variant: amazon2-arm64-compile
   run_on:
     - "rhel70-perf-M60-like"
   tasks:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
-    - name: industry_benchmarks
-    - name: ycsb_60GB
+    - name: ycsb.2023-09
+    - name: ycsb_single_thread
+    - name: ycsb_60GB.2023-09
     - name: tpcc
     - name: tpcc_majority
     - name: linkbench
     - name: linkbench2
-    # TODO DEVPROD-3247 Renable once Genny supports AL2023
-    #- name: genny_query_TenMDocCollection_IntId
-    #- name: genny_query_TenMDocCollection_ObjectId
-    #- name: genny_query_TenMDocCollection_SubDocId
-    #- name: genny_query_TenMDocCollection_IntId_Agg
-    #- name: genny_query_TenMDocCollection_IntId_IdentityView
-    #- name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
+    # - name: genny_query_TenMDocCollection_IntId
+    # - name: genny_query_TenMDocCollection_ObjectId
+    # - name: genny_query_TenMDocCollection_SubDocId
+    # - name: genny_query_TenMDocCollection_IntId_Agg
+    # - name: genny_query_TenMDocCollection_IntId_IdentityView
+    # - name: genny_query_TenMDocCollection_IntId_IdentityView_Agg
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-atlas-M30-real.arm.aws.2023-11
@@ -336,6 +341,7 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
+    - name: ycsb_single_thread
     - name: tpcc
     - name: linkbench2
 
@@ -363,6 +369,7 @@ buildvariants:
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
       cron: &high-value-workload-cron "0 */4 * * 1-5" # High-value workloads run every weekday, every 4 hours
+    - name: ycsb_single_thread
     - name: ycsb_60GB.2023-09
     - name: tpcc
     - name: tpcc_majority
@@ -391,7 +398,7 @@ buildvariants:
   tasks:
     - name: locust_bulk_insert
 
-- <<: *rhel70_x86_compile_variant_dependency
+- <<: *amazon2_x86_compile_variant_dependency
   name: perf-atlas-M60-real.intel.azure.2023-11
   display_name: PERF M60-Atlas ReplSet Intel Azure 2023-11
   cron: *cron_sunday_thursday
@@ -401,7 +408,7 @@ buildvariants:
     canaries: none
     atlas_setup: M60-repl-azure
     use_custom_build_azure: true
-    compile_variant: rhel70-x86-compile
+    compile_variant: amazon2-x86-compile
     infrastructure_provisioning: workload_client_intel.2023-11
     infrastructure_provisioning_release: 2023-09
     workload_setup: 2022-11
@@ -414,6 +421,7 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
+    - name: ycsb_single_thread
     - name: ycsb_60GB.2023-09
     - name: tpcc
     - name: tpcc_majority
@@ -445,6 +453,7 @@ buildvariants:
     - name: smoke_test
     - name: canaries_only
     - name: ycsb.2023-09
+    - name: ycsb_single_thread
     - name: ycsb_60GB.2023-09
     - name: ycsb_60GB.long.2023-09
     - name: crud_workloads_majority
@@ -583,7 +592,7 @@ buildvariants:
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-standalone-sampling-bonsai.arm.aws.2023-11
   display_name: PERF Standalone (Bonsai with Sampling CE) ARM AWS 2023-11
-  cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+  cron: "0 0 * * 0"  # Run it only on Sunday.
   modules: *perf_modules
   expansions:
     mongodb_setup_release: 2022-11
@@ -625,7 +634,7 @@ buildvariants:
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-standalone-heuristic-bonsai.arm.aws.2023-11
   display_name: PERF Standalone (Bonsai with Heuristic CE) ARM AWS 2023-11
-  cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+  cron: "0 0 * * 0"  # Run it only on Sunday.
   modules: *perf_modules
   expansions:
     mongodb_setup_release: 2022-11
@@ -1097,6 +1106,7 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
+    - name: ycsb_single_thread
     - name: ycsb_w1.2023-09
     - name: crud_workloads_majority
     - name: crud_workloads_w1
@@ -1333,6 +1343,7 @@ buildvariants:
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
       cron: *high-value-workload-cron
+    - name: ycsb_single_thread
     - name: ycsb_w1.2023-09
     - name: ycsb_60GB.2023-09
     - name: ycsb.load
@@ -1417,6 +1428,7 @@ buildvariants:
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
       cron: *high-value-workload-cron
+    - name: ycsb_single_thread
     - name: ycsb_60GB.2023-09
     - name: ycsb_60GB.long.2023-09
       cron: *high-value-workload-cron
@@ -1718,28 +1730,6 @@ buildvariants:
     - name: initialsync-large-fcbis
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
-  name: perf-3-node-replSet-cpu-cycle-metrics.arm.aws.2023-11
-  display_name: PERF 3-Node ReplSet CPU Cycle Metrics ARM AWS 2023-11
-  cron: "0 0 * * 4"  # 00:00 on Thursday
-  modules: *perf_modules
-  expansions:
-    mongodb_setup_release: 2022-11
-    mongodb_setup: replica-ipc-counters.2023-06
-    infrastructure_provisioning_release: 2023-09
-    infrastructure_provisioning: replica
-    workload_setup: 2022-11
-    platform: linux
-    authentication: disabled
-    storageEngine: wiredTiger
-    compile_variant: amazon2-arm64-compile
-    project_dir: *perf_project_dir
-  run_on:
-    - "rhel70-perf-replset"
-  tasks:
-    - *schedule_patch_auto_tasks_task
-    - *schedule_variant_auto_tasks_task
-
-- <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-replSet-initialsync-logkeeper.arm.aws.2023-11
   display_name: PERF ReplSet Initial Sync LogKeeper ARM AWS 2023-11
   cron: "0 0 * * 4"  # 00:00 on Thursday
@@ -1865,6 +1855,7 @@ buildvariants:
   display_name: PERF Mongo-Perf Standalone Template (Don't Use)
   cron: &linux-mongo-perf-cron "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
   modules: *perf_modules
+  activate: false
   expansions: &standalone-arm-expansions
     mongodb_setup_release: 2022-11
     mongodb_setup: mongo-perf-standalone.2023-02
@@ -2114,7 +2105,7 @@ buildvariants:
 - <<: *linux-mongo-perf-standalone-arm
   name: perf-mongo-perf-standalone-heuristic-bonsai.arm.aws.2023-11
   display_name: PERF Mongo-Perf Standalone inMemory (Bonsai with Heuristic CE) ARM AWS 2023-11
-  cron: "0 0 * * 0,2,3,4,5"  # Run it every day except Saturday and Monday.
+  cron: "0 0 * * 0"  # Run it only on Sunday.
   expansions:
     <<: *standalone-arm-expansions
     mongodb_setup: mongo-perf-standalone-heuristic-bonsai.2023-02
@@ -2363,3 +2354,89 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: genny_resharding_withIndexes
+
+- <<: *amazon_linux2_arm64_compile_variant_dependency
+  name: perf-3-node-replSet-query-settings.arm.aws.2023-11
+  display_name: PERF 3-Node ReplSet (QuerySettings) ARM AWS 2023-11
+  cron: *linux-3-node-cron
+  modules: *perf_modules
+  expansions:
+    mongodb_setup_release: 2022-11
+    mongodb_setup: replica-query-settings
+    infrastructure_provisioning_release: 2023-09
+    infrastructure_provisioning: replica
+    workload_setup: 2022-11
+    platform: linux
+    project_dir: *perf_project_dir
+    authentication: enabled
+    storageEngine: wiredTiger
+    compile_variant: amazon2-arm64-compile
+  run_on:
+    - "rhel70-perf-replset"
+  tasks:
+    - *schedule_patch_auto_tasks_task
+    - name: schedule_variant_auto_tasks
+    - name: ycsb.2023-09
+      cron: *high-value-workload-cron
+    - name: ycsb_60GB.2023-09
+    - name: ycsb_60GB.long.2023-09
+      cron: *high-value-workload-cron
+    - name: tpcc_majority
+      cron: *high-value-workload-cron
+    - name: linkbench2
+      cron: *high-value-workload-cron
+    - name: mixed_workloads_genny_rate_limited_high_value
+      cron: *high-value-workload-cron
+    - name: majority_reads10_k_threads_high_value
+      cron: *high-value-workload-cron
+    - name: bestbuy_agg
+      cron: *high-value-workload-cron
+    - name: large_indexed_ins_high_value
+      cron: *high-value-workload-cron
+    - name: expressive_queries_high_value
+      cron: *high-value-workload-cron
+    - name: time_series_sort_high_value
+      cron: *high-value-workload-cron
+    - name: tsbs_query
+      cron: *high-value-workload-cron
+    - name: array_traversal_high_value
+      cron: *high-value-workload-cron
+    - name: filter_with_complex_logical_expression_high_value
+    - name: tsbs_query
+      cron: *high-value-workload-cron
+
+
+- <<: *shard-baseline
+  name: perf-3-shard-query-settings.arm.aws.2023-11
+  display_name: PERF 3-Shard Cluster (QuerySettings) ARM AWS 2023-11
+  cron: *linux-3-shard-cron
+  modules: *perf_modules
+  expansions:
+    <<: *shard-baseline-expansions
+    mongodb_setup: shard-query-settings
+  tasks:
+    - *schedule_patch_auto_tasks_task
+    - name: schedule_variant_auto_tasks
+    - name: ycsb.2023-09
+      cron: *high-value-workload-cron
+    - name: tpcc_majority
+      cron: *high-value-workload-cron
+    - name: mixed_workloads_genny_rate_limited_high_value
+      cron: *high-value-workload-cron
+    - name: bestbuy_agg
+      cron: *high-value-workload-cron
+    - name: large_indexed_ins_high_value
+      cron: *high-value-workload-cron
+    - name: expressive_queries_high_value
+      cron: *high-value-workload-cron
+    - name: time_series_sort_high_value
+      cron: *high-value-workload-cron
+    - name: tsbs_query
+      cron: *high-value-workload-cron
+    - name: array_traversal_high_value
+      cron: *high-value-workload-cron
+    - name: filter_with_complex_logical_expression_high_value
+    - name: tsbs_query
+      cron: *high-value-workload-cron
+    - name: mongos_workloads
+      cron: *high-value-workload-cron

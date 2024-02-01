@@ -492,6 +492,7 @@ TEST_F(ReplCoordTest, InitiateSucceedsWhenQuorumCheckPasses) {
     hbResp.setSetName("mySet");
     hbResp.setConfigVersion(0);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     getNet()->scheduleResponse(
         noi, startDate + Milliseconds(10), RemoteCommandResponse(hbResp.toBSON(), Milliseconds(8)));
@@ -1258,6 +1259,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigMajorit
     hbResp.setSetName("mySet");
     hbResp.setConfigVersion(0);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     getNet()->scheduleResponse(
         noi, startDate + Milliseconds(10), RemoteCommandResponse(hbResp.toBSON(), Milliseconds(8)));
@@ -1319,6 +1321,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigNoMajor
     hbResp.setSetName("mySet");
     hbResp.setConfigVersion(0);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     getNet()->scheduleResponse(
         noi, startDate + Milliseconds(10), RemoteCommandResponse(hbResp.toBSON(), Milliseconds(8)));
@@ -1631,6 +1634,7 @@ protected:
             hbResp.setState(MemberState::RS_SECONDARY);
             hbResp.setConfigVersion(hbArgs.getConfigVersion());
             hbResp.setAppliedOpTimeAndWallTime({desiredOpTime, desiredWallTime});
+            hbResp.setWrittenOpTimeAndWallTime({desiredOpTime, desiredWallTime});
             hbResp.setDurableOpTimeAndWallTime({desiredOpTime, desiredWallTime});
             BSONObjBuilder respObj;
             respObj << "ok" << 1;
@@ -1710,12 +1714,16 @@ TEST_F(ReplCoordTest, UpdatePositionArgsAdvancesWallTimes) {
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName << memberOneAppliedWallTime
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName << memberOneAppliedWallTime
                     << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kDurableWallTimeFieldName << memberOneDurableWallTime)
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName << memberOneAppliedWallTime
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName << memberTwoAppliedWallTime
                        << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
@@ -1998,6 +2006,9 @@ TEST_F(StepDownTest, StepDownCanCompleteBasedOnReplSetUpdatePositionAlone) {
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName
+                    << Date_t() + Seconds(opTime2.asOpTime().getSecs())
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -2006,6 +2017,9 @@ TEST_F(StepDownTest, StepDownCanCompleteBasedOnReplSetUpdatePositionAlone) {
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime1.asOpTime().toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(opTime1.asOpTime().getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime1.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(opTime1.asOpTime().getSecs())
@@ -2130,6 +2144,9 @@ TEST_F(StepDownTestWithUnelectableNode,
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName
+                    << Date_t() + Seconds(opTime2.asOpTime().getSecs())
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -2138,6 +2155,9 @@ TEST_F(StepDownTestWithUnelectableNode,
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime1.asOpTime().toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(opTime1.asOpTime().getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime1.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(opTime1.asOpTime().getSecs())
@@ -2160,6 +2180,9 @@ TEST_F(StepDownTestWithUnelectableNode,
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName
+                    << Date_t() + Seconds(opTime2.asOpTime().getSecs())
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -2168,6 +2191,9 @@ TEST_F(StepDownTestWithUnelectableNode,
                     << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(opTime2.asOpTime().getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(opTime2.asOpTime().getSecs())
@@ -2283,6 +2309,7 @@ protected:
             hbResp.setConfigVersion(hbArgs.getConfigVersion());
             hbResp.setDurableOpTimeAndWallTime({optimeResponse, wallTimeResponse});
             hbResp.setAppliedOpTimeAndWallTime({optimeResponse, wallTimeResponse});
+            hbResp.setWrittenOpTimeAndWallTime({optimeResponse, wallTimeResponse});
             BSONObjBuilder respObj;
             respObj << "ok" << 1;
             hbResp.addToBSON(&respObj);
@@ -2451,14 +2478,16 @@ TEST_F(ReplCoordTest, CancelElectionTimeoutIfSyncSourceKnowsThePrimary) {
     // If currentPrimaryIndex is -1, don't reschedule.
     state.processMetadata(
         rsMeta,
-        OplogQueryMetadata(OpTimeAndWallTime(), OpTime(), 1, -1 /* currentPrimaryIndex */, 1, ""));
+        OplogQueryMetadata(
+            OpTimeAndWallTime(), OpTime(), OpTime(), 1, -1 /* currentPrimaryIndex */, 1, ""));
 
     ASSERT_EQUALS(getReplCoord()->getElectionTimeout_forTest(), electionTimeout);
 
     // If currentPrimaryIndex is NOT -1, reschedule.
     state.processMetadata(
         rsMeta,
-        OplogQueryMetadata(OpTimeAndWallTime(), OpTime(), 1, 1 /* currentPrimaryIndex */, 1, ""));
+        OplogQueryMetadata(
+            OpTimeAndWallTime(), OpTime(), OpTime(), 1, 1 /* currentPrimaryIndex */, 1, ""));
 
     // Since we advanced the clock, the new election timeout is after the old one.
     ASSERT_GREATER_THAN(getReplCoord()->getElectionTimeout_forTest(), electionTimeout);
@@ -2484,8 +2513,13 @@ TEST_F(ReplCoordTest, ShouldChangeSyncSource) {
 
     getTopoCoord().updateConfig(config, 1, getNet()->now());
 
-    OplogQueryMetadata opMetaData(
-        OpTimeAndWallTime(), OpTime(Timestamp(1, 1), 1), 1, 0 /* currentPrimaryIndex */, 1, "");
+    OplogQueryMetadata opMetaData(OpTimeAndWallTime(),
+                                  OpTime(Timestamp(1, 1), 1),
+                                  OpTime(Timestamp(1, 1), 1),
+                                  1,
+                                  0 /* currentPrimaryIndex */,
+                                  1,
+                                  "");
     ReplSetMetadata rsMeta(
         0, OpTimeAndWallTime(), OpTime(), 1, 0, replicaSetId, 1, true /* isPrimary */);
 
@@ -2524,8 +2558,13 @@ TEST_F(ReplCoordTest, ServerlessNodeShouldChangeSyncSourceAfterSplit) {
 
     getTopoCoord().updateConfig(config, 1, getNet()->now());
 
-    OplogQueryMetadata opMetaData(
-        OpTimeAndWallTime(), OpTime(Timestamp(1, 1), 1), 1, 0 /* currentPrimaryIndex */, 1, "");
+    OplogQueryMetadata opMetaData(OpTimeAndWallTime(),
+                                  OpTime(Timestamp(1, 1), 1),
+                                  OpTime(Timestamp(1, 1), 1),
+                                  1,
+                                  0 /* currentPrimaryIndex */,
+                                  1,
+                                  "");
     ReplSetMetadata rsMeta(
         0, OpTimeAndWallTime(), OpTime(), 1, 0, replicaSetId, 1, true /* isPrimary */);
 
@@ -3970,6 +4009,7 @@ TEST_F(ReplCoordTest, HelloReturnsErrorInQuiesceModeWhenNodeIsRemoved) {
     hbResp.setSetName("mySet");
     hbResp.setState(MemberState::RS_SECONDARY);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     net->scheduleResponse(noi, net->now(), makeResponseStatus(hbResp.toBSON()));
     net->runReadyNetworkOperations();
@@ -4624,6 +4664,7 @@ TEST_F(ReplCoordTest, HelloOnRemovedNode) {
     hbResp.setSetName("mySet");
     hbResp.setState(MemberState::RS_SECONDARY);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     net->scheduleResponse(noi, net->now(), makeResponseStatus(hbResp.toBSON()));
     net->runReadyNetworkOperations();
@@ -4786,6 +4827,7 @@ TEST_F(ReplCoordTest, AwaitHelloRespondsCorrectlyWhenNodeRemovedAndReadded) {
     hbResp.setSetName("mySet");
     hbResp.setState(MemberState::RS_SECONDARY);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     net->scheduleResponse(noi, net->now(), makeResponseStatus(hbResp.toBSON()));
     net->runReadyNetworkOperations();
@@ -5321,17 +5363,19 @@ TEST_F(ReplCoordTest, DoNotProcessSelfWhenUpdatePositionContainsInfoAboutSelf) {
 
     // receive updatePosition containing ourself, should not process the update for self
     UpdatePositionArgs args;
-    ASSERT_OK(args.initialize(
-        BSON(UpdatePositionArgs::kCommandFieldName
-             << 1 << UpdatePositionArgs::kUpdateArrayFieldName
-             << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
-                                << 2 << UpdatePositionArgs::kMemberIdFieldName << 0
-                                << UpdatePositionArgs::kDurableOpTimeFieldName << time2.toBSON()
-                                << UpdatePositionArgs::kDurableWallTimeFieldName
-                                << Date_t() + Seconds(time2.getSecs())
-                                << UpdatePositionArgs::kAppliedOpTimeFieldName << time2.toBSON()
-                                << UpdatePositionArgs::kAppliedWallTimeFieldName
-                                << Date_t() + Seconds(time2.getSecs()))))));
+    ASSERT_OK(args.initialize(BSON(
+        UpdatePositionArgs::kCommandFieldName
+        << 1 << UpdatePositionArgs::kUpdateArrayFieldName
+        << BSON_ARRAY(BSON(
+               UpdatePositionArgs::kConfigVersionFieldName
+               << 2 << UpdatePositionArgs::kMemberIdFieldName << 0
+               << UpdatePositionArgs::kWrittenOpTimeFieldName << time2.toBSON()
+               << UpdatePositionArgs::kWrittenWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()) << UpdatePositionArgs::kDurableOpTimeFieldName
+               << time2.toBSON() << UpdatePositionArgs::kDurableWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()) << UpdatePositionArgs::kAppliedOpTimeFieldName
+               << time2.toBSON() << UpdatePositionArgs::kAppliedWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()))))));
 
     ASSERT_OK(getReplCoord()->processReplSetUpdatePosition(args));
     ASSERT_EQUALS(ErrorCodes::WriteConcernFailed,
@@ -5369,14 +5413,16 @@ TEST_F(ReplCoordTest, ProcessUpdatePositionWhenItsConfigVersionIsDifferent) {
     ASSERT_OK(args.initialize(BSON(
         UpdatePositionArgs::kCommandFieldName
         << 1 << UpdatePositionArgs::kUpdateArrayFieldName
-        << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
-                           << updatePositionConfigVersion << UpdatePositionArgs::kMemberIdFieldName
-                           << 1 << UpdatePositionArgs::kDurableOpTimeFieldName << time2.toBSON()
-                           << UpdatePositionArgs::kDurableWallTimeFieldName
-                           << Date_t() + Seconds(time2.getSecs())
-                           << UpdatePositionArgs::kAppliedOpTimeFieldName << time2.toBSON()
-                           << UpdatePositionArgs::kAppliedWallTimeFieldName
-                           << Date_t() + Seconds(time2.getSecs()))))));
+        << BSON_ARRAY(BSON(
+               UpdatePositionArgs::kConfigVersionFieldName
+               << updatePositionConfigVersion << UpdatePositionArgs::kMemberIdFieldName << 1
+               << UpdatePositionArgs::kDurableOpTimeFieldName << time2.toBSON()
+               << UpdatePositionArgs::kDurableWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()) << UpdatePositionArgs::kWrittenOpTimeFieldName
+               << time2.toBSON() << UpdatePositionArgs::kWrittenWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()) << UpdatePositionArgs::kAppliedOpTimeFieldName
+               << time2.toBSON() << UpdatePositionArgs::kAppliedWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()))))));
 
     auto opCtx = makeOperationContext();
 
@@ -5413,17 +5459,19 @@ TEST_F(ReplCoordTest, DoNotProcessUpdatePositionOfMembersWhoseIdsAreNotInTheConf
 
     // receive updatePosition with nonexistent member id
     UpdatePositionArgs args;
-    ASSERT_OK(args.initialize(
-        BSON(UpdatePositionArgs::kCommandFieldName
-             << 1 << UpdatePositionArgs::kUpdateArrayFieldName
-             << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
-                                << 2 << UpdatePositionArgs::kMemberIdFieldName << 9
-                                << UpdatePositionArgs::kDurableOpTimeFieldName << time2.toBSON()
-                                << UpdatePositionArgs::kDurableWallTimeFieldName
-                                << Date_t() + Seconds(time2.getSecs())
-                                << UpdatePositionArgs::kAppliedOpTimeFieldName << time2.toBSON()
-                                << UpdatePositionArgs::kAppliedWallTimeFieldName
-                                << Date_t() + Seconds(time2.getSecs()))))));
+    ASSERT_OK(args.initialize(BSON(
+        UpdatePositionArgs::kCommandFieldName
+        << 1 << UpdatePositionArgs::kUpdateArrayFieldName
+        << BSON_ARRAY(BSON(
+               UpdatePositionArgs::kConfigVersionFieldName
+               << 2 << UpdatePositionArgs::kMemberIdFieldName << 9
+               << UpdatePositionArgs::kDurableOpTimeFieldName << time2.toBSON()
+               << UpdatePositionArgs::kDurableWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()) << UpdatePositionArgs::kWrittenOpTimeFieldName
+               << time2.toBSON() << UpdatePositionArgs::kWrittenWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()) << UpdatePositionArgs::kAppliedOpTimeFieldName
+               << time2.toBSON() << UpdatePositionArgs::kAppliedWallTimeFieldName
+               << Date_t() + Seconds(time2.getSecs()))))));
 
     auto opCtx = makeOperationContext();
 
@@ -5471,6 +5519,9 @@ TEST_F(ReplCoordTest,
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << 2 << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << time2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName
+                    << Date_t() + Seconds(time2.asOpTime().getSecs())
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << time2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(time2.asOpTime().getSecs())
@@ -5479,6 +5530,9 @@ TEST_F(ReplCoordTest,
                     << Date_t() + Seconds(time2.asOpTime().getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << 2 << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << time2.asOpTime().toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(time2.asOpTime().getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << time2.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(time2.asOpTime().getSecs())
@@ -6971,6 +7025,7 @@ TEST_F(ReplCoordTest,
     hbResp.setSetName("mySet");
     hbResp.setState(MemberState::RS_SECONDARY);
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     net->scheduleResponse(noi, net->now(), makeResponseStatus(hbResp.toBSON()));
     net->runReadyNetworkOperations();
@@ -7020,6 +7075,7 @@ TEST_F(ReplCoordTest,
     hbResp.setState(MemberState::RS_PRIMARY);
     hbResp.setTerm(replCoord->getTerm());
     hbResp.setAppliedOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
+    hbResp.setWrittenOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setDurableOpTimeAndWallTime({OpTime(Timestamp(100, 1), 0), Date_t() + Seconds(100)});
     hbResp.setConfigVersion(1);
 
@@ -7551,6 +7607,9 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << 2 << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << startingOpTime.toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName
+                    << Date_t() + Seconds(startingOpTime.getSecs())
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << startingOpTime.toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(startingOpTime.getSecs())
@@ -7559,6 +7618,9 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
                     << Date_t() + Seconds(startingOpTime.getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << 2 << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << startingOpTime.toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(startingOpTime.getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << startingOpTime.toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(startingOpTime.getSecs())
@@ -7567,6 +7629,9 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
                        << Date_t() + Seconds(startingOpTime.getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << 2 << UpdatePositionArgs::kMemberIdFieldName << 3
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << startingOpTime.toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(startingOpTime.getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << startingOpTime.toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(startingOpTime.getSecs())
@@ -7575,6 +7640,9 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
                        << Date_t() + Seconds(startingOpTime.getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << 2 << UpdatePositionArgs::kMemberIdFieldName << 4
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << startingOpTime.toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(startingOpTime.getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << startingOpTime.toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(startingOpTime.getSecs())
@@ -7594,6 +7662,9 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
         << BSON_ARRAY(
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << 2 << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << startingOpTime.toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName
+                    << Date_t() + Seconds(startingOpTime.getSecs())
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << startingOpTime.toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName
                     << Date_t() + Seconds(startingOpTime.getSecs())
@@ -7602,6 +7673,9 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
                     << Date_t() + Seconds(startingOpTime.getSecs()))
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << 2 << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << startingOpTime.toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(startingOpTime.getSecs())
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << startingOpTime.toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName
                        << Date_t() + Seconds(startingOpTime.getSecs())
@@ -7650,6 +7724,9 @@ TEST_F(ReplCoordTest, StepDownWhenHandleLivenessTimeoutMarksAMajorityOfVotingNod
         << 1 << UpdatePositionArgs::kUpdateArrayFieldName
         << BSON_ARRAY(BSON(UpdatePositionArgs::kConfigVersionFieldName
                            << 2 << UpdatePositionArgs::kMemberIdFieldName << 1
+                           << UpdatePositionArgs::kWrittenOpTimeFieldName << startingOpTime.toBSON()
+                           << UpdatePositionArgs::kWrittenWallTimeFieldName
+                           << Date_t() + Seconds(startingOpTime.getSecs())
                            << UpdatePositionArgs::kDurableOpTimeFieldName << startingOpTime.toBSON()
                            << UpdatePositionArgs::kDurableWallTimeFieldName
                            << Date_t() + Seconds(startingOpTime.getSecs())
@@ -8328,6 +8405,7 @@ TEST_F(ReplCoordTest, ShouldChooseNearestNodeAsSyncSourceWhenSecondaryAndChainin
     const OpTime lastAppliedOpTime = OpTime(Timestamp(50, 0), 1);
     const auto now = getNet()->now();
     hbResp.setAppliedOpTimeAndWallTime({lastAppliedOpTime, now});
+    hbResp.setWrittenOpTimeAndWallTime({lastAppliedOpTime, now});
     hbResp.setDurableOpTimeAndWallTime({lastAppliedOpTime, now});
 
     // Set the primary's ping to be longer than the other secondary's ping.
@@ -8379,6 +8457,7 @@ TEST_F(ReplCoordTest, ShouldChoosePrimaryAsSyncSourceWhenSecondaryAndChainingNot
     const OpTime lastAppliedOpTime = OpTime(Timestamp(50, 0), 1);
     const auto now = getNet()->now();
     hbResp.setAppliedOpTimeAndWallTime({lastAppliedOpTime, now});
+    hbResp.setWrittenOpTimeAndWallTime({lastAppliedOpTime, now});
     hbResp.setDurableOpTimeAndWallTime({lastAppliedOpTime, now});
 
     // Set the primary's ping to be longer than the other secondary's ping.
@@ -8438,6 +8517,7 @@ TEST_F(ReplCoordTest, ShouldChooseNearestNodeAsSyncSourceWhenPrimaryAndChainingA
     const OpTime lastAppliedOpTime = OpTime(Timestamp(50, 0), 1);
     const auto now = getNet()->now();
     hbResp.setAppliedOpTimeAndWallTime({lastAppliedOpTime, now});
+    hbResp.setWrittenOpTimeAndWallTime({lastAppliedOpTime, now});
     hbResp.setDurableOpTimeAndWallTime({lastAppliedOpTime, now});
     hbResp.setState(MemberState::RS_SECONDARY);
 
@@ -8502,6 +8582,8 @@ TEST_F(ReplCoordTest, IgnoreNonNullDurableOpTimeOrWallTimeForArbiterFromReplSetU
                BSON(UpdatePositionArgs::kConfigVersionFieldName
                     << repl->getConfig().getConfigVersion()
                     << UpdatePositionArgs::kMemberIdFieldName << 2
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName << wallTime2
                     << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                     << UpdatePositionArgs::kAppliedWallTimeFieldName << wallTime2
                     << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
@@ -8509,6 +8591,8 @@ TEST_F(ReplCoordTest, IgnoreNonNullDurableOpTimeOrWallTimeForArbiterFromReplSetU
                << BSON(UpdatePositionArgs::kConfigVersionFieldName
                        << repl->getConfig().getConfigVersion()
                        << UpdatePositionArgs::kMemberIdFieldName << 3
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime2.asOpTime().toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName << wallTime2
                        << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
                        << UpdatePositionArgs::kAppliedWallTimeFieldName << wallTime2
                        << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
@@ -8580,6 +8664,7 @@ TEST_F(ReplCoordTest, IgnoreNonNullDurableOpTimeOrWallTimeForArbiterFromHeartbea
     hbResp.setConfigTerm(1);
     hbResp.setState(MemberState::RS_ARBITER);
     hbResp.setAppliedOpTimeAndWallTime({opTime2, wallTime2});
+    hbResp.setWrittenOpTimeAndWallTime({opTime2, wallTime2});
     hbResp.setDurableOpTimeAndWallTime({opTime2, wallTime2});
 
     startCapturingLogMessages();
@@ -8689,6 +8774,150 @@ TEST_F(ReplCoordTest, LastWrittenCombinedGetterSetterBasic) {
     ASSERT_EQUALS(Date_t() + Seconds(200),
                   getReplCoord()->getMyLastDurableOpTimeAndWallTime().wallTime);
 }
+
+TEST_F(ReplCoordTest, LastWrittenInUpdatePositionArgs) {
+    init("mySet/test1:1234,test2:1234,test3:1234");
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version" << 1 << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test1", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    const auto repl = getReplCoord();
+    OpTimeWithTermOne opTime1(100, 1);
+    OpTimeWithTermOne opTime2(200, 1);
+    OpTimeWithTermOne opTime3(300, 1);
+
+    replCoordSetMyLastWrittenAndAppliedAndDurableOpTime(opTime1, Date_t() + Seconds(100));
+
+    UpdatePositionArgs updatePositionArgsWithoutLastWritten;
+    ASSERT_OK(updatePositionArgsWithoutLastWritten.initialize(BSON(
+        UpdatePositionArgs::kCommandFieldName
+        << 1 << UpdatePositionArgs::kUpdateArrayFieldName
+        << BSON_ARRAY(
+               BSON(UpdatePositionArgs::kConfigVersionFieldName
+                    << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kAppliedWallTimeFieldName
+                    << Date_t() + Seconds(opTime2.asOpTime().getSecs())
+                    << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kDurableWallTimeFieldName
+                    << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
+               << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                       << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime1.asOpTime().toBSON()
+                       << UpdatePositionArgs::kAppliedWallTimeFieldName
+                       << Date_t() + Seconds(opTime1.asOpTime().getSecs())
+                       << UpdatePositionArgs::kDurableOpTimeFieldName << opTime1.asOpTime().toBSON()
+                       << UpdatePositionArgs::kDurableWallTimeFieldName
+                       << Date_t() + Seconds(opTime1.asOpTime().getSecs()))))));
+
+    ASSERT_OK(repl->processReplSetUpdatePosition(updatePositionArgsWithoutLastWritten));
+
+    // Make sure lastWritten is set to lastApplied if not provided.
+    auto memberDataVector = repl->getMemberData();
+    for (const auto& member : memberDataVector) {
+        if (member.getMemberId() == MemberId(1)) {
+            ASSERT_EQ(member.getLastWrittenOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastDurableOpTime(), opTime2.asOpTime());
+        } else if (member.getMemberId() == MemberId(2)) {
+            ASSERT_EQ(member.getLastWrittenOpTime(), opTime1.asOpTime());
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime1.asOpTime());
+            ASSERT_EQ(member.getLastDurableOpTime(), opTime1.asOpTime());
+        }
+    }
+
+    UpdatePositionArgs updatePositionArgsWithLastWritten;
+    ASSERT_OK(updatePositionArgsWithLastWritten.initialize(BSON(
+        UpdatePositionArgs::kCommandFieldName
+        << 1 << UpdatePositionArgs::kUpdateArrayFieldName
+        << BSON_ARRAY(
+               BSON(UpdatePositionArgs::kConfigVersionFieldName
+                    << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 1
+                    << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime3.asOpTime().toBSON()
+                    << UpdatePositionArgs::kWrittenWallTimeFieldName
+                    << Date_t() + Seconds(opTime3.asOpTime().getSecs())
+                    << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kAppliedWallTimeFieldName
+                    << Date_t() + Seconds(opTime2.asOpTime().getSecs())
+                    << UpdatePositionArgs::kDurableOpTimeFieldName << opTime2.asOpTime().toBSON()
+                    << UpdatePositionArgs::kDurableWallTimeFieldName
+                    << Date_t() + Seconds(opTime2.asOpTime().getSecs()))
+               << BSON(UpdatePositionArgs::kConfigVersionFieldName
+                       << repl->getConfigVersion() << UpdatePositionArgs::kMemberIdFieldName << 2
+                       << UpdatePositionArgs::kWrittenOpTimeFieldName << opTime1.asOpTime().toBSON()
+                       << UpdatePositionArgs::kWrittenWallTimeFieldName
+                       << Date_t() + Seconds(opTime1.asOpTime().getSecs())
+                       << UpdatePositionArgs::kAppliedOpTimeFieldName << opTime1.asOpTime().toBSON()
+                       << UpdatePositionArgs::kAppliedWallTimeFieldName
+                       << Date_t() + Seconds(opTime1.asOpTime().getSecs())
+                       << UpdatePositionArgs::kDurableOpTimeFieldName << opTime1.asOpTime().toBSON()
+                       << UpdatePositionArgs::kDurableWallTimeFieldName
+                       << Date_t() + Seconds(opTime1.asOpTime().getSecs()))))));
+
+    ASSERT_OK(repl->processReplSetUpdatePosition(updatePositionArgsWithLastWritten));
+
+    // Make sure lastWritten is updated independently if provided.
+    memberDataVector = repl->getMemberData();
+    for (const auto& member : memberDataVector) {
+        if (member.getMemberId() == MemberId(1)) {
+            ASSERT_EQ(member.getLastWrittenOpTime(), opTime3.asOpTime());
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime2.asOpTime());
+            ASSERT_EQ(member.getLastDurableOpTime(), opTime2.asOpTime());
+        } else if (member.getMemberId() == MemberId(2)) {
+            ASSERT_EQ(member.getLastWrittenOpTime(), opTime1.asOpTime());
+            ASSERT_EQ(member.getLastAppliedOpTime(), opTime1.asOpTime());
+            ASSERT_EQ(member.getLastDurableOpTime(), opTime1.asOpTime());
+        }
+    }
+}
+
+TEST_F(ReplCoordTest, GetLastWrittenDuringRollback) {
+    init("mySet/test1:1234,test2:1234,test3:1234");
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "protocolVersion" << 1 << "version" << 1 << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test2", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    auto term = getTopoCoord().getTerm();
+    OpTime time1(Timestamp(100, 1), term);
+    replCoordSetMyLastWrittenAndAppliedAndDurableOpTime(time1, Date_t() + Seconds(100));
+
+    // getLastWritten should always return a valid opTime if the node is not in
+    // ROLLBACK.
+    ASSERT_EQUALS(time1,
+                  getReplCoord()->getMyLastWrittenOpTimeAndWallTime(false /*rollbackSafe*/).opTime);
+    ASSERT_EQUALS(time1,
+                  getReplCoord()->getMyLastWrittenOpTimeAndWallTime(true /*rollbackSafe*/).opTime);
+    const auto opCtx = makeOperationContext();
+
+    // Set the node to ROLLBACK state.
+    ASSERT_OK(getReplCoord()->setMaintenanceMode(opCtx.get(), true));
+    ASSERT_TRUE(getReplCoord()->getMemberState().recovering());
+    ReplicationStateTransitionLockGuard transitionGuard(opCtx.get(), MODE_X);
+    ASSERT_OK(getReplCoord()->setFollowerModeRollback(opCtx.get()));
+    ASSERT_TRUE(getReplCoord()->getMemberState().rollback());
+
+    // getLastWritten with rollbackSafe=true will return a null opTime if the node is in ROLLBACK.
+    ASSERT_EQUALS(time1,
+                  getReplCoord()->getMyLastWrittenOpTimeAndWallTime(false /*rollbackSafe*/).opTime);
+    ASSERT_TRUE(
+        getReplCoord()->getMyLastWrittenOpTimeAndWallTime(true /*rollbackSafe*/).opTime.isNull());
+    ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTimeAndWallTime().opTime);
+}
+
 // TODO(schwerin): Unit test election id updating
 }  // namespace
 }  // namespace repl

@@ -384,21 +384,21 @@ ExecutionStatsController getOrInitializeExecutionStats(BucketCatalog& catalog,
 /**
  * Retrieves the execution stats for the given namespace, if they have already been initialized.
  */
-std::shared_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
-                                                  const NamespaceString& ns);
+shared_tracked_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
+                                                     const NamespaceString& ns);
 
 /**
  * Retrieves the execution stats from the side bucket catalog.
  * Assumes the side bucket catalog has the stats of one collection.
  */
-std::pair<NamespaceString, std::shared_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
+std::pair<NamespaceString, shared_tracked_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
     BucketCatalog& sideBucketCatalog);
 
 /**
  * Merges the execution stats of a collection into the bucket catalog.
  */
 void mergeExecutionStatsToBucketCatalog(BucketCatalog& catalog,
-                                        std::shared_ptr<ExecutionStats> collStats,
+                                        shared_tracked_ptr<ExecutionStats> collStats,
                                         const NamespaceString& viewNs);
 
 /**
@@ -449,5 +449,21 @@ void runPostCommitDebugChecks(OperationContext* opCtx,
  * within the time range for the bucket.
  */
 bool isDocumentWithinTimeRangeForBucket(Bucket* potentialBucket, const CreationInfo& info);
+
+/**
+ * Closes open buckets when there are too many open buckets for a particular metadata.
+ * If the TimeseriesAlwaysUseCompressedBuckets feature flag is enabled, this limit is
+ * determined by the gTimeseriesMaxOpenBucketsPerMetadata server parameter - we will close
+ * a bucket only if we are at this limit. If the feature flag is not enabled, then we can
+ * have only one open bucket per metadata, so we will close any other existing open bucket.
+ */
+void ensureSpaceToOpenNewBucket(OperationContext* opCtx,
+                                BucketCatalog& catalog,
+                                Stripe& stripe,
+                                WithLock stripeLock,
+                                ExecutionStatsController& stats,
+                                const BucketKey& key,
+                                ClosedBuckets& closedBuckets,
+                                bool isReopening);
 
 }  // namespace mongo::timeseries::bucket_catalog::internal

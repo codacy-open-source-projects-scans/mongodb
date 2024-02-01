@@ -27,17 +27,10 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/classic_runtime_planner_for_sbe.h"
+#include "mongo/db/query/classic_runtime_planner_for_sbe/planner_interface.h"
 
-#include "mongo/db/exec/plan_cache_util.h"
-#include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
-#include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/sbe_stage_builder.h"
-#include "mongo/db/query/stage_builder_util.h"
-#include "mongo/logv2/log.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::classic_runtime_planner_for_sbe {
 
@@ -47,7 +40,15 @@ PlannerBase::PlannerBase(OperationContext* opCtx, PlannerData plannerData)
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> PlannerBase::prepareSbePlanExecutor(
     std::unique_ptr<QuerySolution> solution,
     std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData> sbePlanAndData,
-    bool isFromPlanCache) {
+    bool isFromPlanCache,
+    boost::optional<size_t> cachedPlanHash) {
+    const auto* expCtx = cq()->getExpCtxRaw();
+    auto remoteCursors =
+        expCtx->explain ? nullptr : search_helpers::getSearchRemoteCursors(cq()->cqPipeline());
+    auto remoteExplains = expCtx->explain
+        ? search_helpers::getSearchRemoteExplains(expCtx, cq()->cqPipeline())
+        : nullptr;
+
     stage_builder::prepareSlotBasedExecutableTree(_opCtx,
                                                   sbePlanAndData.first.get(),
                                                   &sbePlanAndData.second,
@@ -55,10 +56,13 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> PlannerBase::prepareSbePlan
                                                   collections(),
                                                   sbeYieldPolicy(),
                                                   isFromPlanCache,
-                                                  // TODO SERVER-85518 Support remoteCursors
-                                                  nullptr /* remoteCursors */);
+                                                  remoteCursors.get());
 
     auto nss = cq()->nss();
+    tassert(8551900,
+            "Solution must be present if cachedPlanHash is present",
+            solution != nullptr || !cachedPlanHash.has_value());
+    bool matchesCachedPlan = cachedPlanHash && *cachedPlanHash == solution->hash();
     return uassertStatusOK(
         plan_executor_factory::make(_opCtx,
                                     extractCq(),
@@ -70,51 +74,10 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> PlannerBase::prepareSbePlan
                                     std::move(nss),
                                     extractSbeYieldPolicy(),
                                     isFromPlanCache,
-                                    // TODO SERVER-85519 Support isCached explain field
-                                    false /* matchesCachedPlan */,
+                                    matchesCachedPlan,
                                     false /* generatedByBonsai */,
                                     OptimizerCounterInfo{} /* used for Bonsai */,
-                                    // TODO SERVER-85518 Support remoteCursors and remoteExplains
-                                    nullptr /* remoteCursors */,
-                                    nullptr /* remoteExplains */));
+                                    std::move(remoteCursors),
+                                    std::move(remoteExplains)));
 }
-
-SingleSolutionPassthroughPlanner::SingleSolutionPassthroughPlanner(
-    OperationContext* opCtx, PlannerData plannerData, std::unique_ptr<QuerySolution> solution)
-    : PlannerBase(opCtx, std::move(plannerData)), _solution(std::move(solution)) {}
-
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SingleSolutionPassthroughPlanner::plan() {
-    LOGV2_DEBUG(8523405, 5, "Using SBE single solution planner");
-
-    if (!cq()->cqPipeline().empty()) {
-        _solution = QueryPlanner::extendWithAggPipeline(
-            *cq(),
-            std::move(_solution),
-            fillOutSecondaryCollectionsInformation(opCtx(), collections(), cq()));
-    }
-
-    auto sbePlanAndData = stage_builder::buildSlotBasedExecutableTree(
-        opCtx(), collections(), *cq(), *_solution, sbeYieldPolicy());
-
-    // Create a pinned plan cache entry.
-    plan_cache_util::updatePlanCache(
-        opCtx(), collections(), *cq(), *_solution, *sbePlanAndData.first, sbePlanAndData.second);
-
-    return prepareSbePlanExecutor(
-        std::move(_solution), std::move(sbePlanAndData), false /*isFromPlanCache*/);
-}
-
-CachedPlanner::CachedPlanner(OperationContext* opCtx,
-                             PlannerData plannerData,
-                             std::unique_ptr<sbe::CachedPlanHolder> cachedPlanHolder)
-    : PlannerBase(opCtx, std::move(plannerData)), _cachedPlanHolder(std::move(cachedPlanHolder)) {}
-
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
-    LOGV2_DEBUG(8523404, 5, "Recovering SBE plan from the cache");
-    return prepareSbePlanExecutor(nullptr /*solution*/,
-                                  {std::move(_cachedPlanHolder->cachedPlan->root),
-                                   std::move(_cachedPlanHolder->cachedPlan->planStageData)},
-                                  true /*isFromPlanCache*/);
-}
-
 }  // namespace mongo::classic_runtime_planner_for_sbe

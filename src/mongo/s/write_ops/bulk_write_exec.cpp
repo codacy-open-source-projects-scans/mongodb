@@ -30,6 +30,7 @@
 #include "mongo/s/write_ops/bulk_write_exec.h"
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/db/basic_types_gen.h"
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
@@ -63,6 +64,7 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
@@ -1082,6 +1084,67 @@ bool hasTransientTransactionErrorLabel(const ErrorReply& reply) {
     return false;
 }
 
+std::vector<BulkWriteReplyItem> exhaustCursorForReplyItems(
+    OperationContext* opCtx,
+    const TargetedWriteBatch& targetedBatch,
+    const BulkWriteCommandReply& commandReply) {
+    // No cursor, just return the first batch from the existing reply.
+    if (commandReply.getCursor().getId() == 0) {
+        return commandReply.getCursor().getFirstBatch();
+    }
+
+    std::vector<BulkWriteReplyItem> result = commandReply.getCursor().getFirstBatch();
+    auto id = commandReply.getCursor().getId();
+    auto collection = commandReply.getCursor().getNs().coll();
+
+    // When cursorId = 0 we do not require a getMore.
+    while (id != 0) {
+        BSONObjBuilder bob;
+        bob.append("getMore", id);
+        bob.append("collection", collection);
+
+        logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &bob);
+
+        std::vector<AsyncRequestsSender::Request> requests;
+        requests.emplace_back(targetedBatch.getShardId(), bob.obj());
+
+        MultiStatementTransactionRequestsSender ars(
+            opCtx,
+            Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
+            DatabaseName::kAdmin,
+            requests,
+            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+            Shard::RetryPolicy::kNoRetry /* getMore is never retryable */);
+
+        while (!ars.done()) {
+            // Block until a response is available.
+            auto response = ars.next();
+
+            // When the responseStatus is not OK, this means that mongos was unable to receive a
+            // response from the shard the write batch was sent to, or mongos faced some other local
+            // error (for example, mongos was shutting down). In this case we need to indicate that
+            // the getMore failed.
+            if (!response.swResponse.getStatus().isOK()) {
+                result.emplace_back(0, response.swResponse.getStatus());
+                id = 0;
+            } else {
+                auto getMoreReply =
+                    CursorGetMoreReply::parse(IDLParserContext("BulkWriteCommandGetMoreReply"),
+                                              response.swResponse.getValue().data);
+
+                id = getMoreReply.getCursor().getCursorId();
+                collection = getMoreReply.getCursor().getNs().coll();
+
+                for (auto& obj : getMoreReply.getCursor().getNextBatch()) {
+                    result.emplace_back(BulkWriteReplyItem::parse(obj));
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
 void BulkWriteOp::processChildBatchResponseFromRemote(
     const TargetedWriteBatch& writeBatch,
     const AsyncRequestsSender::Response& response,
@@ -1168,9 +1231,7 @@ void BulkWriteOp::noteChildBatchResponse(
     const BulkWriteCommandReply& commandReply,
     boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace) {
 
-    // TODO (SERVER-76958): Iterate through the cursor rather than looking only at the first
-    // batch.
-    const auto& replyItems = commandReply.getCursor().getFirstBatch();
+    const auto& replyItems = exhaustCursorForReplyItems(_opCtx, targetedBatch, commandReply);
 
     _nInserted += commandReply.getNInserted();
     _nDeleted += commandReply.getNDeleted();
@@ -1549,18 +1610,26 @@ BulkWriteReplyInfo BulkWriteOp::generateReplyInfo() {
                                            &actualCollections[nsInfoIdx],
                                            &hasContactedPrimaryShard[nsInfoIdx]);
 
-            replyItems.emplace_back(writeOp.getWriteItem().getItemIndex(), error.getStatus());
+            auto replyItem =
+                BulkWriteReplyItem(writeOp.getWriteItem().getItemIndex(), error.getStatus());
 
-            // TODO SERVER-79510: Remove this. This is necessary right now because the nModified
-            //  field is lost in the BulkWriteReplyItem -> WriteError transformation but
-            // we want to return nModified for failed updates. However, this does not actually
-            // return a correct value for multi:true updates that partially succeed (i.e. succeed
-            // on one or more shard and fail on one or more shards). In SERVER-79510 we should
-            // return a correct nModified count by summing the success responses' nModified
-            // values.
-            if (writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Update) {
-                replyItems.back().setNModified(0);
+            if (writeOp.hasBulkWriteReplyItem()) {
+                auto successesReplyItem = writeOp.takeBulkWriteReplyItem();
+
+                replyItem.setN(successesReplyItem.getN());
+                replyItem.setNModified(successesReplyItem.getNModified());
+                replyItem.setUpserted(successesReplyItem.getUpserted());
+            } else {
+                // If there was no previous successful response we still need to set nModified=0
+                // for an update op since we lose that information in the BulkWriteReplyItem ->
+                // WriteError transformation.
+                if (writeOp.getWriteItem().getOpType() == BatchedCommandRequest::BatchType_Update) {
+                    replyItem.setNModified(0);
+                }
             }
+
+            replyItems.emplace_back(replyItem);
+
             // We only count nErrors at the end of the command because it is simpler and less error
             // prone. If we counted errors as we encountered them we could hit edge cases where we
             // accidentally count the same error multiple times. At this point in the execution we

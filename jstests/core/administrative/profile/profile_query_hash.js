@@ -7,7 +7,7 @@
 //   assumes_read_concern_unchanged,
 //   does_not_support_stepdowns,
 //   requires_profiling,
-//   # TODO SERVER-67607: Test plan cache with CQF enabled.
+//   # TODO SERVER-85564: support query hash in slow query log lines in Bonsai M4.
 //   cqf_experimental_incompatible,
 // ]
 

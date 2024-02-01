@@ -4060,6 +4060,88 @@ TEST_F(BulkWriteOpTest, SummaryFieldsAreMergedAcrossReplies) {
     ASSERT_EQ(replyInfo.summaryFields.nDeleted, 1);
 }
 
+// Test that we a success response and a failed response for the same op (from different shards).
+TEST_F(BulkWriteOpTest, SuccessAndErrorsAreMerged) {
+    ShardId shardIdA("shardA");
+    ShardId shardIdB("shardB");
+    NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
+    ShardEndpoint endpointA(
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+    ShardEndpoint endpointB(
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+
+    std::vector<std::unique_ptr<NSTargeter>> targeters;
+    targeters.push_back(initTargeterSplitRange(nss0, endpointA, endpointB));
+
+    // Update op targets both shardA and shardB.
+    auto updateOp = BulkWriteUpdateOp(
+        0, BSON("x" << BSON("$gte" << -5 << "$lt" << 5)), BSON("$set" << BSON("y" << 2)));
+    updateOp.setMulti(true);
+    BulkWriteCommandRequest request({updateOp}, {NamespaceInfoEntry(nss0)});
+    request.setOrdered(false);
+
+    BulkWriteOp op(_opCtx, request);
+
+    TargetedBatchMap targeted;
+    ASSERT_OK(op.target(targeters, false, targeted));
+
+    ASSERT_EQUALS(targeted.size(), 2);
+    ASSERT_EQUALS(targeted[shardIdA]->getWrites().size(), 1u);
+    ASSERT_EQUALS(targeted[shardIdB]->getWrites().size(), 1u);
+
+    // Success response from shard1.
+    auto item = BulkWriteReplyItem(0);
+    item.setNModified(1);
+    item.setN(1);
+    auto reply1 =
+        BulkWriteCommandReply(BulkWriteCommandResponseCursor(
+                                  0, {item}, NamespaceString::makeBulkWriteNSS(boost::none)),
+                              0 /* nErrors */,
+                              0 /* nInserted */,
+                              1 /* nMatched */,
+                              1 /* nModified */,
+                              0 /* nUpserted */,
+                              0 /* nDeleted*/)
+            .toBSON()
+            .addFields(BSON("ok" << 1));
+    auto response1 =
+        AsyncRequestsSender::Response{shardIdA,
+                                      StatusWith<executor::RemoteCommandResponse>(
+                                          executor::RemoteCommandResponse(reply1, Microseconds(0))),
+                                      boost::none};
+    op.processChildBatchResponseFromRemote(*targeted[shardIdA], response1, boost::none);
+
+    // Error response from shard2.
+    auto reply2 = BulkWriteCommandReply(
+                      BulkWriteCommandResponseCursor(
+                          0,
+                          {BulkWriteReplyItem(0, Status(ErrorCodes::BadValue, "test error"))},
+                          NamespaceString::makeBulkWriteNSS(boost::none)),
+                      1 /* nErrors */,
+                      0 /* nInserted */,
+                      0 /* nMatched */,
+                      0 /* nModified */,
+                      0 /* nUpserted */,
+                      0 /* nDeleted */)
+                      .toBSON()
+                      .addFields(BSON("ok" << 1));
+    auto response2 =
+        AsyncRequestsSender::Response{shardIdB,
+                                      StatusWith<executor::RemoteCommandResponse>(
+                                          executor::RemoteCommandResponse(reply2, Microseconds(0))),
+                                      boost::none};
+    op.processChildBatchResponseFromRemote(*targeted[shardIdB], response2, boost::none);
+
+    ASSERT(op.isFinished());
+    auto replyInfo = op.generateReplyInfo();
+
+    // Make sure the error response and the success response were combined correctly.
+    ASSERT_EQ(replyInfo.replyItems[0].getOk(), 0);
+    ASSERT_EQ(replyInfo.replyItems[0].getStatus().code(), ErrorCodes::BadValue);
+    ASSERT_EQ(replyInfo.replyItems[0].getN(), 1);
+    ASSERT_EQ(replyInfo.replyItems[0].getNModified(), 1);
+}
+
 // Test that noteWriteOpFinalResponse correctly updates summary fields.
 TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponseUpdatesSummaryFields) {
     ShardId shardIdA("shardA");
@@ -4468,6 +4550,59 @@ TEST_F(BulkWriteExecTest, TestMaxRoundsWithoutProgress) {
     future.default_timed_get();
 }
 
+TEST_F(BulkWriteExecTest, TestWriteConcernUpgradesFromW0) {
+    NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
+    ShardEndpoint endpoint0(
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+
+    std::vector<std::unique_ptr<NSTargeter>> targeters;
+    targeters.push_back(initTargeterFullRange(nss0, endpoint0));
+
+    BulkWriteCommandRequest request(
+        {BulkWriteInsertOp(0, BSON("x" << 1)), BulkWriteInsertOp(0, BSON("x" << 2))},
+        {NamespaceInfoEntry(nss0)});
+
+    LOGV2(8340600, "Executing a bulkWrite with w:0 writeConcern that should be upgraded.");
+
+    auto future = launchAsync([&] {
+        auto opCtx = operationContext();
+        opCtx->setWriteConcern(
+            WriteConcernOptions::parse(WriteConcernOptions::Unacknowledged).getValue());
+        auto reply = bulk_write_exec::execute(opCtx, targeters, request);
+
+        // Should have 2 reply items.
+        ASSERT_EQUALS(reply.replyItems.size(), 2u);
+        ASSERT_EQUALS(reply.summaryFields.nInserted, 2);
+    });
+
+    // Check the request to make sure it contains non-w:0 WC.
+    onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+        LOGV2(8340601,
+              "Mocking a normal response after checking for writeConcern value.",
+              "request"_attr = request);
+
+        ASSERT(request.cmdObj.hasField("writeConcern"));
+        auto wcField = request.cmdObj.getField("writeConcern").Obj();
+        ASSERT(wcField.hasField("w"));
+        ASSERT_NE(wcField.getField("w").numberInt(), 0);
+
+        BulkWriteCommandReply reply;
+        reply.setCursor(BulkWriteCommandResponseCursor(
+            0,  // cursorId
+            std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0), BulkWriteReplyItem(1)},
+            NamespaceString::makeBulkWriteNSS(boost::none)));
+        reply.setNErrors(0);
+        reply.setNInserted(2);
+        reply.setNDeleted(0);
+        reply.setNMatched(0);
+        reply.setNModified(0);
+        reply.setNUpserted(0);
+        return reply.toBSON();
+    });
+
+    future.default_timed_get();
+}
+
 TEST_F(BulkWriteExecTest, CollectionDroppedBeforeRefreshingTargeters) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint(
@@ -4664,6 +4799,69 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
         auto reply = createBulkWriteShardResponse(request);
         return reply.toBSON();
     });
+    future.default_timed_get();
+}
+
+TEST_F(BulkWriteExecTest, TestGetMoreFromInitialResponse) {
+    NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
+    ShardEndpoint endpoint0(
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+
+    std::vector<std::unique_ptr<NSTargeter>> targeters;
+    targeters.push_back(initTargeterFullRange(nss0, endpoint0));
+
+    BulkWriteCommandRequest request(
+        {BulkWriteInsertOp(0, BSON("x" << 1)), BulkWriteInsertOp(0, BSON("x" << 2))},
+        {NamespaceInfoEntry(nss0)});
+
+    LOGV2(7695800, "Executing a bulkWrite which should succeed.");
+
+    auto future = launchAsync([&] {
+        auto client = getService()->makeClient("thread");
+        getServiceContext()->makeOperationContext(client.get());
+        auto reply = bulk_write_exec::execute(operationContext(), targeters, request);
+        // Should have 2 reply items, 1 from the original response and 1 from the getMore.
+        ASSERT_EQUALS(reply.replyItems.size(), 2u);
+        ASSERT_EQUALS(reply.summaryFields.nInserted, 2);
+    });
+
+    // Mock a response for the request which should contain a cursorID.
+    onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+        LOGV2(7695801, "Mocking a first response that requires a getMore");
+
+        ASSERT(request.cmdObj.hasField("bulkWrite"));
+
+        BulkWriteCommandReply reply;
+        reply.setCursor(BulkWriteCommandResponseCursor(
+            12345,  // cursorId
+            std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0)},
+            NamespaceString::makeBulkWriteNSS(boost::none)));
+        reply.setNErrors(0);
+        reply.setNInserted(2);
+        reply.setNDeleted(0);
+        reply.setNMatched(0);
+        reply.setNModified(0);
+        reply.setNUpserted(0);
+        return reply.toBSON();
+    });
+
+    // Mock a response for the getMore which contains the remaining response.
+    onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+        LOGV2(7695802, "Mocking getMore response.");
+
+        ASSERT(request.cmdObj.hasField("getMore"));
+        ASSERT_EQ(request.cmdObj.getField("getMore").numberInt(), 12345);
+
+        CursorGetMoreReply reply;
+        GetMoreResponseCursor value;
+        value.setResponseCursorBase(
+            ResponseCursorBase(0, NamespaceString::makeBulkWriteNSS(boost::none)));
+        BulkWriteReplyItem item = BulkWriteReplyItem(1);
+        value.setNextBatch({item.toBSON()});
+        reply.setCursor(value);
+        return reply.toBSON();
+    });
+
     future.default_timed_get();
 }
 

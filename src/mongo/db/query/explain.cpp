@@ -61,6 +61,7 @@
 #include "mongo/db/query/plan_explainer_impl.h"
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
@@ -89,11 +90,14 @@ void generatePlannerInfo(PlanExecutor* exec,
                          const MultipleCollectionAccessor& collections,
                          BSONObj extraInfo,
                          const SerializationContext& serializationContext,
-                         BSONObjBuilder* out) {
+                         BSONObjBuilder* out,
+                         ExplainOptions::Verbosity verbosity) {
     BSONObjBuilder plannerBob(out->subobjStart("queryPlanner"));
 
     plannerBob.append("namespace",
                       NamespaceStringUtil::serialize(exec->nss(), serializationContext));
+
+    auto framework = exec->getQueryFramework();
 
     // Find whether there is an index filter set for the query shape. The 'indexFilterSet' field
     // will always be false in the case of EOF or idhack plans.
@@ -112,11 +116,14 @@ void generatePlannerInfo(PlanExecutor* exec,
     }();
     if (mainCollection && exec->getCanonicalQuery()) {
         if (exec->getCanonicalQuery()->isSbeCompatible() &&
-            !exec->getCanonicalQuery()->getForceClassicEngine()) {
-            const auto planCacheKeyInfo =
-                plan_cache_key_factory::make(*exec->getCanonicalQuery(),
-                                             collections,
-                                             canonical_query_encoder::Optimizer::kSbeStageBuilders);
+            !QueryKnobConfiguration::decoration(exec->getCanonicalQuery()->getOpCtx())
+                 .isForceClassicEngineEnabled()) {
+            const auto planCacheKeyInfo = plan_cache_key_factory::make(
+                *exec->getCanonicalQuery(),
+                collections,
+                framework == PlanExecutor::QueryFramework::kCQF
+                    ? canonical_query_encoder::Optimizer::kBonsai
+                    : canonical_query_encoder::Optimizer::kSbeStageBuilders);
             planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
             queryHash = planCacheKeyInfo.queryHash();
         } else {
@@ -132,8 +139,6 @@ void generatePlannerInfo(PlanExecutor* exec,
     // query as an optimization (specifically, the update system does not canonicalize for idhack
     // updates). In these cases, 'query' is NULL.
     auto query = exec->getCanonicalQuery();
-
-    auto framework = exec->getQueryFramework();
 
     // For CQF explains, we serialize the entire input MQL (via CanonicalQuery or Pipeline) under
     // "parsedQuery". For classic explains, we serialize just the match expression.
@@ -209,6 +214,11 @@ void generatePlannerInfo(PlanExecutor* exec,
         bab.append(rejectedStats);
     }
     bab.doneFast();
+
+    if (verbosity == ExplainOptions::Verbosity::kQueryPlannerDebug) {
+        plannerBob.appendArray("optimizerPhases", explainer.getOptimizerDebugInfo());
+    }
+
     plannerBob.doneFast();
 }
 
@@ -406,7 +416,8 @@ void Explain::explainStages(PlanExecutor* exec,
     out->appendElements(explainVersionToBson(explainer.getVersion()));
 
     if (verbosity >= ExplainOptions::Verbosity::kQueryPlanner) {
-        generatePlannerInfo(exec, command, collections, extraInfo, serializationContext, out);
+        generatePlannerInfo(
+            exec, command, collections, extraInfo, serializationContext, out, verbosity);
     }
 
     if (verbosity >= ExplainOptions::Verbosity::kExecStats) {

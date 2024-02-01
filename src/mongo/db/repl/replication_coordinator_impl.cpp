@@ -1676,8 +1676,12 @@ OpTime ReplicationCoordinatorImpl::getMyLastWrittenOpTime() const {
     return _getMyLastWrittenOpTime_inlock();
 }
 
-OpTimeAndWallTime ReplicationCoordinatorImpl::getMyLastWrittenOpTimeAndWallTime() const {
+OpTimeAndWallTime ReplicationCoordinatorImpl::getMyLastWrittenOpTimeAndWallTime(
+    bool rollbackSafe) const {
     stdx::lock_guard<Latch> lock(_mutex);
+    if (rollbackSafe && _getMemberState_inlock().rollback()) {
+        return {};
+    }
     return _getMyLastWrittenOpTimeAndWallTime_inlock();
 }
 
@@ -1686,12 +1690,8 @@ OpTime ReplicationCoordinatorImpl::getMyLastAppliedOpTime() const {
     return _getMyLastAppliedOpTime_inlock();
 }
 
-OpTimeAndWallTime ReplicationCoordinatorImpl::getMyLastAppliedOpTimeAndWallTime(
-    bool rollbackSafe) const {
+OpTimeAndWallTime ReplicationCoordinatorImpl::getMyLastAppliedOpTimeAndWallTime() const {
     stdx::lock_guard<Latch> lock(_mutex);
-    if (rollbackSafe && _getMemberState_inlock().rollback()) {
-        return {};
-    }
     return _getMyLastAppliedOpTimeAndWallTime_inlock();
 }
 
@@ -1990,7 +1990,7 @@ Status ReplicationCoordinatorImpl::setLastDurableOptime_forTest(long long cfgVer
     }
 
     const UpdatePositionArgs::UpdateInfo update(
-        OpTime(), Date_t(), opTime, wallTime, cfgVer, memberId);
+        OpTime(), Date_t(), OpTime(), Date_t(), opTime, wallTime, cfgVer, memberId);
     const auto statusWithOpTime = _setLastOptimeForMember(lock, update);
     _updateStateAfterRemoteOpTimeUpdates(lock, statusWithOpTime.getValue());
     return statusWithOpTime.getStatus();
@@ -2008,7 +2008,25 @@ Status ReplicationCoordinatorImpl::setLastAppliedOptime_forTest(long long cfgVer
     }
 
     const UpdatePositionArgs::UpdateInfo update(
-        opTime, wallTime, OpTime(), Date_t(), cfgVer, memberId);
+        opTime, wallTime, OpTime(), Date_t(), OpTime(), Date_t(), cfgVer, memberId);
+    const auto statusWithOpTime = _setLastOptimeForMember(lock, update);
+    _updateStateAfterRemoteOpTimeUpdates(lock, statusWithOpTime.getValue());
+    return statusWithOpTime.getStatus();
+}
+
+Status ReplicationCoordinatorImpl::setLastWrittenOptime_forTest(long long cfgVer,
+                                                                long long memberId,
+                                                                const OpTime& opTime,
+                                                                Date_t wallTime) {
+    stdx::lock_guard<Latch> lock(_mutex);
+    invariant(_settings.isReplSet());
+
+    if (wallTime == Date_t()) {
+        wallTime = Date_t() + Seconds(opTime.getSecs());
+    }
+
+    const UpdatePositionArgs::UpdateInfo update(
+        OpTime(), Date_t(), opTime, wallTime, OpTime(), Date_t(), cfgVer, memberId);
     const auto statusWithOpTime = _setLastOptimeForMember(lock, update);
     _updateStateAfterRemoteOpTimeUpdates(lock, statusWithOpTime.getValue());
     return statusWithOpTime.getStatus();
@@ -2021,7 +2039,8 @@ StatusWith<OpTime> ReplicationCoordinatorImpl::_setLastOptimeForMember(
         return result.getStatus();
     const bool advancedOpTime = result.getValue();
     _rescheduleLivenessUpdate_inlock(args.memberId);
-    return advancedOpTime ? std::max(args.appliedOpTime, args.durableOpTime) : OpTime();
+    return advancedOpTime ? std::max({args.writtenOpTime, args.appliedOpTime, args.durableOpTime})
+                          : OpTime();
 }
 
 void ReplicationCoordinatorImpl::_updateStateAfterRemoteOpTimeUpdates(
@@ -2148,12 +2167,11 @@ bool ReplicationCoordinatorImpl::_doneWaitingForReplication_inlock(
                 if (kDebugBuild) {
                     // At this stage all the tagged nodes should have reached the opTime, except
                     // after the reconfig(see SERVER-47205). If the OpTime is greater than
-                    // _committedSnapshotAfterReconfig, check for that.
-                    if (!_committedSnapshotAfterReconfig ||
-                        (_committedSnapshotAfterReconfig < opTime)) {
+                    // LastCommittedInPrevConfig, check for that.
+                    if (_topCoord->getLastCommittedInPrevConfig() < opTime) {
                         auto tagPattern = uassertStatusOK(_rsConfig.findCustomWriteMode(
                             ReplSetConfig::kMajorityWriteConcernModeName));
-                        dassert(_topCoord->haveTaggedNodesReachedOpTime(
+                        invariant(_topCoord->haveTaggedNodesReachedOpTime(
                             opTime, tagPattern, useDurableOpTime));
                     }
                 }
@@ -4242,8 +4260,6 @@ void ReplicationCoordinatorImpl::_finishReplSetReconfig(OperationContext* opCtx,
                 member.getHostAndPort(), now, newConfig.getReplSetName().toString());
         }
     }
-
-    _committedSnapshotAfterReconfig = _getCurrentCommittedSnapshotOpTime_inlock();
     lk.unlock();
     ReplicaSetAwareServiceRegistry::get(_service).onSetCurrentConfig(opCtx);
     _performPostMemberStateUpdateAction(action);

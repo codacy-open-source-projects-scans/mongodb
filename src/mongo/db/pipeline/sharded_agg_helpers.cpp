@@ -1032,6 +1032,16 @@ SplitPipeline splitPipeline(std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
     // half to the shards, as possible.
     auto mergePipeline = std::move(pipeline);
 
+    // Before splitting the pipeline, we need to do dependency analysis to validate if we have text
+    // score metadata. This is because the planner will not have any way of knowing whether the
+    // split half provides this metadata after shards are targeted, because the shard executing the
+    // merging half only sees a $mergeCursors stage.
+    auto queryObj = mergePipeline->getInitialQuery();
+    auto unavailableMetadata = DocumentSourceMatch::isTextQuery(queryObj)
+        ? DepsTracker::kNoMetadata
+        : DepsTracker::kOnlyTextScore;
+    mergePipeline->getDependencies(unavailableMetadata);
+
     auto [shardsPipeline, inputsSort] = findSplitPoint(mergePipeline.get());
 
     // The order in which optimizations are applied can have significant impact on the efficiency of
@@ -1680,6 +1690,11 @@ Status appendExplainResults(DispatchShardPipelineResults&& dispatchResults,
         const auto& data = shardResult.swResponse.getValue().data;
         BSONObjBuilder explain(shardExplains.subobjStart(shardId));
         explain << "host" << shardResult.shardHostAndPort->toString();
+
+        // Add the per shard explainVersion to the final explain output.
+        auto explainVersion = data["explainVersion"];
+        explain << "explainVersion" << explainVersion;
+
         if (auto stagesElement = data["stages"]) {
             explain << "stages" << stagesElement;
         } else {

@@ -380,26 +380,25 @@ private:
 class BSONElementMaterializer {
 public:
     using Element = BSONElement;
-    using Allocator = ElementStorage;
 
-    static BSONElement materialize(Allocator& allocator, bool val);
-    static BSONElement materialize(Allocator& allocator, int32_t val);
-    static BSONElement materialize(Allocator& allocator, int64_t val);
-    static BSONElement materialize(Allocator& allocator, double val);
-    static BSONElement materialize(Allocator& allocator, const Decimal128& val);
-    static BSONElement materialize(Allocator& allocator, const Date_t& val);
-    static BSONElement materialize(Allocator& allocator, const Timestamp& val);
-    static BSONElement materialize(Allocator& allocator, StringData val);
-    static BSONElement materialize(Allocator& allocator, const BSONBinData& val);
-    static BSONElement materialize(Allocator& allocator, const BSONCode& val);
-    static BSONElement materialize(Allocator& allocator, const OID& val);
+    static BSONElement materialize(ElementStorage& allocator, bool val);
+    static BSONElement materialize(ElementStorage& allocator, int32_t val);
+    static BSONElement materialize(ElementStorage& allocator, int64_t val);
+    static BSONElement materialize(ElementStorage& allocator, double val);
+    static BSONElement materialize(ElementStorage& allocator, const Decimal128& val);
+    static BSONElement materialize(ElementStorage& allocator, const Date_t& val);
+    static BSONElement materialize(ElementStorage& allocator, const Timestamp& val);
+    static BSONElement materialize(ElementStorage& allocator, StringData val);
+    static BSONElement materialize(ElementStorage& allocator, const BSONBinData& val);
+    static BSONElement materialize(ElementStorage& allocator, const BSONCode& val);
+    static BSONElement materialize(ElementStorage& allocator, const OID& val);
 
     template <typename T>
-    static BSONElement materialize(Allocator& allocator, BSONElement val) {
+    static BSONElement materialize(ElementStorage& allocator, BSONElement val) {
         return val;
     }
 
-    static BSONElement materializeMissing(Allocator& allocator) {
+    static BSONElement materializeMissing(ElementStorage& allocator) {
         return BSONElement();
     }
 
@@ -411,6 +410,85 @@ private:
                                        BSONType bsonType,
                                        StringData val);
 };
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<bool>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == Bool, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, val.boolean());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<int32_t>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == NumberInt, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, (int32_t)val._numberInt());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<int64_t>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == NumberLong, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, (int64_t)val._numberLong());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<double>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == NumberDouble, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, val._numberDouble());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<Decimal128>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == NumberDecimal, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, val._numberDecimal());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<Date_t>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == Date, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, val.date());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<Timestamp>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == bsonTimestamp, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, val.timestamp());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<StringData>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == String, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, val.valueStringData());
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<BSONBinData>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == BinData, "materialize invoked with incorrect BSONElement type");
+    int len = 0;
+    const char* data = val.binData(len);
+    return materialize(allocator, BSONBinData(data, len, val.binDataType()));
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<BSONCode>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == Code, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, BSONCode(val.valueStringData()));
+}
+
+template <>
+inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<OID>(
+    ElementStorage& allocator, BSONElement val) {
+    dassert(val.type() == jstOID, "materialize invoked with incorrect BSONElement type");
+    return materialize(allocator, val.OID());
+}
 
 }  // namespace bsoncolumn
 }  // namespace mongo

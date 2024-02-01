@@ -3,10 +3,8 @@ load("@poetry//:dependencies.bzl", "dependency")
 
 # config selection
 load("@bazel_skylib//lib:selects.bzl", "selects")
-
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
-
-load("//bazel:separate_debug.bzl", "extract_debuginfo" , "WITH_DEBUG_SUFFIX")
+load("//bazel:separate_debug.bzl", "CC_SHARED_LIBRARY_SUFFIX", "WITH_DEBUG_SUFFIX", "extract_debuginfo")
 # === Windows-specific compilation settings ===
 
 # /RTC1              Enable Stack Frame Run-Time Error Checking; Reports when a variable is used without having been initialized (implies /Od: no optimizations)
@@ -27,7 +25,7 @@ WINDOWS_DBG_COPTS = [
     "/MDd",
     "/RTC1",
     "/Od",
-    "/pdbpagesize:16384"
+    "/pdbpagesize:16384",
 ]
 
 WINDOWS_OPT_ON_COPTS = [
@@ -38,7 +36,7 @@ WINDOWS_OPT_ON_COPTS = [
 
 WINDOWS_OPT_OFF_COPTS = [
     "/Od",
-    "/pdbpagesize:16384"
+    "/pdbpagesize:16384",
 ]
 
 WINDOWS_OPT_DBG_COPTS = [
@@ -63,10 +61,10 @@ WINDOWS_RELEASE_COPTS = [
 # TODO SERVER-85340 fix this error message when libc++ is readded to the toolchain
 LIBCXX_ERROR_MESSAGE = (
     "\nError:\n" +
-    "    libc++ is not currently supported in the mongo toolchain.\n"+
-    "    Follow this ticket to see when support is being added SERVER-85340\n"+
-    "    We currently only support passing the libcxx config on macos for compatibility reasons.\n"+
-    "    libc++ requires these configuration:\n"+
+    "    libc++ is not currently supported in the mongo toolchain.\n" +
+    "    Follow this ticket to see when support is being added SERVER-85340\n" +
+    "    We currently only support passing the libcxx config on macos for compatibility reasons.\n" +
+    "    libc++ requires these configuration:\n" +
     "    --//bazel/config:compiler_type=clang\n"
 )
 
@@ -122,84 +120,98 @@ LIBUNWIND_DEFINES = select({
     "//bazel/config:_libunwind_auto": [],
 }, no_match_error = REQUIRED_SETTINGS_LIBUNWIND_ERROR_MESSAGE)
 
-
 REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE = (
     "\nError:\n" +
-    "    any sanitizer requires these configurations:\n"+
+    "    any sanitizer requires these configurations:\n" +
     "    --//bazel/config:compiler_type=clang\n" +
     "    --//bazel/config:build_mode=opt_on [OR] --//bazel/config:build_mode=opt_debug"
 )
 
 # -fno-omit-frame-pointer should be added if any sanitizer flag is used by user
-ANY_SANITIZER_AVAILABLE_COPTS = select({
-    "//bazel/config:no_enabled_sanitizer": [],
-    "//bazel/config:any_sanitizer_required_setting": ["-fno-omit-frame-pointer"],
-},
-no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE)
-
+ANY_SANITIZER_AVAILABLE_COPTS = select(
+    {
+        "//bazel/config:no_enabled_sanitizer": [],
+        "//bazel/config:any_sanitizer_required_setting": ["-fno-omit-frame-pointer"],
+    },
+    no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE,
+)
 
 SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE = (
     "\nError:\n" +
-    "    address and memory sanitizers require these configurations:\n"+
+    "    address and memory sanitizers require these configurations:\n" +
     "    --//bazel/config:allocator=system\n"
 )
 
-ADDRESS_SANITIZER_COPTS = select({
-    ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
-    "//bazel/config:asan_disabled": [],
-}
-, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
+ADDRESS_SANITIZER_COPTS = select(
+    {
+        ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
+        "//bazel/config:asan_disabled": [],
+    },
+    no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE,
+)
 
-ADDRESS_SANITIZER_LINKFLAGS = select({
-    ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
-    "//bazel/config:asan_disabled": [],
-}
-, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
+ADDRESS_SANITIZER_LINKFLAGS = select(
+    {
+        ("//bazel/config:sanitize_address_required_settings"): ["-fsanitize=address"],
+        "//bazel/config:asan_disabled": [],
+    },
+    no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE,
+)
 
 # Unfortunately, abseil requires that we make these macros
 # (this, and THREAD_ and UNDEFINED_BEHAVIOR_ below) set,
 # because apparently it is too hard to query the running
 # compiler. We do this unconditionally because abseil is
 # basically pervasive via the 'base' library.
-ADDRESS_SANITIZER_DEFINES = select({
-    ("//bazel/config:sanitize_address_required_settings"): ["ADDRESS_SANITIZER"],
-    "//bazel/config:asan_disabled": [],
-}
-, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
+ADDRESS_SANITIZER_DEFINES = select(
+    {
+        ("//bazel/config:sanitize_address_required_settings"): ["ADDRESS_SANITIZER"],
+        "//bazel/config:asan_disabled": [],
+    },
+    no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE,
+)
 
 # Makes it easier to debug memory failures at the cost of some perf: -fsanitize-memory-track-origins
-MEMORY_SANITIZER_COPTS = select({
-    ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory", "-fsanitize-memory-track-origins"],
-    ("//bazel/config:msan_disabled"): [],
-}
-, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
+MEMORY_SANITIZER_COPTS = select(
+    {
+        ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory", "-fsanitize-memory-track-origins"],
+        ("//bazel/config:msan_disabled"): [],
+    },
+    no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE,
+)
 
 # Makes it easier to debug memory failures at the cost of some perf: -fsanitize-memory-track-origins
-MEMORY_SANITIZER_LINKFLAGS = select({
-    ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory"],
-    ("//bazel/config:msan_disabled"): [],
-}
-, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
-
+MEMORY_SANITIZER_LINKFLAGS = select(
+    {
+        ("//bazel/config:sanitize_memory_required_settings"): ["-fsanitize=memory"],
+        ("//bazel/config:msan_disabled"): [],
+    },
+    no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE,
+)
 
 GENERIC_SANITIZER_ERROR_MESSAGE = (
     "Failed to enable sanitizers with flag: "
 )
+
 # We can't include the fuzzer flag with the other sanitize flags
 # The libfuzzer library already has a main function, which will cause the dependencies check
 # to fail
-FUZZER_SANITIZER_COPTS = select({
-    ("//bazel/config:sanitize_fuzzer_required_settings"): ["-fsanitize=fuzzer-no-link", "-fprofile-instr-generate", "-fcoverage-mapping"],
-    ("//bazel/config:fsan_disabled"): [],
-}
-, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer")
+FUZZER_SANITIZER_COPTS = select(
+    {
+        ("//bazel/config:sanitize_fuzzer_required_settings"): ["-fsanitize=fuzzer-no-link", "-fprofile-instr-generate", "-fcoverage-mapping"],
+        ("//bazel/config:fsan_disabled"): [],
+    },
+    no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer",
+)
 
 # These flags are needed to generate a coverage report
-FUZZER_SANITIZER_LINKFLAGS = select({
-    ("//bazel/config:sanitize_fuzzer_required_settings"): ["-fsanitize=fuzzer-no-link", "-fprofile-instr-generate", "-fcoverage-mapping"],
-    ("//bazel/config:fsan_disabled"): [],
-}
-, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer")
+FUZZER_SANITIZER_LINKFLAGS = select(
+    {
+        ("//bazel/config:sanitize_fuzzer_required_settings"): ["-fsanitize=fuzzer-no-link", "-fprofile-instr-generate", "-fcoverage-mapping"],
+        ("//bazel/config:fsan_disabled"): [],
+    },
+    no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer",
+)
 
 # Combines following two conditions -
 # 1.
@@ -238,7 +250,6 @@ THREAD_SANITIZER_DEFINES = select({
     ("//bazel/config:sanitize_thread_required_settings"): ["THREAD_SANITIZER"],
     ("//bazel/config:tsan_disabled"): [],
 }, no_match_error = THREAD_SANITIZER_ERROR_MESSAGE)
-
 
 UNDEFINED_SANITIZER_DEFINES = select({
     ("//bazel/config:ubsan_enabled"): ["UNDEFINED_BEHAVIOR_SANITIZER"],
@@ -294,8 +305,8 @@ TCMALLOC_DEPS = select({
 #TODO SERVER-84714 add message about using the toolchain version of C++ libs
 GLIBCXX_DEBUG_ERROR_MESSAGE = (
     "\nError:\n" +
-    "    glibcxx_debug requires these configurations:\n"+
-    "    --//bazel/config:build_mode=dbg\n"+
+    "    glibcxx_debug requires these configurations:\n" +
+    "    --//bazel/config:build_mode=dbg\n" +
     "    --//bazel/config:use_libcxx=False"
 )
 
@@ -306,30 +317,28 @@ GLIBCXX_DEBUG_DEFINES = select({
 
 DETECT_ODR_VIOLATIONS_ERROR_MESSAGE = (
     "\nError:\n" +
-    "    detect_odr_violations requires these configurations:\n"+
-    "    --//bazel/config:build_mode=opt_off\n"+
+    "    detect_odr_violations requires these configurations:\n" +
+    "    --//bazel/config:build_mode=opt_off\n" +
     "    --//bazel/config:linker=gold\n"
 )
-
 
 DETECT_ODR_VIOLATIONS_LINKFLAGS = select({
     ("//bazel/config:detect_odr_violations_required_settings"): ["-Wl,--detect-odr-violations"],
     ("//bazel/config:detect_odr_violations_disabled"): [],
 }, no_match_error = DETECT_ODR_VIOLATIONS_ERROR_MESSAGE)
 
-MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES \
-                       + THREAD_SANITIZER_DEFINES + UNDEFINED_SANITIZER_DEFINES + GLIBCXX_DEBUG_DEFINES
+MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES + \
+                       THREAD_SANITIZER_DEFINES + UNDEFINED_SANITIZER_DEFINES + GLIBCXX_DEBUG_DEFINES
 
-MONGO_GLOBAL_COPTS = ["-Isrc"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS \
-                    + MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + UNDEFINED_SANITIZER_COPTS \
-                    + THREAD_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS
+MONGO_GLOBAL_COPTS = ["-Isrc"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS + \
+                     MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + UNDEFINED_SANITIZER_COPTS + \
+                     THREAD_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS
 
-MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS \
-                        + UNDEFINED_SANITIZER_LINKFLAGS + THREAD_SANITIZER_LINKFLAGS \
-                        + LIBCXX_LINKFLAGS + LINKER_LINKFLAGS + DETECT_ODR_VIOLATIONS_LINKFLAGS
+MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS + \
+                         UNDEFINED_SANITIZER_LINKFLAGS + THREAD_SANITIZER_LINKFLAGS + \
+                         LIBCXX_LINKFLAGS + LINKER_LINKFLAGS + DETECT_ODR_VIOLATIONS_LINKFLAGS
 
 def force_includes_copt(package_name, name):
-
     if package_name.startswith("src/mongo"):
         basic_h = "mongo/platform/basic.h"
         return select({
@@ -348,7 +357,7 @@ def force_includes_copt(package_name, name):
             "//bazel/config:macos_aarch64": ["-include", "third_party/mozjs/platform/aarch64/macOS/build/js-confdefs.h"],
         })
 
-    if name in ['scripting', 'scripting_mozjs_test', 'encrypted_dbclient']:
+    if name in ["scripting", "scripting_mozjs_test", "encrypted_dbclient"]:
         return select({
             "//bazel/config:linux_aarch64": ["-include", "third_party/mozjs/platform/aarch64/linux/build/js-config.h"],
             "//bazel/config:linux_x86_64": ["-include", "third_party/mozjs/platform/x86_64/linux/build/js-config.h"],
@@ -380,7 +389,7 @@ def force_includes_hdr(package_name, name):
             "//bazel/config:macos_aarch64": ["//src/third_party/mozjs:platform/aarch64/macOS/build/js-confdefs.h"],
         })
 
-    if name in ['scripting', 'scripting_mozjs_test', 'encrypted_dbclient']:
+    if name in ["scripting", "scripting_mozjs_test", "encrypted_dbclient"]:
         return select({
             "//bazel/config:linux_aarch64": ["//src/third_party/mozjs:platform/aarch64/linux/build/js-config.h"],
             "//bazel/config:linux_x86_64": ["//src/third_party/mozjs:platform/x86_64/linux/build/js-config.h"],
@@ -438,16 +447,16 @@ def mongo_cc_library(
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
 
-    all_deps = deps
     if name != "tcmalloc_minimal":
-        all_deps += TCMALLOC_DEPS
+        deps += TCMALLOC_DEPS
 
-    linux_rpath_flags = ['-Wl,-z,origin', '-Wl,--enable-new-dtags', '-Wl,-rpath,\\$$ORIGIN/../lib', "-Wl,-h,lib" + name + ".so"]
-    macos_rpath_flags = ['-Wl,-rpath,\\$$ORIGIN/../lib', "-Wl,-install_name,@rpath/lib" + name + ".so"]
+    linux_rpath_flags = ["-Wl,-z,origin", "-Wl,--enable-new-dtags", "-Wl,-rpath,\\$$ORIGIN/../lib", "-Wl,-h,lib" + name + ".so"]
+    macos_rpath_flags = ["-Wl,-rpath,\\$$ORIGIN/../lib", "-Wl,-install_name,@rpath/lib" + name + ".so"]
+
     rpath_flags = select({
         "//bazel/config:linux_aarch64": linux_rpath_flags,
         "//bazel/config:linux_x86_64": linux_rpath_flags,
-        "//bazel/config:linux_ppc64le":linux_rpath_flags,
+        "//bazel/config:linux_ppc64le": linux_rpath_flags,
         "//bazel/config:linux_s390x": linux_rpath_flags,
         "//bazel/config:windows_x86_64": [],
         "//bazel/config:macos_x86_64": macos_rpath_flags,
@@ -459,7 +468,7 @@ def mongo_cc_library(
         name = name + ".so",
         srcs = srcs,
         hdrs = hdrs + fincludes_hdr,
-        deps = all_deps,
+        deps = deps,
         visibility = visibility,
         testonly = testonly,
         copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
@@ -476,7 +485,7 @@ def mongo_cc_library(
         }),
     )
 
-    all_deps += select({
+    deps_with_shared_archive = deps + select({
         "//bazel/config:shared_archive_enabled": [":" + name + ".so"],
         "//conditions:default": [],
     })
@@ -485,14 +494,14 @@ def mongo_cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs,
         hdrs = hdrs + fincludes_hdr,
-        deps = all_deps,
+        deps = deps_with_shared_archive,
         visibility = visibility,
         testonly = testonly,
         copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
         data = data,
         tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags,
-        linkstatic = LINKSTATIC_ENABLED,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
+        linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + local_defines,
         includes = [],
         features = select({
@@ -502,13 +511,33 @@ def mongo_cc_library(
         }),
     )
 
-    extract_debuginfo(
-        name=name,
-        binary_with_debug=":" + name + WITH_DEBUG_SUFFIX,
-        type="library",
-        enabled = SEPARATE_DEBUG_ENABLED,
-        deps = all_deps)
+    # Creates a shared library version of our target only if //bazel/config:linkstatic_disabled is true.
+    # This uses the CcSharedLibraryInfo provided from extract_debuginfo to allow it to declare all dependencies in
+    # dynamic_deps.
+    native.cc_shared_library(
+        name = name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX,
+        deps = [name + WITH_DEBUG_SUFFIX],
+        visibility = visibility,
+        tags = tags,
+        user_link_flags = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags,
+        target_compatible_with = select({
+            "//bazel/config:linkstatic_disabled": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        dynamic_deps = deps,
+    )
 
+    extract_debuginfo(
+        name = name,
+        binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
+        type = "library",
+        enabled = SEPARATE_DEBUG_ENABLED,
+        cc_shared_library = select({
+            "//bazel/config:linkstatic_disabled": ":" + name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX,
+            "//conditions:default": None,
+        }),
+        deps = deps,
+    )
 
 def mongo_cc_binary(
         name,
@@ -550,6 +579,19 @@ def mongo_cc_binary(
 
     all_deps = deps + LIBUNWIND_DEPS + TCMALLOC_DEPS
 
+    linux_rpath_flags = ["-Wl,-z,origin", "-Wl,--enable-new-dtags", "-Wl,-rpath,\\$$ORIGIN/../lib"]
+    macos_rpath_flags = ["-Wl,-rpath,\\$$ORIGIN/../lib"]
+
+    rpath_flags = select({
+        "//bazel/config:linux_aarch64": linux_rpath_flags,
+        "//bazel/config:linux_x86_64": linux_rpath_flags,
+        "//bazel/config:linux_ppc64le": linux_rpath_flags,
+        "//bazel/config:linux_s390x": linux_rpath_flags,
+        "//bazel/config:windows_x86_64": [],
+        "//bazel/config:macos_x86_64": macos_rpath_flags,
+        "//bazel/config:macos_aarch64": macos_rpath_flags,
+    })
+
     native.cc_binary(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs + fincludes_hdr,
@@ -559,20 +601,24 @@ def mongo_cc_binary(
         copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
         data = data,
         tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags,
         linkstatic = LINKSTATIC_ENABLED,
         local_defines = MONGO_GLOBAL_DEFINES + LIBUNWIND_DEFINES + local_defines,
         includes = [],
         features = ["pie"],
+        dynamic_deps = select({
+            "//bazel/config:linkstatic_disabled": deps,
+            "//conditions:default": [],
+        }),
     )
 
     extract_debuginfo(
-        name=name,
-        binary_with_debug=":" + name + WITH_DEBUG_SUFFIX,
-        type="program",
+        name = name,
+        binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
+        type = "program",
         enabled = SEPARATE_DEBUG_ENABLED,
-        deps = all_deps)
-
+        deps = all_deps,
+    )
 
 IdlInfo = provider(
     fields = {
@@ -594,30 +640,36 @@ def idl_generator_impl(ctx):
     python_path = []
     for py_dep in ctx.attr.py_deps:
         for dep in py_dep[PyInfo].transitive_sources.to_list():
-            if dep.path not in  python_path:
+            if dep.path not in python_path:
                 python_path.append(dep.path)
     py_depsets = [py_dep[PyInfo].transitive_sources for py_dep in ctx.attr.py_deps]
 
-    inputs = depset(transitive=[
+    inputs = depset(transitive = [
         ctx.attr.src.files,
         ctx.attr.idlc.files,
-        python.files] + dep_depsets + py_depsets)
+        python.files,
+    ] + dep_depsets + py_depsets)
 
     ctx.actions.run(
         executable = python.interpreter.path,
         outputs = [gen_source, gen_header],
         inputs = inputs,
         arguments = [
-            'buildscripts/idl/idlc.py',
-            '--include', 'src',
-            '--base_dir', ctx.bin_dir.path + '/src',
-            '--target_arch', ctx.var['TARGET_CPU'],
-            '--header', gen_header.path,
-            '--output', gen_source.path,
-            ctx.attr.src.files.to_list()[0].path
+            "buildscripts/idl/idlc.py",
+            "--include",
+            "src",
+            "--base_dir",
+            ctx.bin_dir.path + "/src",
+            "--target_arch",
+            ctx.var["TARGET_CPU"],
+            "--header",
+            gen_header.path,
+            "--output",
+            gen_source.path,
+            ctx.attr.src.files.to_list()[0].path,
         ],
         mnemonic = "IdlcGenerator",
-         env={"PYTHONPATH":ctx.configuration.host_path_separator.join(python_path)}
+        env = {"PYTHONPATH": ctx.configuration.host_path_separator.join(python_path)},
     )
 
     return [
@@ -625,8 +677,8 @@ def idl_generator_impl(ctx):
             files = depset([gen_source, gen_header]),
         ),
         IdlInfo(
-            idl_deps = depset(ctx.attr.src.files.to_list(), transitive=[dep[IdlInfo].idl_deps for dep in ctx.attr.deps])
-        )
+            idl_deps = depset(ctx.attr.src.files.to_list(), transitive = [dep[IdlInfo].idl_deps for dep in ctx.attr.deps]),
+        ),
     ]
 
 idl_generator = rule(
@@ -634,23 +686,23 @@ idl_generator = rule(
     attrs = {
         "src": attr.label(
             doc = "The idl file to generate cpp/h files from.",
-            allow_single_file=True,
+            allow_single_file = True,
         ),
-        "idlc" : attr.label(
+        "idlc": attr.label(
             doc = "The idlc generator to use.",
             default = "//buildscripts/idl:idlc",
         ),
-        "py_deps" : attr.label_list(
+        "py_deps": attr.label_list(
             doc = "Python modules that should be imported.",
             providers = [PyInfo],
-            default=[dependency("pyyaml", group="core"), dependency("pymongo", group="core")]
+            default = [dependency("pyyaml", group = "core"), dependency("pymongo", group = "core")],
         ),
-        "deps" : attr.label_list(
+        "deps": attr.label_list(
             doc = "Other idl files that need to be imported.",
             providers = [IdlInfo],
         ),
     },
     doc = "Generates header/source files from IDL files.",
     toolchains = ["@bazel_tools//tools/python:toolchain_type"],
-    fragments = ["py"]
+    fragments = ["py"],
 )

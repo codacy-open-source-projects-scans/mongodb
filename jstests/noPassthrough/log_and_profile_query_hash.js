@@ -4,7 +4,7 @@
  *  does_not_support_stepdowns,
  *  requires_profiling,
  *  assumes_read_preference_unchanged,
- *  # TODO SERVER-67607: support query hash in slow query log lines.
+ *  # TODO SERVER-85564: support query hash in slow query log lines in Bonsai M4.
  *  cqf_experimental_incompatible,
  * ]
  */

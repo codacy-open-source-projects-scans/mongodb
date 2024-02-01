@@ -790,22 +790,12 @@ bool TransactionParticipant::Participant::_verifyCanBeginMultiDocumentTransactio
                        o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() ||
                    o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() ==
                        kUninitializedTxnRetryCounter) {
-            // Servers in a sharded cluster can start a new transaction at the active transaction
-            // number to allow internal retries by routers on re-targeting errors, like
-            // StaleShard/DatabaseVersion or SnapshotTooOld.
-            uassert(ErrorCodes::ConflictingOperationInProgress,
-                    "Only servers in a sharded cluster can start a new transaction at the active "
-                    "transaction number",
-                    !serverGlobalParams.clusterRole.has(ClusterRole::None));
-
             if (_isInternalSessionForRetryableWrite() &&
                 o().txnState.isInSet(TransactionState::kCommitted)) {
                 // This is a retry of a committed internal transaction for retryable writes so
                 // skip resetting the state and updating the metrics.
                 return true;
             }
-
-            _uassertCanReuseActiveTxnNumberForTransaction(opCtx);
         } else {
             const auto restartableStates = TransactionState::kNone | TransactionState::kInProgress |
                 TransactionState::kAbortedWithoutPrepare | TransactionState::kAbortedWithPrepare;
@@ -828,8 +818,35 @@ bool TransactionParticipant::Participant::_verifyCanBeginMultiDocumentTransactio
     return false;
 }
 
-void TransactionParticipant::Participant::_uassertCanReuseActiveTxnNumberForTransaction(
-    OperationContext* opCtx) {
+bool TransactionParticipant::Participant::_shouldRestartTransactionOnReuseActiveTxnNumber(
+    OperationContext* opCtx,
+    TransactionActions action,
+    const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
+    // We should never restart on kContinue
+    if (action == TransactionActions::kContinue)
+        return false;
+
+    // We should only call this function if the request is attempting to reuse the active txnNumber
+    // and retryCounter
+    invariant(
+        txnNumberAndRetryCounter.getTxnNumber() ==
+            o().activeTxnNumberAndRetryCounter.getTxnNumber() &&
+        (txnNumberAndRetryCounter.getTxnRetryCounter() ==
+             o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() ||
+         o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() == kUninitializedTxnRetryCounter));
+
+    if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
+        // Servers in a sharded cluster can start a new transaction at the active transaction
+        // number to allow internal retries by routers on re-targeting errors, like
+        // StaleShard/DatabaseVersion or SnapshotTooOld.
+        uassert(ErrorCodes::ConflictingOperationInProgress,
+                "Only servers in a sharded cluster can start a new transaction at the active "
+                "transaction number",
+                action != TransactionActions::kStart);
+
+        return false;
+    }
+
     if (o().txnState.isInSet(TransactionState::kNone)) {
         const auto& retryableWriteTxnParticipantCatalog =
             getRetryableWriteTransactionParticipantCatalog(opCtx);
@@ -856,6 +873,15 @@ void TransactionParticipant::Participant::_uassertCanReuseActiveTxnNumberForTran
                               << " in state " << txnParticipant.o().txnState,
                 txnParticipant.transactionIsAbortedWithoutPrepare());
         }
+
+        return true;
+    } else if (o().txnState.isInSet(TransactionState::kAbortedWithoutPrepare)) {
+        return true;
+    } else if (_isInternalSessionForRetryableWrite() &&
+               o().txnState.isInSet(TransactionState::kCommitted)) {
+        // We won't actually restart the transaction, we'll early return later on and skip resetting
+        // any state and metrics
+        return true;
     } else {
         uassert(
             50911,
@@ -864,7 +890,9 @@ void TransactionParticipant::Participant::_uassertCanReuseActiveTxnNumberForTran
                           << o().activeTxnNumberAndRetryCounter.toBSON()
                           << " because a transaction with the same transaction number is in state "
                           << o().txnState,
-            o().txnState.isInSet(TransactionState::kAbortedWithoutPrepare));
+            action != TransactionActions::kStart);
+
+        return false;
     }
 }
 
@@ -1006,12 +1034,14 @@ void TransactionParticipant::Participant::beginOrContinue(
     OperationContext* opCtx,
     TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
-    boost::optional<bool> startTransaction) {
+    TransactionActions action) {
     if (_isInternalSessionForRetryableWrite()) {
         auto parentTxnParticipant =
             TransactionParticipant::get(opCtx, _session()->getParentSession());
-        parentTxnParticipant.beginOrContinue(
-            opCtx, {*_sessionId().getTxnNumber(), boost::none}, boost::none, boost::none);
+        parentTxnParticipant.beginOrContinue(opCtx,
+                                             {*_sessionId().getTxnNumber(), boost::none},
+                                             boost::none,
+                                             TransactionActions::kNone);
     }
 
     // Make sure we are still a primary. We need to hold on to the RSTL through the end of this
@@ -1060,7 +1090,7 @@ void TransactionParticipant::Participant::beginOrContinue(
     // Requests without an autocommit field are interpreted as retryable writes. They cannot specify
     // startTransaction, which is verified earlier when parsing the request.
     if (!autocommit) {
-        invariant(!startTransaction);
+        invariant(action == TransactionActions::kNone);
         invariant(!txnNumberAndRetryCounter.getTxnRetryCounter(),
                   "Cannot specify a txnRetryCounter for retryable write");
         _beginOrContinueRetryableWrite(opCtx, txnNumberAndRetryCounter);
@@ -1071,6 +1101,7 @@ void TransactionParticipant::Participant::beginOrContinue(
     // autocommit be given as an argument on the request, and currently it can only be false, which
     // is verified earlier when parsing the request.
     invariant(*autocommit == false);
+    invariant(action != TransactionActions::kNone);
     invariant(opCtx->inMultiDocumentTransaction());
     if (txnNumberAndRetryCounter.getTxnRetryCounter()) {
         uassert(ErrorCodes::InvalidOptions,
@@ -1082,15 +1113,32 @@ void TransactionParticipant::Participant::beginOrContinue(
         txnNumberAndRetryCounter.setTxnRetryCounter(0);
     }
 
+    // If the request conatined startTransaction, we should always choose to start the transaction.
+    // If the request contained startOrContinueTransaction, we should always choose to start the
+    // transaction unless the txnNumber and retryCounter are equal to the active txnNumber and
+    // retryCounter. In this case, we must decide whether we should start or continue the
+    // transaction depending on the active transaction state.
+    bool startTransaction =
+        action == TransactionActions::kStart || action == TransactionActions::kStartOrContinue;
+    if (txnNumberAndRetryCounter.getTxnNumber() ==
+            o().activeTxnNumberAndRetryCounter.getTxnNumber() &&
+        (txnNumberAndRetryCounter.getTxnRetryCounter() ==
+             o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() ||
+         o().activeTxnNumberAndRetryCounter.getTxnRetryCounter() ==
+             kUninitializedTxnRetryCounter)) {
+        startTransaction = _shouldRestartTransactionOnReuseActiveTxnNumber(
+            opCtx, action, txnNumberAndRetryCounter);
+
+        if (action == TransactionActions::kStart) {
+            // If a caller passed kStart, we should always choose to start the transaction
+            invariant(startTransaction);
+        }
+    }
+
     if (!startTransaction) {
         _continueMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
         return;
     }
-
-    // Attempt to start a multi-statement transaction, which requires startTransaction be given as
-    // an argument on the request. The 'startTransaction' argument currently can only be specified
-    // as true, which is verified earlier, when parsing the request.
-    invariant(*startTransaction);
 
     auto isRetry = _verifyCanBeginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
     if (isRetry) {
@@ -1098,6 +1146,7 @@ void TransactionParticipant::Participant::beginOrContinue(
         // start the transaction since that already happened.
         return;
     }
+
     _beginMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
 }
 
@@ -1280,8 +1329,8 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     // We must hold the Client lock to change the Locker on the OperationContext. Hence the
     // WithLock.
 
-    _ruState = opCtx->getWriteUnitOfWork()->release();
-    opCtx->setWriteUnitOfWork(nullptr);
+    _ruState = shard_role_details::getWriteUnitOfWork(opCtx)->release();
+    shard_role_details::setWriteUnitOfWork(opCtx, nullptr);
 
     _locker = shard_role_details::swapLocker(
         opCtx, std::make_unique<Locker>(opCtx->getServiceContext()), wl);
@@ -1388,7 +1437,8 @@ void TransactionParticipant::TxnResources::release(OperationContext* opCtx) {
     invariant(oldState == WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork,
               str::stream() << "RecoveryUnit state was " << oldState);
 
-    opCtx->setWriteUnitOfWork(WriteUnitOfWork::createForSnapshotResume(opCtx, _ruState));
+    shard_role_details::setWriteUnitOfWork(
+        opCtx, WriteUnitOfWork::createForSnapshotResume(opCtx, _ruState));
 
     auto& apiParameters = APIParameters::get(opCtx);
     apiParameters = _apiParameters;
@@ -1405,20 +1455,20 @@ TransactionParticipant::SideTransactionBlock::SideTransactionBlock(OperationCont
     : _opCtx(opCtx) {
     // Do nothing if we are already in a SideTransactionBlock. We can tell we are already in a
     // SideTransactionBlock because there is no top level write unit of work.
-    if (!_opCtx->getWriteUnitOfWork()) {
+    if (!shard_role_details::getWriteUnitOfWork(_opCtx)) {
         return;
     }
 
     // Release WUOW.
-    _ruState = opCtx->getWriteUnitOfWork()->release();
-    opCtx->setWriteUnitOfWork(nullptr);
+    _ruState = shard_role_details::getWriteUnitOfWork(_opCtx)->release();
+    shard_role_details::setWriteUnitOfWork(_opCtx, nullptr);
 
     // Remember the locking state of WUOW, opt out two-phase locking, but don't release locks.
-    shard_role_details::getLocker(opCtx)->releaseWriteUnitOfWork(&_WUOWLockSnapshot);
+    shard_role_details::getLocker(_opCtx)->releaseWriteUnitOfWork(&_WUOWLockSnapshot);
 
     // Release recovery unit, saving the recovery unit off to the side, keeping open the storage
     // transaction.
-    _recoveryUnit = shard_role_details::releaseAndReplaceRecoveryUnit(opCtx);
+    _recoveryUnit = shard_role_details::releaseAndReplaceRecoveryUnit(_opCtx);
 }
 
 TransactionParticipant::SideTransactionBlock::~SideTransactionBlock() {
@@ -1436,7 +1486,8 @@ TransactionParticipant::SideTransactionBlock::~SideTransactionBlock() {
               str::stream() << "RecoveryUnit state was " << oldState);
 
     // Restore WUOW.
-    _opCtx->setWriteUnitOfWork(WriteUnitOfWork::createForSnapshotResume(_opCtx, _ruState));
+    shard_role_details::setWriteUnitOfWork(
+        _opCtx, WriteUnitOfWork::createForSnapshotResume(_opCtx, _ruState));
 }
 
 void TransactionParticipant::Participant::_stashActiveTransaction(OperationContext* opCtx) {
@@ -1646,7 +1697,7 @@ void TransactionParticipant::Participant::unstashTransactionResources(OperationC
     // Stashed transaction resources do not exist for this in-progress multi-document transaction.
     // Set up the transaction resources on the opCtx. Must be done after setting up the read
     // snapshot.
-    opCtx->setWriteUnitOfWork(std::make_unique<WriteUnitOfWork>(opCtx));
+    shard_role_details::setWriteUnitOfWork(opCtx, std::make_unique<WriteUnitOfWork>(opCtx));
 
     // The Client lock must not be held when executing this failpoint as it will block currentOp
     // execution.
@@ -1788,7 +1839,7 @@ TransactionParticipant::Participant::prepareTransaction(
 
     shard_role_details::getRecoveryUnit(opCtx)->setPrepareTimestamp(
         prepareOplogSlot.getTimestamp());
-    opCtx->getWriteUnitOfWork()->prepare();
+    shard_role_details::getWriteUnitOfWork(opCtx)->prepare();
     p().needToWriteAbortEntry = true;
 
     // Don't write oplog entry on secondaries.
@@ -2102,15 +2153,15 @@ void TransactionParticipant::Participant::commitPreparedTransaction(
 
 void TransactionParticipant::Participant::_commitStorageTransaction(OperationContext* opCtx,
                                                                     bool isSplitPreparedTxn) {
-    invariant(opCtx->getWriteUnitOfWork());
+    invariant(shard_role_details::getWriteUnitOfWork(opCtx));
     invariant(shard_role_details::getLocker(opCtx)->isRSTLLocked() || isSplitPreparedTxn);
     try {
-        opCtx->getWriteUnitOfWork()->commit();
+        shard_role_details::getWriteUnitOfWork(opCtx)->commit();
     } catch (const ExceptionFor<ErrorCodes::WriteConflict>&) {
         CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
         throw;
     }
-    opCtx->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx, nullptr);
 
     // We must clear the recovery unit and locker for the 'config.transactions' and oplog entry
     // writes.
@@ -2433,7 +2484,7 @@ void TransactionParticipant::Participant::_finishAbortingActiveTransaction(
     } else if (opCtx->getTxnNumber() == o().activeTxnNumberAndRetryCounter.getTxnNumber()) {
         if (o().txnState.isInRetryableWriteMode()) {
             // The active transaction is not a multi-document transaction.
-            invariant(opCtx->getWriteUnitOfWork() == nullptr);
+            invariant(!shard_role_details::getWriteUnitOfWork(opCtx));
             return;
         }
 
@@ -2497,7 +2548,7 @@ void TransactionParticipant::Participant::_cleanUpTxnResourceOnOpCtx(
                         repl::ReadConcernArgs::get(opCtx));
 
     // Reset the WUOW. We should be able to abort empty transactions that don't have WUOW.
-    if (opCtx->getWriteUnitOfWork()) {
+    if (shard_role_details::getWriteUnitOfWork(opCtx)) {
         // There are two cases that are legal to abort a unit of work without RSTL:
         // 1. We are aborting a split prepared transaction, in which case the RSTL is held by
         //    the original prepared transaction.
@@ -2505,7 +2556,7 @@ void TransactionParticipant::Participant::_cleanUpTxnResourceOnOpCtx(
         //    a WriteUnitOfWork but not have allocated the storage transaction.
         invariant(shard_role_details::getLocker(opCtx)->isRSTLLocked() || isSplitPreparedTxn ||
                   !shard_role_details::getRecoveryUnit(opCtx)->isActive());
-        opCtx->setWriteUnitOfWork(nullptr);
+        shard_role_details::setWriteUnitOfWork(opCtx, nullptr);
     }
 
     // We must clear the recovery unit and locker so any post-transaction writes can run without

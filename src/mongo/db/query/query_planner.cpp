@@ -90,6 +90,7 @@
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/projection.h"
+#include "mongo/db/query/query_decorations.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_common.h"
@@ -343,7 +344,7 @@ Status computeColumnScanIsPossibleStatus(const CanonicalQuery& query,
                 "A columnstore index can only be used with queries in the SBE engine. The given "
                 "query is not eligible for this engine (yet)"};
     }
-    if (query.getForceClassicEngine()) {
+    if (QueryKnobConfiguration::decoration(query.getOpCtx()).isForceClassicEngineEnabled()) {
         return {ErrorCodes::InvalidOptions,
                 "A columnstore index can only be used with queries in the SBE engine, but the "
                 "query specified to force the classic engine"};
@@ -547,9 +548,10 @@ StatusWith<std::unique_ptr<QuerySolution>> tryToBuildSearchQuerySolution(
     }
 
     if (query.isSearchQuery()) {
-        tassert(7816300,
-                "Pushing down $search into SBE but forceClassicEngine is true.",
-                !query.getForceClassicEngine());
+        tassert(
+            7816300,
+            "Pushing down $search into SBE but forceClassicEngine is on",
+            !QueryKnobConfiguration::decoration(query.getOpCtx()).isForceClassicEngineEnabled());
 
         tassert(7816301,
                 "Pushing down $search into SBE but featureFlagSearchInSbe is disabled.",
@@ -1230,6 +1232,13 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         }
     }
 
+    // geoNear and text queries *require* an index.
+    // Also, if a hint is specified it indicates that we MUST use it.
+    bool mustUseIndexedPlan =
+        QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::GEO_NEAR) ||
+        QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::TEXT) ||
+        hintedIndexBson;
+
     if (hintedIndexBson) {
         // If we have a hint, check if it matches any "special" index before proceeding.
         const auto& hintObj = *hintedIndexBson;
@@ -1364,8 +1373,12 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     }
 
     // Figure out how useful each index is to each predicate.
+    QueryPlannerIXSelect::QueryContext queryContext;
+    queryContext.collator = query.getCollator();
+    queryContext.elemMatchContext = QueryPlannerIXSelect::ElemMatchContext{};
+    queryContext.mustUseIndexedPlan = mustUseIndexedPlan;
     QueryPlannerIXSelect::rateIndices(
-        query.getPrimaryMatchExpression(), "", relevantIndices, query.getCollator());
+        query.getPrimaryMatchExpression(), "", relevantIndices, queryContext);
     QueryPlannerIXSelect::stripInvalidAssignments(query.getPrimaryMatchExpression(),
                                                   relevantIndices);
 
@@ -1728,18 +1741,13 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
 
     bool clusteredCollection = params.clusteredInfo.has_value();
 
-    // geoNear and text queries *require* an index.
-    // Also, if a hint is specified it indicates that we MUST use it.
-    bool possibleToCollscan = !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(),
-                                                           MatchExpression::GEO_NEAR) &&
-        !QueryPlannerCommon::hasNode(query.getPrimaryMatchExpression(), MatchExpression::TEXT) &&
-        !hintedIndexBson;
-    if (collScanRequired && !possibleToCollscan) {
+
+    if (collScanRequired && mustUseIndexedPlan) {
         return Status(ErrorCodes::NoQueryExecutionPlans, "No query solutions");
     }
 
     bool isClusteredIDXScan = false;
-    if (possibleToCollscan && (collscanRequested || collScanRequired || clusteredCollection)) {
+    if (!mustUseIndexedPlan && (collscanRequested || collScanRequired || clusteredCollection)) {
         boost::optional<int> clusteredScanDirection =
             QueryPlannerCommon::determineClusteredScanDirection(query, params);
         int direction = clusteredScanDirection.value_or(1);

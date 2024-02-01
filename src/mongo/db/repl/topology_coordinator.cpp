@@ -876,16 +876,20 @@ StatusWith<bool> TopologyCoordinator::prepareHeartbeatResponseV1(
     }
 
     OpTimeAndWallTime lastOpApplied;
+    OpTimeAndWallTime lastOpWritten;
     OpTimeAndWallTime lastOpDurable;
 
-    // We include null times for lastApplied and lastDurable if we are in STARTUP_2, as we do not
-    // want to report replication progress and be part of write majorities while in initial sync.
+    // We include null times for lastApplied, lastWritten and lastDurable if we are in STARTUP_2, as
+    // we do not want to report replication progress and be part of write majorities while in
+    // initial sync.
     if (!myState.startup2()) {
         lastOpApplied = getMyLastAppliedOpTimeAndWallTime();
+        lastOpWritten = getMyLastWrittenOpTimeAndWallTime();
         lastOpDurable = getMyLastDurableOpTimeAndWallTime();
     }
 
     response->setAppliedOpTimeAndWallTime(lastOpApplied);
+    response->setWrittenOpTimeAndWallTime(lastOpWritten);
     response->setDurableOpTimeAndWallTime(lastOpDurable);
 
     if (_currentPrimaryIndex != -1) {
@@ -1494,13 +1498,19 @@ StatusWith<bool> TopologyCoordinator::setLastOptimeForMember(
                 3,
                 "Updating member data due to replSetUpdatePosition",
                 "memberId"_attr = memberId,
+                "oldLastWrittenOpTime"_attr = memberData->getLastWrittenOpTime(),
                 "oldLastAppliedOpTime"_attr = memberData->getLastAppliedOpTime(),
                 "oldLastDurableOpTime"_attr = memberData->getLastDurableOpTime(),
+                "newWrittenOpTime"_attr = args.writtenOpTime,
                 "newAppliedOpTime"_attr = args.appliedOpTime,
                 "newDurableOpTime"_attr = durableOpTime);
 
-    bool advancedOpTime = memberData->advanceLastAppliedOpTimeAndWallTime(
-        {args.appliedOpTime, args.appliedWallTime}, now);
+
+    bool advancedOpTime = memberData->advanceLastWrittenOpTimeAndWallTime(
+        {args.writtenOpTime, args.writtenWallTime}, now);
+    advancedOpTime = memberData->advanceLastAppliedOpTimeAndWallTime(
+                         {args.appliedOpTime, args.appliedWallTime}, now) ||
+        advancedOpTime;
     advancedOpTime =
         memberData->advanceLastDurableOpTimeAndWallTime({durableOpTime, durableWallTime}, now) ||
         advancedOpTime;
@@ -1849,6 +1859,8 @@ void TopologyCoordinator::setCurrentPrimary_forTest(int primaryIndex,
             hbResponse.setElectionTime(electionTime);
             hbResponse.setAppliedOpTimeAndWallTime(
                 {_memberData.at(primaryIndex).getHeartbeatAppliedOpTime(), Date_t() + Seconds(1)});
+            hbResponse.setWrittenOpTimeAndWallTime(
+                {_memberData.at(primaryIndex).getHeartbeatWrittenOpTime(), Date_t() + Seconds(1)});
             hbResponse.setSyncingTo(HostAndPort());
             _memberData.at(primaryIndex)
                 .setUpValues(_memberData.at(primaryIndex).getLastHeartbeat(),
@@ -2146,14 +2158,18 @@ StatusWith<BSONObj> TopologyCoordinator::prepareReplSetUpdatePositionCommand(
         }
 
         BSONObjBuilder entry(arrayBuilder.subobjStart());
-        memberData.getLastDurableOpTime().append(&entry,
-                                                 UpdatePositionArgs::kDurableOpTimeFieldName);
-        entry.appendDate(UpdatePositionArgs::kDurableWallTimeFieldName,
-                         memberData.getLastDurableWallTime());
+        memberData.getLastWrittenOpTime().append(&entry,
+                                                 UpdatePositionArgs::kWrittenOpTimeFieldName);
+        entry.appendDate(UpdatePositionArgs::kWrittenWallTimeFieldName,
+                         memberData.getLastWrittenWallTime());
         memberData.getLastAppliedOpTime().append(&entry,
                                                  UpdatePositionArgs::kAppliedOpTimeFieldName);
         entry.appendDate(UpdatePositionArgs::kAppliedWallTimeFieldName,
                          memberData.getLastAppliedWallTime());
+        memberData.getLastDurableOpTime().append(&entry,
+                                                 UpdatePositionArgs::kDurableOpTimeFieldName);
+        entry.appendDate(UpdatePositionArgs::kDurableWallTimeFieldName,
+                         memberData.getLastDurableWallTime());
         entry.append(UpdatePositionArgs::kMemberIdFieldName, memberData.getMemberId().getData());
         entry.append(UpdatePositionArgs::kConfigVersionFieldName, _rsConfig.getConfigVersion());
     }
@@ -2179,8 +2195,14 @@ void TopologyCoordinator::fillMemberData(BSONObjBuilder* result) {
             const auto lastAppliedOpTime = memberData.getLastAppliedOpTime();
             entry.append("lastAppliedOpTime", lastAppliedOpTime.toBSON());
 
+            const auto lastWrittenOpTime = memberData.getLastWrittenOpTime();
+            entry.append("lastWrittenOpTime", lastWrittenOpTime.toBSON());
+
             const auto heartbeatAppliedOpTime = memberData.getHeartbeatAppliedOpTime();
             entry.append("heartbeatAppliedOpTime", heartbeatAppliedOpTime.toBSON());
+
+            const auto heartbeatWrittenOpTime = memberData.getHeartbeatWrittenOpTime();
+            entry.append("heartbeatWrittenOpTime", heartbeatWrittenOpTime.toBSON());
 
             const auto heartbeatDurableOpTime = memberData.getHeartbeatDurableOpTime();
             entry.append("heartbeatDurableOpTime", heartbeatDurableOpTime.toBSON());
@@ -3452,6 +3474,7 @@ rpc::ReplSetMetadata TopologyCoordinator::prepareReplSetMetadata(
 rpc::OplogQueryMetadata TopologyCoordinator::prepareOplogQueryMetadata(int rbid) const {
     return rpc::OplogQueryMetadata(_lastCommittedOpTimeAndWallTime,
                                    getMyLastAppliedOpTime(),
+                                   getMyLastWrittenOpTime(),
                                    rbid,
                                    _currentPrimaryIndex,
                                    _rsConfig.findMemberIndexByHostAndPort(getSyncSourceAddress()),

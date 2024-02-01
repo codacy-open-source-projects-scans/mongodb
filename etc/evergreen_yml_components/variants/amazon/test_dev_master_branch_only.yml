@@ -39,8 +39,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: amazon-linux2-arm64-dynamic-compile
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: amazon-linux2-arm64-dynamic-compile
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/perf.yml
@@ -153,8 +153,14 @@ buildvariants:
     distros:
     - amazon2-arm64-large
   - name: disk_wiredtiger
+  - name: aggregation_embedded_router_jscore_passthrough_gen
+  - name: aggregation_sharded_collections_embedded_router_jscore_passthrough_gen
   - name: embedded_router_jscore_passthrough_gen
   - name: embedded_router_jscore_passthrough_with_config_shard_gen
+  - name: embedded_router_jscore_txns_gen
+  - name: embedded_router_jscore_txns_with_config_shard_gen
+  - name: embedded_router_sharded_collections_jscore_txns_gen
+  - name: embedded_router_sharded_collections_jscore_txns_with_config_shard_gen
   - name: .encrypt
   - name: feature_flag_multiversion_gen
   - name: idl_tests
@@ -342,3 +348,22 @@ buildvariants:
   - name: vector_search
   - name: vector_search_auth
   - name: vector_search_ssl
+
+- name: &amazon-linux2-arm64-sep-benchmark amazon-linux2-arm64-sep-benchmark
+  display_name: "Amazon Linux 2 arm64 (SEP Benchmark)"
+  cron: "0 0,8,16 * * *" # Run this task every 8 hours
+  modules:
+  - enterprise
+  run_on:
+  - amazon2-arm64-large
+  expansions:
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+    scons_cache_scope: shared
+    compile_variant: *amazon-linux2-arm64-sep-benchmark
+  tasks:
+  - name: compile_upload_benchmarks_TG
+  - name: .benchmarks_sep

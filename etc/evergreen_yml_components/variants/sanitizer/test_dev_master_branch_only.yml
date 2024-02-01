@@ -16,8 +16,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-x86-dynamic-compile
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-x86-dynamic-compile
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/sanitizer/test_dev_master_branch_only.yml
@@ -33,8 +33,8 @@ variables:
     # This is added because of EVG-18211.
     # Without this we are adding extra dependencies on evergreen and it is causing strain
     omit_generated_tasks: true
-  - name: generate_buildid_to_debug_symbols_mapping
-    variant: linux-debug-aubsan-compile-required
+  # - name: generate_buildid_to_debug_symbols_mapping
+  #   variant: linux-debug-aubsan-compile-required
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/rhel/test_dev_master_branch_only.yml
@@ -284,9 +284,9 @@ buildvariants:
   - name: compile_test_serial_TG
     distros:
     - windows-vsCurrent-xxlarge
-  - name: compile_build_tools_next_TG
+  - name: compile_test_parallel_unittest_stream_TG
     distros:
-    - windows-vsCurrent-xlarge
+    - windows-vsCurrent-xxlarge
   - name: compile_integration_and_test_no_audit_parallel_stream_TG
     distros:
     - windows-vsCurrent-xlarge
@@ -406,19 +406,15 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_serial_TG
-  - name: compile_build_tools_next_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: aggregation !.feature_flag_guarded
   - name: auth_gen
-  - name: causally_consistent_jscore_txns_passthrough
   - name: disk_wiredtiger
   - name: failpoints
   - name: .jscore .common !.auth !.sharding
-  - name: jsCore_txns_large_txns_format
   - name: mongosTest
   - name: replica_sets_gen
-  - name: replica_sets_max_mirroring_large_txns_format_gen
   - name: .ssl
-  - name: .stitch
 
 - name: &enterprise-macos enterprise-macos
   display_name: "Enterprise macOS DEBUG"
@@ -443,14 +439,13 @@ buildvariants:
     num_scons_link_jobs_available: 0.99
   tasks:
   - name: compile_test_serial_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: audit
   - name: auth_audit_gen
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: .encrypt !.replica_sets !.sharding !.aggregation !.jscore !.ssl
+  - name: fle
+  - name: fle2
   - name: .jscore .common !.decimal !.sharding
   - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough_gen
-  - name: timeseries_crud_jscore_passthrough_gen
   - name: sasl
   - name: .crypt
 
@@ -549,13 +544,18 @@ buildvariants:
   - name: change_streams_multitenant_passthrough
   - name: change_streams_multitenant_sharded_collections_passthrough
   # - name: disk_wiredtiger
+  - name: aggregation_embedded_router_jscore_passthrough_gen
+  - name: aggregation_sharded_collections_embedded_router_jscore_passthrough_gen
   - name: embedded_router_jscore_passthrough_gen
   - name: embedded_router_jscore_passthrough_with_config_shard_gen
+  - name: embedded_router_jscore_txns_gen
+  - name: embedded_router_jscore_txns_with_config_shard_gen
+  - name: embedded_router_sharded_collections_jscore_txns_gen
+  - name: embedded_router_sharded_collections_jscore_txns_with_config_shard_gen
   - name: external_auth
   - name: external_auth_aws
   - name: external_auth_oidc
   - name: .encrypt
-  - name: generate_buildid_to_debug_symbols_mapping
   - name: initial_sync_fuzzer_gen
   - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
   - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
@@ -588,7 +588,8 @@ buildvariants:
   - name: sharded_jscore_txns_sharded_collections_with_replica_set_endpoint_gen
   - name: sharding_jscore_passthrough_with_replica_set_endpoint_gen
   - name: streams
-  - name: .sharding .jscore !.wo_snapshot
+  # TODO SERVER-85584 Reenable uninitialized_fcv passthrough
+  - name: .sharding .jscore !.wo_snapshot !.uninitialized_fcv
   - name: .sharding .common !.csrs
   - name: .serverless
   - name: .shard_split
@@ -652,10 +653,11 @@ buildvariants:
       --excludeWithAnyTags=tsan_incompatible
   tasks:
   - name: compile_test_serial_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: compile_integration_and_test_parallel_stream_TG
   - name: check_feature_flag_tags
-  # TODO SERVER-82766: timeseries and multiversion fuzzers had been timing out on TSAN builds.
-  - name: .aggfuzzer !.feature_flag_guarded !.timeseries !.multiversion
+  # TODO SERVER-82766: timeseries, multiversion, and optimization fuzzers had been timing out on TSAN builds.
+  - name: .aggfuzzer !.feature_flag_guarded !.timeseries !.multiversion !.optimization !.no_debug_mode
   - name: .aggregation !.feature_flag_guarded
   - name: audit
   # - name: .auth  # Not passing
@@ -736,7 +738,8 @@ buildvariants:
   - name: search_pinned_connections_auth
   - name: search_ssl
   - name: session_jscore_passthrough
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  # TODO SERVER-85584: Remove !.uninitialized_fcv and reenable sharding uninitialized fcv passthrough suites.
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.uninitialized_fcv
   - name: sharding_api_version_jscore_passthrough_gen
   - name: .sharding .txns
   # - name: .sharding .common # Not passing
@@ -777,6 +780,7 @@ buildvariants:
     compile_variant: *enterprise-rhel80-debug-complete-tsan
   tasks:
   - name: compile_test_serial_TG
+  - name: compile_test_parallel_unittest_stream_TG
   - name: .auth
   - name: .concurrency !.no_txns !.compute_mode
   - name: .config_fuzzer

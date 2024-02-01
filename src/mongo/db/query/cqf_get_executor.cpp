@@ -475,6 +475,7 @@ static ExecParams createExecutor(
     // Get the plan either from cache or by lowering + optimization.
     auto [fromCache, sbePlan, data] =
         plan(phaseManager, planAndProps, opCtx, collections, requireRID, sbeYieldPolicy, env);
+    CurOp::get(opCtx)->debug().fromPlanCache = fromCache;
 
     sbePlan->attachToOperationContext(opCtx);
     if (expCtx->explain || expCtx->mayDbProfile) {
@@ -514,10 +515,12 @@ static ExecParams createExecutor(
         MONGO_UNREACHABLE;
     }
 
-    abtPrinter = std::make_unique<ABTPrinter>(phaseManager.getMetadata(),
-                                              std::move(toExplain),
-                                              explainVersion,
-                                              std::move(phaseManager.getQueryParameters()));
+    abtPrinter =
+        std::make_unique<ABTPrinter>(phaseManager.getMetadata(),
+                                     std::move(toExplain),
+                                     explainVersion,
+                                     std::move(phaseManager.getQueryParameters()),
+                                     std::move(phaseManager.getQueryPlannerOptimizationStages()));
 
     // (Possibly) cache the SBE plan.
     if (planCacheKey && shouldCachePlan(*sbePlan)) {
@@ -985,6 +988,12 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
         return boost::none;
     }();
 
+    if (planCacheKey) {
+        OpDebug& opDebug = CurOp::get(opCtx)->debug();
+        opDebug.queryHash = planCacheKey.get().queryHash();
+        opDebug.planCacheKey = planCacheKey.get().planCacheKeyHash();
+    }
+
     const auto& collection = collections.getMainCollection();
 
     const boost::optional<BSONObj>& hint =
@@ -1096,7 +1105,8 @@ boost::optional<ExecParams> getSBEExecutorViaCascadesOptimizer(
                                  DebugInfo::kDefaultForProd,
                                  std::move(queryHints),
                                  std::move(queryParameters),
-                                 optCounterInfo};
+                                 optCounterInfo,
+                                 expCtx->explain};
 
     auto resultPlans = phaseManager.optimizeNoAssert(std::move(abt), false /*includeRejected*/);
     if (resultPlans.empty()) {

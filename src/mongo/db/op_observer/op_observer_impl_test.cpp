@@ -149,7 +149,7 @@ void beginRetryableWriteWithTxnNumber(
     txnParticipant.beginOrContinue(opCtx,
                                    {*opCtx->getTxnNumber()},
                                    boost::none /* autocommit */,
-                                   boost::none /* startTransaction */);
+                                   TransactionParticipant::TransactionActions::kNone);
 }
 
 void beginNonRetryableTransactionWithTxnNumber(
@@ -163,8 +163,10 @@ void beginNonRetryableTransactionWithTxnNumber(
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
     contextSession = mongoDSessionCatalog->checkOutSession(opCtx);
     auto txnParticipant = TransactionParticipant::get(opCtx);
-    txnParticipant.beginOrContinue(
-        opCtx, {*opCtx->getTxnNumber()}, false /* autocommit */, true /* startTransaction */);
+    txnParticipant.beginOrContinue(opCtx,
+                                   {*opCtx->getTxnNumber()},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
 }
 
 void beginRetryableInternalTransactionWithTxnNumber(
@@ -178,8 +180,10 @@ void beginRetryableInternalTransactionWithTxnNumber(
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
     contextSession = mongoDSessionCatalog->checkOutSession(opCtx);
     auto txnParticipant = TransactionParticipant::get(opCtx);
-    txnParticipant.beginOrContinue(
-        opCtx, {*opCtx->getTxnNumber()}, false /* autocommit */, true /* startTransaction */);
+    txnParticipant.beginOrContinue(opCtx,
+                                   {*opCtx->getTxnNumber()},
+                                   false /* autocommit */,
+                                   TransactionParticipant::TransactionActions::kStart);
 }
 
 template <typename OpObserverType>
@@ -1154,8 +1158,10 @@ public:
                               NamespaceString nss,
                               TxnNumber txnNum,
                               StmtId stmtId) {
-        txnParticipant.beginOrContinue(
-            opCtx, {txnNum}, boost::none /* autocommit */, boost::none /* startTransaction */);
+        txnParticipant.beginOrContinue(opCtx,
+                                       {txnNum},
+                                       boost::none /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kNone);
 
         {
             AutoGetCollection autoColl(opCtx, nss, MODE_IX);
@@ -1562,7 +1568,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
     }
 
     // Mimic committing the transaction.
-    opCtx()->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx(), nullptr);
     shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     {
@@ -1632,7 +1638,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
     }
 
     // Mimic aborting the transaction.
-    opCtx()->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx(), nullptr);
     shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
@@ -1780,7 +1786,7 @@ TEST_F(OpObserverTransactionTest, AbortingPreparedTransactionWritesToTransaction
     }
 
     // Mimic aborting the transaction.
-    opCtx()->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx(), nullptr);
     shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
@@ -1817,7 +1823,7 @@ TEST_F(OpObserverTransactionTest, CommittingUnpreparedNonEmptyTransactionWritesT
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
     ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
     commitUnpreparedTransaction<OpObserverImpl>(opCtx(), opObserver());
-    opCtx()->getWriteUnitOfWork()->commit();
+    shard_role_details::getWriteUnitOfWork(opCtx())->commit();
 
     assertTxnRecord(txnNum(), {}, DurableTxnStateEnum::kCommitted);
 }
@@ -1860,7 +1866,7 @@ TEST_F(OpObserverTransactionTest, CommittingPreparedTransactionWritesToTransacti
     ASSERT_LTE(prepareOpTime, commitOpTime);
 
     // Mimic committing the transaction.
-    opCtx()->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx(), nullptr);
     shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     {
@@ -4083,7 +4089,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // Mimic committing the transaction.
-    opCtx()->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx(), nullptr);
     shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     // commitTimestamp must be greater than the prepareTimestamp.
@@ -4160,7 +4166,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
               shard_role_details::getRecoveryUnit(opCtx())->getPrepareTimestamp());
 
     // Mimic aborting the transaction by resetting the WUOW.
-    opCtx()->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx(), nullptr);
     shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
     {
         Lock::GlobalLock lk(opCtx(), MODE_IX);
@@ -4366,7 +4372,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // Mimic committing the transaction.
-    opCtx()->setWriteUnitOfWork(nullptr);
+    shard_role_details::setWriteUnitOfWork(opCtx(), nullptr);
     shard_role_details::getLocker(opCtx())->unsetMaxLockTimeout();
 
     // commitTimestamp must be greater than the prepareTimestamp.

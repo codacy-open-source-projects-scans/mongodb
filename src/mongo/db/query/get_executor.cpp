@@ -109,7 +109,7 @@
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/classic_plan_cache.h"
-#include "mongo/db/query/classic_runtime_planner_for_sbe.h"
+#include "mongo/db/query/classic_runtime_planner_for_sbe/planner_interface.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collection_query_info.h"
@@ -1001,7 +1001,8 @@ public:
     }
 
     void setCachedPlanHash(boost::optional<size_t> cachedPlanHash) {
-        // TODO SERVER-85519 Support isCached explain field
+        // SbeWithClassicRuntimePlanningPrepareExecutionHelper passes cached plan hash to the
+        // runtime planner.
     }
 
     std::unique_ptr<crp_sbe::PlannerInterface> runtimePlanner;
@@ -1033,10 +1034,25 @@ public:
         _plannerParams = plannerOptions;
     }
 
+    /**
+     * When the instance of this class goes out of scope the trials for multiplanner are completed.
+     */
+    virtual ~PrepareExecutionHelper() {
+        if (_opCtx) {
+            if (auto curOp = CurOp::get(_opCtx)) {
+
+                LOGV2_DEBUG(8276400,
+                            4,
+                            "Stopping the planningTime timer",
+                            "query"_attr = redact(_cq->toStringShort()));
+                curOp->stopQueryPlanningTimer();
+            }
+        }
+    }
+
     StatusWith<std::unique_ptr<ResultType>> prepare() {
         const auto& mainColl = getMainCollection();
 
-        ON_BLOCK_EXIT([&] { CurOp::get(_opCtx)->stopQueryPlanningTimer(); });
         if (!mainColl) {
             LOGV2_DEBUG(20921,
                         2,
@@ -1591,7 +1607,8 @@ private:
                                     .sbeYieldPolicy = std::move(_sbeYieldPolicy),
                                     .workingSet = std::move(_ws),
                                     .collections = _collections,
-                                    .plannerParams = _plannerParams};
+                                    .plannerParams = _plannerParams,
+                                    .cachedPlanHash = _cachedPlanHash};
     }
 
     std::unique_ptr<SbeWithClassicRuntimePlanningResult> buildIdHackPlan() final {
@@ -1634,7 +1651,14 @@ private:
     }
 
     boost::optional<size_t> getCachedPlanHash(const sbe::PlanCacheKey& planCacheKey) final {
-        // TODO SERVER-85519 Support isCached explain field
+        if (_cachedPlanHash) {
+            return _cachedPlanHash;
+        }
+        auto&& planCache = sbe::getPlanCache(_opCtx);
+        if (auto cacheEntry = planCache.getCacheEntryIfActive(planCacheKey); cacheEntry) {
+            _cachedPlanHash = cacheEntry->cachedPlan->solutionHash;
+            return _cachedPlanHash;
+        }
         return boost::none;
     };
 
@@ -1646,11 +1670,17 @@ private:
 
     std::unique_ptr<SbeWithClassicRuntimePlanningResult> buildMultiPlan(
         std::vector<std::unique_ptr<QuerySolution>> solutions) final {
-        // This is a stub implementation that just returns the first solution.
-        // TODO SERVER-85235 Use classic multi-planner to select best solution.
+        for (auto&& solution : solutions) {
+            solution->indexFilterApplied = _plannerParams.indexFiltersApplied;
+        }
+
         auto result = releaseResult();
-        result->runtimePlanner = std::make_unique<crp_sbe::SingleSolutionPassthroughPlanner>(
-            _opCtx, makePlannerData(), std::move(solutions[0]));
+        result->runtimePlanner =
+            std::make_unique<crp_sbe::MultiPlanner>(_opCtx,
+                                                    makePlannerData(),
+                                                    _yieldPolicy,
+                                                    std::move(solutions),
+                                                    PlanCachingMode::NeverCache);
         return result;
     }
 
@@ -1662,6 +1692,9 @@ private:
     // support yielding during trial period in classic engine.
     PlanYieldPolicy::YieldPolicy _yieldPolicy;
     std::unique_ptr<PlanYieldPolicySBE> _sbeYieldPolicy;
+
+    // If there is a matching cache entry, this is the hash of that plan.
+    boost::optional<size_t> _cachedPlanHash;
 };
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getClassicExecutor(
@@ -1914,16 +1947,15 @@ getSlotBasedExecutorWithSbeRuntimePlanning(OperationContext* opCtx,
 bool shouldUseRegularSbe(OperationContext* opCtx, const CanonicalQuery& cq, const bool sbeFull) {
     // When featureFlagSbeFull is not enabled, we cannot use SBE unless 'trySbeEngine' is enabled or
     // if 'trySbeRestricted' is enabled, and we have eligible pushed down stages in the cq pipeline.
-    if (!QueryKnobConfiguration::decoration(opCtx).canPushDownFullyCompatibleStages() &&
-        cq.cqPipeline().empty()) {
+    auto& queryKnob = QueryKnobConfiguration::decoration(opCtx);
+    if (!queryKnob.canPushDownFullyCompatibleStages() && cq.cqPipeline().empty()) {
         return false;
     }
 
     // Return true if all the expressions in the CanonicalQuery's filter and projection are SBE
     // compatible.
-    SbeCompatibility minRequiredCompatibility =
-        sbeFull ? SbeCompatibility::flagGuarded : SbeCompatibility::fullyCompatible;
-
+    SbeCompatibility minRequiredCompatibility = getMinRequiredSbeCompatibility(
+        queryKnob.getInternalQueryFrameworkControlForOp(), cq.isSearchQuery(), sbeFull);
     return cq.getExpCtx()->sbeCompatibility >= minRequiredCompatibility;
 }
 
@@ -1937,7 +1969,8 @@ bool shouldAttemptSBE(const CanonicalQuery* canonicalQuery) {
         return *queryFramework == QueryFrameworkControlEnum::kTrySbeEngine;
     }
 
-    return !canonicalQuery->getForceClassicEngine();
+    return !QueryKnobConfiguration::decoration(canonicalQuery->getOpCtx())
+                .isForceClassicEngineEnabled();
 }
 }  // namespace
 

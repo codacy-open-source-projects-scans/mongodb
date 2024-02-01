@@ -439,6 +439,13 @@ StatusWith<std::unique_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
 
     // Initialize the remaining member variables from the bucket document.
     if (isCompressed) {
+        if (!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            // Re-opening compressed buckets is only supported when the always use compressed
+            // buckets feature flag is enabled.
+            return {ErrorCodes::BadValue, "Bucket is compressed and cannot be reopened"};
+        }
+
         auto decompressed = decompressBucket(bucketDoc);
         if (!decompressed.has_value()) {
             return Status{ErrorCodes::BadValue, "Bucket could not be decompressed"};
@@ -549,31 +556,11 @@ StatusWith<std::reference_wrapper<Bucket>> reopenBucket(OperationContext* opCtx,
         stripe.openBucketsById.try_emplace(bucket->bucketId, std::move(bucket));
     invariant(newlyInserted);
     Bucket* unownedBucket = insertedIt->second.get();
-
-    // If we already have an open bucket for this key, we need to close it.
-    // If the feature flag for TimeseriesAlwaysUseCompressedBuckets is enabled, we do
-    // not close the existing bucket for this key because having multiple open buckets for
-    // the same key/metadata will be supported. TODO: SERVER-79481 - Once the upper bound
-    // for the number of open buckets per metadata is defined, revisit this to ensure that
-    // we close open buckets for this metadata when we are over the bound.
-    if (auto it = stripe.openBucketsByKey.find(key); it != stripe.openBucketsByKey.end() &&
-        !feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        auto& openSet = it->second;
-        for (Bucket* existingBucket : openSet) {
-            if (existingBucket->rolloverAction == RolloverAction::kNone) {
-                stats.incNumBucketsClosedDueToReopening();
-                if (allCommitted(*existingBucket)) {
-                    closeOpenBucket(
-                        opCtx, catalog, stripe, stripeLock, *existingBucket, closedBuckets);
-                } else {
-                    existingBucket->rolloverAction = RolloverAction::kSoftClose;
-                }
-                // We should only have one open bucket at a time.
-                break;
-            }
-        }
-    }
+    // Close other existing bucket(s) if adding this bucket would push us over the
+    // max number of buckets per metadata.
+    constexpr bool isReopening = true;
+    ensureSpaceToOpenNewBucket(
+        opCtx, catalog, stripe, stripeLock, stats, key, closedBuckets, isReopening);
 
     // Now actually mark this bucket as open.
     stripe.openBucketsByKey[key].emplace(unownedBucket);
@@ -1098,6 +1085,50 @@ void expireIdleBuckets(OperationContext* opCtx,
     }
 }
 
+void ensureSpaceToOpenNewBucket(OperationContext* opCtx,
+                                BucketCatalog& catalog,
+                                Stripe& stripe,
+                                WithLock stripeLock,
+                                ExecutionStatsController& stats,
+                                const BucketKey& key,
+                                ClosedBuckets& closedBuckets,
+                                bool isReopening) {
+    auto alwaysCompressedFeatureFlagEnabled =
+        feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+
+    if (auto it = stripe.openBucketsByKey.find(key); it != stripe.openBucketsByKey.end()) {
+        auto& openSet = it->second;
+        int numOpenBuckets = 0;
+        for (Bucket* existingBucket : openSet) {
+            if (existingBucket->rolloverAction == RolloverAction::kNone) {
+                ++numOpenBuckets;
+            }
+        }
+        auto maxOpenBuckets = gTimeseriesMaxOpenBucketsPerMetadata;
+        // Return early, we don't need to close any open buckets.
+        if (alwaysCompressedFeatureFlagEnabled && numOpenBuckets < maxOpenBuckets) {
+            return;
+        }
+        // TODO: SERVER-79480 Close the most 'expensive' buckets first, as defined by the cost
+        // function defined in SERVER-79480.
+        for (Bucket* existingBucket : openSet) {
+            if (existingBucket->rolloverAction == RolloverAction::kNone) {
+                if (isReopening) {
+                    stats.incNumBucketsClosedDueToReopening();
+                }
+                if (allCommitted(*existingBucket)) {
+                    closeOpenBucket(
+                        opCtx, catalog, stripe, stripeLock, *existingBucket, closedBuckets);
+                } else {
+                    existingBucket->rolloverAction = RolloverAction::kSoftClose;
+                }
+                break;
+            }
+        }
+    }
+}
+
 std::pair<OID, Date_t> generateBucketOID(const Date_t& time, const TimeseriesOptions& options) {
     OID oid;
 
@@ -1151,6 +1182,22 @@ Bucket& allocateBucket(OperationContext* opCtx,
                        WithLock stripeLock,
                        const CreationInfo& info) {
     expireIdleBuckets(opCtx, catalog, stripe, stripeLock, info.stats, *info.closedBuckets);
+    // If the feature flag for timeseriesAlwaysUseCompressed is enabled, we want to make sure that
+    // if allocating a new bucket for this metadata pushes the number of open buckets for this
+    // metadata above gTimeseriesMaxOpenBucketsPerMetadata, that we close a bucket to get back
+    // under this limit.
+    if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        constexpr bool isReopening = false;
+        ensureSpaceToOpenNewBucket(opCtx,
+                                   catalog,
+                                   stripe,
+                                   stripeLock,
+                                   info.stats,
+                                   info.key,
+                                   *info.closedBuckets,
+                                   isReopening);
+    }
 
     // In rare cases duplicate bucket _id fields can be generated in the same stripe and fail to be
     // inserted. We will perform a limited number of retries to minimize the probability of
@@ -1235,6 +1282,16 @@ std::pair<RolloverAction, RolloverReason> determineRolloverAction(
     // accordingly. If we specify the mode to not allow bucket creation, it means we are not sure if
     // we want to soft close the bucket yet and should wait to update closure stats.
     const bool shouldUpdateStats = (mode == AllowBucketCreation::kYes);
+
+    if (bucket.usingAlwaysCompressedBuckets !=
+        feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        // The user operation is executing with the always use compressed buckets feature flag in
+        // the opposite mode from what the bucket was created with. We close the bucket as this
+        // makes the incoming measurement incompatible with this bucket.
+        // TODO SERVER-70605: remove this check.
+        return {RolloverAction::kHardClose, RolloverReason::kIncompatible};
+    }
 
     auto bucketTime = bucket.minTime;
     if (info.time - bucketTime >= Seconds(*info.options.getBucketMaxSpanSeconds())) {
@@ -1321,12 +1378,13 @@ ExecutionStatsController getOrInitializeExecutionStats(BucketCatalog& catalog,
         return {it->second, catalog.globalExecutionStats};
     }
 
-    auto res = catalog.executionStats.emplace(ns, std::make_shared<ExecutionStats>());
+    auto res = catalog.executionStats.emplace(
+        ns, make_shared_tracked<ExecutionStats>(catalog.trackingContext));
     return {res.first->second, catalog.globalExecutionStats};
 }
 
-std::shared_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
-                                                  const NamespaceString& ns) {
+shared_tracked_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
+                                                     const NamespaceString& ns) {
     static const auto kEmptyStats{std::make_shared<ExecutionStats>()};
 
     stdx::lock_guard catalogLock{catalog.mutex};
@@ -1338,7 +1396,7 @@ std::shared_ptr<ExecutionStats> getExecutionStats(const BucketCatalog& catalog,
     return kEmptyStats;
 }
 
-std::pair<NamespaceString, std::shared_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
+std::pair<NamespaceString, shared_tracked_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
     BucketCatalog& sideBucketCatalog) {
     stdx::lock_guard catalogLock{sideBucketCatalog.mutex};
     invariant(sideBucketCatalog.executionStats.size() == 1);
@@ -1346,7 +1404,7 @@ std::pair<NamespaceString, std::shared_ptr<ExecutionStats>> getSideBucketCatalog
 }
 
 void mergeExecutionStatsToBucketCatalog(BucketCatalog& catalog,
-                                        std::shared_ptr<ExecutionStats> collStats,
+                                        shared_tracked_ptr<ExecutionStats> collStats,
                                         const NamespaceString& viewNs) {
     ExecutionStatsController stats = getOrInitializeExecutionStats(catalog, viewNs);
     addCollectionExecutionStats(stats, *collStats);

@@ -896,7 +896,7 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
     } else if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
         // If this mongod has a router service, it needs to run stepdown
         // hooks even if the shard-role isn't initialized yet.
-        // TODO SERVER-82588: Update this code once CatalogCacheLoader is split between
+        // TODO SERVER-84243: Update this code once CatalogCacheLoader is split between
         // router and shard roles.
         if (Grid::get(_service)->isShardingInitialized()) {
             CatalogCacheLoader::get(_service).onStepDown();
@@ -1032,7 +1032,7 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         } else if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
             // If this mongod has a router service, it needs to run stepdown
             // hooks even if the shard-role isn't initialized yet.
-            // TODO SERVER-82588: Update this code once CatalogCacheLoader is split between
+            // TODO SERVER-84243: Update this code once CatalogCacheLoader is split between
             // router and shard roles.
             if (Grid::get(_service)->isShardingInitialized()) {
                 CatalogCacheLoader::get(_service).onStepUp();
@@ -1288,19 +1288,19 @@ JournalListener::Token ReplicationCoordinatorExternalStateImpl::getToken(Operati
         return {*truncatePoint, true /*isPrimary*/};
     }
 
-    // All other repl states use the 'lastApplied'.
+    // All other repl states use the 'lastWritten'.
     //
-    // Setting 'rollbackSafe' will ensure that a safe lastApplied value is returned if we're in
-    // ROLLBACK state. 'lastApplied' may be momentarily set to an opTime from a divergent branch
+    // Setting 'rollbackSafe' will ensure that a safe lastWritten value is returned if we're in
+    // ROLLBACK state. 'lastWritten' may be momentarily set to an opTime from a divergent branch
     // of history during rollback, so a benign default value will be returned instead to prevent
-    // a divergent 'lastApplied' from being used to forward the 'lastDurable' after rollback.
+    // a divergent 'lastWritten' from being used to forward the 'lastDurable' after rollback.
     //
     // No concurrency control is necessary and it is still safe if the node goes into ROLLBACK
     // after getting the token because the JournalFlusher is shut down during rollback, before a
-    // divergent 'lastApplied' value is present. The JournalFlusher will start up again in
+    // divergent 'lastWritten' value is present. The JournalFlusher will start up again in
     // ROLLBACK and never transition from non-ROLLBACK to ROLLBACK with a divergent
-    // 'lastApplied' value.
-    return {repl::ReplicationCoordinator::get(_service)->getMyLastAppliedOpTimeAndWallTime(
+    // 'lastWritten' value.
+    return {repl::ReplicationCoordinator::get(_service)->getMyLastWrittenOpTimeAndWallTime(
                 /*rollbackSafe=*/true),
             false /*isPrimary*/};
 }

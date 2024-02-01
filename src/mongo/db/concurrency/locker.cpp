@@ -29,6 +29,7 @@
 
 #include "mongo/db/concurrency/locker.h"
 
+#include "mongo/bson/json.h"
 #include "mongo/db/dump_lock_manager.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -1046,8 +1047,6 @@ void Locker::_setWaitingResource(ResourceId resId) {
 bool Locker::_shouldDelayUnlock(ResourceId resId, LockMode mode) const {
     switch (resId.getType()) {
         case RESOURCE_MUTEX:
-        case RESOURCE_DDL_DATABASE:
-        case RESOURCE_DDL_COLLECTION:
             return false;
 
         case RESOURCE_GLOBAL:
@@ -1055,6 +1054,8 @@ bool Locker::_shouldDelayUnlock(ResourceId resId, LockMode mode) const {
         case RESOURCE_DATABASE:
         case RESOURCE_COLLECTION:
         case RESOURCE_METADATA:
+        case RESOURCE_DDL_DATABASE:
+        case RESOURCE_DDL_COLLECTION:
             break;
 
         default:

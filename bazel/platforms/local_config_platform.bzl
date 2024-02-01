@@ -1,3 +1,4 @@
+load("//bazel/platforms:remote_execution_containers.bzl", "REMOTE_EXECUTION_CONTAINERS")
 
 _OS_MAP = {
     "macos": "@platforms//os:osx",
@@ -16,7 +17,7 @@ def _setup_local_config_platform(ctx):
     Generates our own local_config_platform, overriding bazel's built in generation.
 
     This allows is to setup the exec_properties on this platform so a user can use remote execution
-    without need to specify a specific platform. 
+    without need to specify a specific platform.
     """
 
     if "win" in ctx.os.name:
@@ -36,15 +37,20 @@ def _setup_local_config_platform(ctx):
     # So Starlark doesn't throw an indentation error when this gets injected.
     constraints_str = ",\n        ".join(['"%s"' % c for c in constraints])
 
-    if os == "linux" and arch in ['amd64', 'aarch64', 'x86_64']:
+    if os == "linux" and arch in ["aarch64"]:
         exec_props = """
     exec_properties = {
-        # debian gcc based image contains the base our toolchain needs (glibc version and build-essentials)
-        # https://hub.docker.com/layers/library/gcc/12.3-bookworm/images/sha256-6a3a5694d10299dbfb8747b98621abf4593bb54a5396999caa013cba0e17dd4f?context=explore
-        "container-image": "docker://docker.io/library/gcc@sha256:6a3a5694d10299dbfb8747b98621abf4593bb54a5396999caa013cba0e17dd4f",
+        "container-image": "%s",
         "dockerNetwork": "standard"
     },
-"""
+""" % REMOTE_EXECUTION_CONTAINERS["linux_arm64"]["container-image"]
+    elif os == "linux" and arch in ["amd64", "x86_64"]:
+        exec_props = """
+    exec_properties = {
+        "container-image": "%s",
+        "dockerNetwork": "standard"
+    },
+""" % REMOTE_EXECUTION_CONTAINERS["linux_amd64"]["container-image"]
     else:
         exec_props = ""
 
@@ -52,7 +58,7 @@ def _setup_local_config_platform(ctx):
         "{constraints}": constraints_str,
         "{exec_props}": exec_props,
     }
-    
+
     ctx.template(
         "BUILD.bazel",
         ctx.attr.build_tpl,

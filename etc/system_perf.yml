@@ -115,61 +115,75 @@ modules:
   # (search update-repos-here) in this repo, and etc/system_perf.yml and
   # etc/perf.yml in mongodb/mongo
   - name: dsi
-    repo: git@github.com:10gen/dsi.git
+    owner: 10gen
+    repo: dsi
     prefix: ${workdir}/src
     branch: master
   - name: genny
-    repo: git@github.com:10gen/genny.git
+    owner: 10gen
+    repo: genny
     prefix: ${workdir}/src
     branch: master
   - name: workloads
-    repo: git@github.com:10gen/workloads.git
+    owner: 10gen
+    repo: workloads
     prefix: ${workdir}/src
     branch: master
   - name: linkbench
-    repo: git@github.com:10gen/linkbench.git
+    owner: 10gen
+    repo: linkbench
     prefix: ${workdir}/src
     branch: master
   - name: linkbench2
-    repo: git@github.com:10gen/linkbench2.git
+    owner: 10gen
+    repo: linkbench2
     prefix: ${workdir}/src
     branch: master
   - name: tsbs
-    repo: git@github.com:mongodb-forks/tsbs.git
+    owner: mongodb-forks
+    repo: tsbs
     prefix: ${workdir}/src
     branch: main
   - name: mongo-perf
-    repo: git@github.com:mongodb/mongo-perf.git
+    owner: mongodb
+    repo: mongo-perf
     prefix: ${workdir}/src
     branch: master
   - name: YCSB
-    repo: git@github.com:mongodb-labs/YCSB.git
+    owner: mongodb-labs
+    repo: YCSB
     prefix: ${workdir}/src
     branch: production
   - name: py-tpcc
-    repo: git@github.com:mongodb-labs/py-tpcc.git
+    owner: mongodb-labs
+    repo: py-tpcc
     prefix: ${workdir}/src
     branch: production
   - name: flamegraph
-    repo: git@github.com:mongodb-forks/flamegraph.git
+    owner: mongodb-forks
+    repo: flamegraph
     prefix: ${workdir}/src
     branch: master
   #  - name: mongo
-  #    repo: git@github.com:mongodb/mongo.git
+  #    owner: mongodb
+  #    repo: mongo
   #    prefix: ${workdir}/src
   #    branch: master
   ###
   - name: enterprise
-    repo: git@github.com:10gen/mongo-enterprise-modules.git
+    owner: 10gen
+    repo: mongo-enterprise-modules
     prefix: src/mongo/db/modules
     branch: master
   # Pinned to version 100.7.2
   - name: mongo-tools
-    repo: git@github.com:mongodb/mongo-tools.git
+    owner: mongodb
+    repo: mongo-tools
     prefix: mongo-tools/src/github.com/mongodb
     branch: db8c5c4
   - name: PrivateWorkloads
-    repo: git@github.com:10gen/PrivateWorkloads.git
+    owner: 10gen
+    repo: PrivateWorkloads
     prefix: ${workdir}/src
     branch: production
 
@@ -1179,31 +1193,6 @@ buildvariants:
         depends_on:
           - name: archive_dist_test
             variant: amazon2-arm64-compile
-
-  - name: rhel70-x86-compile
-    display_name: Compile for RHEL70 x86 NEW
-    modules: *modules
-    expansions:
-      platform: linux
-      project_dir: *project_dir
-      compile_variant: rhel70-x86-compile
-      scons_cache_scope: shared
-      scons_cache_mode: all
-      has_packages: false
-      compile_flags: >-
-        --ssl
-        MONGO_DISTMOD=rhel70
-        -j$(grep -c ^processor /proc/cpuinfo)
-        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-    run_on:
-      - rhel70-xlarge
-    tasks:
-      - name: compile_and_package_serial_no_unittests_TG
-      - name: package_new_compile
-        depends_on:
-          - name: archive_dist_test
-            variant: rhel70-x86-compile
-
 
   - name: amazon2-arm64-mongocrypt-shlib-compile
     display_name: Compile mongo_crypt_v1.so for Amazon Linux 2 arm64 NEW
@@ -3223,28 +3212,6 @@ buildvariants:
   #     - *schedule_variant_auto_tasks_task
   #     - name: initialsync-large
   #     - name: initialsync-large-fcbis
-
-  # - name: linux-3-node-replSet-cpu-cycle-metrics.2023-06
-  #   display_name: Linux 3-Node ReplSet CPU Cycle Metrics 2023-06
-  #   cron: "0 0 * * 4" # 00:00 on Thursday
-  #   modules: *modules
-  #   expansions:
-  #     mongodb_setup_release: 2022-11
-  #     mongodb_setup: replica-ipc-counters.2023-06
-  #     infrastructure_provisioning_release: 2022-11
-  #     infrastructure_provisioning: replica
-  #     workload_setup: 2022-11
-  #     platform: linux
-  #     authentication: disabled
-  #     storageEngine: wiredTiger
-  #     compile_variant: "-arm64"
-  #     project_dir: *project_dir
-  #   depends_on: *_compile_amazon_linux2_arm64
-  #   run_on:
-  #     - "rhel70-perf-replset"
-  #   tasks:
-  #     - *schedule_patch_auto_tasks_task
-  #     - *schedule_variant_auto_tasks_task
 
   # - name: linux-replSet-initialsync-logkeeper.2022-11
   #   display_name: Linux ReplSet Initial Sync LogKeeper 2022-11

@@ -451,6 +451,70 @@ public:
         }
         ASSERT_EQ(memcmp(columnBinary.data, buf, columnBinary.length), 0);
 
+        // Verify BSONColumnBuilder::intermediate
+        {
+            BufBuilder buffer;
+            size_t num = BSONColumn(columnBinary).size();
+            // This test has quadratic complexity, limit it to binaries with a limited number of
+            // elements.
+            if (num > 0 && num < 100) {
+                // Iterate over all elements and validate intermediate in all combinations
+                for (size_t i = 1; i < num; ++i) {
+                    BSONColumnBuilder cb;
+
+                    // Append initial data to our builder
+                    BSONColumn c(columnBinary);
+                    auto it = c.begin();
+                    for (size_t j = 0; j < i; ++j, ++it) {
+                        cb.append(*it);
+                    }
+
+                    // Call intermediate and obtain our anchor points
+                    auto [anchor1, anchor2] = cb.intermediate(buffer);
+                    ASSERT_GTE(anchor1, 0);
+                    ASSERT_LTE(anchor1, buffer.len());
+                    ASSERT_GTE(anchor2, 0);
+                    ASSERT_LTE(anchor2, buffer.len());
+                    ASSERT_LTE(anchor1, anchor2);
+
+                    // Append the rest of the data and verify that the anchor points from before.
+                    BufBuilder buffer2;
+                    for (size_t j = i; j < num; ++j, ++it) {
+                        cb.append(*it);
+
+                        // Validate anchor points when we've appended more data.
+                        cb.intermediate(buffer2);
+                        ASSERT(memcmp(buffer.buf(), buffer2.buf(), anchor1) == 0);
+                        if (*(buffer.buf() + anchor1) == *(buffer2.buf() + anchor1)) {
+                            ASSERT(memcmp(buffer.buf(), buffer2.buf(), anchor2) == 0);
+                        }
+                    }
+
+                    // We should now have added all our data.
+                    ASSERT(it == c.end());
+
+                    // Finalize the binary, we are now done. Perform one last validation of the
+                    // anchor points
+                    BSONBinData binary = cb.finalize();
+                    ASSERT_GTE(binary.length, anchor1);
+                    auto data = buffer.buf();
+                    auto res = memcmp(binary.data, data, anchor1);
+                    ASSERT(res == 0);
+
+                    if (*(data + anchor1) == *((const char*)binary.data + anchor1)) {
+                        auto res = memcmp(binary.data, data, anchor2);
+                        ASSERT(res == 0);
+                    }
+
+                    // Last verify that the final binary is exactly the same as-if intermediate was
+                    // never called.
+                    ASSERT_EQ(binary.length, columnBinary.length);
+                    res = memcmp(binary.data, columnBinary.data, binary.length);
+                    ASSERT(res == 0);
+                }
+            }
+        }
+
         if (testReopen) {
             BSONColumn c(columnBinary);
             size_t num = c.size();
@@ -472,17 +536,22 @@ public:
         }
     }
 
+    // testBlockBased is a temporary option; it will be removed once all
+    // functionality for block based decompression is in place and all
+    // relevant tests are onboarded
     static void verifyDecompression(const BufBuilder& columnBinary,
-                                    const std::vector<BSONElement>& expected) {
+                                    const std::vector<BSONElement>& expected,
+                                    bool testBlockBased = false) {
         BSONBinData bsonBinData;
         bsonBinData.data = columnBinary.buf();
         bsonBinData.length = columnBinary.len();
         bsonBinData.type = Column;
-        verifyDecompression(bsonBinData, expected);
+        verifyDecompression(bsonBinData, expected, testBlockBased);
     }
 
     static void verifyDecompression(BSONBinData columnBinary,
-                                    const std::vector<BSONElement>& expected) {
+                                    const std::vector<BSONElement>& expected,
+                                    bool testBlockBased = false) {
         BSONObjBuilder obj;
         obj.append(""_sd, columnBinary);
         BSONElement columnElement = obj.done().firstElement();
@@ -578,6 +647,33 @@ public:
                 }
             }
         }
+        // Verify we can decompress the entire column using the block-based API using the
+        // BSONElementMaterializer.
+        {
+            bsoncolumn::BSONColumnBlockBased col(columnBinary);
+            boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+            std::vector<BSONElement> container;
+            col.decompressIterative<BSONElementMaterializer>(container, allocator);
+            ASSERT_EQ(container.size(), expected.size());
+            auto actual = container.begin();
+            for (auto&& elem : expected) {
+                elem.binaryEqualValues(*actual);
+                ++actual;
+            }
+        }
+
+        // This gate will be removed once all types are onboarded to decompress all interface
+        if (testBlockBased) {
+            boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+            std::vector<BSONElement> collection;
+            BSONColumnBlockBased c((const char*)columnBinary.data, columnBinary.length);
+
+            c.decompress<BSONElementMaterializer, std::vector<BSONElement>>(collection, allocator);
+            ASSERT_EQ(collection.size(), expected.size());
+            for (size_t i = 0; i < collection.size(); ++i) {
+                ASSERT(expected[i].binaryEqualValues(collection[i]));
+            }
+        }
     }
 
     /**
@@ -611,7 +707,7 @@ TEST_F(BSONColumnTest, Empty) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {});
+    verifyDecompression(binData, {}, true);
 }
 
 TEST_F(BSONColumnTest, ContainsScalarInt32SimpleCompressed) {
@@ -886,7 +982,7 @@ TEST_F(BSONColumnTest, BasicValue) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elem, elem});
+    verifyDecompression(binData, {elem, elem}, true);
 }
 
 TEST_F(BSONColumnTest, BasicSkip) {
@@ -970,7 +1066,7 @@ TEST_F(BSONColumnTest, LargeDeltaIsLiteral) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {first, second});
+    verifyDecompression(binData, {first, second}, true);
 }
 
 TEST_F(BSONColumnTest, LargeDeltaIsLiteralAfterSimple8b) {
@@ -995,7 +1091,7 @@ TEST_F(BSONColumnTest, LargeDeltaIsLiteralAfterSimple8b) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {zero, zero, large, large});
+    verifyDecompression(binData, {zero, zero, large, large}, true);
 }
 
 TEST_F(BSONColumnTest, OverBlockCount) {
@@ -1047,7 +1143,7 @@ TEST_F(BSONColumnTest, TypeChangeAfterLiteral) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elemInt32, elemInt64});
+    verifyDecompression(binData, {elemInt32, elemInt64}, true);
 }
 
 TEST_F(BSONColumnTest, TypeChangeAfterSimple8b) {
@@ -1069,7 +1165,7 @@ TEST_F(BSONColumnTest, TypeChangeAfterSimple8b) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elemInt32, elemInt32, elemInt64});
+    verifyDecompression(binData, {elemInt32, elemInt32, elemInt64}, true);
 }
 
 TEST_F(BSONColumnTest, Simple8bAfterTypeChange) {
@@ -1091,7 +1187,7 @@ TEST_F(BSONColumnTest, Simple8bAfterTypeChange) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elemInt32, elemInt64, elemInt64});
+    verifyDecompression(binData, {elemInt32, elemInt64, elemInt64}, true);
 }
 
 TEST_F(BSONColumnTest, BasicDouble) {
@@ -1110,7 +1206,7 @@ TEST_F(BSONColumnTest, BasicDouble) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {d1, d2});
+    verifyDecompression(binData, {d1, d2}, true);
 }
 
 TEST_F(BSONColumnTest, DoubleSameScale) {
@@ -1134,7 +1230,7 @@ TEST_F(BSONColumnTest, DoubleSameScale) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleIncreaseScaleFromLiteral) {
@@ -1153,7 +1249,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromLiteral) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {d1, d2});
+    verifyDecompression(binData, {d1, d2}, true);
 }
 
 TEST_F(BSONColumnTest, DoubleLiteralAndScaleAfterSkip) {
@@ -1224,7 +1320,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaWithRescale) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaNoRescale) {
@@ -1256,7 +1352,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaNoRescale) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlock) {
@@ -1287,7 +1383,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlock) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockContinueAppend) {
@@ -1327,7 +1423,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockContinueAppend) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkip) {
@@ -1385,7 +1481,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockThenScaleBackUp) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkipThenScaleBackUp) {
@@ -1411,7 +1507,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkipThenScaleBackUp) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleUnscalable) {
@@ -1438,7 +1534,7 @@ TEST_F(BSONColumnTest, DoubleUnscalable) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleMultiplePendingAfterWritingBlock) {
@@ -1474,7 +1570,7 @@ TEST_F(BSONColumnTest, DoubleMultiplePendingAfterWritingBlock) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleSignalingNaN) {
@@ -1500,7 +1596,7 @@ TEST_F(BSONColumnTest, DoubleSignalingNaN) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elem, nan});
+    verifyDecompression(binData, {elem, nan}, true);
 }
 
 TEST_F(BSONColumnTest, DoubleQuietNaN) {
@@ -1524,7 +1620,7 @@ TEST_F(BSONColumnTest, DoubleQuietNaN) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elem, nan});
+    verifyDecompression(binData, {elem, nan}, true);
 }
 
 TEST_F(BSONColumnTest, DoubleInfinity) {
@@ -1548,7 +1644,7 @@ TEST_F(BSONColumnTest, DoubleInfinity) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elem, inf});
+    verifyDecompression(binData, {elem, inf}, true);
 }
 
 TEST_F(BSONColumnTest, DoubleDenorm) {
@@ -1572,7 +1668,7 @@ TEST_F(BSONColumnTest, DoubleDenorm) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elem, denorm});
+    verifyDecompression(binData, {elem, denorm}, true);
 }
 
 TEST_F(BSONColumnTest, DoubleIntegerOverflow) {
@@ -1596,7 +1692,7 @@ TEST_F(BSONColumnTest, DoubleIntegerOverflow) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {e1, e2});
+    verifyDecompression(binData, {e1, e2}, true);
 }
 
 TEST_F(BSONColumnTest, DoubleZerosSignDifference) {
@@ -1620,7 +1716,7 @@ TEST_F(BSONColumnTest, DoubleZerosSignDifference) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {d1, d2});
+    verifyDecompression(binData, {d1, d2}, true);
 }
 
 TEST_F(BSONColumnTest, Decimal128Base) {
@@ -1862,7 +1958,7 @@ TEST_F(BSONColumnTest, Simple8bTimestamp) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {first, second, second});
+    verifyDecompression(binData, {first, second, second}, true);
 }
 
 TEST_F(BSONColumnTest, Simple8bTimestampNegativeDeltaOfDelta) {
@@ -1886,7 +1982,7 @@ TEST_F(BSONColumnTest, Simple8bTimestampNegativeDeltaOfDelta) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {first, second, third});
+    verifyDecompression(binData, {first, second, third}, true);
 }
 
 TEST_F(BSONColumnTest, Simple8bTimestampAfterChangeBack) {
@@ -1917,7 +2013,7 @@ TEST_F(BSONColumnTest, Simple8bTimestampAfterChangeBack) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {first, second, elemInt32, first, second});
+    verifyDecompression(binData, {first, second, elemInt32, first, second}, true);
 }
 
 TEST_F(BSONColumnTest, LargeDeltaOfDeltaTimestamp) {
@@ -1936,7 +2032,7 @@ TEST_F(BSONColumnTest, LargeDeltaOfDeltaTimestamp) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {first, second});
+    verifyDecompression(binData, {first, second}, true);
 }
 
 TEST_F(BSONColumnTest, LargeDeltaOfDeltaIsLiteralAfterSimple8bTimestamp) {
@@ -1967,7 +2063,7 @@ TEST_F(BSONColumnTest, LargeDeltaOfDeltaIsLiteralAfterSimple8bTimestamp) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {zero, zero, large, large, semiLarge});
+    verifyDecompression(binData, {zero, zero, large, large, semiLarge}, true);
 }
 
 TEST_F(BSONColumnTest, DateBasic) {
@@ -1989,7 +2085,7 @@ TEST_F(BSONColumnTest, DateBasic) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {first, second, second});
+    verifyDecompression(binData, {first, second, second}, true);
 }
 
 TEST_F(BSONColumnTest, DateAfterChangeBack) {
@@ -2012,7 +2108,7 @@ TEST_F(BSONColumnTest, DateAfterChangeBack) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elemInt32, date, date});
+    verifyDecompression(binData, {elemInt32, date, date}, true);
 }
 
 TEST_F(BSONColumnTest, DateLargeDelta) {
@@ -2031,7 +2127,7 @@ TEST_F(BSONColumnTest, DateLargeDelta) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {first, second});
+    verifyDecompression(binData, {first, second}, true);
 }
 
 TEST_F(BSONColumnTest, BoolBasic) {
@@ -2055,7 +2151,7 @@ TEST_F(BSONColumnTest, BoolBasic) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {trueBson, trueBson, falseBson, trueBson});
+    verifyDecompression(binData, {trueBson, trueBson, falseBson, trueBson}, true);
 }
 
 TEST_F(BSONColumnTest, BoolAfterChangeBack) {
@@ -2078,7 +2174,7 @@ TEST_F(BSONColumnTest, BoolAfterChangeBack) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elemInt32, trueBson, trueBson});
+    verifyDecompression(binData, {elemInt32, trueBson, trueBson}, true);
 }
 
 TEST_F(BSONColumnTest, UndefinedBasic) {
@@ -6709,9 +6805,11 @@ TEST_F(BSONColumnTest, Intermediate) {
 
     int prevAnchor = 0;
     {
-        BSONBinData binData = cb.intermediate(&prevAnchor);
-        ASSERT_EQ(binData.length, 1);
-        ASSERT_EQ(*static_cast<const char*>(binData.data), '\0');
+        int a;
+        BufBuilder buffer;
+        std::tie(prevAnchor, a) = cb.intermediate(buffer);
+        ASSERT_EQ(buffer.len(), 1);
+        ASSERT_EQ(*buffer.buf(), '\0');
         ASSERT_EQ(prevAnchor, 0);
     }
 
@@ -6720,12 +6818,12 @@ TEST_F(BSONColumnTest, Intermediate) {
         cb.append(elem);
         cb2.append(elem);
 
-        int anchor = 0;
-        BSONBinData binData = cb.intermediate(&anchor);
+        BufBuilder buffer;
+        auto [anchor, anchor2] = cb.intermediate(buffer);
         anchors.emplace_back();
-        anchors.back().appendBuf(binData.data, anchor);
+        anchors.back().appendBuf(buffer.buf(), anchor);
         // Anchor is always less than the final buffer because of the EOO at the end
-        ASSERT_LT(anchor, binData.length);
+        ASSERT_LT(anchor, buffer.len());
         // Anchor should increase or stay the same when appending
         ASSERT_GTE(anchor, prevAnchor);
         prevAnchor = anchor;
@@ -6818,109 +6916,101 @@ TEST_F(BSONColumnTest, FTDCRoundTrip) {
 
 class TestMaterializer {
 public:
-    // Dummy allocator is not used
-    // Normally a materializer either has its own Allocator definition, or templates on an external
-    // allocator and simply declares
-    //
-    // using Allocator = typename TemplateAllocator;
-    class Allocator {
-    public:
-        Allocator() {}
-    };
     using Element = std::
         variant<std::monostate, bool, int32_t, int64_t, double, Timestamp, Date_t, OID, StringData>;
 
     template <typename T>
-    static Element materialize(Allocator& a, const T& val) {
+    static Element materialize(ElementStorage& a, const T& val) {
         return val;
     }
 
     template <typename T>
-    static Element materialize(Allocator& a, const BSONElement& val) {
+    static Element materialize(ElementStorage& a, const BSONElement& val) {
         return std::monostate();
     }
 
 
-    static Element materializeMissing(Allocator& a) {
+    static Element materializeMissing(ElementStorage& a) {
         return std::monostate();
     }
 };
 
 // Some compilers require that specializations be defined outside of class
 template <>
-TestMaterializer::Element TestMaterializer::materialize<BSONBinData>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<BSONBinData>(ElementStorage& a,
                                                                      const BSONBinData& val) {
     return StringData((const char*)val.data, val.length);
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<BSONCode>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<BSONCode>(ElementStorage& a,
                                                                   const BSONCode& val) {
     return val.code;
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<bool>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<bool>(ElementStorage& a,
                                                               const BSONElement& val) {
     return val.Bool();
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<int32_t>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<int32_t>(ElementStorage& a,
                                                                  const BSONElement& val) {
     return (int32_t)val.Int();
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<int64_t>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<int64_t>(ElementStorage& a,
                                                                  const BSONElement& val) {
     return (int64_t)val.Int();
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<double>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<double>(ElementStorage& a,
                                                                 const BSONElement& val) {
     return val.Double();
 }
 
 template <>
 TestMaterializer::Element TestMaterializer::materialize<unsigned long long>(
-    Allocator& a, const BSONElement& val) {
+    ElementStorage& a, const BSONElement& val) {
     return val.date();
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<Date_t>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<Date_t>(ElementStorage& a,
                                                                 const BSONElement& val) {
     return val.Date();
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<OID>(Allocator& a, const BSONElement& val) {
+TestMaterializer::Element TestMaterializer::materialize<OID>(ElementStorage& a,
+                                                             const BSONElement& val) {
     return val.OID();
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<StringData>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<StringData>(ElementStorage& a,
                                                                     const BSONElement& val) {
     return val.valueStringData();
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<BSONBinData>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<BSONBinData>(ElementStorage& a,
                                                                      const BSONElement& val) {
     int size = 0;
     return StringData(val.binData(size), size);
 }
 
 template <>
-TestMaterializer::Element TestMaterializer::materialize<BSONCode>(Allocator& a,
+TestMaterializer::Element TestMaterializer::materialize<BSONCode>(ElementStorage& a,
                                                                   const BSONElement& val) {
     return val.valueStringData();
 }
 
 TEST_F(BSONColumnTest, TestCollector) {
-    TestMaterializer::Allocator allocator;
+    boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
     std::vector<TestMaterializer::Element> collection;
     Collector<TestMaterializer, std::vector<TestMaterializer::Element>> collector(collection,
                                                                                   allocator);

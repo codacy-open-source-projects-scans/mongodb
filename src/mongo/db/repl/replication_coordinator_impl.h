@@ -245,11 +245,11 @@ public:
     virtual void setMyHeartbeatMessage(const std::string& msg);
 
     virtual OpTime getMyLastWrittenOpTime() const override;
-    virtual OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime() const override;
+    virtual OpTimeAndWallTime getMyLastWrittenOpTimeAndWallTime(
+        bool rollbackSafe = false) const override;
 
     virtual OpTime getMyLastAppliedOpTime() const override;
-    virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime(
-        bool rollbackSafe = false) const override;
+    virtual OpTimeAndWallTime getMyLastAppliedOpTimeAndWallTime() const override;
 
     virtual OpTime getMyLastDurableOpTime() const override;
     virtual OpTimeAndWallTime getMyLastDurableOpTimeAndWallTime() const override;
@@ -541,6 +541,10 @@ public:
      * Simple wrappers around _setLastOptimeForMember to make it easier to test.
      */
     Status setLastAppliedOptime_forTest(long long cfgVer,
+                                        long long memberId,
+                                        const OpTime& opTime,
+                                        Date_t wallTime = Date_t());
+    Status setLastWrittenOptime_forTest(long long cfgVer,
                                         long long memberId,
                                         const OpTime& opTime,
                                         Date_t wallTime = Date_t());
@@ -1186,8 +1190,8 @@ private:
      * "configVersion" will be populated with our config version if it and the configVersion
      * of "args" differ.
      *
-     * If either applied or durable optime has changed, returns the later of the two (even if
-     * that's not the one which changed).  Otherwise returns a null optime.
+     * If either written, applied or durable optime has changed, returns the later of the three
+     * (even if that's not the one which changed).  Otherwise returns a null optime.
      */
     StatusWith<OpTime> _setLastOptimeForMember(WithLock lk,
                                                const UpdatePositionArgs::UpdateInfo& args);
@@ -1868,9 +1872,6 @@ private:
     // The non-null OpTime used for committed reads, if there is one.
     // When engaged, this must be <= _lastCommittedOpTime.
     boost::optional<OpTime> _currentCommittedSnapshot;  // (M)
-
-    // Captured committedSnapshotOptime after reconfig
-    boost::optional<OpTime> _committedSnapshotAfterReconfig;  // (M)
 
     // Used to signal threads that are waiting for a new value of _currentCommittedSnapshot.
     stdx::condition_variable _currentCommittedSnapshotCond;  // (M)
