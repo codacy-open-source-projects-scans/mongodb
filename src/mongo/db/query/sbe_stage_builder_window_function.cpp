@@ -134,7 +134,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeCovarianceSamp(
     sbe::value::SlotVector slots,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state).expr;
+    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state);
 }
 
 std::unique_ptr<sbe::EExpression> buildWindowFinalizeCovariancePop(
@@ -143,7 +143,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeCovariancePop(
     sbe::value::SlotVector slots,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state).expr;
+    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state);
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddPush(
@@ -227,7 +227,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeIntegral(
     sbe::value::SlotVector slots,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state).expr;
+    return buildFinalize(state, accStmt, slots, collatorSlot).extractExpr(state);
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowInitializeDerivative(
@@ -261,7 +261,7 @@ std::unique_ptr<sbe::EExpression> buildWindowFinalizeDerivative(
     StringDataMap<std::unique_ptr<sbe::EExpression>> args,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto accStmt = createFakeAccumulationStatement(state, stmt);
-    return buildFinalize(state, accStmt, slots, std::move(args), collatorSlot);
+    return buildFinalize(state, accStmt, slots, std::move(args), collatorSlot).extractExpr(state);
 }
 
 std::vector<std::unique_ptr<sbe::EExpression>> buildWindowAddStdDev(

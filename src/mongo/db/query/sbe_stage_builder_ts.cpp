@@ -156,29 +156,65 @@ void printPlan(const sbe::PlanStage& stage) {
 
 std::unique_ptr<sbe::PlanStage> SlotBasedStageBuilder::buildBlockToRow(
     std::unique_ptr<sbe::PlanStage> stage, PlanStageSlots& outputs) {
+    auto [outStage, _] = buildBlockToRow(std::move(stage), outputs, TypedSlotVector{});
+    return std::move(outStage);
+}
+
+std::pair<std::unique_ptr<sbe::PlanStage>, TypedSlotVector> SlotBasedStageBuilder::buildBlockToRow(
+    std::unique_ptr<sbe::PlanStage> stage,
+    PlanStageSlots& outputs,
+    TypedSlotVector individualSlots) {
     // For this stage we output the 'topLevelSlots' (i.e. kField) and NOT the 'traversedSlots' (i.e.
     // kFilterCellField).
+    using UnownedSlotName = PlanStageSlots::UnownedSlotName;
+
+    absl::flat_hash_map<sbe::value::SlotId, sbe::value::SlotId> blockIdToUnpackedIdMap;
     sbe::value::SlotVector blockSlots;
-    std::vector<PlanStageSlots::UnownedSlotName> blockSlotNames, outputsToRemove;
+    sbe::value::SlotVector unpackedSlots;
+
+    std::vector<PlanStageSlots::UnownedSlotName> fieldNames, outputsToRemove;
     outputsToRemove.push_back(PlanStageSlots::kBlockSelectivityBitmap);
-    for (const auto& slot : outputs.getAllNameSlotPairsInOrder()) {
-        if (slot.first.first == PlanStageSlots::kField &&
-            (TypeSignature::kBlockType.isSubset(slot.second.typeSignature) ||
-             TypeSignature::kCellType.isSubset(slot.second.typeSignature))) {
-            blockSlots.push_back(slot.second.slotId);
-            blockSlotNames.push_back(slot.first);
+
+    auto processSlot = [&](TypedSlot slot, boost::optional<UnownedSlotName> name) {
+        auto typeSig = slot.getTypeSignature();
+        // If slot is a Block or Cell, add a mapping for it to 'blockIdToUnpackedIdMap'.
+        if (typeSig &&
+            (TypeSignature::kBlockType.isSubset(*typeSig) ||
+             TypeSignature::kCellType.isSubset(*typeSig))) {
+            if (!blockIdToUnpackedIdMap.count(slot.getId())) {
+                auto slotId = slot.getId();
+                auto unpackedId = _slotIdGenerator.generate();
+
+                blockIdToUnpackedIdMap[slotId] = unpackedId;
+                blockSlots.push_back(slotId);
+                unpackedSlots.push_back(unpackedId);
+            }
         }
-        if (slot.first.first == PlanStageSlots::kFilterCellField) {
-            outputsToRemove.push_back(slot.first);
+    };
+
+    for (const auto& [name, slot] : outputs.getAllNameSlotPairsInOrder()) {
+        if (name.first == PlanStageSlots::kField) {
+            fieldNames.push_back(name);
+            processSlot(slot, name);
+        }
+        if (name.first == PlanStageSlots::kFilterCellField) {
+            outputsToRemove.push_back(name);
         }
     }
+
+    for (const auto& slot : individualSlots) {
+        processSlot(slot, boost::none);
+    }
+
     // If there aren't any required block slots, use the default block slot as a fallback.
     if (blockSlots.empty()) {
         invariant(outputs.getBlockSlot());
-        auto [_, slot] = *outputs.getBlockSlot();
+        auto slot = *outputs.getBlockSlot();
+
         blockSlots.push_back(slot.slotId);
+        unpackedSlots.push_back(_slotIdGenerator.generate());
     }
-    auto unpackedSlots = _slotIdGenerator.generateMultiple(blockSlots.size());
+
     // Adds the BlockToRowStage.
     PlanNodeId nodeId = stage->getCommonStats()->nodeId;
     stage = std::make_unique<sbe::BlockToRowStage>(
@@ -195,68 +231,112 @@ std::unique_ptr<sbe::PlanStage> SlotBasedStageBuilder::buildBlockToRow(
         outputs.clear(outputsToRemove[i]);
     }
 
-    // After the BlockToRow stage, the block fields are now scalar values, in a different slot.
-    for (size_t i = 0; i < blockSlotNames.size(); ++i) {
-        outputs.set(blockSlotNames[i],
-                    TypedSlot{unpackedSlots[i],
-                              outputs.get(blockSlotNames[i])
-                                  .typeSignature.exclude(TypeSignature::kBlockType)
-                                  .exclude(TypeSignature::kCellType)});
+    // Update 'outputs' after the BlockToRow stage.
+    for (const auto& fieldName : fieldNames) {
+        auto slot = outputs.get(fieldName);
+        auto it = blockIdToUnpackedIdMap.find(slot.getId());
+        if (it != blockIdToUnpackedIdMap.end()) {
+            // 'slot' and 'unpackedSlot' will have the same type except that unpackedSlot's
+            // type will be scalar.
+            auto typeSig = slot.getTypeSignature();
+            auto unpackedTypeSig =
+                typeSig->exclude(TypeSignature::kBlockType).exclude(TypeSignature::kCellType);
+
+            auto unpackedSlot = TypedSlot{it->second, unpackedTypeSig};
+            outputs.set(fieldName, unpackedSlot);
+        }
+    }
+
+    // Update 'individualSlots' after the BlockToRow stage.
+    for (auto& slot : individualSlots) {
+        auto it = blockIdToUnpackedIdMap.find(slot.getId());
+        if (it != blockIdToUnpackedIdMap.end()) {
+            // 'slot' and 'unpackedSlot' will have the same type except that unpackedSlot's
+            // type will be scalar.
+            auto typeSig = slot.getTypeSignature();
+            auto unpackedTypeSig =
+                typeSig->exclude(TypeSignature::kBlockType).exclude(TypeSignature::kCellType);
+
+            auto unpackedSlot = TypedSlot{it->second, unpackedTypeSig};
+            slot = unpackedSlot;
+        }
     }
 
     outputs.clearBlockSlot();
 
-    return stage;
+    return {std::move(stage), std::move(individualSlots)};
 }
 
-boost::optional<TypedExpression> SlotBasedStageBuilder::buildVectorizedExpr(SbExpr scalarExpression,
-                                                                            PlanStageSlots& outputs,
-                                                                            bool forFilterStage) {
-    if (scalarExpression.hasABT()) {
-        auto abt = abt::unwrap(scalarExpression.extractABT());
-        // Prepare a temporary object to expose the block variables as scalar types.
-        VariableTypes varTypes;
+SbExpr buildVectorizedExpr(StageBuilderState& state,
+                           SbExpr scalarExpression,
+                           PlanStageSlots& outputs,
+                           bool forFilterStage) {
+    if (!scalarExpression || scalarExpression.isFinishedOptimizing()) {
+        // If this SbExpr is null or if it's marked as "finished optimizing", then do nothing
+        // and return.
+        return {};
+    }
 
+    // If 'scalarExpression' is a constant expression, then don't bother populating
+    // 'variableTypes' because optimize() doesn't need it.
+    auto typesToExclude = TypeSignature::kBlockType.include(TypeSignature::kCellType);
+    boost::optional<VariableTypes> variableTypes = !scalarExpression.isConstantExpr()
+        ? boost::make_optional(excludeTypes(buildVariableTypes(outputs), typesToExclude))
+        : boost::none;
+    VariableTypes* varTypes = variableTypes ? &*variableTypes : nullptr;
+
+    // Call optimize() with block variables exposed as scalar types.
+    scalarExpression.optimize(state, varTypes);
+
+    // If 'scalarExpression' is a local variable, there's nothing we can do, so return
+    // a null SbExpr.
+    if (scalarExpression.isLocalVarExpr()) {
+        return {};
+    }
+
+    // If 'scalarExpression' is a constant expression, then it is compatible with block
+    // processing, so we can just return it now without having do to any further processing.
+    if (scalarExpression.isConstantExpr()) {
+        return scalarExpression;
+    }
+
+    if (scalarExpression.canExtractABT()) {
+        Vectorizer vectorizer(state.frameIdGenerator,
+                              forFilterStage ? Vectorizer::Purpose::Filter
+                                             : Vectorizer::Purpose::Project);
+
+        // If we have an active bitmap, let the vectorizer know.
+        auto bitmapSlot = outputs.getSlotIfExists(PlanStageSlots::kBlockSelectivityBitmap);
+
+        Vectorizer::VariableTypes bindings;
         for (const TypedSlot& slot : outputs.getAllSlotsInOrder()) {
-            varTypes.emplace(getABTVariableName(slot.slotId),
-                             slot.typeSignature.exclude(TypeSignature::kBlockType)
-                                 .exclude(TypeSignature::kCellType));
+            if (auto typeSig = slot.getTypeSignature()) {
+                bindings.emplace(getABTVariableName(slot), std::make_pair(*typeSig, boost::none));
+            }
         }
 
-        constantFold(abt, _state, &varTypes);
+        auto abt = abt::unwrap(scalarExpression.extractABT());
 
-        if (abt.is<optimizer::Constant>()) {
-            // We consider constant expressions as compatible with block processing.
-            auto [tag, value] = abt.cast<optimizer::Constant>()->get();
-            auto [cpyTag, cpyVal] = sbe::value::copyValue(tag, value);
-            return TypedExpression{sbe::makeE<sbe::EConstant>(cpyTag, cpyVal),
-                                   getTypeSignature(tag)};
-        } else {
-            Vectorizer vectorizer(_state.frameIdGenerator,
-                                  forFilterStage ? Vectorizer::Purpose::Filter
-                                                 : Vectorizer::Purpose::Project);
+        Vectorizer::Tree blockABT = vectorizer.vectorize(abt, bindings, bitmapSlot);
 
-            // If we have an active bitmap, let the vectorizer know.
-            auto bitmapSlot = outputs.getSlotIfExists(PlanStageSlots::kBlockSelectivityBitmap);
+        if (blockABT.expr.has_value()) {
+            // Move the ABT into a new SbExpr and call optimize() without the information about
+            // the type of the slots, as they are now block variables that are not supported by
+            // the type checker. Manually set the type signature of the SbExpr to be whatever
+            // was reported by the vectorizer.
+            auto e = SbExpr{abt::wrap(std::move(*blockABT.expr))};
+            e.optimize(state);
+            e.setTypeSignature(blockABT.typeSignature);
 
-            Vectorizer::VariableTypes bindings;
-            for (const TypedSlot& slot : outputs.getAllSlotsInOrder()) {
-                bindings.emplace(getABTVariableName(slot.slotId),
-                                 std::make_pair(slot.typeSignature, boost::none));
-            }
-            Vectorizer::Tree blockABT = vectorizer.vectorize(abt, bindings, bitmapSlot);
+            // Mark this SbExpr as "finished optimizing" so that it won't get optimized again
+            // when extractExpr() gets called.
+            e.setFinishedOptimizing();
 
-            if (blockABT.expr.has_value()) {
-                // Run the conversion from ABT to EExpression without the information about the type
-                // of the slots, as they are now block variables that are not supported by the type
-                // checker. Report just the type of the root expression as reported by the
-                // vectorizer.
-                return TypedExpression{abtToExpr(*blockABT.expr, _state).expr,
-                                       blockABT.typeSignature};
-            }
+            return e;
         }
     }
-    return boost::none;
+
+    return {};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots>
@@ -343,7 +423,7 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
         }
         if (!outputs.hasBlockOutput()) {
             // Initalize the fallback block slot id.
-            outputs.setBlockSlot(key, slot);
+            outputs.setBlockSlot(slot);
         }
     }
     // Declare the traversed fields which can be used for evaluating $match.
@@ -381,74 +461,29 @@ SlotBasedStageBuilder::buildUnpackTsBucket(const QuerySolutionNode* root,
     boost::optional<sbe::value::SlotId> bitmapSlotId;
     if (eventFilter) {
         auto eventFilterSbExpr =
-            generateFilter(_state, eventFilter, /*rootSlot*/ boost::none, &outputs);
-        auto filterExpr = buildVectorizedExpr(std::move(eventFilterSbExpr), outputs, true);
-        if (filterExpr.has_value()) {
-            if (auto constExpr = filterExpr->expr->as<sbe::EConstant>(); constExpr) {
-                auto [tag, val] = constExpr->getConstant();
-                // The expression is a scalar constant, it must be a boolean value.
-                tassert(7969850,
-                        "Expected true or false value for filter",
-                        tag == sbe::value::TypeTags::Boolean);
-                if (sbe::value::bitcastTo<bool>(val)) {
-                    eventFilter = nullptr;
-                } else {
-                    stage = makeS<sbe::FilterStage<true>>(
-                        std::move(stage),
-                        sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean,
-                                                   sbe::value::bitcastFrom<bool>(false)),
-                        unpackNode->nodeId());
-                }
-            } else if (TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
-                           .isSubset(filterExpr->typeSignature)) {
-                // We successfully created an expression working on the block values and
-                // returning a block of boolean values; attach it to a project stage and use
-                // the result as the bitmap for the BlockToRow stage.
-                sbe::value::SlotId bitmapSlotId = _state.slotId();
-                sbe::SlotExprPairVector projects;
-                projects.emplace_back(bitmapSlotId, std::move(filterExpr->expr));
+            generateFilter(_state, eventFilter, boost::none /* rootSlot */, outputs);
 
-                stage = sbe::makeS<sbe::ProjectStage>(
-                    std::move(stage), std::move(projects), unpackNode->nodeId());
-                printPlan(*stage);
+        auto [newStage, isVectorised] = buildVectorizedFilterExpr(
+            std::move(stage), reqs, std::move(eventFilterSbExpr), outputs, unpackNode->nodeId());
+        stage = std::move(newStage);
 
-                // Add a filter stage that pulls new data if there isn't at least one 'true' value
-                // in the produced bitmap.
-                SbExprBuilder b(_state);
-                auto filterSbExpr = b.makeNot(b.makeFunction("valueBlockNone"_sd,
-                                                             b.makeVariable(SbVar{bitmapSlotId}),
-                                                             b.makeBoolConstant(true)));
+        if (!isVectorised) {
+            // The last step was to convert the block to row. Generate the filter expression
+            // again to use the scalar slots instead of the block slots.
+            auto eventFilterSbExpr =
+                generateFilter(_state, eventFilter, boost::none /* rootSlot */, outputs);
+            if (!eventFilterSbExpr.isNull()) {
                 stage = sbe::makeS<sbe::FilterStage<false>>(
-                    std::move(stage), filterSbExpr.extractExpr(_state).expr, unpackNode->nodeId());
+                    std::move(stage), eventFilterSbExpr.extractExpr(_state), unpackNode->nodeId());
                 printPlan(*stage);
-
-                outputs.set(
-                    PlanStageSlots::kBlockSelectivityBitmap,
-                    TypedSlot{bitmapSlotId,
-                              TypeSignature::kBlockType.include(TypeSignature::kBooleanType)});
-                // Reset the variable so that the filter is not generated as a stage in the
-                // scalar section of the pipeline.
-                eventFilter = nullptr;
             }
         }
-    }
-
-    // Insert a BlockToRow stage and let the rest of the pipeline work on scalar values if:
-    // - we have a filter that we could not vectorize
-    // - we are supposed to return a BSON result
-    // - the caller doesn't support working on block values
-    if (eventFilter || reqs.hasResult() || !reqs.getCanProcessBlockValues()) {
-        stage = buildBlockToRow(std::move(stage), outputs);
-    }
-
-    // Add filter stage(s) for the per-event filter.
-    if (eventFilter) {
-        auto eventFilterSbExpr =
-            generateFilter(_state, eventFilter, boost::none /* rootSlot */, &outputs);
-        if (!eventFilterSbExpr.isNull()) {
-            stage = sbe::makeS<sbe::FilterStage<false>>(
-                std::move(stage), eventFilterSbExpr.extractExpr(_state).expr, unpackNode->nodeId());
-            printPlan(*stage);
+    } else {
+        // Insert a BlockToRow stage and let the rest of the pipeline work on scalar values if:
+        // - we are supposed to return a BSON result
+        // - the caller doesn't support working on block values
+        if (reqs.hasResult() || !reqs.getCanProcessBlockValues()) {
+            stage = buildBlockToRow(std::move(stage), outputs);
         }
     }
 

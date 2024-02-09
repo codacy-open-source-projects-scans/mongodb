@@ -247,7 +247,8 @@ public:
     void setTimeseriesBucketingParametersChanged(OperationContext* opCtx,
                                                  boost::optional<bool> value) final;
 
-    bool doesTimeseriesBucketsDocContainMixedSchemaData(const BSONObj& bucketsDoc) const final;
+    StatusWith<bool> doesTimeseriesBucketsDocContainMixedSchemaData(
+        const BSONObj& bucketsDoc) const final;
 
     bool getRequiresTimeseriesExtendedRangeSupport() const final;
     void setRequiresTimeseriesExtendedRangeSupport(OperationContext* opCtx) const final;
@@ -270,6 +271,8 @@ public:
     //
     // Stats
     //
+
+    bool areRecordIdsReplicated() const final;
 
     bool isCapped() const final;
     long long getCappedMaxDocs() const final;
@@ -451,6 +454,8 @@ private:
         // of their own. The collection's validator will respect this collation. If null, the
         // default collation is simple binary compare.
         std::unique_ptr<CollatorInterface> _collator;
+
+        const bool _recordIdsReplicated;
 
         const bool _isCapped;
         const bool _needCappedLock;

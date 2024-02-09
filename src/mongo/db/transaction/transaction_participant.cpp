@@ -932,7 +932,9 @@ void TransactionParticipant::Participant::_beginOrContinueRetryableWrite(
 }
 
 void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
-    OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter) {
+    OperationContext* opCtx,
+    const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
+    TransactionActions action) {
     uassert(ErrorCodes::NoSuchTransaction,
             str::stream()
                 << "Given transaction number " << txnNumberAndRetryCounter.getTxnNumber()
@@ -982,6 +984,23 @@ void TransactionParticipant::Participant::_continueMultiDocumentTransaction(
             str::stream()
                 << "Transaction with " << txnNumberAndRetryCounter.toBSON()
                 << " has been aborted because an earlier command in this transaction failed.");
+    }
+
+    if (action == TransactionParticipant::TransactionActions::kStartOrContinue &&
+        o().txnResourceStash) {
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "Cannot continue transaction "
+                              << txnNumberAndRetryCounter.getTxnNumber() << " on session "
+                              << _sessionId() << " because readConcern  "
+                              << repl::ReadConcernArgs::get(opCtx).toString()
+                              << " does not match the existing readConcern for the transaction  "
+                              << o().txnResourceStash->getReadConcernArgs().toString(),
+                o().txnResourceStash->getReadConcernArgs().getLevel() ==
+                        repl::ReadConcernArgs::get(opCtx).getLevel() &&
+                    o().txnResourceStash->getReadConcernArgs().getArgsAfterClusterTime() ==
+                        repl::ReadConcernArgs::get(opCtx).getArgsAfterClusterTime() &&
+                    o().txnResourceStash->getReadConcernArgs().getArgsAtClusterTime() ==
+                        repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime());
     }
 }
 
@@ -1035,6 +1054,8 @@ void TransactionParticipant::Participant::beginOrContinue(
     TxnNumberAndRetryCounter txnNumberAndRetryCounter,
     boost::optional<bool> autocommit,
     TransactionActions action) {
+    opCtx->setActiveTransactionParticipant();
+
     if (_isInternalSessionForRetryableWrite()) {
         auto parentTxnParticipant =
             TransactionParticipant::get(opCtx, _session()->getParentSession());
@@ -1136,7 +1157,9 @@ void TransactionParticipant::Participant::beginOrContinue(
     }
 
     if (!startTransaction) {
-        _continueMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter);
+        invariant(action == TransactionActions::kContinue ||
+                  action == TransactionActions::kStartOrContinue);
+        _continueMultiDocumentTransaction(opCtx, txnNumberAndRetryCounter, action);
         return;
     }
 
@@ -1153,6 +1176,7 @@ void TransactionParticipant::Participant::beginOrContinue(
 void TransactionParticipant::Participant::beginOrContinueTransactionUnconditionally(
     OperationContext* opCtx, TxnNumberAndRetryCounter txnNumberAndRetryCounter) {
     invariant(opCtx->inMultiDocumentTransaction());
+    opCtx->setActiveTransactionParticipant();
 
     // We don't check or fetch any on-disk state, so treat the transaction as 'valid' for the
     // purposes of this method and continue the transaction unconditionally
@@ -1938,11 +1962,10 @@ TransactionOperations* TransactionParticipant::Participant::retrieveCompletedTra
     return &(p().transactionOperations);
 }
 
-TxnResponseMetadata TransactionParticipant::Participant::getResponseMetadata() {
-    // Currently the response metadata only contains a single field, which is whether or not the
-    // transaction is read-only so far.
-    return {o().txnState.isInSet(TransactionState::kInProgress) &&
-            p().transactionOperations.isEmpty()};
+BSONObj TransactionParticipant::Participant::getResponseMetadata() {
+    return BSON(TxnResponseMetadata::kReadOnlyFieldName
+                << (o().txnState.isInSet(TransactionState::kInProgress) &&
+                    p().transactionOperations.isEmpty()));
 }
 
 void TransactionParticipant::Participant::clearOperationsInMemory(OperationContext* opCtx) {
@@ -2608,7 +2631,7 @@ void TransactionParticipant::Observer::reportStashedState(OperationContext* opCt
         if (auto lockerInfo = o().txnResourceStash->locker()->getLockerInfo(boost::none)) {
             invariant(o().activeTxnNumberAndRetryCounter.getTxnNumber() != kUninitializedTxnNumber);
             builder->append("type", "idleSession");
-            builder->append("host", getHostNameCachedAndPort());
+            builder->append("host", prettyHostNameAndPort(opCtx->getClient()->getLocalPort()));
             builder->append("desc", "inactive transaction");
 
             const auto& lastClientInfo =

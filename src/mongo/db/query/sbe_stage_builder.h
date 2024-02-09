@@ -126,15 +126,6 @@ buildSearchMetadataExecutorSBE(OperationContext* opCtx,
                                PlanYieldPolicySBE* yieldPolicy);
 
 /**
- * Associate a slot with a signature representing all the possible types that the value stored at
- * runtime in the slot can assume.
- */
-struct TypedSlot {
-    sbe::value::SlotId slotId;
-    TypeSignature typeSignature;
-};
-
-/**
  * The PlanStageSlots class is used by SlotBasedStageBuilder to return the output slots produced
  * after building a stage.
  */
@@ -219,7 +210,7 @@ public:
 
         // When engaged, this stores a slot which is guaranteed to hold a block. If not engaged, we
         // are not currently in a block portion of the stage tree.
-        boost::optional<std::pair<OwnedSlotName, TypedSlot>> blockSlot;
+        boost::optional<TypedSlot> blockSlot;
     };
 
     static std::unique_ptr<Data> cloneData(const std::unique_ptr<Data>& other) {
@@ -300,12 +291,6 @@ public:
     }
 
     // Maps 'name' to 'slot' and clears any prior mapping the 'name' may have had.
-    void set(const UnownedSlotName& name, sbe::value::SlotId slot) {
-        set(name, TypedSlot{slot, TypeSignature::kAnyScalarType});
-    }
-    void set(OwnedSlotName name, sbe::value::SlotId slot) {
-        set(std::move(name), TypedSlot{slot, TypeSignature::kAnyScalarType});
-    }
     void set(const UnownedSlotName& name, TypedSlot slot) {
         _data->slotNameToIdMap.insert_or_assign(name, slot);
     }
@@ -449,9 +434,6 @@ public:
         set(kResult, slot);
         _data->resultInfoChanges.reset();
     }
-    void setResultObj(sbe::value::SlotId slot) {
-        setResultObj(TypedSlot{slot, TypeSignature::kAnyScalarType});
-    }
 
     // Returns true if this PlanStageSlots has "ResultInfo" (kResult mapped to a base object, a list
     // of changed fields in 'resultInfoChanges', and changed field slots), otherwise returns false.
@@ -486,16 +468,13 @@ public:
         set(kResult, slot);
         _data->resultInfoChanges.emplace();
     }
-    void setResultInfoBaseObj(sbe::value::SlotId slot) {
-        setResultInfoBaseObj(TypedSlot{slot, TypeSignature::kAnyScalarType});
-    }
 
-    void setBlockSlot(OwnedSlotName name, TypedSlot slot) {
+    void setBlockSlot(TypedSlot slot) {
         tassert(8542200, "Cannot override an initialized blockSlot", !_data->blockSlot);
-        _data->blockSlot = std::make_pair(name, slot);
+        _data->blockSlot = slot;
     }
 
-    const boost::optional<std::pair<OwnedSlotName, TypedSlot>>& getBlockSlot() const {
+    const boost::optional<TypedSlot>& getBlockSlot() const {
         return _data->blockSlot;
     }
 
@@ -523,21 +502,18 @@ public:
         changes = ProjectionEffects(FieldSet::makeOpenSet(drops), modifys, {}).compose(changes);
     }
 
-    // Return the type information associated with the requested slot.
-    TypeSignature getSignatureForSlot(sbe::value::SlotId slotId);
-
     // Returns a sorted list of all the names in this PlanStageSlots has that are required by
     // 'reqs', plus any additional names needed by 'reqs' that this PlanStageSlots does not satisfy.
     std::vector<OwnedSlotName> getRequiredNamesInOrder(const PlanStageReqs& reqs) const;
 
     // Returns a list of slots that correspond pairwise to the list of names produced by calling
     // 'getRequiredNamesInOrder(reqs)'.
-    std::vector<TypedSlot> getRequiredSlotsInOrder(const PlanStageReqs& reqs) const;
+    TypedSlotVector getRequiredSlotsInOrder(const PlanStageReqs& reqs) const;
 
     // This method returns a de-dupped list of all the slots that correspond to the names produced
     // calling by 'getRequiredNamesInOrder(reqs)'. The list returned by this method is sorted by
     // slot ID.
-    std::vector<TypedSlot> getRequiredSlotsUnique(const PlanStageReqs& reqs) const;
+    TypedSlotVector getRequiredSlotsUnique(const PlanStageReqs& reqs) const;
 
     // Returns a sorted list of all the name->slot mappings in this PlanStageSlots, sorted by
     // slot name.
@@ -545,7 +521,7 @@ public:
 
     // This method calls getAllNameSlotPairsInOrder() and then returns a list of the slots only,
     // sorted by slot name.
-    std::vector<TypedSlot> getAllSlotsInOrder() const;
+    TypedSlotVector getAllSlotsInOrder() const;
 
     // This method computes the list of required names 'L = getRequiredNamesInOrder(reqs)', and
     // then it adds a mapping 'N->NothingSlot' for each name N in list L where 'has(N)' is false.
@@ -1118,13 +1094,22 @@ private:
     std::unique_ptr<sbe::PlanStage> buildBlockToRow(std::unique_ptr<sbe::PlanStage> stage,
                                                     PlanStageSlots& outputs);
 
-    // Given an expression built on top of scalar processing, along with the definition of the
-    // visible slots (some of which could be marked as holding block of values), produce an
-    // expression tree that can be executed directly on top of them. Returns an empty result if the
-    // expression isn't vectorizable.
-    boost::optional<TypedExpression> buildVectorizedExpr(SbExpr scalarExpression,
-                                                         PlanStageSlots& outputs,
-                                                         bool forFilterStage);
+    std::pair<std::unique_ptr<sbe::PlanStage>, TypedSlotVector> buildBlockToRow(
+        std::unique_ptr<sbe::PlanStage> stage,
+        PlanStageSlots& outputs,
+        TypedSlotVector individualSlots);
+
+    /**
+     * Given a scalar filter Expression it tries to produced the vectorised stage. If this is
+     * possible it returns a pair {vectorisedStage, true}. If this is not possible it adds a
+     * block-to-row transition and returns {newStage, false}.
+     */
+    std::pair<std::unique_ptr<sbe::PlanStage>, bool> buildVectorizedFilterExpr(
+        std::unique_ptr<sbe::PlanStage> stage,
+        const PlanStageReqs& reqs,
+        SbExpr scalarFilterExpression,
+        PlanStageSlots& outputs,
+        PlanNodeId nodeId);
 
     std::unique_ptr<sbe::EExpression> buildLimitSkipAmountExpression(
         LimitSkipParameterization canBeParameterized,

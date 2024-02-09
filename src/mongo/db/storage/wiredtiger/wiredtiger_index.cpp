@@ -70,6 +70,8 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(WTIndexUassertDuplicateRecordForIdIndex);
 MONGO_FAIL_POINT_DEFINE(WTIndexUassertDuplicateRecordForKeyOnIdUnindex);
+MONGO_FAIL_POINT_DEFINE(WTIndexCreateUniqueIndexesInOldFormat);
+MONGO_FAIL_POINT_DEFINE(WTIndexInsertUniqueKeysInOldFormat);
 
 static const WiredTigerItem emptyItem(nullptr, 0);
 
@@ -165,25 +167,30 @@ StatusWith<std::string> WiredTigerIndex::parseIndexOptions(const BSONObj& option
 
 // static
 std::string WiredTigerIndex::generateAppMetadataString(const IndexDescriptor& desc) {
-    StringBuilder ss;
-
-    int keyStringVersion;
+    int dataFormatVersion;
 
     if (desc.unique() && !desc.isIdIndex()) {
-        keyStringVersion = desc.version() >= IndexDescriptor::IndexVersion::kV2
-            ? kDataFormatV6KeyStringV1UniqueIndexVersionV2
-            : kDataFormatV5KeyStringV0UniqueIndexVersionV1;
+        if (MONGO_unlikely(WTIndexCreateUniqueIndexesInOldFormat.shouldFail())) {
+            LOGV2(8596200,
+                  "Creating unique index with old format version due to "
+                  "WTIndexCreateUniqueIndexesInOldFormat failpoint",
+                  "desc"_attr = desc.toString());
+            dataFormatVersion = desc.version() >= IndexDescriptor::IndexVersion::kV2
+                ? kDataFormatV4KeyStringV1UniqueIndexVersionV2
+                : kDataFormatV3KeyStringV0UniqueIndexVersionV1;
+        } else {
+            dataFormatVersion = desc.version() >= IndexDescriptor::IndexVersion::kV2
+                ? kDataFormatV6KeyStringV1UniqueIndexVersionV2
+                : kDataFormatV5KeyStringV0UniqueIndexVersionV1;
+        }
     } else {
-        keyStringVersion = desc.version() >= IndexDescriptor::IndexVersion::kV2
+        dataFormatVersion = desc.version() >= IndexDescriptor::IndexVersion::kV2
             ? kDataFormatV2KeyStringV1IndexVersionV2
             : kDataFormatV1KeyStringV0IndexVersionV1;
     }
 
     // Index metadata
-    ss << ",app_metadata=("
-       << "formatVersion=" << keyStringVersion << "),";
-
-    return (ss.str());
+    return fmt::format(",app_metadata=(formatVersion={}),", dataFormatVersion);
 }
 
 // static
@@ -377,16 +384,8 @@ int64_t WiredTigerIndex::numEntries(OperationContext* opCtx) const {
 
     auto keyInclusion =
         TRACING_ENABLED ? Cursor::KeyInclusion::kInclude : Cursor::KeyInclusion::kExclude;
-    key_string::Value keyStringForSeek =
-        IndexEntryComparison::makeKeyStringFromBSONKeyForSeek(BSONObj(),
-                                                              getKeyStringVersion(),
-                                                              getOrdering(),
-                                                              true, /* forward */
-                                                              true  /* inclusive */
-        );
-
     auto cursor = newCursor(opCtx);
-    for (auto kv = cursor->seek(keyStringForSeek, keyInclusion); kv; kv = cursor->next()) {
+    for (auto kv = cursor->next(keyInclusion); kv; kv = cursor->next(keyInclusion)) {
         LOGV2_TRACE_INDEX(20095, "numEntries", "kv"_attr = kv);
         count++;
     }
@@ -784,7 +783,7 @@ public:
         invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(_opCtx), _cursor.get()),
                       _cursor->session);
 
-        _metrics.incrementOneIdxEntryWritten(_cursor->uri, item.size);
+        _metrics.incrementOneIdxEntryWritten(_idx->uri(), item.size);
 
         return Status::OK();
     }
@@ -850,7 +849,7 @@ public:
         invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(_opCtx), _cursor.get()),
                       _cursor->session);
 
-        _metrics.incrementOneIdxEntryWritten(_cursor->uri, keyItem.size);
+        _metrics.incrementOneIdxEntryWritten(_idx->uri(), keyItem.size);
 
         // Don't copy the key again if dups are allowed.
         if (!_dupsAllowed)
@@ -902,7 +901,7 @@ public:
         invariantWTOK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(_opCtx), _cursor.get()),
                       _cursor->session);
 
-        _metrics.incrementOneIdxEntryWritten(_cursor->uri, keyItem.size);
+        _metrics.incrementOneIdxEntryWritten(_idx->uri(), keyItem.size);
 
         _previousKeyString.resetFromBuffer(newKeyString.getBuffer(), newKeyString.getSize());
         return Status::OK();
@@ -1176,7 +1175,7 @@ protected:
         int ret = wiredTigerPrepareConflictRetry(
             _opCtx, [&] { return _forward ? cur->next(cur) : cur->prev(cur); });
 
-        _metrics->incrementOneCursorSeek(cur->uri);
+        _metrics->incrementOneCursorSeek(_uri);
 
         if (ret == WT_NOTFOUND) {
             return false;
@@ -1342,7 +1341,7 @@ protected:
     // false by any operation that moves the cursor, other than subsequent save/restore pairs.
     bool _lastMoveSkippedKey = false;
 
-    bool _eof = true;
+    bool _eof = false;
 };
 }  // namespace
 
@@ -1646,7 +1645,7 @@ Status WiredTigerIdIndex::_insert(OperationContext* opCtx,
     int ret = WT_OP_CHECK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), c));
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(c->uri, keyItem.size);
+    metricsCollector.incrementOneIdxEntryWritten(_uri, keyItem.size);
 
     if (ret != WT_DUPLICATE_KEY) {
         return wtRCToStatus(ret, c->session, [this]() {
@@ -1676,6 +1675,52 @@ Status WiredTigerIdIndex::_insert(OperationContext* opCtx,
                                   duplicateRecordId);
 }
 
+Status WiredTigerIndexUnique::_insertOldFormatKey(OperationContext* opCtx,
+                                                  WT_CURSOR* c,
+                                                  const key_string::Value& keyString) {
+    const RecordId id =
+        key_string::decodeRecordIdLongAtEnd(keyString.getBuffer(), keyString.getSize());
+    invariant(id.isValid());
+
+    LOGV2_DEBUG(8596201,
+                1,
+                "Inserting old format key into unique index due to "
+                "WTIndexInsertUniqueKeysInOldFormat failpoint",
+                "key"_attr = keyString.toString(),
+                "recordId"_attr = id.toString(),
+                "indexName"_attr = _indexName,
+                "keyPattern"_attr = _keyPattern,
+                "collectionUUID"_attr = _collectionUUID);
+
+    auto sizeWithoutRecordId =
+        key_string::sizeWithoutRecordIdLongAtEnd(keyString.getBuffer(), keyString.getSize());
+    WiredTigerItem keyItem(keyString.getBuffer(), sizeWithoutRecordId);
+
+    key_string::Builder value(getKeyStringVersion(), id);
+    const key_string::TypeBits typeBits = keyString.getTypeBits();
+    if (!typeBits.isAllZeros()) {
+        value.appendTypeBits(typeBits);
+    }
+
+    WiredTigerItem valueItem(value.getBuffer(), value.getSize());
+    setKey(c, keyItem.Get());
+    c->set_value(c, valueItem.Get());
+    int ret = WT_OP_CHECK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), c));
+
+    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
+    metricsCollector.incrementOneIdxEntryWritten(c->uri, keyItem.size);
+
+    // We don't expect WT_DUPLICATE_KEY here as we only insert old format keys when dupsAllowed is
+    // false. At this point we will have already triggered a write conflict with any concurrent
+    // writers in the new format, so we can safely insert without worrying about duplicates.
+    invariantWTOK(ret,
+                  c->session,
+                  fmt::format("WiredTigerIndexUnique::_insertOldFormatKey error: {}; uri: {}",
+                              _indexName,
+                              _uri));
+    return Status::OK();
+}
+
 Status WiredTigerIndexUnique::_insert(OperationContext* opCtx,
                                       WT_CURSOR* c,
                                       const key_string::Value& keyString,
@@ -1696,6 +1741,21 @@ Status WiredTigerIndexUnique::_insert(OperationContext* opCtx,
         }
     }
 
+    const bool hasOldFormatVersion =
+        _dataFormatVersion == kDataFormatV3KeyStringV0UniqueIndexVersionV1 ||
+        _dataFormatVersion == kDataFormatV4KeyStringV1UniqueIndexVersionV2;
+    if (MONGO_unlikely(!dupsAllowed && hasOldFormatVersion && _rsKeyFormat == KeyFormat::Long &&
+                       WTIndexInsertUniqueKeysInOldFormat.shouldFail())) {
+        // To support correctness testing of old-format index keys that might still be in the index
+        // after an upgrade, this failpoint can be configured to insert keys in the old format,
+        // given the required prerequisites. We can't do this when dups are allowed (on
+        // secondaries), as this could result in concurrent writes to the same key, the very thing
+        // the new format intends to avoid. Note that in testing, the only way to create a unique
+        // index with the old format version is with the WTIndexCreateUniqueIndexesInOldFormat
+        // failpoint. Old format keys also predated support for KeyFormat::String.
+        return _insertOldFormatKey(opCtx, c, keyString);
+    }
+
     // Now create the table key/value, the actual data record.
     WiredTigerItem keyItem(keyString.getBuffer(), keyString.getSize());
 
@@ -1710,7 +1770,7 @@ Status WiredTigerIndexUnique::_insert(OperationContext* opCtx,
     // Account for the actual key insertion, but do not attempt account for the complexity of any
     // previous duplicate key detection, which may perform writes.
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(c->uri, keyItem.size);
+    metricsCollector.incrementOneIdxEntryWritten(_uri, keyItem.size);
 
     // It is possible that this key is already present during a concurrent background index build.
     if (ret != WT_DUPLICATE_KEY) {
@@ -1750,7 +1810,7 @@ void WiredTigerIdIndex::_unindex(OperationContext* opCtx,
         invariantWTOK(ret, c->session);
 
         auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-        metricsCollector.incrementOneIdxEntryWritten(c->uri, keyItem.size);
+        metricsCollector.incrementOneIdxEntryWritten(_uri, keyItem.size);
         return;
     }
 
@@ -1764,7 +1824,7 @@ void WiredTigerIdIndex::_unindex(OperationContext* opCtx,
     invariantWTOK(ret, c->session);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneCursorSeek(c->uri);
+    metricsCollector.incrementOneCursorSeek(_uri);
 
     WT_ITEM old;
     invariantWTOK(c->get_value(c, &old), c->session);
@@ -1799,7 +1859,7 @@ void WiredTigerIdIndex::_unindex(OperationContext* opCtx,
     if (id == idInIndex) {
         invariantWTOK(WT_OP_CHECK(wiredTigerCursorRemove(*WiredTigerRecoveryUnit::get(opCtx), c)),
                       c->session);
-        metricsCollector.incrementOneIdxEntryWritten(c->uri, keyItem.size);
+        metricsCollector.incrementOneIdxEntryWritten(_uri, keyItem.size);
         return;
     }
 
@@ -1826,7 +1886,7 @@ void WiredTigerIndexUnique::_unindex(OperationContext* opCtx,
     // Account for the first removal attempt, but do not attempt to account for the complexity of
     // any subsequent removals and insertions when the index's keys are not fully-upgraded.
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(c->uri, item.size);
+    metricsCollector.incrementOneIdxEntryWritten(_uri, item.size);
 
     if (ret != WT_NOTFOUND) {
         invariantWTOK(ret, c->session);
@@ -1963,7 +2023,7 @@ Status WiredTigerIndexStandard::_insert(OperationContext* opCtx,
     ret = WT_OP_CHECK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), c));
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(c->uri, keyItem.size);
+    metricsCollector.incrementOneIdxEntryWritten(_uri, keyItem.size);
 
     // If the record was already in the index, we return OK. This can happen, for example, when
     // building a background index while documents are being written and reindexed.
@@ -1992,7 +2052,7 @@ void WiredTigerIndexStandard::_unindex(OperationContext* opCtx,
     invariantWTOK(ret, c->session);
 
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    metricsCollector.incrementOneIdxEntryWritten(c->uri, item.size);
+    metricsCollector.incrementOneIdxEntryWritten(_uri, item.size);
 }
 
 }  // namespace mongo

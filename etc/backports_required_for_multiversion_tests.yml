@@ -21,6 +21,8 @@
 #
 last-continuous:
   all:
+  - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
+    ticket: SERVER-83508
   - test_file: jstests/sharding/config_shards_on_repl_set_changes.js
     ticket: SERVER-21185
   - test_file: jstests/sharding/query/find_and_modify_without_two_phase.js
@@ -567,11 +569,19 @@ last-continuous:
     ticket: SERVER-83119
   - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
     ticket: SERVER-84151
+  - test_file: jstests/change_streams/split_large_event_with_other_stages.js
+    ticket: SERVER-85848
   - test_file: jstests/core/timeseries/timeseries_collmod.js
     ticket: SERVER-83370
+  - test_file: jstests/sharding/timeseries_drop.js
+    ticket: SERVER-84589
+  - test_file: jstests/core/clustered/clustered_collection_creation.js
+    ticket: SERVER-84331
   suites: null
 last-lts:
   all:
+  - test_file: src/mongo/db/modules/enterprise/jstests/fcbis/fcbis_pauses_watchdog_checks_during_storage_change.js
+    ticket: SERVER-83508
   - test_file: jstests/sharding/config_shards_on_repl_set_changes.js
     ticket: SERVER-21185
   - test_file: jstests/core/query/null_query_semantics.js
@@ -1194,6 +1204,12 @@ last-lts:
     ticket: SERVER-83119
   - test_file: jstests/core/timeseries/timeseries_collection_uuid.js
     ticket: SERVER-84151
+  - test_file: jstests/change_streams/split_large_event_with_other_stages.js
+    ticket: SERVER-85848
   - test_file: jstests/core/timeseries/timeseries_collmod.js
     ticket: SERVER-83370
+  - test_file: jstests/sharding/timeseries_drop.js
+    ticket: SERVER-84589
+  - test_file: jstests/core/clustered/clustered_collection_creation.js
+    ticket: SERVER-84331
   suites: null

@@ -84,8 +84,8 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/index_tag.h"
-#include "mongo/db/query/plan_enumerator.h"
-#include "mongo/db/query/plan_enumerator_explain_info.h"
+#include "mongo/db/query/plan_enumerator/plan_enumerator.h"
+#include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_ixselect.h"
@@ -1470,14 +1470,14 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // If we have any relevant indices, we try to create indexed plans.
     if (!relevantIndices.empty()) {
         // The enumerator spits out trees tagged with IndexTag(s).
-        PlanEnumeratorParams enumParams;
+        plan_enumerator::PlanEnumeratorParams enumParams;
         enumParams.intersect = params.options & QueryPlannerParams::INDEX_INTERSECTION;
         enumParams.root = query.getPrimaryMatchExpression();
         enumParams.indices = &relevantIndices;
         enumParams.enumerateOrChildrenLockstep =
             params.options & QueryPlannerParams::ENUMERATE_OR_CHILDREN_LOCKSTEP;
 
-        PlanEnumerator planEnumerator(enumParams);
+        plan_enumerator::PlanEnumerator planEnumerator(enumParams);
         uassertStatusOKWithContext(planEnumerator.init(), "failed to initialize plan enumerator");
 
         unique_ptr<MatchExpression> nextTaggedTree;
@@ -1736,7 +1736,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     bool collScanRequired = 0 == out.size();
     if (collScanRequired && noTableAndClusteredIDXScan(params)) {
         return Status(ErrorCodes::NoQueryExecutionPlans,
-                      "No indexed plans available, and running with 'notablescan' 1");
+                      "No indexed plans available, and running with 'notablescan'");
     }
 
     bool clusteredCollection = params.clusteredInfo.has_value();

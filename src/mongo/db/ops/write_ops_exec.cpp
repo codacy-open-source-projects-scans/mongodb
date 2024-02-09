@@ -135,6 +135,7 @@
 #include "mongo/db/timeseries/bucket_catalog/closed_bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/bucket_compression.h"
+#include "mongo/db/timeseries/bucket_compression_failure.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_options.h"
@@ -291,6 +292,7 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
             // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
             // TODO (SERVER-82066): Update handling for direct connections.
             // TODO (SERVER-81937): Update handling for transactions.
+            // TODO (SERVER-85366): Update handling for retryable writes.
             boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
                 allowCollectionCreation;
             const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
@@ -790,6 +792,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
         // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
         // TODO (SERVER-82066): Update handling for direct connections.
         // TODO (SERVER-81937): Update handling for transactions.
+        // TODO (SERVER-85366): Update handling for retryable writes.
         boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
             allowCollectionCreation;
         const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
@@ -2263,10 +2266,6 @@ TimeseriesSingleWriteResult performTimeseriesUpdate(
 void tryPerformTimeseriesBucketCompression(OperationContext* opCtx,
                                            timeseries::bucket_catalog::ClosedBucket& closedBucket,
                                            const write_ops::InsertCommandRequest& request) {
-    // When enabled, we skip constructing ClosedBuckets which results in skipping compression.
-    invariant(!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
-
     // Buckets with just a single measurement is not worth compressing.
     if (closedBucket.numMeasurements.has_value() && closedBucket.numMeasurements.value() <= 1) {
         return;
@@ -2684,12 +2683,13 @@ void getTimeseriesBatchResultsNoTenantMigration(
 
 std::tuple<TimeseriesBatches, TimeseriesStmtIds, size_t /* numInserted */> insertIntoBucketCatalog(
     OperationContext* opCtx,
+    const write_ops::InsertCommandRequest& request,
     size_t start,
     size_t numDocs,
     const std::vector<size_t>& indices,
+    timeseries::BucketReopeningPermittance reopening,
     std::vector<write_ops::WriteError>* errors,
-    bool* containsRetry,
-    const write_ops::InsertCommandRequest& request) {
+    bool* containsRetry) {
     auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
 
     auto bucketsNs = makeTimeseriesBucketsNamespace(ns(request));
@@ -2752,6 +2752,7 @@ std::tuple<TimeseriesBatches, TimeseriesStmtIds, size_t /* numInserted */> inser
             bucketsColl,
             timeSeriesOptions,
             measurementDoc,
+            reopening,
             canCombineTimeseriesInsertWithOtherClients(opCtx, request));
 
         if (auto error = write_ops_exec::generateError(
@@ -2810,25 +2811,57 @@ std::tuple<TimeseriesBatches, TimeseriesStmtIds, size_t /* numInserted */> inser
     return {std::move(batches), std::move(stmtIds), request.getDocuments().size()};
 }
 
+template <typename Fn>
+auto timeseriesBucketCompressionFailureRetry(
+    timeseries::bucket_catalog::BucketCatalog& bucketCatalog, const NamespaceString& ns, Fn&& fn) {
+    try {
+        return fn(timeseries::BucketReopeningPermittance::kAllowed);
+    } catch (const ExceptionFor<ErrorCodes::TimeseriesBucketCompressionFailed>& ex) {
+        auto bucketId = ex.extraInfo<timeseries::BucketCompressionFailure>()->bucketId();
+        timeseries::bucket_catalog::freeze(bucketCatalog, ns, bucketId);
+        LOGV2_WARNING(
+            8065300,
+            "Failed to compress bucket for time-series write, retrying write with different bucket",
+            "bucketId"_attr = bucketId);
+    }
+
+    // Disallow bucket reopening when retrying, in order to avoid reopening the same bucket that we
+    // just tried.
+    return fn(timeseries::BucketReopeningPermittance::kDisallowed);
+}
+
 bool performOrderedTimeseriesWritesAtomically(OperationContext* opCtx,
+                                              const write_ops::InsertCommandRequest& request,
                                               std::vector<write_ops::WriteError>* errors,
                                               boost::optional<repl::OpTime>* opTime,
                                               boost::optional<OID>* electionId,
-                                              bool* containsRetry,
-                                              const write_ops::InsertCommandRequest& request) {
-    auto [batches, stmtIds, numInserted] = insertIntoBucketCatalog(
-        opCtx, 0, request.getDocuments().size(), {}, errors, containsRetry, request);
+                                              bool* containsRetry) {
+    return timeseriesBucketCompressionFailureRetry(
+        timeseries::bucket_catalog::BucketCatalog::get(opCtx),
+        request.getNamespace(),
+        [&](auto reopening) {
+            auto [batches, stmtIds, numInserted] =
+                insertIntoBucketCatalog(opCtx,
+                                        request,
+                                        0,
+                                        request.getDocuments().size(),
+                                        {},
+                                        reopening,
+                                        errors,
+                                        containsRetry);
 
-    hangTimeseriesInsertBeforeCommit.pauseWhileSet();
+            hangTimeseriesInsertBeforeCommit.pauseWhileSet();
 
-    if (!commitTimeseriesBucketsAtomically(
-            opCtx, batches, std::move(stmtIds), opTime, electionId, request)) {
-        return false;
-    }
+            if (!commitTimeseriesBucketsAtomically(
+                    opCtx, batches, std::move(stmtIds), opTime, electionId, request)) {
+                return false;
+            }
 
-    getTimeseriesBatchResults(opCtx, batches, 0, batches.size(), true, errors, opTime, electionId);
+            getTimeseriesBatchResults(
+                opCtx, batches, 0, batches.size(), true, errors, opTime, electionId);
 
-    return true;
+            return true;
+        });
 }
 
 /**
@@ -2841,17 +2874,18 @@ bool performOrderedTimeseriesWritesAtomically(OperationContext* opCtx,
  */
 std::vector<size_t> performUnorderedTimeseriesWrites(
     OperationContext* opCtx,
+    const write_ops::InsertCommandRequest& request,
     size_t start,
     size_t numDocs,
     const std::vector<size_t>& indices,
+    timeseries::BucketReopeningPermittance reopening,
     std::vector<write_ops::WriteError>* errors,
     boost::optional<repl::OpTime>* opTime,
     boost::optional<OID>* electionId,
     bool* containsRetry,
-    const write_ops::InsertCommandRequest& request,
     absl::flat_hash_map<int, int>& retryAttemptsForDup) {
-    auto [batches, bucketStmtIds, _] =
-        insertIntoBucketCatalog(opCtx, start, numDocs, indices, errors, containsRetry, request);
+    auto [batches, bucketStmtIds, _] = insertIntoBucketCatalog(
+        opCtx, request, start, numDocs, indices, reopening, errors, containsRetry);
 
     hangTimeseriesInsertBeforeCommit.pauseWhileSet();
 
@@ -2918,26 +2952,29 @@ std::vector<size_t> performUnorderedTimeseriesWrites(
 }
 
 void performUnorderedTimeseriesWritesWithRetries(OperationContext* opCtx,
+                                                 const write_ops::InsertCommandRequest& request,
                                                  size_t start,
                                                  size_t numDocs,
                                                  std::vector<write_ops::WriteError>* errors,
                                                  boost::optional<repl::OpTime>* opTime,
                                                  boost::optional<OID>* electionId,
-                                                 bool* containsRetry,
-                                                 const write_ops::InsertCommandRequest& request) {
+                                                 bool* containsRetry) {
     std::vector<size_t> docsToRetry;
     absl::flat_hash_map<int, int> retryAttemptsForDup;
     do {
-        docsToRetry = performUnorderedTimeseriesWrites(opCtx,
-                                                       start,
-                                                       numDocs,
-                                                       docsToRetry,
-                                                       errors,
-                                                       opTime,
-                                                       electionId,
-                                                       containsRetry,
-                                                       request,
-                                                       retryAttemptsForDup);
+        // TODO (SERVER-86072): Retry on bucket compression failure.
+        docsToRetry =
+            performUnorderedTimeseriesWrites(opCtx,
+                                             request,
+                                             start,
+                                             numDocs,
+                                             docsToRetry,
+                                             timeseries::BucketReopeningPermittance::kAllowed,
+                                             errors,
+                                             opTime,
+                                             electionId,
+                                             containsRetry,
+                                             retryAttemptsForDup);
         if (!retryAttemptsForDup.empty()) {
             timeseries::bucket_catalog::resetBucketOIDCounter();
         }
@@ -2948,13 +2985,13 @@ void performUnorderedTimeseriesWritesWithRetries(OperationContext* opCtx,
  * Returns the number of documents that were inserted.
  */
 size_t performOrderedTimeseriesWrites(OperationContext* opCtx,
+                                      const write_ops::InsertCommandRequest& request,
                                       std::vector<write_ops::WriteError>* errors,
                                       boost::optional<repl::OpTime>* opTime,
                                       boost::optional<OID>* electionId,
-                                      bool* containsRetry,
-                                      const write_ops::InsertCommandRequest& request) {
+                                      bool* containsRetry) {
     if (performOrderedTimeseriesWritesAtomically(
-            opCtx, errors, opTime, electionId, containsRetry, request)) {
+            opCtx, request, errors, opTime, electionId, containsRetry)) {
         if (!errors->empty()) {
             invariant(errors->size() == 1);
             return errors->front().getIndex();
@@ -2964,7 +3001,7 @@ size_t performOrderedTimeseriesWrites(OperationContext* opCtx,
 
     for (size_t i = 0; i < request.getDocuments().size(); ++i) {
         performUnorderedTimeseriesWritesWithRetries(
-            opCtx, i, 1, errors, opTime, electionId, containsRetry, request);
+            opCtx, request, i, 1, errors, opTime, electionId, containsRetry);
         if (!errors->empty()) {
             return i;
         }
@@ -3040,16 +3077,16 @@ write_ops::InsertCommandReply performTimeseriesWrites(
 
     if (request.getOrdered()) {
         baseReply.setN(performOrderedTimeseriesWrites(
-            opCtx, &errors, &opTime, &electionId, &containsRetry, request));
+            opCtx, request, &errors, &opTime, &electionId, &containsRetry));
     } else {
         performUnorderedTimeseriesWritesWithRetries(opCtx,
+                                                    request,
                                                     0,
                                                     request.getDocuments().size(),
                                                     &errors,
                                                     &opTime,
                                                     &electionId,
-                                                    &containsRetry,
-                                                    request);
+                                                    &containsRetry);
         baseReply.setN(request.getDocuments().size() - errors.size());
     }
 

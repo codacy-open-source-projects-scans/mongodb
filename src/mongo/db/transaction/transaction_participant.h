@@ -681,9 +681,10 @@ public:
         TransactionOperations* retrieveCompletedTransactionOperations(OperationContext* opCtx);
 
         /**
-         * Returns an object containing transaction-related metadata to append on responses.
+         * Returns an object containing the transaction-related metadata known by this participant
+         * to append on responses.
          */
-        TxnResponseMetadata getResponseMetadata();
+        BSONObj getResponseMetadata();
 
         /**
          * Clears the stored operations for an multi-document (non-autocommit) transaction, marking
@@ -835,6 +836,11 @@ public:
         const RecoveryUnit* getTxnResourceStashRecoveryUnitForTest() const {
             invariant(o().txnResourceStash);
             return o().txnResourceStash->recoveryUnit();
+        }
+
+        repl::ReadConcernArgs getTxnResourceStashReadConcernArgsForTest() const {
+            invariant(o().txnResourceStash);
+            return o().txnResourceStash->getReadConcernArgs();
         }
 
         void transitionToPreparedforTest(OperationContext* opCtx, repl::OpTime prepareOpTime) {
@@ -1042,7 +1048,9 @@ public:
         // Attempt to continue an in-progress multi document transaction at the given transaction
         // number and transaction retry counter.
         void _continueMultiDocumentTransaction(
-            OperationContext* opCtx, const TxnNumberAndRetryCounter& txnNumberAndRetryCounter);
+            OperationContext* opCtx,
+            const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
+            TransactionActions action);
 
         // Implementation of public refreshFromStorageIfNeeded methods.
         void _refreshFromStorageIfNeeded(OperationContext* opCtx, bool fetchOplogEntries);

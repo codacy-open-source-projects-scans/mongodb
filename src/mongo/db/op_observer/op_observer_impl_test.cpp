@@ -1060,6 +1060,7 @@ TEST_F(OpObserverTest, SingleStatementInsertTestIncludesTenantId) {
                          *autoColl,
                          insert.begin(),
                          insert.end(),
+                         /*recordIds*/ {},
                          /*fromMigrate=*/std::vector<bool>(insert.size(), false),
                          /*defaultFromMigrate=*/false);
     wuow.commit();
@@ -1192,6 +1193,7 @@ TEST_F(OpObserverSessionCatalogRollbackTest,
     {
         auto opCtx = cc().makeOperationContext();
         opCtx->setLogicalSessionId(sessionId);
+        opCtx->setTxnNumber(txnNum);
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx.get());
         auto txnParticipant = TransactionParticipant::get(opCtx.get());
         txnParticipant.refreshFromStorageIfNeeded(opCtx.get());
@@ -1470,6 +1472,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
 
@@ -1556,6 +1559,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
                                *autoColl,
                                insert.begin(),
                                insert.end(),
+                               /*recordIds*/ {},
                                /*fromMigrate=*/std::vector<bool>(insert.size(), false),
                                /*defaultFromMigrate=*/false);
 
@@ -1628,6 +1632,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
                                *autoColl,
                                insert.begin(),
                                insert.end(),
+                               /*recordIds*/ {},
                                /*fromMigrate=*/std::vector<bool>(insert.size(), false),
                                /*defaultFromMigrate=*/false);
 
@@ -1692,6 +1697,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUnpreparedAbortTest) {
                                *autoColl,
                                insert.begin(),
                                insert.end(),
+                               /*recordIds*/ {},
                                /*fromMigrate=*/std::vector<bool>(insert.size(), false),
                                /*defaultFromMigrate=*/false);
 
@@ -1816,6 +1822,7 @@ TEST_F(OpObserverTransactionTest, CommittingUnpreparedNonEmptyTransactionWritesT
                                *autoColl,
                                insert.begin(),
                                insert.end(),
+                               /*recordIds*/ {},
                                /*fromMigrate=*/std::vector<bool>(insert.size(), false),
                                /*defaultFromMigrate=*/false);
     }
@@ -1906,12 +1913,14 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
     opObserver().onInserts(opCtx(),
                            *autoColl2,
                            inserts2.begin(),
                            inserts2.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
                            /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -1980,12 +1989,14 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
     opObserver().onInserts(opCtx(),
                            *autoColl2,
                            inserts2.begin(),
                            inserts2.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
                            /*defaultFromMigrate=*/false);
 
@@ -2275,6 +2286,7 @@ TEST_F(OpObserverServerlessTransactionTest,
                                *autoColl,
                                insert.begin(),
                                insert.end(),
+                               /*recordIds*/ {},
                                /*fromMigrate=*/std::vector<bool>(insert.size(), false),
                                /*defaultFromMigrate=*/false);
     }
@@ -2879,6 +2891,7 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
                              *autoColl,
                              toInsert.begin(),
                              toInsert.end(),
+                             /*recordIds*/ {},
                              /*fromMigrate=*/std::vector<bool>(toInsert.size(), false),
                              /*defaultFromMigrate=*/false);
         wuow.commit();
@@ -3072,6 +3085,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
             *autoColl,
             insert.begin(),
             insert.end(),
+            /*recordIds*/ {},
             /*fromMigrate=*/std::vector<bool>(insert.size(), false),
             /*defaultFromMigrate=*/false);
     }
@@ -3167,6 +3181,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
             *autoColl,
             insert.begin(),
             insert.end(),
+            /*recordIds*/ {},
             /*fromMigrate=*/std::vector<bool>(insert.size(), false),
             /*defaultFromMigrate=*/false);
     }
@@ -3587,6 +3602,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
                            *autoColl,
                            inserts.begin(),
                            inserts.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts.size(), false),
                            /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -3625,12 +3641,14 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
     opObserver().onInserts(opCtx(),
                            *autoColl2,
                            inserts2.begin(),
                            inserts2.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
                            /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -3827,12 +3845,14 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
     opObserver().onInserts(opCtx(),
                            *autoColl2,
                            inserts2.begin(),
                            inserts2.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
                            /*defaultFromMigrate=*/false);
 
@@ -4051,6 +4071,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
 
@@ -4134,6 +4155,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, AbortPreparedTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
 
@@ -4208,12 +4230,14 @@ TEST_F(OpObserverMultiEntryTransactionTest, UnpreparedTransactionPackingTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
     opObserver().onInserts(opCtx(),
                            *autoColl2,
                            inserts2.begin(),
                            inserts2.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
                            /*defaultFromMigrate=*/false);
     auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
@@ -4270,12 +4294,14 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPackingTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
     opObserver().onInserts(opCtx(),
                            *autoColl2,
                            inserts2.begin(),
                            inserts2.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts2.size(), false),
                            /*defaultFromMigrate=*/false);
 
@@ -4338,6 +4364,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, CommitPreparedPackingTest) {
                            *autoColl1,
                            inserts1.begin(),
                            inserts1.end(),
+                           /*recordIds*/ {},
                            /*fromMigrate=*/std::vector<bool>(inserts1.size(), false),
                            /*defaultFromMigrate=*/false);
 
@@ -4534,6 +4561,7 @@ TEST_F(OpObserverServerlessTest, OnInsertChecksIfTenantMigrationIsBlockingWrites
                                  *autoColl,
                                  insert.begin(),
                                  insert.end(),
+                                 /*recordIds*/ {},
                                  /*fromMigrate=*/std::vector<bool>(insert.size(), false),
                                  /*defaultFromMigrate=*/false),
             DBException,

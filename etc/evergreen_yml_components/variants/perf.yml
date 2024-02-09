@@ -67,6 +67,7 @@ variables:
   packager_distro: amazon2
   repo_edition: enterprise
   large_distro_name: amazon2-arm64-large
+  core_analyzer_distro_name: amazon2-arm64-xlarge
   num_scons_link_jobs_available: 0.99
 
 - modules: &perf_modules
@@ -930,7 +931,9 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: medical_workload_diagnosis_50_50_high_value
+      cron: *high-value-workload-cron
     - name: ycsb_like_queryable_encrypt1_cfdefault_high_value
+      cron: *high-value-workload-cron
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-1-node-replSet-audit-log-encryption-compression.arm.aws.2023-11
@@ -1115,14 +1118,14 @@ buildvariants:
     - name: smoke_test
     - name: canaries_only
     - name: mongos_workloads
-      #cron: *high-value-workload-cron
+      cron: *high-value-workload-cron
     - name: mongos_large_catalog_workloads
     - name: move_chunk_workloads
-      #cron: *high-value-workload-cron
+      cron: *high-value-workload-cron
     - name: change_streams_latency
-      #cron: *high-value-workload-cron
+      cron: *high-value-workload-cron
     - name: change_streams_listen_throughput
-      #cron: *high-value-workload-cron
+      cron: *high-value-workload-cron
     - name: change_streams_multi_mongos
     - name: tsbs_query_sharded
     - name: tsbs_query_finance_sharded
@@ -1427,40 +1430,30 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - *schedule_variant_auto_tasks_task
     - name: ycsb.2023-09
-      cron: *high-value-workload-cron
     - name: ycsb_single_thread
     - name: ycsb_60GB.2023-09
     - name: ycsb_60GB.long.2023-09
-      cron: *high-value-workload-cron
     - name: crud_workloads_majority
     - name: smoke_test
     - name: bestbuy_agg
-      cron: *high-value-workload-cron
     - name: bestbuy_agg_merge_different_db
     - name: bestbuy_agg_merge_same_db
     - name: bestbuy_agg_merge_wordcount
     - name: bestbuy_query
     - name: tpcc_majority
-      cron: *high-value-workload-cron
     - name: linkbench
     - name: linkbench2
       cron: *high-value-workload-cron
     - name: tsbs_load
       cron: &only-run-in-patch-cron "0 0 29 2 1"
     - name: tsbs_query
-      cron: *high-value-workload-cron
     - name: mixed_workloads_genny_rate_limited_high_value
       cron: *high-value-workload-cron
     - name: load_test_high_value
-      cron: *high-value-workload-cron
     - name: majority_reads10_k_threads_high_value
-      cron: *high-value-workload-cron
     - name: large_indexed_ins_high_value
-      cron: *high-value-workload-cron
     - name: expressive_queries_high_value
-      cron: *high-value-workload-cron
     - name: time_series_sort_high_value
-      cron: *high-value-workload-cron
     - name: tsbs-expression-query
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -2314,7 +2307,7 @@ buildvariants:
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-1-node-replSet-longRunning.arm.aws.2023-11
   display_name: PERF 1-Node ReplSet Long-Running ARM AWS 2023-11
-  cron: "0 0 1 * *"  # 00:00 on the first of each month
+  cron: "0 0 * * 6"  # 00:00 on every Saturday
   modules: *perf_modules
   expansions:
     mongodb_setup_release: 2022-11
@@ -2331,6 +2324,29 @@ buildvariants:
     - "rhel70-perf-single"
   tasks:
     - name: tsbs_query_high_cardinality
+    - name: tsbs_query_medium_cardinality
+
+- <<: *amazon_linux2_arm64_compile_variant_dependency
+  name: perf-1-node-replSet-all-feature-flags-longRunning.arm.aws.2023-11
+  display_name: PERF 1-Node ReplSet (all feature flags) Long-Running ARM AWS 2023-11
+  cron: "0 0 * * 6"  # 00:00 on every Saturday
+  modules: *perf_modules
+  expansions:
+    mongodb_setup_release: 2022-11
+    mongodb_setup: single-replica-all-feature-flags
+    infrastructure_provisioning_release: 2023-09
+    infrastructure_provisioning: M60-like-single-large-volume.2023-02
+    workload_setup: 2022-11
+    platform: linux
+    project_dir: *perf_project_dir
+    authentication: enabled
+    storageEngine: wiredTiger
+    compile_variant: amazon2-arm64-compile
+  run_on:
+    - "rhel70-perf-single"
+  tasks:
+    - name: tsbs_query_high_cardinality
+    - name: tsbs_query_medium_cardinality
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
   name: perf-arm-3-shard-resharding.arm.aws.2023-11
@@ -2377,33 +2393,20 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - name: schedule_variant_auto_tasks
     - name: ycsb.2023-09
-      cron: *high-value-workload-cron
     - name: ycsb_60GB.2023-09
     - name: ycsb_60GB.long.2023-09
-      cron: *high-value-workload-cron
     - name: tpcc_majority
-      cron: *high-value-workload-cron
     - name: linkbench2
-      cron: *high-value-workload-cron
     - name: mixed_workloads_genny_rate_limited_high_value
-      cron: *high-value-workload-cron
     - name: majority_reads10_k_threads_high_value
-      cron: *high-value-workload-cron
     - name: bestbuy_agg
-      cron: *high-value-workload-cron
     - name: large_indexed_ins_high_value
-      cron: *high-value-workload-cron
     - name: expressive_queries_high_value
-      cron: *high-value-workload-cron
     - name: time_series_sort_high_value
-      cron: *high-value-workload-cron
     - name: tsbs_query
-      cron: *high-value-workload-cron
     - name: array_traversal_high_value
-      cron: *high-value-workload-cron
     - name: filter_with_complex_logical_expression_high_value
     - name: tsbs_query
-      cron: *high-value-workload-cron
 
 
 - <<: *shard-baseline
@@ -2418,25 +2421,14 @@ buildvariants:
     - *schedule_patch_auto_tasks_task
     - name: schedule_variant_auto_tasks
     - name: ycsb.2023-09
-      cron: *high-value-workload-cron
     - name: tpcc_majority
-      cron: *high-value-workload-cron
     - name: mixed_workloads_genny_rate_limited_high_value
-      cron: *high-value-workload-cron
     - name: bestbuy_agg
-      cron: *high-value-workload-cron
     - name: large_indexed_ins_high_value
-      cron: *high-value-workload-cron
     - name: expressive_queries_high_value
-      cron: *high-value-workload-cron
     - name: time_series_sort_high_value
-      cron: *high-value-workload-cron
     - name: tsbs_query
-      cron: *high-value-workload-cron
     - name: array_traversal_high_value
-      cron: *high-value-workload-cron
     - name: filter_with_complex_logical_expression_high_value
     - name: tsbs_query
-      cron: *high-value-workload-cron
     - name: mongos_workloads
-      cron: *high-value-workload-cron

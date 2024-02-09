@@ -12,6 +12,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/client/read_preference',
+        '$BUILD_DIR/mongo/client/read_preference_validators',
         '$BUILD_DIR/mongo/db/server_base',
     ],
 )
@@ -491,7 +492,9 @@ env.Library(
     ],
 )
 
-env.Library(
+isSelfEnv = env.Clone()
+isSelfEnv.InjectThirdParty(libraries=['asio'])
+isSelfEnv.Library(
     target="isself",
     source=[
         'isself.cpp',
@@ -663,6 +666,8 @@ env.Library(
         '$BUILD_DIR/mongo/db/concurrency/exception_util',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/shard_role',
+        '$BUILD_DIR/mongo/db/storage/journal_flusher',
+        'initial_syncer',
     ],
 )
 

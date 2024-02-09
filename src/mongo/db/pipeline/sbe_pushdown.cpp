@@ -341,7 +341,7 @@ constexpr size_t kSbeMaxPipelineStages = 100;
  * $lookup via 'DocumentSourceLookUp':
  *   - The 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is false,
  *   - the $lookup uses only the 'localField'/'foreignField' syntax (no pipelines), and
- *   - the foreign collection is neither sharded nor a view.
+ *   - the foreign collection is fully local to this node and is not a view.
  *
  * $project via 'DocumentSourceInternalProjection':
  *   - No additional criteria.
@@ -399,7 +399,7 @@ bool findSbeCompatibleStagesForPushdown(
     const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled(
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     SbeCompatibility minRequiredCompatibility = getMinRequiredSbeCompatibility(
-        queryKnob.getInternalQueryFrameworkControlForOp(), cq->isSearchQuery(), sbeFullEnabled);
+        queryKnob.getInternalQueryFrameworkControlForOp(), sbeFullEnabled);
 
     auto meetsRequirements = [&minRequiredCompatibility, &cq](SbeCompatibility stageCompatibility) {
         return stageCompatibility >= minRequiredCompatibility;
@@ -409,17 +409,16 @@ bool findSbeCompatibleStagesForPushdown(
         .group = meetsRequirements(SbeCompatibility::noRequirements) &&
             !queryKnob.getSbeDisableGroupPushdownForOp(),
 
-        // If lookup pushdown isn't enabled or the main collection is sharded or any of the
-        // secondary namespaces are sharded or are a view, then no $lookup stage will be eligible
-        // for pushdown.
+        // If lookup pushdown isn't enabled or the main collection isn't fully local or any of the
+        // secondary namespaces aren't fully local or are a view, then no $lookup stage will be
+        // eligible for pushdown.
         //
         // When acquiring locks for multiple collections, it is the case that we can only determine
-        // whether any secondary collection is a view or is sharded, not which ones are a view or
-        // are sharded and which ones aren't. As such, if any secondary collection is a view or is
-        // sharded, no $lookup will be eligible for pushdown.
+        // whether any secondary collection is a view or isn't local to this node. As such, if any
+        // secondary collection is a view or isn't local, no $lookup will be eligible for pushdown.
         .lookup = meetsRequirements(SbeCompatibility::noRequirements) &&
             !queryKnob.getSbeDisableLookupPushdownForOp() && !isMainCollectionSharded &&
-            !collections.isAnySecondaryNamespaceAViewOrSharded(),
+            !collections.isAnySecondaryNamespaceAViewOrNotFullyLocal(),
 
         .transform = meetsRequirements(SbeCompatibility::requiresTrySbe),
 
@@ -513,12 +512,10 @@ void attachPipelineStages(const MultipleCollectionAccessor& collections,
 };
 
 SbeCompatibility getMinRequiredSbeCompatibility(QueryFrameworkControlEnum currentQueryKnobFramework,
-                                                bool isSearchQuery,
                                                 bool sbeFullEnabled) {
     if (sbeFullEnabled) {
         return SbeCompatibility::requiresSbeFull;
-    } else if (currentQueryKnobFramework == QueryFrameworkControlEnum::kTrySbeEngine ||
-               isSearchQuery) {
+    } else if (currentQueryKnobFramework == QueryFrameworkControlEnum::kTrySbeEngine) {
         return SbeCompatibility::requiresTrySbe;
     }
     return SbeCompatibility::noRequirements;

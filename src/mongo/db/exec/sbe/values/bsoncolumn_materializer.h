@@ -32,6 +32,7 @@
 #include "mongo/db/exec/sbe/values/value.h"
 
 namespace mongo::sbe::bsoncolumn {
+using ElementStorage = mongo::bsoncolumn::ElementStorage;
 
 /**
  * Implementation of the Materializer concept that allows BSONColumn to decompress to SBE values.
@@ -113,6 +114,12 @@ struct SBEColumnMaterializer {
 
     template <typename T>
     static inline Element materialize(ElementStorage& allocator, BSONElement val);
+
+    static inline SBEColumnMaterializer::Element materializePreallocated(BSONElement val) {
+        // Return an SBE value that is a view. It will reference memory that decompression has
+        // pre-allocated in ElementStorage memory.
+        return bson::convertFrom<true /* view */>(val);
+    }
 
     static inline Element materializeMissing(ElementStorage& allocator) {
         return {value::TypeTags::Nothing, value::Value{0}};
@@ -229,8 +236,11 @@ inline SBEColumnMaterializer::Element SBEColumnMaterializer::materialize<OID>(
 template <typename T>
 inline SBEColumnMaterializer::Element SBEColumnMaterializer::materialize(ElementStorage& allocator,
                                                                          BSONElement val) {
-    // Return an SBE value that is a view. It will reference memory that is owned by the BSONColumn.
-    return bson::convertFrom<true /* view */>(val);
+    // Return an SBE value that is a view. It will reference memory that is owned by the
+    // ElementStorage instance.
+    auto allocatedElem = allocator.allocate(val.type(), "", val.valuesize());
+    memcpy(allocatedElem.value(), val.value(), val.valuesize());
+    return bson::convertFrom<true /* view */>(allocatedElem.element());
 }
 
 }  // namespace mongo::sbe::bsoncolumn

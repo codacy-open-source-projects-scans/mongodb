@@ -234,6 +234,35 @@ public:
 };
 
 /**
+ * Generate token anchor padding root
+ */
+class FLEAnchorPaddingGenerator {
+public:
+    /**
+     * AnchorPaddingRootToken = HMAC(ESCToken, d) = S^esc_f_d = Fs[f,1,2,d]
+     *  d = 136 bit blob of zero = 17 octets of 0
+     */
+    static AnchorPaddingRootToken generateAnchorPaddingRootToken(ESCToken token);
+};
+
+/**
+ * Generate token anchor padding derived tokens
+ */
+class FLEAnchorPaddingDerivedGenerator {
+public:
+    /**
+     * AnchorPaddingKeyToken = HMAC(AnchorPaddingRootToken, 1) = Fs[f,1,2,d,1]
+     */
+    static AnchorPaddingKeyToken generateAnchorPaddingKeyToken(AnchorPaddingRootToken token);
+
+    /**
+     * AnchorPaddingValueToken = HMAC(AnchorPaddingRootToken, 2) = Fs[f,1,2,d,2]
+     */
+    static AnchorPaddingValueToken generateAnchorPaddingValueToken(AnchorPaddingRootToken token);
+};
+
+
+/**
  * ESC Collection schema
  * {
  *    _id : HMAC(ESCTwiceDerivedTagToken, type || pos )
@@ -867,16 +896,20 @@ public:
  *
  * struct {
  *    uint8_t[32] esc;
+ *    uint8_t isLeaf; // Optional: 0 or 1 for range operations, absent for equality.
  * }
  */
 struct EncryptedStateCollectionTokensV2 {
 public:
-    EncryptedStateCollectionTokensV2(ESCDerivedFromDataTokenAndContentionFactorToken s) : esc(s) {}
+    EncryptedStateCollectionTokensV2(ESCDerivedFromDataTokenAndContentionFactorToken s,
+                                     boost::optional<bool> leaf)
+        : esc(s), isLeaf(std::move(leaf)) {}
     static StatusWith<EncryptedStateCollectionTokensV2> decryptAndParse(ECOCToken token,
                                                                         ConstDataRange cdr);
     StatusWith<std::vector<uint8_t>> serialize(ECOCToken token);
 
     ESCDerivedFromDataTokenAndContentionFactorToken esc;
+    boost::optional<bool> isLeaf;
 };
 
 struct ECOCCompactionDocumentV2 {
@@ -1488,6 +1521,9 @@ class Edges {
 public:
     Edges(std::string leaf, int sparsity);
     std::vector<StringData> get();
+    const std::string& getLeaf() const {
+        return _leaf;
+    }
 
 private:
     std::string _leaf;

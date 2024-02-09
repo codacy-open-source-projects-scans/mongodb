@@ -59,11 +59,11 @@ public:
         ASSERT_EQ(blockTag, value::TypeTags::valueBlock);
         auto* block = value::bitcastTo<value::ValueBlock*>(blockVal);
         auto extracted = block->extract();
-        ASSERT_EQ(expected.size(), extracted.count);
+        ASSERT_EQ(expected.size(), extracted.count());
 
-        for (size_t i = 0; i < extracted.count; ++i) {
+        for (size_t i = 0; i < extracted.count(); ++i) {
             auto [t, v] = value::compareValue(
-                extracted.tags[i], extracted.vals[i], expected[i].first, expected[i].second);
+                extracted.tags()[i], extracted.vals()[i], expected[i].first, expected[i].second);
             ASSERT_EQ(t, value::TypeTags::NumberInt32) << extracted;
             ASSERT_EQ(value::bitcastTo<int32_t>(v), 0)
                 << "Got " << extracted[i] << " expected " << expected[i]
@@ -93,16 +93,16 @@ public:
         std::unique_ptr<value::ValueBlock> rightBlock) {
         auto left = leftBlock->extract();
         auto right = rightBlock->extract();
-        ASSERT_EQ(left.count, right.count);
+        ASSERT_EQ(left.count(), right.count());
 
         std::vector<bool> andRes;
         std::vector<bool> orRes;
 
-        for (size_t i = 0; i < left.count; ++i) {
-            ASSERT_EQ(left.tags[i], value::TypeTags::Boolean);
-            ASSERT_EQ(right.tags[i], value::TypeTags::Boolean);
-            auto leftBool = value::bitcastTo<bool>(left.vals[i]);
-            auto rightBool = value::bitcastTo<bool>(right.vals[i]);
+        for (size_t i = 0; i < left.count(); ++i) {
+            ASSERT_EQ(left.tags()[i], value::TypeTags::Boolean);
+            ASSERT_EQ(right.tags()[i], value::TypeTags::Boolean);
+            auto leftBool = value::bitcastTo<bool>(left.vals()[i]);
+            auto rightBool = value::bitcastTo<bool>(right.vals()[i]);
             andRes.push_back(leftBool && rightBool);
             orRes.push_back(leftBool || rightBool);
         }
@@ -1012,8 +1012,8 @@ void SBEBlockExpressionTest::testCmpScalar(EPrimBinary::Op scalarOp,
         scalarOp, makeE<EVariable>(scalarSlotLhs), makeE<EVariable>(scalarSlotRhs));
     auto compiledScalarExpr = compileExpression(*scalarExpr);
 
-    for (size_t i = 0; i < deblocked.count; ++i) {
-        scalarAccessorRhs.reset(deblocked.tags[i], deblocked.vals[i]);
+    for (size_t i = 0; i < deblocked.count(); ++i) {
+        scalarAccessorRhs.reset(deblocked.tags()[i], deblocked.vals()[i]);
 
         // Run the block expression and get the result.
         auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
@@ -1023,11 +1023,11 @@ void SBEBlockExpressionTest::testCmpScalar(EPrimBinary::Op scalarOp,
         auto* resultValBlock = value::getValueBlock(runVal);
         auto resultExtracted = resultValBlock->extract();
 
-        ASSERT_EQ(resultExtracted.count, deblocked.count);
+        ASSERT_EQ(resultExtracted.count(), deblocked.count());
 
-        for (size_t j = 0; j < resultExtracted.count; ++j) {
+        for (size_t j = 0; j < resultExtracted.count(); ++j) {
             // Determine the expected result.
-            scalarAccessorLhs.reset(deblocked.tags[j], deblocked.vals[j]);
+            scalarAccessorLhs.reset(deblocked.tags()[j], deblocked.vals()[j]);
             auto [expectedTag, expectedVal] = runCompiledExpression(compiledScalarExpr.get());
             value::ValueGuard guard(expectedTag, expectedVal);
 
@@ -1135,9 +1135,9 @@ void SBEBlockExpressionTest::testBlockBlockArithmeticOp(EPrimBinary::Op scalarOp
     // run the same operations using the scalar version of the operation
     auto leftExtractedValues = leftBlock->extract();
     auto rightExtractedValues = rightBlock->extract();
-    auto resNum = leftExtractedValues.count;
+    auto resNum = leftExtractedValues.count();
 
-    ASSERT_EQ(resBlockExtractedValues.count, resNum);
+    ASSERT_EQ(resBlockExtractedValues.count(), resNum);
 
     value::ViewOfValueAccessor leftScalarAccessor;
     value::ViewOfValueAccessor rightScalarAccessor;
@@ -1153,27 +1153,29 @@ void SBEBlockExpressionTest::testBlockBlockArithmeticOp(EPrimBinary::Op scalarOp
     if (bitsetBlock) {
         auto bitsetExtractedValues = bitsetBlock->extract();
         for (size_t i = 0; i < resNum; ++i) {
-            if (bitsetExtractedValues.tags[i] != value::TypeTags::Boolean ||
-                !value::bitcastTo<bool>(bitsetExtractedValues.vals[i])) {
+            if (bitsetExtractedValues.tags()[i] != value::TypeTags::Boolean ||
+                !value::bitcastTo<bool>(bitsetExtractedValues.vals()[i])) {
                 // skip
                 continue;
             }
 
-            leftScalarAccessor.reset(leftExtractedValues.tags[i], leftExtractedValues.vals[i]);
-            rightScalarAccessor.reset(rightExtractedValues.tags[i], rightExtractedValues.vals[i]);
+            leftScalarAccessor.reset(leftExtractedValues.tags()[i], leftExtractedValues.vals()[i]);
+            rightScalarAccessor.reset(rightExtractedValues.tags()[i],
+                                      rightExtractedValues.vals()[i]);
             auto [scalarTag, scalarVal] = runCompiledExpression(scalarCompiledExpr.get());
 
-            ASSERT_EQ(scalarTag, resBlockExtractedValues.tags[i]);
-            ASSERT_EQ(scalarVal, resBlockExtractedValues.vals[i]);
+            ASSERT_EQ(scalarTag, resBlockExtractedValues.tags()[i]);
+            ASSERT_EQ(scalarVal, resBlockExtractedValues.vals()[i]);
         }
     } else {
         for (size_t i = 0; i < resNum; ++i) {
-            leftScalarAccessor.reset(leftExtractedValues.tags[i], leftExtractedValues.vals[i]);
-            rightScalarAccessor.reset(rightExtractedValues.tags[i], rightExtractedValues.vals[i]);
+            leftScalarAccessor.reset(leftExtractedValues.tags()[i], leftExtractedValues.vals()[i]);
+            rightScalarAccessor.reset(rightExtractedValues.tags()[i],
+                                      rightExtractedValues.vals()[i]);
             auto [scalarTag, scalarVal] = runCompiledExpression(scalarCompiledExpr.get());
 
-            ASSERT_EQ(scalarTag, resBlockExtractedValues.tags[i]);
-            ASSERT_EQ(scalarVal, resBlockExtractedValues.vals[i]);
+            ASSERT_EQ(scalarTag, resBlockExtractedValues.tags()[i]);
+            ASSERT_EQ(scalarVal, resBlockExtractedValues.vals()[i]);
         }
     }
 }
@@ -1240,10 +1242,10 @@ void SBEBlockExpressionTest::testBlockScalarArithmeticOp(
 
     // verify the results against the scalar operation
     auto extractedValues = block->extract();
-    auto resNum = extractedValues.count;
+    auto resNum = extractedValues.count();
 
-    ASSERT_EQ(resScalarBlockExtractedValues.count, resNum);
-    ASSERT_EQ(resBlockScalarExtractedValues.count, resNum);
+    ASSERT_EQ(resScalarBlockExtractedValues.count(), resNum);
+    ASSERT_EQ(resBlockScalarExtractedValues.count(), resNum);
 
     value::ViewOfValueAccessor leftScalarAccessor;
     value::ViewOfValueAccessor rightScalarAccessor;
@@ -1259,45 +1261,45 @@ void SBEBlockExpressionTest::testBlockScalarArithmeticOp(
     if (bitsetBlock) {
         auto bitsetExtractedValues = bitsetBlock->extract();
         for (size_t i = 0; i < resNum; ++i) {
-            if (bitsetExtractedValues.tags[i] != value::TypeTags::Boolean ||
-                !value::bitcastTo<bool>(bitsetExtractedValues.vals[i])) {
+            if (bitsetExtractedValues.tags()[i] != value::TypeTags::Boolean ||
+                !value::bitcastTo<bool>(bitsetExtractedValues.vals()[i])) {
                 // skip
                 continue;
             }
 
             // scalar - block
             leftScalarAccessor.reset(scalar.first, scalar.second);
-            rightScalarAccessor.reset(extractedValues.tags[i], extractedValues.vals[i]);
+            rightScalarAccessor.reset(extractedValues.tags()[i], extractedValues.vals()[i]);
             auto [scalarSBTag, scalarSBVal] = runCompiledExpression(scalarCompiledExpr.get());
 
-            ASSERT_EQ(scalarSBTag, resScalarBlockExtractedValues.tags[i]);
-            ASSERT_EQ(scalarSBVal, resScalarBlockExtractedValues.vals[i]);
+            ASSERT_EQ(scalarSBTag, resScalarBlockExtractedValues.tags()[i]);
+            ASSERT_EQ(scalarSBVal, resScalarBlockExtractedValues.vals()[i]);
 
             // block - scalar
-            leftScalarAccessor.reset(extractedValues.tags[i], extractedValues.vals[i]);
+            leftScalarAccessor.reset(extractedValues.tags()[i], extractedValues.vals()[i]);
             rightScalarAccessor.reset(scalar.first, scalar.second);
             auto [scalarBSTag, scalarBSVal] = runCompiledExpression(scalarCompiledExpr.get());
 
-            ASSERT_EQ(scalarBSTag, resBlockScalarExtractedValues.tags[i]);
-            ASSERT_EQ(scalarBSVal, resBlockScalarExtractedValues.vals[i]);
+            ASSERT_EQ(scalarBSTag, resBlockScalarExtractedValues.tags()[i]);
+            ASSERT_EQ(scalarBSVal, resBlockScalarExtractedValues.vals()[i]);
         }
     } else {
         for (size_t i = 0; i < resNum; ++i) {
             // scalar - block
             leftScalarAccessor.reset(scalar.first, scalar.second);
-            rightScalarAccessor.reset(extractedValues.tags[i], extractedValues.vals[i]);
+            rightScalarAccessor.reset(extractedValues.tags()[i], extractedValues.vals()[i]);
             auto [scalarSBTag, scalarSBVal] = runCompiledExpression(scalarCompiledExpr.get());
 
-            ASSERT_EQ(scalarSBTag, resScalarBlockExtractedValues.tags[i]);
-            ASSERT_EQ(scalarSBVal, resScalarBlockExtractedValues.vals[i]);
+            ASSERT_EQ(scalarSBTag, resScalarBlockExtractedValues.tags()[i]);
+            ASSERT_EQ(scalarSBVal, resScalarBlockExtractedValues.vals()[i]);
 
             // block - scalar
-            leftScalarAccessor.reset(extractedValues.tags[i], extractedValues.vals[i]);
+            leftScalarAccessor.reset(extractedValues.tags()[i], extractedValues.vals()[i]);
             rightScalarAccessor.reset(scalar.first, scalar.second);
             auto [scalarBSTag, scalarBSVal] = runCompiledExpression(scalarCompiledExpr.get());
 
-            ASSERT_EQ(scalarBSTag, resBlockScalarExtractedValues.tags[i]);
-            ASSERT_EQ(scalarBSVal, resBlockScalarExtractedValues.vals[i]);
+            ASSERT_EQ(scalarBSTag, resBlockScalarExtractedValues.tags()[i]);
+            ASSERT_EQ(scalarBSVal, resBlockScalarExtractedValues.vals()[i]);
         }
     }
 }
@@ -2111,6 +2113,285 @@ TEST_F(SBEBlockExpressionTest, BlockCoerceToBool) {
                       makeNothing(),    // Nothing
                       makeBool(false),  // Null
                   });
+}
+
+TEST_F(SBEBlockExpressionTest, BlockRound) {
+    value::ViewOfValueAccessor blockAccessor;
+    value::ViewOfValueAccessor scalarAccessor;
+
+    auto blockSlot = bindAccessor(&blockAccessor);
+    auto scalarSlot = bindAccessor(&scalarAccessor);
+
+    value::HeterogeneousBlock block;
+    block.push_back(value::makeNewString("abcd"));
+    block.push_back(makeInt32(-2));
+    block.push_back(makeInt32(2));
+    block.push_back(makeBool(false));
+    block.push_back(makeDouble(0.0));
+    block.push_back(makeDouble(-1234.987));
+    block.push_back(makeDouble(1987.956));
+    block.push_back(makeDouble(-1234.1234));
+    block.push_back(makeDouble(1987.1234));
+    block.push_back(makeDecimal("-1234.987"));
+    block.push_back(makeDecimal("1987.956"));
+    block.push_back(makeDecimal("1234.1234"));
+    block.push_back(makeDecimal("-1987.1234"));
+    block.push_back(makeNothing());
+    block.push_back(makeNull());
+
+    {
+        auto expr = sbe::makeE<sbe::EFunction>(
+            "valueBlockRound",
+            sbe::makeEs(makeE<EVariable>(blockSlot), makeE<EVariable>(scalarSlot)));
+
+        auto compiledExpr = compileExpression(*expr);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        scalarAccessor.reset(value::TypeTags::NumberInt32, value::bitcastFrom<int>(2));
+
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        auto expectedResults = std::vector<std::pair<value::TypeTags, value::Value>>{
+            makeNothing(),  // string
+            makeInt32(-2),
+            makeInt32(2),
+            makeNothing(),  // bool
+            makeDouble(0.0),
+            makeDouble(-1234.99),
+            makeDouble(1987.96),
+            makeDouble(-1234.12),
+            makeDouble(1987.12),
+            makeDecimal("-1234.99"),
+            makeDecimal("1987.96"),
+            makeDecimal("1234.12"),
+            makeDecimal("-1987.12"),
+            makeNothing(),  // Nothing
+            makeNothing(),  // Null
+        };
+
+        assertBlockEq(runTag, runVal, expectedResults);
+
+        for (size_t i = 0; i < expectedResults.size(); ++i) {
+            releaseValue(expectedResults[i].first, expectedResults[i].second);
+        }
+    }
+
+    {
+        auto expr = sbe::makeE<sbe::EFunction>(
+            "valueBlockRound",
+            sbe::makeEs(makeE<EVariable>(blockSlot), makeE<EVariable>(scalarSlot)));
+
+        auto compiledExpr = compileExpression(*expr);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        scalarAccessor.reset(value::TypeTags::NumberInt32, value::bitcastFrom<int>(-2));
+
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        auto expectedResults = std::vector<std::pair<value::TypeTags, value::Value>>{
+            makeNothing(),  // string
+            makeInt32(0),
+            makeInt32(0),
+            makeNothing(),  // bool
+            makeDouble(0.0),
+            makeDouble(-1200),
+            makeDouble(2000),
+            makeDouble(-1200),
+            makeDouble(2000),
+            makeDecimal("-1200"),
+            makeDecimal("2000"),
+            makeDecimal("1200"),
+            makeDecimal("-2000"),
+            makeNothing(),  // Nothing
+            makeNothing(),  // Null
+        };
+
+        assertBlockEq(runTag, runVal, expectedResults);
+
+        for (size_t i = 0; i < expectedResults.size(); ++i) {
+            releaseValue(expectedResults[i].first, expectedResults[i].second);
+        }
+    }
+
+    {
+        auto expr =
+            sbe::makeE<sbe::EFunction>("valueBlockRound", sbe::makeEs(makeE<EVariable>(blockSlot)));
+
+        auto compiledExpr = compileExpression(*expr);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        auto expectedResults = std::vector<std::pair<value::TypeTags, value::Value>>{
+            makeNothing(),  // string
+            makeInt32(-2),
+            makeInt32(2),
+            makeNothing(),  // bool
+            makeDouble(0.0),
+            makeDouble(-1235),
+            makeDouble(1988),
+            makeDouble(-1234),
+            makeDouble(1987),
+            makeDecimal("-1235"),
+            makeDecimal("1988"),
+            makeDecimal("1234"),
+            makeDecimal("-1987"),
+            makeNothing(),  // Nothing
+            makeNothing(),  // Null
+        };
+
+        assertBlockEq(runTag, runVal, expectedResults);
+
+        for (size_t i = 0; i < expectedResults.size(); ++i) {
+            releaseValue(expectedResults[i].first, expectedResults[i].second);
+        }
+    }
+}
+
+TEST_F(SBEBlockExpressionTest, BlockTrunc) {
+    value::ViewOfValueAccessor blockAccessor;
+    value::ViewOfValueAccessor scalarAccessor;
+
+    auto blockSlot = bindAccessor(&blockAccessor);
+    auto scalarSlot = bindAccessor(&scalarAccessor);
+
+    value::HeterogeneousBlock block;
+    block.push_back(value::makeNewString("abcd"));
+    block.push_back(makeInt32(-2));
+    block.push_back(makeInt32(2));
+    block.push_back(makeBool(false));
+    block.push_back(makeDouble(0.0));
+    block.push_back(makeDouble(-1234.987));
+    block.push_back(makeDouble(1987.956));
+    block.push_back(makeDouble(-1234.1234));
+    block.push_back(makeDouble(1987.1234));
+    block.push_back(makeDecimal("-1234.987"));
+    block.push_back(makeDecimal("1987.956"));
+    block.push_back(makeDecimal("1234.1234"));
+    block.push_back(makeDecimal("-1987.1234"));
+    block.push_back(makeNothing());
+    block.push_back(makeNull());
+
+    {
+        auto expr = sbe::makeE<sbe::EFunction>(
+            "valueBlockTrunc",
+            sbe::makeEs(makeE<EVariable>(blockSlot), makeE<EVariable>(scalarSlot)));
+
+        auto compiledExpr = compileExpression(*expr);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        scalarAccessor.reset(value::TypeTags::NumberInt32, value::bitcastFrom<int>(2));
+
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        auto expectedResults = std::vector<std::pair<value::TypeTags, value::Value>>{
+            makeNothing(),  // string
+            makeInt32(-2),
+            makeInt32(2),
+            makeNothing(),  // bool
+            makeDouble(0.0),
+            makeDouble(-1234.98),
+            makeDouble(1987.95),
+            makeDouble(-1234.12),
+            makeDouble(1987.12),
+            makeDecimal("-1234.98"),
+            makeDecimal("1987.95"),
+            makeDecimal("1234.12"),
+            makeDecimal("-1987.12"),
+            makeNothing(),  // Nothing
+            makeNothing(),  // Null
+        };
+
+        assertBlockEq(runTag, runVal, expectedResults);
+
+        for (size_t i = 0; i < expectedResults.size(); ++i) {
+            releaseValue(expectedResults[i].first, expectedResults[i].second);
+        }
+    }
+
+    {
+        auto expr = sbe::makeE<sbe::EFunction>(
+            "valueBlockTrunc",
+            sbe::makeEs(makeE<EVariable>(blockSlot), makeE<EVariable>(scalarSlot)));
+
+        auto compiledExpr = compileExpression(*expr);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        scalarAccessor.reset(value::TypeTags::NumberInt32, value::bitcastFrom<int>(-2));
+
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        auto expectedResults = std::vector<std::pair<value::TypeTags, value::Value>>{
+            makeNothing(),  // string
+            makeInt32(0),
+            makeInt32(0),
+            makeNothing(),  // bool
+            makeDouble(0.0),
+            makeDouble(-1200),
+            makeDouble(1900),
+            makeDouble(-1200),
+            makeDouble(1900),
+            makeDecimal("-1200"),
+            makeDecimal("1900"),
+            makeDecimal("1200"),
+            makeDecimal("-1900"),
+            makeNothing(),  // Nothing
+            makeNothing(),  // Null
+        };
+
+        assertBlockEq(runTag, runVal, expectedResults);
+
+        for (size_t i = 0; i < expectedResults.size(); ++i) {
+            releaseValue(expectedResults[i].first, expectedResults[i].second);
+        }
+    }
+
+    {
+        auto expr =
+            sbe::makeE<sbe::EFunction>("valueBlockTrunc", sbe::makeEs(makeE<EVariable>(blockSlot)));
+
+        auto compiledExpr = compileExpression(*expr);
+
+        blockAccessor.reset(sbe::value::TypeTags::valueBlock,
+                            value::bitcastFrom<value::ValueBlock*>(&block));
+        auto [runTag, runVal] = runCompiledExpression(compiledExpr.get());
+        value::ValueGuard guard(runTag, runVal);
+
+        auto expectedResults = std::vector<std::pair<value::TypeTags, value::Value>>{
+            makeNothing(),  // string
+            makeInt32(-2),
+            makeInt32(2),
+            makeNothing(),  // bool
+            makeDouble(0.0),
+            makeDouble(-1234),
+            makeDouble(1987),
+            makeDouble(-1234),
+            makeDouble(1987),
+            makeDecimal("-1234"),
+            makeDecimal("1987"),
+            makeDecimal("1234"),
+            makeDecimal("-1987"),
+            makeNothing(),  // Nothing
+            makeNothing(),  // Null
+        };
+
+        assertBlockEq(runTag, runVal, expectedResults);
+
+        for (size_t i = 0; i < expectedResults.size(); ++i) {
+            releaseValue(expectedResults[i].first, expectedResults[i].second);
+        }
+    }
 }
 
 }  // namespace mongo::sbe

@@ -1030,6 +1030,7 @@ env.CppUnitTest(
         'auth/authmocks',
         'commands',
         'commands_test_example',
+        'repl/replmocks',
         's/sharding_catalog_manager',
         'service_context_d_test_fixture',
         'shard_role_api',
@@ -1224,6 +1225,19 @@ env.Library(
 )
 
 env.Library(
+    target='service_request_common', source=[
+        'common_request_args.idl',
+    ], LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/db/session/logical_session_id',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+        '$BUILD_DIR/mongo/s/common_s',
+        'api_parameters',
+        'vector_clock',
+    ])
+
+env.Library(
     target='service_entry_point_common',
     source=[
         'service_entry_point_common.cpp',
@@ -1243,7 +1257,6 @@ env.Library(
         'commands/server_status_core',
         'commands/txn_cmd_request',
         'curop_metrics',
-        'initialize_api_parameters',
         'introspect',
         'multitenancy',
         'not_primary_error_tracker',
@@ -1252,6 +1265,7 @@ env.Library(
         'repl/tenant_migration_access_blocker',
         'rw_concern_d',
         'server_feature_flags',
+        'service_request_common',
         'session/session_catalog_mongod',
         'shared_request_handling',
         'stats/api_version_metrics',
@@ -1263,6 +1277,7 @@ env.Library(
         'storage/storage_engine_lock_file',
         'storage/storage_engine_metadata',
         'transaction/transaction',
+        'validate_api_parameters',
         'write_block_bypass',
     ],
 )
@@ -1336,6 +1351,25 @@ env.Library(
         'storage/encryption_hooks',
         'storage/storage_options',
         'storage/storage_util',
+        'storage/two_phase_index_build_knobs_idl',
+    ],
+)
+
+env.Library(
+    target='index_builds_coordinator_mock',
+    source=['index_builds_coordinator_mock.cpp'],
+    LIBDEPS=[
+        'index_builds_coordinator_interface',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/executor/task_executor_interface',
+        'catalog/collection_catalog',
+        'catalog/index_build_entry_idl',
+        'index_build_entry_helpers',
+        'repl/tenant_migration_access_blocker',
+        'resumable_index_builds_idl',
+        's/forwardable_operation_metadata',
+        'shard_role',
         'storage/two_phase_index_build_knobs_idl',
     ],
 )
@@ -1629,9 +1663,11 @@ execEnv.Library(
         'query/find.cpp',
         'query/get_executor.cpp',
         'query/internal_plans.cpp',
+        'query/plan_executor_express.cpp',
         'query/plan_executor_factory.cpp',
         'query/plan_executor_impl.cpp',
         'query/plan_executor_sbe.cpp',
+        'query/plan_explainer_express.cpp',
         'query/plan_explainer_factory.cpp',
         'query/plan_explainer_impl.cpp',
         'query/plan_explainer_sbe.cpp',
@@ -1990,9 +2026,9 @@ env.Library(
 )
 
 env.Library(
-    target='initialize_api_parameters',
+    target='validate_api_parameters',
     source=[
-        'initialize_api_parameters.cpp',
+        'validate_api_parameters.cpp',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/transport/transport_layer_common',
@@ -2501,6 +2537,7 @@ env.Library(
         'storage/storage_init_d',
         'storage/storage_options',
         'system_index',
+        'timeseries/bucket_compression_failure',
         'traffic_recorder',
         'ttl_collection_cache',
         'ttl_d',
@@ -2600,7 +2637,6 @@ env.Library(
         's/sharding_commands_d',
         's/sharding_runtime_d',
         'serverinit',
-        'serverless/multitenancy_check',
         'serverless/shard_split_donor_service',
         'service_context_d',
         'session/kill_sessions',

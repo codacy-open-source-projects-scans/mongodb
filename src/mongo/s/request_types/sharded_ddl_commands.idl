@@ -56,6 +56,7 @@ types:
         cpp_type: CollectionType
         serializer: "mongo::CollectionType::toBSON"
         deserializer: "mongo::CollectionType"
+        is_view: false
 
 enums:
     ShardsvrSetUserWriteBlockModePhase:
@@ -293,8 +294,8 @@ structs:
                     doesn't already exist. Only allowed if `unsplittable` is true.
                 type: shard_id
                 optional: true
-            # TODO SERVER-81190 Remove this parameter when unsplittable collections request coming
-            # from the {create...} cmd start getting tracked in the catalog
+            # TODO SERVER-83878 Remove this parameter when unsplittable timeseries collections request coming 
+            # from the {create...} cmd start getting tracked in the catalog 
             isFromCreateUnsplittableCollectionTestCommand:
                 description: "Temporary field to differentiate calls originating from the createUnsplittableCollection test command."
                 type: optionalBool

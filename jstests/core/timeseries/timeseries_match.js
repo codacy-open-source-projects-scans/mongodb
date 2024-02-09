@@ -131,11 +131,105 @@ TimeseriesTest.run((insert) => {
         {pred: {"topLevelArray": {$eq: [101, 102]}}, ids: [3], usesBlockProcessing: false},
         {pred: {"topLevelScalar": {$eq: [999, 999]}}, ids: [], usesBlockProcessing: false},
 
+        // These tests intentionally use nested arrays to force $in to produce Nothing values.
         {
             pred: {"time": {$in: [[new Date("2019-09-27T21:14:45.654Z")]]}},
             ids: [],
             usesBlockProcessing: true
-        }
+        },
+        {
+            pred: {
+                "time": {
+                    $not:
+                        {$in: [[new Date("2019-09-27T21:14:45.654Z"), new Date(datePrefix + 300)]]}
+                }
+            },
+            ids: [0, 1, 2, 3, 4],
+            usesBlockProcessing: true
+        },
+
+        // Basic support for boolean operators.
+        {
+            pred: {
+                $or: [
+                    {
+                        $and: [
+                            {"time": {$gte: new Date("2019-09-27T21:14:45.654Z")}},
+                            {"time": {$gt: new Date(datePrefix + 300)}}
+                        ]
+                    },
+                    {"time": {$eq: new Date(datePrefix + 300)}}
+                ]
+            },
+            ids: [2],
+            usesBlockProcessing: true
+        },
+        // Test boolean operators dealing with Nothing values.
+        {
+            pred: {
+                $nor: [
+                    {"time": {$ne: ["arr1", "arr2"]}},
+                    {
+                        $and: [
+                            {"time": {$gte: ["arr3", "arr4"]}},
+                            {"time": {$gt: new Date(datePrefix + 300)}}
+                        ]
+                    },
+                    {"time": {$eq: new Date(datePrefix + 300)}}
+                ]
+            },
+            ids: [],
+            usesBlockProcessing: true
+        },
+        // Logical operators between scalar and block values.
+        {
+            pred: {
+                $or: [
+                    {$expr: {$regexFind: {input: "$measurement", regex: "^2", options: ""}}},
+                    {"topLevelScalar": {$lte: 200}}
+                ]
+            },
+            ids: [0],
+            usesBlockProcessing: false
+        },
+        {pred: {$expr: {$lt: [101, "$topLevelScalar"]}}, ids: [0, 1], usesBlockProcessing: false},
+
+        {
+            pred: {
+                "$expr": {
+                    "$gt": [
+                        {
+                            "$dateDiff": {
+                                "startDate": "$time",
+                                "endDate": new Date(datePrefix + 150),
+                                "unit": "millisecond"
+                            }
+                        },
+                        0
+                    ]
+                }
+            },
+            ids: [0],
+            usesBlockProcessing: false
+        },
+        {
+            pred: {
+                "$expr": {
+                    "$gt": [
+                        {
+                            "$dateDiff": {
+                                "startDate": new Date(datePrefix + 550),
+                                "endDate": "$time",
+                                "unit": "millisecond"
+                            }
+                        },
+                        -60
+                    ]
+                }
+            },
+            ids: [4],
+            usesBlockProcessing: false
+        },
     ];
 
     // $match pushdown requires sbe to be fully enabled and featureFlagTimeSeriesInSbe to be set.

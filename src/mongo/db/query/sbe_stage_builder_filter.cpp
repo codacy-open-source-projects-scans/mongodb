@@ -160,7 +160,7 @@ struct MatchExpressionVisitorContext {
             7097201, "Expected 'rootSlot' or 'slots' to be defined", rootSlot || slots != nullptr);
 
         // Set up the top-level MatchFrame.
-        emplaceFrame(state, rootSlot ? rootSlot->slotId : boost::optional<sbe::value::SlotId>());
+        emplaceFrame(state, SbExpr{rootSlot});
     }
 
     SbExpr done() {
@@ -254,7 +254,7 @@ SbExpr generateTraverseF(SbExpr inputExpr,
     auto lambdaParam = SbExpr{SbVar{lambdaFrameId, 0}};
     auto getFieldName = isNumericField ? "getFieldOrElement"_sd : "getField"_sd;
     SbExpr fieldExpr = topLevelFieldSlot
-        ? b.makeVariable(topLevelFieldSlot->slotId)
+        ? SbExpr{*topLevelFieldSlot}
         : b.makeFunction(getFieldName, inputExpr.clone(), b.makeStrConstant(fp.getPart(level)));
 
     if (childIsLeafWithEmptyName) {
@@ -387,10 +387,10 @@ void generatePredicate(MatchExpressionVisitorContext* context,
         // corresponds to the full path 'path'.
         if (context->isFilterOverIxscan && !path.empty()) {
             auto name = std::make_pair(PlanStageSlots::kField, path.dottedField());
-            if (auto slot = slots->getIfExists(name); slot) {
+            if (auto slot = slots->getIfExists(name)) {
                 // We found a kField slot that matches. We don't need to perform any traversal;
                 // we can just evaluate the predicate on the slot directly and return.
-                frame.pushExpr(makePredicate(slot->slotId));
+                frame.pushExpr(makePredicate(*slot));
                 return;
             }
         }
@@ -406,7 +406,7 @@ void generatePredicate(MatchExpressionVisitorContext* context,
             auto lambdaFrameId = context->state.frameIdGenerator->generate();
             auto traverseFExpr = b.makeFunction(
                 "blockTraverseFPlaceholder"_sd,
-                b.makeVariable(slot->slotId),
+                SbExpr{*slot},
                 b.makeLocalLambda(lambdaFrameId, makePredicate(SbExpr{SbVar{lambdaFrameId, 0}})));
             frame.pushExpr(std::move(traverseFExpr));
             return;
@@ -888,8 +888,10 @@ public:
         auto& frame = _context->topFrame();
 
         // The $expr expression is always applied to the current $$ROOT document.
-        auto expr = generateExpression(
-            _context->state, matchExpr->getExpression().get(), _context->rootSlot, _context->slots);
+        auto expr = generateExpression(_context->state,
+                                       matchExpr->getExpression().get(),
+                                       _context->rootSlot,
+                                       *_context->slots);
 
         // Convert the result of the '{$expr: ..}' expression to a boolean value.
         frame.pushExpr(b.makeFillEmptyFalse(b.makeFunction("coerceToBool"_sd, std::move(expr))));
@@ -1066,7 +1068,7 @@ public:
 
         // Translate the agg expression to SBE.
         auto translatedCmpExpr = generateExpression(
-            _context->state, cmpAggExpr.get(), _context->rootSlot, _context->slots);
+            _context->state, cmpAggExpr.get(), _context->rootSlot, *_context->slots);
 
         auto isArrayExpr = b.makeIf(b.makeFillEmptyTrue(b.makeFunction("isArray", lhsVar.clone())),
                                     b.makeBoolConstant(true),
@@ -1076,7 +1078,7 @@ public:
         auto fieldPathExpr = ExpressionFieldPath::createPathFromString(
             expCtx.get(), expr->fieldRef()->dottedField().toString(), expCtx->variablesParseState);
         auto translatedFieldPathExpr = generateExpression(
-            _context->state, fieldPathExpr.get(), _context->rootSlot, _context->slots);
+            _context->state, fieldPathExpr.get(), _context->rootSlot, *_context->slots);
 
         // Put the LHS into the slot we generated in a let statement.
         auto cmpWArrayCheckExpr = b.makeLet(
@@ -1310,7 +1312,7 @@ private:
 SbExpr generateFilter(StageBuilderState& state,
                       const MatchExpression* root,
                       boost::optional<TypedSlot> rootSlot,
-                      const PlanStageSlots* slots,
+                      const PlanStageSlots& slots,
                       const std::vector<std::string>& keyFields,
                       bool isFilterOverIxscan) {
     // The planner adds an $and expression without the operands if the query was empty. We can bail
@@ -1319,7 +1321,7 @@ SbExpr generateFilter(StageBuilderState& state,
         return SbExpr{};
     }
 
-    MatchExpressionVisitorContext context{state, rootSlot, root, slots, isFilterOverIxscan};
+    MatchExpressionVisitorContext context{state, rootSlot, root, &slots, isFilterOverIxscan};
 
     MatchExpressionPreVisitor preVisitor{&context};
     MatchExpressionInVisitor inVisitor{&context};

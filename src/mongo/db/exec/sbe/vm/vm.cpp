@@ -2572,10 +2572,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinFloor(ArityType 
     return genericFloor(tagOperand, valOperand);
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTrunc(ArityType arity) {
-    return genericRoundTrunc("$trunc", Decimal128::kRoundTowardZero, arity);
-}
-
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinExp(ArityType arity) {
     invariant(arity == 1);
 
@@ -3896,7 +3892,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTanh(ArityType a
  * argument, which is checked to be a whole number between -20 and 100, but could still be a
  * non-int32 type.
  */
-static int32_t convertNumericToInt32(const value::TypeTags tag, const value::Value val) {
+int32_t ByteCode::convertNumericToInt32(const value::TypeTags tag, const value::Value val) {
     switch (tag) {
         case value::TypeTags::NumberInt32: {
             return value::bitcastTo<int32_t>(val);
@@ -3917,21 +3913,16 @@ static int32_t convertNumericToInt32(const value::TypeTags tag, const value::Val
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericRoundTrunc(
-    std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity) {
-    invariant(arity == 1 || arity == 2);
-    int32_t place = 0;
-    const auto [numOwn, numTag, numVal] = getFromStack(0);
-    if (arity == 2) {
-        const auto [placeOwn, placeTag, placeVal] = getFromStack(1);
-        if (!value::isNumber(placeTag)) {
-            return {false, value::TypeTags::Nothing, 0};
-        }
-        place = convertNumericToInt32(placeTag, placeVal);
-    }
+    std::string funcName,
+    Decimal128::RoundingMode roundingMode,
+    int32_t place,
+    value::TypeTags numTag,
+    value::Value numVal) {
 
     // Construct 10^-precisionValue, which will be used as the quantize reference. This is passed to
     // decimal.quantize() to indicate the precision of our rounding.
     const auto quantum = Decimal128(0LL, Decimal128::kExponentBias - place, 0LL, 1LL);
+
     switch (numTag) {
         case value::TypeTags::NumberDecimal: {
             auto dec = value::bitcastTo<Decimal128>(numVal);
@@ -3952,7 +3943,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericRoundTrunc(
         case value::TypeTags::NumberInt32:
         case value::TypeTags::NumberInt64: {
             if (place >= 0) {
-                return {numOwn, numTag, numVal};
+                return {false, numTag, numVal};
             }
             auto numericArgll = numTag == value::TypeTags::NumberInt32
                 ? static_cast<int64_t>(value::bitcastTo<int32_t>(numVal))
@@ -3977,8 +3968,28 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericRoundTrunc(
     }
 }
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::scalarRoundTrunc(
+    std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity) {
+    invariant(arity == 1 || arity == 2);
+    int32_t place = 0;
+    const auto [_, numTag, numVal] = getFromStack(0);
+    if (arity == 2) {
+        const auto [placeOwn, placeTag, placeVal] = getFromStack(1);
+        if (!value::isNumber(placeTag)) {
+            return {false, value::TypeTags::Nothing, 0};
+        }
+        place = convertNumericToInt32(placeTag, placeVal);
+    }
+
+    return genericRoundTrunc(funcName, roundingMode, place, numTag, numVal);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTrunc(ArityType arity) {
+    return scalarRoundTrunc("$trunc", Decimal128::kRoundTowardZero, arity);
+}
+
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinRound(ArityType arity) {
-    return genericRoundTrunc("$round", Decimal128::kRoundTiesToEven, arity);
+    return scalarRoundTrunc("$round", Decimal128::kRoundTiesToEven, arity);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinConcat(ArityType arity) {
@@ -6647,7 +6658,12 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggMinMaxNFinali
     }
 }
 
-std::tuple<value::Array*, std::pair<value::TypeTags, value::Value>, bool, int64_t, int64_t>
+std::tuple<value::Array*,
+           std::pair<value::TypeTags, value::Value>,
+           bool,
+           int64_t,
+           int64_t,
+           SortSpec*>
 rankState(value::TypeTags stateTag, value::Value stateVal) {
     uassert(
         7795500, "The accumulator state should be an array", stateTag == value::TypeTags::Array);
@@ -6662,6 +6678,7 @@ rankState(value::TypeTags stateTag, value::Value stateVal) {
         state->getAt(AggRankElems::kLastValueIsNothing);
     auto [lastRankTag, lastRankVal] = state->getAt(AggRankElems::kLastRank);
     auto [sameRankCountTag, sameRankCountVal] = state->getAt(AggRankElems::kSameRankCount);
+    auto [sortSpecTag, sortSpecVal] = state->getAt(AggRankElems::kSortSpec);
 
     uassert(8188900,
             "Last rank is nothing component should be a boolean",
@@ -6677,7 +6694,13 @@ rankState(value::TypeTags stateTag, value::Value stateVal) {
             "Same rank component should be a 64-bit integer",
             sameRankCountTag == value::TypeTags::NumberInt64);
     auto sameRankCount = value::bitcastTo<int64_t>(sameRankCountVal);
-    return {state, lastValue, lastValueIsNothing, lastRank, sameRankCount};
+
+    uassert(8216800,
+            "Sort spec component should be a sort spec object",
+            sortSpecTag == value::TypeTags::sortSpec);
+    auto sortSpec = value::getSortSpecView(sortSpecVal);
+
+    return {state, lastValue, lastValueIsNothing, lastRank, sameRankCount, sortSpec};
 }
 
 FastTuple<bool, value::TypeTags, value::Value> builtinAggRankImpl(
@@ -6686,8 +6709,11 @@ FastTuple<bool, value::TypeTags, value::Value> builtinAggRankImpl(
     bool valueOwned,
     value::TypeTags valueTag,
     value::Value valueVal,
+    bool isAscending,
     bool dense,
     CollatorInterface* collator = nullptr) {
+
+    const char* kTempSortKeyField = "sortKey";
     // Initialize the accumulator.
     if (stateTag == value::TypeTags::Nothing) {
         auto [newStateTag, newStateVal] = value::makeNewArray();
@@ -6708,21 +6734,48 @@ FastTuple<bool, value::TypeTags, value::Value> builtinAggRankImpl(
         }
         newState->push_back(value::TypeTags::NumberInt64, 1);  // kLastRank
         newState->push_back(value::TypeTags::NumberInt64, 1);  // kSameRankCount
+
+        auto sortSpec =
+            std::make_unique<SortSpec>(BSON(kTempSortKeyField << (isAscending ? 1 : -1)));
+        newState->push_back(value::TypeTags::sortSpec,
+                            value::bitcastFrom<SortSpec*>(sortSpec.release()));  // kSortSpec
         newStateGuard.reset();
         return {true, newStateTag, newStateVal};
     }
 
     value::ValueGuard stateGuard{stateTag, stateVal};
-    auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount] =
+    auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount, sortSpec] =
         rankState(stateTag, stateVal);
     // Update the last value to Nothing before comparison if the flag is set.
     if (lastValueIsNothing) {
         lastValue.first = value::TypeTags::Nothing;
         lastValue.second = 0;
     }
-    auto [compareTag, compareVal] =
-        value::compareValue(valueTag, valueVal, lastValue.first, lastValue.second, collator);
-    if (compareTag == value::TypeTags::NumberInt32 && compareVal == 0) {
+
+    // Define sort-order compliant comparison function which uses fast pass logic for null and
+    // missing and full sort key logic for arrays.
+    auto isSameValue = [&](SortSpec* keyGen,
+                           std::pair<value::TypeTags, value::Value> currValue,
+                           std::pair<value::TypeTags, value::Value> lastValue) {
+        if (value::isNullish(currValue.first) && value::isNullish(lastValue.first)) {
+            return true;
+        }
+        if (value::isArray(currValue.first) || value::isArray(lastValue.first)) {
+            auto getSortKey = [&](value::TypeTags tag, value::Value val) {
+                BSONObjBuilder builder;
+                bson::appendValueToBsonObj(builder, kTempSortKeyField, tag, val);
+                return keyGen->generateSortKey(builder.obj(), collator);
+            };
+            auto currKey = getSortKey(currValue.first, currValue.second);
+            auto lastKey = getSortKey(lastValue.first, lastValue.second);
+            return currKey.compare(lastKey) == 0;
+        }
+        auto [compareTag, compareVal] = value::compareValue(
+            currValue.first, currValue.second, lastValue.first, lastValue.second, collator);
+        return compareTag == value::TypeTags::NumberInt32 && compareVal == 0;
+    };
+
+    if (isSameValue(sortSpec, std::make_pair(valueTag, valueVal), lastValue)) {
         state->setAt(AggRankElems::kSameRankCount, value::TypeTags::NumberInt64, sameRankCount + 1);
     } else {
         if (!valueOwned) {
@@ -6749,54 +6802,93 @@ FastTuple<bool, value::TypeTags, value::Value> builtinAggRankImpl(
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRank(ArityType arity) {
-    invariant(arity == 2);
+    invariant(arity == 3);
+    auto [isAscendingOwned, isAscendingTag, isAscendingVal] = getFromStack(2);
     auto [valueOwned, valueTag, valueVal] = getFromStack(1);
     auto [stateTag, stateVal] = moveOwnedFromStack(0);
+
+    tassert(8216803,
+            "Incorrect value type passed to aggRank for 'isAscending' parameter.",
+            isAscendingTag == value::TypeTags::Boolean);
+    auto isAscending = value::bitcastTo<bool>(isAscendingVal);
+
     return builtinAggRankImpl(
-        stateTag, stateVal, valueOwned, valueTag, valueVal, false /* dense */);
+        stateTag, stateVal, valueOwned, valueTag, valueVal, isAscending, false /* dense */);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRankColl(ArityType arity) {
-    invariant(arity == 3);
-    auto [collatorOwned, collatorTag, collatorVal] = getFromStack(2);
+    invariant(arity == 4);
+    auto [collatorOwned, collatorTag, collatorVal] = getFromStack(3);
+    auto [isAscendingOwned, isAscendingTag, isAscendingVal] = getFromStack(2);
     auto [valueOwned, valueTag, valueVal] = getFromStack(1);
     auto [stateTag, stateVal] = moveOwnedFromStack(0);
+
+    tassert(8216804,
+            "Incorrect value type passed to aggRankColl for 'isAscending' parameter.",
+            isAscendingTag == value::TypeTags::Boolean);
+    auto isAscending = value::bitcastTo<bool>(isAscendingVal);
 
     tassert(7795504,
             "Incorrect value type passed to aggRankColl for collator.",
             collatorTag == value::TypeTags::collator);
     auto collator = value::getCollatorView(collatorVal);
 
-    return builtinAggRankImpl(
-        stateTag, stateVal, valueOwned, valueTag, valueVal, false /* dense */, collator);
+    return builtinAggRankImpl(stateTag,
+                              stateVal,
+                              valueOwned,
+                              valueTag,
+                              valueVal,
+                              isAscending,
+                              false /* dense */,
+                              collator);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDenseRank(ArityType arity) {
-    invariant(arity == 2);
+    invariant(arity == 3);
+    auto [isAscendingOwned, isAscendingTag, isAscendingVal] = getFromStack(2);
     auto [valueOwned, valueTag, valueVal] = getFromStack(1);
     auto [stateTag, stateVal] = moveOwnedFromStack(0);
-    return builtinAggRankImpl(stateTag, stateVal, valueOwned, valueTag, valueVal, true /* dense */);
+
+    tassert(8216805,
+            "Incorrect value type passed to aggDenseRank for 'isAscending' parameter.",
+            isAscendingTag == value::TypeTags::Boolean);
+    auto isAscending = value::bitcastTo<bool>(isAscendingVal);
+
+    return builtinAggRankImpl(
+        stateTag, stateVal, valueOwned, valueTag, valueVal, isAscending, true /* dense */);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggDenseRankColl(ArityType arity) {
-    invariant(arity == 3);
-    auto [collatorOwned, collatorTag, collatorVal] = getFromStack(2);
+    invariant(arity == 4);
+    auto [collatorOwned, collatorTag, collatorVal] = getFromStack(3);
+    auto [isAscendingOwned, isAscendingTag, isAscendingVal] = getFromStack(2);
     auto [valueOwned, valueTag, valueVal] = getFromStack(1);
     auto [stateTag, stateVal] = moveOwnedFromStack(0);
+
+    tassert(8216806,
+            "Incorrect value type passed to aggDenseRankColl for 'isAscending' parameter.",
+            isAscendingTag == value::TypeTags::Boolean);
+    auto isAscending = value::bitcastTo<bool>(isAscendingVal);
 
     tassert(7795505,
             "Incorrect value type passed to aggDenseRankColl for collator.",
             collatorTag == value::TypeTags::collator);
     auto collator = value::getCollatorView(collatorVal);
 
-    return builtinAggRankImpl(
-        stateTag, stateVal, valueOwned, valueTag, valueVal, true /* dense */, collator);
+    return builtinAggRankImpl(stateTag,
+                              stateVal,
+                              valueOwned,
+                              valueTag,
+                              valueVal,
+                              isAscending,
+                              true /* dense */,
+                              collator);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAggRankFinalize(ArityType arity) {
     invariant(arity == 1);
     auto [stateOwned, stateTag, stateVal] = getFromStack(0);
-    auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount] =
+    auto [state, lastValue, lastValueIsNothing, lastRank, sameRankCount, sortSpec] =
         rankState(stateTag, stateVal);
     return {true, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(lastRank)};
 }
@@ -9446,6 +9538,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockDateDiff(arity);
         case Builtin::valueBlockDateTrunc:
             return builtinValueBlockDateTrunc(arity);
+        case Builtin::valueBlockTrunc:
+            return builtinValueBlockTrunc(arity);
+        case Builtin::valueBlockRound:
+            return builtinValueBlockRound(arity);
         case Builtin::valueBlockSum:
             return builtinValueBlockSum(arity);
         case Builtin::valueBlockAdd:
@@ -9942,6 +10038,14 @@ std::string builtinToString(Builtin b) {
             return "valueBlockMax";
         case Builtin::valueBlockCount:
             return "valueBlockCount";
+        case Builtin::valueBlockDateDiff:
+            return "valueBlockDateDiff";
+        case Builtin::valueBlockDateTrunc:
+            return "valueBlockDateTrunc";
+        case Builtin::valueBlockTrunc:
+            return "valueBlockTrunc";
+        case Builtin::valueBlockRound:
+            return "valueBlockRound";
         case Builtin::valueBlockSum:
             return "valueBlockSum";
         case Builtin::valueBlockAdd:

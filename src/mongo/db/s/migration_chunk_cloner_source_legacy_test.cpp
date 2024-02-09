@@ -323,7 +323,8 @@ public:
             tsOptions->getBucketMaxSpanSeconds() == tsOptions->getBucketRoundingSeconds();
     }
 
-    bool doesTimeseriesBucketsDocContainMixedSchemaData(const BSONObj& bucketsDoc) const override {
+    StatusWith<bool> doesTimeseriesBucketsDocContainMixedSchemaData(
+        const BSONObj& bucketsDoc) const override {
         return _coll->doesTimeseriesBucketsDocContainMixedSchemaData(bucketsDoc);
     }
 
@@ -493,6 +494,10 @@ public:
 
     CappedVisibilitySnapshot takeCappedVisibilitySnapshot() const override {
         return _coll->takeCappedVisibilitySnapshot();
+    }
+
+    bool areRecordIdsReplicated() const override {
+        return _coll->areRecordIdsReplicated();
     }
 
     bool isCapped() const override {

@@ -4,7 +4,7 @@ load("@poetry//:dependencies.bzl", "dependency")
 # config selection
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
-load("//bazel:separate_debug.bzl", "CC_SHARED_LIBRARY_SUFFIX", "WITH_DEBUG_SUFFIX", "extract_debuginfo")
+load("//bazel:separate_debug.bzl", "CC_SHARED_LIBRARY_SUFFIX", "WITH_DEBUG_SUFFIX", "extract_debuginfo", "extract_debuginfo_binary")
 # === Windows-specific compilation settings ===
 
 # /RTC1              Enable Stack Frame Run-Time Error Checking; Reports when a variable is used without having been initialized (implies /Od: no optimizations)
@@ -414,7 +414,8 @@ def mongo_cc_library(
         copts = [],
         linkopts = [],
         linkstatic = False,
-        local_defines = []):
+        local_defines = [],
+        mongo_api_name = None):
     """Wrapper around cc_library.
 
     Args:
@@ -450,6 +451,23 @@ def mongo_cc_library(
     if name != "tcmalloc_minimal":
         deps += TCMALLOC_DEPS
 
+    if mongo_api_name:
+        visibility_support_defines_list = ["MONGO_USE_VISIBILITY", "MONGO_API_" + mongo_api_name]
+        visibility_support_shared_lib_flags_list = ["-fvisibility=hidden"]
+    else:
+        visibility_support_defines_list = ["MONGO_USE_VISIBILITY"]
+        visibility_support_shared_lib_flags_list = []
+
+    visibility_support_defines = select({
+        ("//bazel/config:visibility_support_enabled_dynamic_linking_setting"): visibility_support_defines_list,
+        "//conditions:default": [],
+    })
+
+    visibility_support_shared_flags = select({
+        ("//bazel/config:visibility_support_enabled_dynamic_linking_non_windows_setting"): visibility_support_shared_lib_flags_list,
+        "//conditions:default": [],
+    })
+
     linux_rpath_flags = ["-Wl,-z,origin", "-Wl,--enable-new-dtags", "-Wl,-rpath,\\$$ORIGIN/../lib", "-Wl,-h,lib" + name + ".so"]
     macos_rpath_flags = ["-Wl,-rpath,\\$$ORIGIN/../lib", "-Wl,-install_name,@rpath/lib" + name + ".so"]
 
@@ -476,7 +494,7 @@ def mongo_cc_library(
         tags = tags,
         linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
         linkstatic = True,
-        local_defines = MONGO_GLOBAL_DEFINES + local_defines,
+        local_defines = MONGO_GLOBAL_DEFINES + visibility_support_defines + local_defines,
         includes = [],
         features = ["supports_pic", "pic"],
         target_compatible_with = select({
@@ -519,7 +537,7 @@ def mongo_cc_library(
         deps = [name + WITH_DEBUG_SUFFIX],
         visibility = visibility,
         tags = tags,
-        user_link_flags = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags,
+        user_link_flags = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags + visibility_support_shared_flags,
         target_compatible_with = select({
             "//bazel/config:linkstatic_disabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
@@ -612,7 +630,7 @@ def mongo_cc_binary(
         }),
     )
 
-    extract_debuginfo(
+    extract_debuginfo_binary(
         name = name,
         binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
         type = "program",

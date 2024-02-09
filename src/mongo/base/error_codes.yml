@@ -534,6 +534,10 @@ error_codes:
 
     - {code: 406, name: MigrationBlockingOperationCoordinatorCleaningUp}
 
+    - {code: 407, name: TimeseriesBucketCompressionFailed, extra: 'timeseries::BucketCompressionFailure'}
+
+    - {code: 408, name: CannotInsertTimeseriesBucketsWithMixedSchema}
+
     # Error codes 4000-8999 are reserved.
 
     # Non-sequential error codes for compatibility only)

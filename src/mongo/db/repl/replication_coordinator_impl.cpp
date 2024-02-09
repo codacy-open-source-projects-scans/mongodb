@@ -721,7 +721,7 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
     const PostMemberStateUpdateAction action =
         _setCurrentRSConfig(lock, opCtx.get(), localConfig, myIndex.getValue());
 
-    // Set our last applied and durable optimes to the top of the oplog, if we have one.
+    // Set our last applied, written and durable optimes to the top of the oplog, if we have one.
     if (!lastOpTime.isNull()) {
         LOGV2_DEBUG(4280510,
                     1,
@@ -1540,7 +1540,7 @@ void ReplicationCoordinatorImpl::resetMyLastOpTimes() {
 }
 
 void ReplicationCoordinatorImpl::_resetMyLastOpTimes(WithLock lk) {
-    LOGV2_DEBUG(21332, 1, "Resetting durable/applied optimes");
+    LOGV2_DEBUG(21332, 1, "Resetting written/applied/durable optimes");
     // Reset to uninitialized OpTime
     bool isRollbackAllowed = true;
     _setMyLastWrittenOpTimeAndWallTime(lk, OpTimeAndWallTime(), isRollbackAllowed);
@@ -1568,6 +1568,11 @@ void ReplicationCoordinatorImpl::_setMyLastWrittenOpTimeAndWallTime(
     WithLock lk, const OpTimeAndWallTime& opTimeAndWallTime, bool isRollbackAllowed) {
     _topCoord->setMyLastWrittenOpTimeAndWallTime(
         opTimeAndWallTime, _replExecutor->now(), isRollbackAllowed);
+
+    // If we are using written times to calculate the commit level, update it now.
+    if (!_rsConfig.getWriteConcernMajorityShouldJournal()) {
+        _updateLastCommittedOpTimeAndWallTime(lk);
+    }
 }
 
 void ReplicationCoordinatorImpl::_setMyLastAppliedOpTimeAndWallTime(
@@ -1581,10 +1586,7 @@ void ReplicationCoordinatorImpl::_setMyLastAppliedOpTimeAndWallTime(
 
     _topCoord->setMyLastAppliedOpTimeAndWallTime(
         opTimeAndWallTime, _replExecutor->now(), isRollbackAllowed);
-    // If we are using applied times to calculate the commit level, update it now.
-    if (!_rsConfig.getWriteConcernMajorityShouldJournal()) {
-        _updateLastCommittedOpTimeAndWallTime(lk);
-    }
+
     // No need to wake up replication waiters because there should not be any replication waiters
     // waiting on our own lastApplied.
 
@@ -2731,11 +2733,19 @@ void ReplicationCoordinatorImpl::_killConflictingOpsOnStepUpAndStepDown(
         // Don't kill step up/step down thread.
         if (toKill && !toKill->isKillPending() && toKill->getOpID() != rstlOpCtx->getOpID()) {
             auto locker = shard_role_details::getLocker(toKill);
-            if (toKill->shouldAlwaysInterruptAtStepDownOrUp() ||
-                locker->wasGlobalLockTakenInModeConflictingWithWrites() ||
-                PrepareConflictTracker::get(toKill).isWaitingOnPrepareConflict()) {
+            bool alwaysInterrupt = toKill->shouldAlwaysInterruptAtStepDownOrUp();
+            bool globalLockConfict = locker->wasGlobalLockTakenInModeConflictingWithWrites();
+            bool isWaitingOnPrepareConflict =
+                PrepareConflictTracker::get(toKill).isWaitingOnPrepareConflict();
+            if (alwaysInterrupt || globalLockConfict || isWaitingOnPrepareConflict) {
                 serviceCtx->killOperation(lk, toKill, reason);
                 arsc->incrementTotalOpsKilled();
+                LOGV2(8562701,
+                      "Repl state change interrupted a thread.",
+                      "name"_attr = client->desc(),
+                      "alwaysInterrupt"_attr = alwaysInterrupt,
+                      "globalLockConflict"_attr = globalLockConfict,
+                      "isWaitingOnPrepareConflict"_attr = isWaitingOnPrepareConflict);
             } else {
                 arsc->incrementTotalOpsRunning();
             }

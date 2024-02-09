@@ -25,7 +25,7 @@ buildvariants:
       --win-version-min=win10
       --use-diagnostic-latches=on
     num_scons_link_jobs_available: 0.25
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     test_flags: >-
       --storageEngine=inMemory
       --excludeWithAnyTags=requires_persistence,requires_journaling,incompatible_with_windows_tls
@@ -49,7 +49,7 @@ buildvariants:
   - name: concurrency_replication_causal_consistency_gen
   - name: initial_sync_fuzzer_gen
   - name: .jscore .common !.decimal !.sharding
-  - name: .jstestfuzz .common !.flow_control  # Flow control jstestfuzz take longer.
+  - name: .jstestfuzz .common !.feature_flag_guarded !.flow_control  # Flow control jstestfuzz take longer.
   - name: .read_write_concern .linearize !.durable_history
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough_gen

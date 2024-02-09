@@ -111,13 +111,12 @@ std::map<NamespaceString, SecondaryCollectionInfo> fillOutSecondaryCollectionsIn
  * Fill out the provided 'plannerParams' for the 'canonicalQuery' operating on the collection
  * 'collection'.
  */
-void fillOutPlannerParams(OperationContext* opCtx,
-                          const CollectionPtr& collection,
-                          const CanonicalQuery* canonicalQuery,
-                          QueryPlannerParams* plannerParams,
-                          bool ignoreQuerySettings = false);
+void fillOutMainCollectionPlannerParams(OperationContext* opCtx,
+                                        const CollectionPtr& collection,
+                                        const CanonicalQuery* canonicalQuery,
+                                        QueryPlannerParams* plannerParams);
 /**
- * Overload of the above function that does two things:
+ * Fills out the 'plannerParams':
  * - Calls the single collection overload of 'fillOutPlannerParams' on the main collection held
  * by 'collections'
  * - Calls 'fillOutSecondaryCollectionsInformation' to store information about the set of
@@ -318,5 +317,10 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getCollectionScanExecutor(
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     CollectionScanDirection scanDirection,
     const boost::optional<RecordId>& resumeAfterRecordId = boost::none);
+
+
+bool isExpressEligible(OperationContext* opCtx,
+                       const CollectionPtr& coll,
+                       const CanonicalQuery* cq);
 
 }  // namespace mongo

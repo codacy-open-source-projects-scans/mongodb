@@ -719,6 +719,8 @@ enum class Builtin : uint16_t {
     valueBlockCount,
     valueBlockDateDiff,
     valueBlockDateTrunc,
+    valueBlockTrunc,
+    valueBlockRound,
     valueBlockSum,
     valueBlockAdd,
     valueBlockSub,
@@ -881,8 +883,17 @@ enum AggStdDevValueElems {
  * - The element at index `kLastRank` is the rank of the last value.
  * - The element at index `kSameRankCount` is how many values are of the same rank as the last
  * value.
+ * - The element at index `kSortSpec` is the sort spec object used to generate sort key for adjacent
+ * value comparison.
  */
-enum AggRankElems { kLastValue, kLastValueIsNothing, kLastRank, kSameRankCount, kRankArraySize };
+enum AggRankElems {
+    kLastValue,
+    kLastValueIsNothing,
+    kLastRank,
+    kSameRankCount,
+    kSortSpec,
+    kRankArraySize
+};
 
 /**
  * This enum defines indices into an 'Array' that returns the result of accumulators that track the
@@ -1318,6 +1329,14 @@ private:
                                                               value::TypeTags exponentTag,
                                                               value::Value exponentValue);
     FastTuple<bool, value::TypeTags, value::Value> genericRoundTrunc(
+        std::string funcName,
+        Decimal128::RoundingMode roundingMode,
+        int32_t place,
+        value::TypeTags numTag,
+        value::Value numVal);
+    FastTuple<bool, value::TypeTags, value::Value> scalarRoundTrunc(
+        std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> blockRoundTrunc(
         std::string funcName, Decimal128::RoundingMode roundingMode, ArityType arity);
     std::pair<value::TypeTags, value::Value> genericNot(value::TypeTags tag, value::Value value);
 
@@ -1358,6 +1377,8 @@ private:
     void valueBlockApplyLambda(const CodeFragment* code);
 
     FastTuple<bool, value::TypeTags, value::Value> setField();
+
+    int32_t convertNumericToInt32(value::TypeTags tag, value::Value val);
 
     FastTuple<bool, value::TypeTags, value::Value> getArraySize(value::TypeTags tag,
                                                                 value::Value val);
@@ -1999,6 +2020,9 @@ private:
 
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockDateDiff(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockDateTrunc(ArityType arity);
+
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockRound(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockTrunc(ArityType arity);
 
     template <class Cmp, value::ColumnOpType::Flags AddFlags = value::ColumnOpType::kNoFlags>
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCmpScalar(ArityType arity);

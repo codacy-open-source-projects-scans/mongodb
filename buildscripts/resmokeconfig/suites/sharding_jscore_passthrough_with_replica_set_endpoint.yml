@@ -52,7 +52,7 @@ selector:
   - jstests/core/query/awaitdata_getmore_cmd.js
   - jstests/core/query/count/count_plan_summary.js
   - jstests/core/query/mr/mr_killop.js
-  # TODO (SERVER-84183): Support FLE on mongod with router role.
+  # TODO (SERVER-86393): Support FLE2 with replica set endpoint.
   - src/mongo/db/modules/enterprise/jstests/fle2/**/*.js
   # TODO (SERVER-75855): Support running the find command via mongos by specifying a UUID
   # (instead of a collection name).
@@ -101,8 +101,8 @@ executor:
     mongod_options:
       set_parameters:
         enableTestCommands: 1
-        featureFlagEmbeddedRouter: 1
-        featureFlagReplicaSetEndpoint: 1
+        featureFlagEmbeddedRouter: true
+        featureFlagReplicaSetEndpoint: true
     # TODO (SERVER-84184): Test multi-node shards with embedded router.
     num_rs_nodes_per_shard: 1
     embedded_router: 1

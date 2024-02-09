@@ -593,34 +593,49 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
 
         self._writer.write_empty_line()
 
-    def gen_ownership_getter(self):
-        # type: () -> None
+    def gen_ownership_getter(self, struct):
+        # type: (ast.Struct) -> None
         """Generate a getter that returns true if this IDL object owns its underlying data."""
-        self.gen_description_comment(
-            textwrap.dedent("""\
-        An IDL struct can either provide a view onto some underlying BSON data, or it can
-        participate in owning that data. This function returns true if the struct participates in
-        owning the underlying data.
+        if struct.is_view:
+            self.gen_description_comment(
+                textwrap.dedent("""\
+            *An IDL struct can either provide a view onto some underlying BSON data, or it can
+            participate in owning that data. This function returns true if the struct participates in
+            owning the underlying data.
 
-        Note that the underlying data is not synchronized with the IDL struct over its lifetime; to
-        generate a BSON representation of an IDL struct, use its `serialize` member functions.
-        Participating in ownership of the underlying data merely allows the struct to ensure that
-        struct members that are pointers-into-BSON (i.e. BSONElement and BSONObject) are valid for
-        the lifetime of the struct itself."""))
-        self._writer.write_line("bool isOwned() const { return _anchorObj.isOwned(); }")
+            Note that the underlying data is not synchronized with the IDL struct over its lifetime; to
+            generate a BSON representation of an IDL struct, use its `serialize` member functions.
+            Participating in ownership of the underlying data merely allows the struct to ensure that
+            struct members that are pointers-into-BSON (i.e. BSONElement and BSONObject) are valid for
+            the lifetime of the struct itself."""))
+            self._writer.write_line("bool isOwned() const { return _anchorObj.isOwned(); }")
+        else:
+            self.gen_description_comment(
+                textwrap.dedent("""\
+            This function will return true every time because there is no underlying BSONObj anchor.
+            The object owns the data of all of its members."""))
+            self._writer.write_line("bool isOwner() const { return true; }")
 
-    def gen_protected_ownership_setters(self):
-        # type: () -> None
+    def gen_protected_ownership_setters(self, struct):
+        # type: (ast.Struct) -> None
         """Generate a setter that can be used to allow this IDL struct to particpate in the ownership of some BSON that the struct's members refer to."""
-        with self._block('void setAnchor(const BSONObj& obj) {', '}'):
-            self._writer.write_line("invariant(obj.isOwned());")
-            self._writer.write_line("_anchorObj = obj;")
-        self._writer.write_empty_line()
+        if struct.is_view:
+            # If the struct is not a view type, then a BSONObj anchor is not needed because we
+            # know the struct owns all of its data.
+            with self._block('void setAnchor(const BSONObj& obj) {', '}'):
+                self._writer.write_line("invariant(obj.isOwned());")
+                self._writer.write_line("_anchorObj = obj;")
+            self._writer.write_empty_line()
 
-        with self._block('void setAnchor(BSONObj&& obj) {', '}'):
-            self._writer.write_line("invariant(obj.isOwned());")
-            self._writer.write_line("_anchorObj = std::move(obj);")
-        self._writer.write_empty_line()
+            with self._block('void setAnchor(BSONObj&& obj) {', '}'):
+                self._writer.write_line("invariant(obj.isOwned());")
+                self._writer.write_line("_anchorObj = std::move(obj);")
+            self._writer.write_empty_line()
+        else:
+            self._writer.write_line("void setAnchor(const BSONObj& obj) { }")
+            self._writer.write_empty_line()
+            self._writer.write_line("void setAnchor(BSONObj&& obj) { }")
+            self._writer.write_empty_line()
 
     def gen_protected_serializer_methods(self, struct):
         # type: (ast.Struct) -> None
@@ -709,9 +724,14 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
         param_type = cpp_type_info.get_getter_setter_type()
         is_serial = _is_required_serializer_field(field)
         memfn = _get_field_member_setter_name(field)
-        body = cpp_type_info.get_setter_body(
-            _get_field_member_name(field),
-            _get_field_member_validator_name(field) if field.validator is not None else '')
+        if field.chained_struct_field:
+            body = "{}.{}(std::move(value));".format(
+                _get_field_member_name(field.chained_struct_field),
+                _get_field_member_setter_name(field))
+        else:
+            body = cpp_type_info.get_setter_body(
+                _get_field_member_name(field),
+                _get_field_member_validator_name(field) if field.validator is not None else '')
         set_has = _gen_mark_present(field.cpp_name) if is_serial else ''
 
         with self._block(f'void {memfn}({param_type} value) {{', '}'):
@@ -1250,7 +1270,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                     if isinstance(struct, ast.Command):
                         self.gen_op_msg_request_methods(struct)
 
-                    self.gen_ownership_getter()
+                    self.gen_ownership_getter(struct)
 
                     # Write getters & setters
                     for field in struct.fields:
@@ -1258,10 +1278,8 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                             if field.description:
                                 self.gen_description_comment(field.description)
                             self.gen_getter(struct, field)
-                            if not field.chained_struct_field:
-                                if not struct.immutable or (field.type
-                                                            and field.type.internal_only):
-                                    self.gen_setter(field)
+                            if not struct.immutable or (field.type and field.type.internal_only):
+                                self.gen_setter(field)
 
                     # Generate getters for any constexpr/compile-time struct data
                     self.write_empty_line()
@@ -1271,9 +1289,13 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                         self.gen_field_list_entry_lookup_methods_struct(struct)
 
                     self.write_unindented_line('protected:')
-                    self.gen_protected_ownership_setters()
+                    if (struct.is_view):
+                        # If the struct is not a view type, then a BSONObj anchor is not needed because we
+                        # know the struct owns all of its data.
+                        self.gen_protected_ownership_setters(struct)
+                        self._writer.write_line("BSONObj _anchorObj;")
+
                     self.gen_protected_serializer_methods(struct)
-                    self._writer.write_line("BSONObj _anchorObj;")
 
                     # Write private validators
                     if [field for field in struct.fields if field.validator]:
@@ -1584,22 +1606,10 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                     self._writer.write_line('break;')
 
         if field.type.variant_struct_types:
-            self._writer.write_line('case Object:')
-            self._writer.indent()
-
-            is_multiple_structs = len(field.type.variant_struct_types) > 1
-            if is_multiple_structs:
-                self._writer.write_line('{')
-                self._writer.indent()
-                self._writer.write_line(
-                    'auto firstElement = %s.Obj().firstElement();' % bson_element)
-            self._gen_variant_deserializer_helper(field, field_name=_get_field_member_name(field),
-                                                  bson_element='%s.Obj()' % bson_element)
-            self._writer.write_line('break;')
-            if is_multiple_structs:
-                self._writer.unindent()
-                self._writer.write_line('}')
-            self._writer.unindent()
+            with self._block('case Object: {', '} break;'):
+                self._gen_variant_deserializer_from_obj(field,
+                                                        field_name=_get_field_member_name(field),
+                                                        bson_element='%s.Obj()' % bson_element)
 
         self._writer.write_line('default:')
         self._writer.indent()
@@ -1617,36 +1627,35 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         # Used by _gen_array_deserializer for arrays of variant.
         return _get_field_member_name(field)
 
-    def _gen_variant_deserializer_helper(self, field, field_name, bson_element):
-        beginning_str = ''
-        is_multiple_structs = len(field.type.variant_struct_types) > 1
-
-        for variant_type in field.type.variant_struct_types:
-            if is_multiple_structs:
-                struct_type = variant_type.first_element_field_name
-                self._writer.write_line('%sif (firstElement.fieldNameStringData() == "%s") {' %
-                                        (beginning_str, struct_type))
-                beginning_str = '} else '
-                self._writer.indent()
-            object_value = '%s::parse(ctxt, %s)' % (variant_type.cpp_type, bson_element)
+    def _gen_variant_deserializer_from_obj(self, field, field_name, bson_element):
+        def on_variant_alternative_match(variant_type):
+            value_expr = f'{variant_type.cpp_type}::parse(ctxt, {bson_element})'
             if field.optional:
                 cpp_type_info = cpp_types.get_cpp_type(field)
-                object_value = '%s(%s)' % (cpp_type_info.get_getter_setter_type(), object_value)
-
+                value_expr = f'{cpp_type_info.get_getter_setter_type()}({value_expr})'
             if field.chained_struct_field:
-                self._writer.write_line(
-                    '%s.%s(%s);' % (_get_field_member_name(field.chained_struct_field),
-                                    _get_field_member_setter_name(field), object_value))
+                chain_source = _get_field_member_name(field.chained_struct_field)
+                setter = _get_field_member_setter_name(field)
+                self._writer.write_line(f'{chain_source}.{setter}({value_expr});')
             else:
-                self._writer.write_line('%s = %s;' % (field_name, object_value))
-            if is_multiple_structs:
-                self._writer.unindent()
-        if is_multiple_structs:
-            self._writer.write_line('} else {')
-            self._writer.indent()
-            self._writer.write_line('ctxt.throwUnknownField(firstElement.fieldNameStringData());')
-            self._writer.unindent()
-            self._writer.write_line('}')
+                self._writer.write_line(f'{field_name} = {value_expr};')
+
+        struct_types_list = field.type.variant_struct_types
+        if len(struct_types_list) == 1:
+            on_variant_alternative_match(struct_types_list[0])
+        else:
+            key = f'{bson_element}.firstElement().fieldNameStringData()'
+            with self._block('[&](StringData s) {', f'}}({key});'):
+                with self._block('auto onMatch = [&](int found) {', '};'):
+                    with self._block('switch (found) {', '}'):
+                        for idx, variant_type in enumerate(struct_types_list):
+                            with self._block(f'case {idx}: {{', '} break;'):
+                                on_variant_alternative_match(variant_type)
+                with self._block('auto onFail = [&] {', '};'):
+                    self._writer.write_line('ctxt.throwUnknownField(s);')
+                writer.gen_string_table_find_function_block(
+                    self._writer, 's', 'onMatch({})', 'onFail()',
+                    [f.first_element_field_name for f in struct_types_list])
 
     def _gen_usage_check(self, field, bson_element, field_usage_check):
         # type: (ast.Field, str, _FieldUsageCheckerBase) -> None
@@ -1658,9 +1667,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 self._writer.write_line(_gen_mark_present(field.cpp_name))
 
     def gen_field_deserializer(self, field, field_type, bson_object, bson_element,
-                               field_usage_check, tenant, is_command_field=False, check_type=True,
-                               deserialize_fn=None):
-        # type: (ast.Field, ast.Type, str, str, _FieldUsageCheckerBase, str, bool, bool, Optional[Callable[[], None]]) -> None
+                               field_usage_check, tenant, is_command_field=False, check_type=True):
+        # type: (ast.Field, ast.Type, str, str, _FieldUsageCheckerBase, str, bool, bool) -> None
         """Generate the C++ deserializer piece for a field.
 
         If field_type is scalar and check_type is True (the default), generate type-checking code.
@@ -1675,18 +1683,12 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             predicate = "MONGO_likely(ctxt.checkAndAssertType(%s, Array))" % (bson_element)
             with self._predicate(predicate):
                 self._gen_usage_check(field, bson_element, field_usage_check)
-                if deserialize_fn:
-                    deserialize_fn()
-                else:
-                    self._gen_array_deserializer(field, bson_element, field_type, tenant)
+                self._gen_array_deserializer(field, bson_element, field_type, tenant)
             return
 
         elif field_type.is_variant:
             self._gen_usage_check(field, bson_element, field_usage_check)
-            if deserialize_fn:
-                deserialize_fn()
-            else:
-                self._gen_variant_deserializer(field, bson_element, tenant)
+            self._gen_variant_deserializer(field, bson_element, tenant)
             return
 
         def validate_and_assign_or_uassert(field, expression):
@@ -1703,7 +1705,6 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 self._writer.write_line('%s = std::move(value);' % (field_name))
 
         if field.chained:
-            assert not deserialize_fn
             # Do not generate a predicate check since we always call these deserializers.
 
             if field_type.is_struct:
@@ -1726,9 +1727,6 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             with self._predicate(predicate):
 
                 self._gen_usage_check(field, bson_element, field_usage_check)
-                if deserialize_fn:
-                    deserialize_fn()
-                    return
 
                 object_value = self._gen_field_deserializer_expression(
                     bson_element, field, field_type, tenant)
@@ -1744,11 +1742,6 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                     self._writer.write_line(
                         '%s.%s(%s);' % (_get_field_member_name(field.chained_struct_field),
                                         _get_field_member_setter_name(field), object_value))
-                elif field.name == 'expectPrefix':
-                    # expectPrefix is only included in commands, and we need this value to set
-                    # the state in the local SerializerFlags object
-                    self._writer.write_line(
-                        '_serializationContext.setPrefixState(%s);' % object_value)
                 else:
                     validate_and_assign_or_uassert(field, object_value)
 
@@ -1788,9 +1781,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 array_value = '%s::parse(tempContext, sequenceObject)' % (field.type.cpp_type, )
             elif field.type.is_variant:
                 self._writer.write_line('%s _tmp;' % field.type.cpp_type)
-                self._writer.write_line('auto firstElement = sequenceObject.firstElement();')
-                self._gen_variant_deserializer_helper(field, field_name='_tmp',
-                                                      bson_element='sequenceObject')
+                self._gen_variant_deserializer_from_obj(field, field_name='_tmp',
+                                                        bson_element='sequenceObject')
                 array_value = '_tmp'
             else:
                 for serialization_type in field.type.bson_serialization_type:
@@ -2016,45 +2008,18 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         self._writer.write_empty_line()
 
-        deferred_fields = []  # type: List[ast.Field]
-        deferred_field_names = []  # type: List[str]
         field_name_map = {f.name: f for f in struct.fields}
 
         def map_field(field_name):
             field = field_name_map[field_name]
 
-            def defer_field():
-                # type: () -> None
-                """Field depends on other field(s), store its location and defer processing till later."""
-                assert field.name in deferred_field_names
-                self._writer.write_line('%s = element;' % (_gen_field_element_name(field)))
-
             if field.ignore:
                 field_usage_check.add(field, "element")
                 self._writer.write_line('// ignore field')
             else:
-                fn = defer_field if field.name in deferred_field_names else None
                 self.gen_field_deserializer(field, field.type, bson_object, "element",
-                                            field_usage_check, tenant, deserialize_fn=fn)
+                                            field_usage_check, tenant)
             self._writer.write_line('return true;')
-
-        if 'expectPrefix' in [field.name for field in struct.fields]:
-            # Deserialization of 'expectPrefix' modifies the deserializationContext and how
-            # certain other fields are then deserialized.
-            # Such dependent fields include those which "deserialize_with_tenant" and
-            # any complex struct type.
-            # In practice, this typically only occurs on Command structs.
-            deferred_fields = [
-                field for field in struct.fields
-                if field.type and (field.type.is_struct or field.type.deserialize_with_tenant)
-            ]
-            deferred_field_names = [field.name for field in deferred_fields]
-            if deferred_fields:
-                self._writer.write_line(
-                    '// Anchors for values of fields which may depend on others.')
-                for field in deferred_fields:
-                    self._writer.write_line('BSONElement %s;' % (_gen_field_element_name(field)))
-                self._writer.write_empty_line()
 
         with self._block('for (const auto& element :%s) {' % (bson_object), '}'):
 
@@ -2105,14 +2070,6 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                 with writer.IndentedScopedBlock(
                         self._writer, 'if (MONGO_unlikely(push_result.second == false)) {', '}'):
                     self._writer.write_line('ctxt.throwDuplicateField(fieldName);')
-
-        # Handle the deferred fields after their possible dependencies have been processed.
-        for field in deferred_fields:
-            element_name = _gen_field_element_name(field)
-            self._writer.write_empty_line()
-            with self._predicate(element_name):
-                self.gen_field_deserializer(field, field.type, bson_object, element_name, None,
-                                            tenant)
 
         # Parse chained structs if not inlined
         # Parse chained types always here
@@ -2165,11 +2122,12 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
             self._writer.write_line(method_info.get_call('object'))
 
-            if ownership == _StructDataOwnership.OWNER:
-                self._writer.write_line('object.setAnchor(std::move(bsonObject));')
+            if struct.is_view:
+                if ownership == _StructDataOwnership.OWNER:
+                    self._writer.write_line('object.setAnchor(std::move(bsonObject));')
 
-            elif ownership == _StructDataOwnership.SHARED:
-                self._writer.write_line('object.setAnchor(bsonObject);')
+                elif ownership == _StructDataOwnership.SHARED:
+                    self._writer.write_line('object.setAnchor(bsonObject);')
 
             self._writer.write_line('return object;')
 
@@ -2675,9 +2633,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
             if field.supports_doc_sequence and is_op_msg_request:
                 continue
 
-            # Internal-only types aren't serialized or deserialized, while expectPrefix should not
-            # be serialized
-            if field.type and field.type.internal_only or field.name == 'expectPrefix':
+            # Internal-only types aren't serialized or deserialized.
+            if field.type and field.type.internal_only:
                 continue
 
             self._gen_serializer_method_common(field)

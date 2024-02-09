@@ -93,6 +93,10 @@ export class ShardTargetingTest {
             const split = explain.splitPipeline;
             assert(split.hasOwnProperty("mergerPart"), explain);
             const mergerPart = split.mergerPart;
+            assert(
+                expectedMergingStages,
+                "Should have specified merging stages for test case if 'expectedMergingShard' was specified" +
+                    tojson(explain));
             assert(expectedMergingStages, explain);
             this._assertExpectedStages(expectedMergingStages, mergerPart, explain);
         } else {
@@ -117,10 +121,11 @@ export class ShardTargetingTest {
                 this._assertExpectedStages(expectedShardStages, stages, explain);
             }
 
+            const stage = getAggPlanStage(shard, "EQ_LOOKUP", true /* useQueryPlannerSection */);
             if (assertSBELookupPushdown) {
-                const stage =
-                    getAggPlanStage(shard, "EQ_LOOKUP", true /* useQueryPlannerSection */);
                 assert.neq(stage, null, shard);
+            } else {
+                assert.eq(stage, null, shard);
             }
         }
     }
@@ -138,10 +143,6 @@ export class ShardTargetingTest {
      */
     setupColl({collName, indexList, docs, collType, shardKey, chunkList, owningShard}) {
         const coll = this.db[collName];
-        if (indexList && indexList.length > 0) {
-            assert.commandWorked(coll.createIndexes(indexList));
-        }
-
         if (collType === "sharded") {
             assert(shardKey && chunkList,
                    "Must specify shard key and chunk list when setting up a sharded collection");
@@ -155,7 +156,13 @@ export class ShardTargetingTest {
             assert(false, "Unknown collection type " + tojson(collType));
         }
 
-        assert.commandWorked(coll.insertMany(docs));
+        if (indexList && indexList.length > 0) {
+            assert.commandWorked(coll.createIndexes(indexList));
+        }
+
+        if (docs && docs.length > 0) {
+            assert.commandWorked(coll.insertMany(docs));
+        }
     }
 
     /**
@@ -180,9 +187,11 @@ export class ShardTargetingTest {
     }) {
         const coll = this.db[targetCollName];
 
+        const options = comment ? {'comment': comment} : {};
+
         // Test explain if 'explainAssertionObj' is specified.
         if (explainAssertionObj) {
-            const explain = coll.explain().aggregate(pipeline);
+            const explain = coll.explain().aggregate(pipeline, options);
             this._assertExplainTargeting(explain, explainAssertionObj);
         }
 
@@ -190,7 +199,6 @@ export class ShardTargetingTest {
         this._resetProfiling();
 
         // Verify that 'pipeline' returns the expected results.
-        const options = comment ? {'comment': comment} : {};
         const res = coll.aggregate(pipeline, options).toArray();
         assert(arrayEq(res, expectedResults),
                "sharded aggregation results did not match: " + tojson(res) +

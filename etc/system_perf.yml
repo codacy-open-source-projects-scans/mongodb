@@ -5,6 +5,7 @@ include:
   - filename: etc/evergreen_yml_components/variants/misc/task_generation.yml
   - filename: etc/evergreen_yml_components/definitions.yml
   - filename: etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
+  - filename: etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
   - filename: etc/evergreen_yml_components/tasks/compile_tasks.yml
   - filename: etc/evergreen_yml_components/tasks/misc_tasks.yml
   - filename: etc/evergreen_yml_components/perf_tasks.yml
@@ -229,6 +230,7 @@ functions:
     - command: expansions.write
       params:
         file: ./expansions.yml
+        redacted: true
     - command: shell.exec
       params:
         script: ./src/dsi/run-dsi run_workload
@@ -667,6 +669,8 @@ functions:
             mv ./dist-test/bin/mongos mongodb/bin
             mv ./dist-test/bin/mongod mongodb/bin
             mv ./dist-test/bin/mongocryptd mongodb/bin
+            # Copy libs folder if it exists
+            [ ! -d ./dist-test/lib ] || mv ./dist-test/lib mongodb
   download mongodb old:
     - command: shell.exec
       params:

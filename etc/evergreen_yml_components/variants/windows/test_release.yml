@@ -23,7 +23,7 @@ buildvariants:
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
       --win-version-min=win10
     num_scons_link_jobs_available: 0.25
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     ext: zip
     scons_cache_scope: shared
     large_distro_name: windows-vsCurrent-large
@@ -47,16 +47,16 @@ buildvariants:
   - name: disk_wiredtiger
   - name: .jscore .common !.auth !.feature_flag_guarded
   - name: json_schema
-  - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
+  - name: .jstestfuzz !.initsync !.flow_control !.stepdowns !.feature_flag_guarded
   - name: multiversion_gen
   - name: multiversion_auth_gen
   - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: replica_sets_jscore_passthrough_gen
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.uninitialized_fcv
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.uninitialized_fcv !.feature_flag_guarded
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.encrypt
+  - name: .sharding .common !.csrs !.encrypt !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .ssl
   - name: .stitch
@@ -86,7 +86,7 @@ buildvariants:
       -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
       --win-version-min=win10
     num_scons_link_jobs_available: 0.2
-    python: '/cygdrive/c/python/python39/python.exe'
+    python: '/cygdrive/c/python/python310/python.exe'
     ext: zip
     scons_cache_scope: shared
     multiversion_platform: windows
@@ -127,16 +127,16 @@ buildvariants:
   - name: disk_wiredtiger
   - name: .jscore .common !.auth !.feature_flag_guarded
   - name: json_schema
-  - name: .jstestfuzz !.initsync !.flow_control !.stepdowns
+  - name: .jstestfuzz !.initsync !.flow_control !.stepdowns !.feature_flag_guarded
   - name: multiversion_gen
   - name: multiversion_auth_gen
   - name: .query_fuzzer !.feature_flag_guarded
   - name: .read_write_concern
   - name: replica_sets_gen
   - name: replica_sets_jscore_passthrough_gen
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.uninitialized_fcv
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.uninitialized_fcv !.feature_flag_guarded
   - name: .sharding .txns
-  - name: .sharding .common !.csrs !.gcm
+  - name: .sharding .common !.csrs !.gcm !.feature_flag_guarded
   - name: .ssl
   - name: .stitch
   - name: .updatefuzzer

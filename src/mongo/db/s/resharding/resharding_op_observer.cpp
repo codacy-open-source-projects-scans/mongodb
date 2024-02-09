@@ -110,7 +110,7 @@ void assertCanExtractShardKeyFromDocs(OperationContext* opCtx,
     // sharded outside of running reshardCollection.
     uassert(ErrorCodes::NamespaceNotSharded,
             str::stream() << "Temporary resharding collection " << nss.toStringForErrorMsg()
-                          << " is not sharded",
+                          << " was not found",
             collDesc.hasRoutingTable());
 
     const ShardKeyPattern shardKeyPattern(collDesc.getKeyPattern());
@@ -218,6 +218,7 @@ void ReshardingOpObserver::onInserts(OperationContext* opCtx,
                                      const CollectionPtr& coll,
                                      std::vector<InsertStatement>::const_iterator begin,
                                      std::vector<InsertStatement>::const_iterator end,
+                                     const std::vector<RecordId>& recordIds,
                                      std::vector<bool> fromMigrate,
                                      bool defaultFromMigrate,
                                      OpStateAccumulator* opAccumulator) {

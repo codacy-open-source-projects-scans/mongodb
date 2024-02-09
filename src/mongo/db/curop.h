@@ -293,6 +293,11 @@ public:
      */
     CursorMetrics getCursorMetrics() const;
 
+    /**
+     * Aggregate CursorMetrics (e.g., from a remote cursor) into the curop's metrics.
+     */
+    void aggregateCursorMetrics(const CursorMetrics& metrics);
+
     // -------------------
 
     // basic options
@@ -447,6 +452,9 @@ public:
     // Stores the duration of time spent waiting for the specified user write concern to
     // be fulfilled.
     Milliseconds waitForWriteConcernDurationMillis{0};
+
+    // Stores the duration of time spent waiting in a queue for a ticket to be acquired.
+    Milliseconds waitForTicketDurationMillis{0};
 
     // Stores the total time an operation spends with an uncommitted oplog slot held open. Indicator
     // that an operation is holding back replication by causing oplog holes to remain open for

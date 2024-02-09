@@ -47,7 +47,6 @@
 
 namespace mongo::stage_builder {
 class PlanStageSlots;
-struct TypedSlot;
 
 /**
  * This function generates an SbExpr that implements the filter expression represented by 'root'.
@@ -67,7 +66,7 @@ struct TypedSlot;
 SbExpr generateFilter(StageBuilderState& state,
                       const MatchExpression* root,
                       boost::optional<TypedSlot> inputSlot,
-                      const PlanStageSlots* slots,
+                      const PlanStageSlots& slots,
                       const std::vector<std::string>& keyFields = {},
                       bool isFilterOverIxscan = false);
 

@@ -155,7 +155,7 @@ variables:
   - name: external_auth_aws
   - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
-  - name: .jstestfuzz .common
+  - name: .jstestfuzz .common !.feature_flag_guarded
   - name: libunwind_tests
   - name: .ocsp
   - name: replica_sets_auth_gen
@@ -339,7 +339,9 @@ buildvariants:
   - name: feature_flag_multiversion_gen
   - name: idl_tests
   - name: index_filters_to_query_settings
-  - name: cursor_hints_to_query_settings
+  - name: cursor_hints_to_query_settings_replset_passthrough
+  - name: cursor_hints_to_query_settings_sharded_collections_passthrough
+  - name: cursor_hints_to_query_settings_unsharded_collections_passthrough
   - name: initial_sync_fuzzer_gen
   - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
   - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
@@ -464,7 +466,7 @@ buildvariants:
   - name: external_auth_oidc
   - name: .jscore .common !.decimal !.sharding
   - name: jsCore_txns_large_txns_format
-  - name: .jstestfuzz .common
+  - name: .jstestfuzz .common !.feature_flag_guarded
   - name: libunwind_tests
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough_gen
@@ -643,7 +645,7 @@ buildvariants:
       MONGO_DISTMOD=rhel79
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      --enterprise-features=hot_backups
+      --enterprise-features=hot_backups,magic_restore
       --link-model=dynamic
       --use-diagnostic-latches=on
     compile_variant: *hot_backups-rhel-79-64-bit
@@ -727,8 +729,8 @@ buildvariants:
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
   - name: .jscore .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs !.encrypt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
+  - name: .sharding .common !.csrs !.encrypt !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -770,8 +772,8 @@ buildvariants:
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
   - name: .jscore .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs !.encrypt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
+  - name: .sharding .common !.csrs !.encrypt !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -818,8 +820,8 @@ buildvariants:
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
   - name: .jscore .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs !.encrypt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
+  - name: .sharding .common !.csrs !.encrypt !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -866,8 +868,8 @@ buildvariants:
   - name: .sharding .causally_consistent !.wo_snapshot
   - name: .concurrency .common !.kill_terminate
   - name: .jscore .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
-  - name: .sharding .common !.csrs !.encrypt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
+  - name: .sharding .common !.csrs !.encrypt !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: generate_buildid_to_debug_symbols_mapping
 
@@ -916,9 +918,9 @@ buildvariants:
     patch_only: true
   - name: .jscore .common
     patch_only: true
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
     patch_only: true
-  - name: .sharding .common !.csrs !.encrypt
+  - name: .sharding .common !.csrs !.encrypt !.feature_flag_guarded
     patch_only: true
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
     patch_only: true
@@ -1097,7 +1099,7 @@ buildvariants:
     - rhel80-medium
   - name: .encrypt
   - name: .jscore .common !jsCore !.sbe_only
-  - name: .jstestfuzz !.flow_control
+  - name: .jstestfuzz !.feature_flag_guarded !.flow_control
   - name: .misc_js
   - name: .multi_shard
   - name: .query_fuzzer !.cqf_only
@@ -1112,8 +1114,8 @@ buildvariants:
     distros:
     - rhel80-xlarge
   - name: .rollbackfuzzer
-  - name: .sharding .common
-  - name: .sharding .jscore !.wo_snapshot !.multi_stmt
+  - name: .sharding .common !.feature_flag_guarded
+  - name: .sharding .jscore !.wo_snapshot !.multi_stmt !.feature_flag_guarded
   - name: .sharding .txns
   - name: .serverless
     distros:

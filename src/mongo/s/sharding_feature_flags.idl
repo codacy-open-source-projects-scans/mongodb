@@ -123,4 +123,17 @@ feature_flags:
     default: true
     version: 7.3
     shouldBeFCVGated: true
-
+  featureFlagShardedAggregationCatalogCacheGossiping:
+    description: "Feature flag that makes routers executing distributed aggregations that involve
+                  secondary collections request the shards to gossip back the catalog cache versions
+                  for these collections."
+    cpp_varname: feature_flags::gShardedAggregationCatalogCacheGossiping
+    default: true
+    version: 8.0
+    shouldBeFCVGated: true
+  # TODO (SERVER-81037): enable this feature flag once it's possible to detect prepare conflicts on the catalog
+  featureFlagCreateCollectionInPreparedTransactions:
+    description: "Feature flag protecting the codepath allowing to create collections in prepared transactions "
+    cpp_varname: feature_flags::gCreateCollectionInPreparedTransactions
+    default: false
+    shouldBeFCVGated: true

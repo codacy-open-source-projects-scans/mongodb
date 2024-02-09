@@ -141,17 +141,20 @@ public:
             false /* allowDiskUse */
         };
 
-        auto evalExpr = stage_builder::generateExpression(
-            state,
-            expression.get(),
-            stage_builder::TypedSlot{_inputSlotId, stage_builder::TypeSignature::kAnyScalarType});
+        auto rootSlot =
+            stage_builder::TypedSlot{_inputSlotId, stage_builder::TypeSignature::kAnyScalarType};
+
+        stage_builder::PlanStageSlots slots;
+        slots.setResultObj(rootSlot);
+
+        auto evalExpr = stage_builder::generateExpression(state, expression.get(), rootSlot, slots);
 
         LOGV2_DEBUG(6979801,
                     1,
                     "sbe expression benchmark PlanStage",
                     "stage"_attr = debugPrint(stage.get()));
 
-        auto expr = evalExpr.extractExpr(state).expr;
+        auto expr = evalExpr.extractExpr(state);
         LOGV2_DEBUG(6979802,
                     1,
                     "sbe expression benchmark EExpression",

@@ -210,7 +210,8 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    bool doesTimeseriesBucketsDocContainMixedSchemaData(const BSONObj& bucketsDoc) const {
+    StatusWith<bool> doesTimeseriesBucketsDocContainMixedSchemaData(
+        const BSONObj& bucketsDoc) const {
         MONGO_UNREACHABLE;
     }
 
@@ -252,6 +253,10 @@ public:
     void setChangeStreamPreAndPostImages(OperationContext* opCtx,
                                          ChangeStreamPreAndPostImagesOptions val) {
         MONGO_UNREACHABLE;
+    }
+
+    bool areRecordIdsReplicated() const {
+        return false;
     }
 
     bool isCapped() const {

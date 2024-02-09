@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/bson/json.h"
 #include "mongo/bson/util/bsoncolumn.h"
 #include "mongo/bson/util/bsoncolumnbuilder.h"
 
@@ -37,7 +38,18 @@ namespace mongo {
 namespace bsoncolumn {
 namespace {
 
-class BSONColumnBlockBasedTest : public unittest::Test {};
+struct BSONColumnBlockBasedTest : public unittest::Test {
+    BSONColumnBlockBased bsonColumnFromObjs(std::vector<BSONObj> objs) {
+        for (auto& o : objs) {
+            _columnBuilder.append(o);
+        }
+
+        return BSONColumnBlockBased{_columnBuilder.finalize()};
+    }
+
+private:
+    BSONColumnBuilder _columnBuilder;
+};
 
 /**
  * Helper template to extract a value from a BSONElement.
@@ -91,6 +103,33 @@ TEST_F(BSONColumnBlockBasedTest, BSONMaterializer) {
     assertRoundtrip(StringData{"foo/bar"});
     assertRoundtrip(BSONBinData{binData, sizeof(binData), BinDataGeneral});
     assertRoundtrip(BSONCode{StringData{"x = 0"}});
+}
+
+TEST_F(BSONColumnBlockBasedTest, BSONMaterializerBSONElement) {
+    boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+    std::vector<BSONElement> vec;
+    Collector<BSONElementMaterializer, decltype(vec)> collector{vec, allocator};
+
+    // Not all types are compressed in BSONColumn. Values of these types are just stored as
+    // uncompressed BSONElements. "Code with scope" is an example of this.
+    BSONCodeWScope codeWScope{"print(`${x}`)", BSON("x" << 10)};
+    auto obj = BSON("" << codeWScope);
+    auto bsonElem = obj.firstElement();
+
+    // Test with copying.
+    collector.append<BSONElement>(bsonElem);
+    auto elem = vec.back();
+    ASSERT(bsonElem.binaryEqual(elem));
+    // Since we are making a copy and storing it in the ElementStorage, the address of the data
+    // should not be the same.
+    ASSERT_NOT_EQUALS(elem.value(), bsonElem.value());
+
+    // Test without copying.
+    collector.appendPreallocated(bsonElem);
+    elem = vec.back();
+    ASSERT(bsonElem.binaryEqual(elem));
+    // Assert that we did not make a copy, because the address of the data is the same.
+    ASSERT_EQ(elem.value(), bsonElem.value());
 }
 
 TEST_F(BSONColumnBlockBasedTest, BSONMaterializerMissing) {
@@ -175,10 +214,14 @@ void assertEquals(const T& lhs, const T& rhs) {
 }
 
 /**
- * A simple path that traverses an object for a set of fields make up a path.
+ * A simple path that traverses an object for a set of fields that make up a path.
  */
 struct TestPath {
     std::vector<const char*> elementsToMaterialize(BSONObj refObj) {
+        if (_fields.empty()) {
+            return {refObj.objdata()};
+        }
+
         BSONObj obj = refObj;
         size_t idx = 0;
         for (auto& field : _fields) {
@@ -202,19 +245,13 @@ struct TestPath {
     const std::vector<std::string> _fields;
 };
 
-TEST_F(BSONColumnBlockBasedTest, DecompressPath) {
-    BSONColumnBuilder cb;
-    std::vector<BSONObj> objs = {
+TEST_F(BSONColumnBlockBasedTest, DecompressScalars) {
+    auto col = bsonColumnFromObjs({
         BSON("a" << 10 << "b" << BSON("c" << int64_t(20))),
         BSON("a" << 11 << "b" << BSON("c" << int64_t(21))),
         BSON("a" << 12 << "b" << BSON("c" << int64_t(22))),
         BSON("a" << 13 << "b" << BSON("c" << int64_t(23))),
-    };
-    for (auto&& o : objs) {
-        cb.append(o);
-    }
-
-    BSONColumnBlockBased col{cb.finalize()};
+    });
 
     boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
     std::vector<std::pair<TestPath, std::vector<BSONElement>>> paths{
@@ -222,7 +259,7 @@ TEST_F(BSONColumnBlockBasedTest, DecompressPath) {
         {TestPath{{"b", "c"}}, {}},
     };
 
-    // Decompress only the values of "a" to the vector.
+    // Decompress both scalar fields to vectors
     col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
 
     ASSERT_EQ(paths[0].second.size(), 4);
@@ -236,6 +273,115 @@ TEST_F(BSONColumnBlockBasedTest, DecompressPath) {
     ASSERT_EQ(paths[1].second[1].Long(), 21);
     ASSERT_EQ(paths[1].second[2].Long(), 22);
     ASSERT_EQ(paths[1].second[3].Long(), 23);
+}
+
+TEST_F(BSONColumnBlockBasedTest, DecompressObjects) {
+    auto col = bsonColumnFromObjs({
+        fromjson("{a: 10}"),
+        fromjson("{a: 11}"),
+        fromjson("{a: 12}"),
+        fromjson("{a: 13}"),
+    });
+
+    boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+    std::vector<std::pair<TestPath, std::vector<BSONElement>>> paths{{TestPath{}, {}}};
+
+    // Decompress complete objects to the vector.
+    col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
+
+    ASSERT_EQ(paths[0].second.size(), 4);
+    ASSERT_EQ(paths[0].second[0].type(), Object);
+    ASSERT_BSONOBJ_EQ(paths[0].second[0].Obj(), fromjson("{a: 10}"));
+    ASSERT_BSONOBJ_EQ(paths[0].second[1].Obj(), fromjson("{a: 11}"));
+    ASSERT_BSONOBJ_EQ(paths[0].second[2].Obj(), fromjson("{a: 12}"));
+    ASSERT_BSONOBJ_EQ(paths[0].second[3].Obj(), fromjson("{a: 13}"));
+}
+
+TEST_F(BSONColumnBlockBasedTest, DecompressNestedObjects) {
+    auto col = bsonColumnFromObjs({
+        fromjson("{a: 10, b: {c: 30}}"),
+        fromjson("{a: 11, b: {c: 31}}"),
+        fromjson("{a: 12, b: {c: 32}}"),
+        fromjson("{a: 13, b: {c: 33}}"),
+    });
+
+    {
+        boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+        std::vector<std::pair<TestPath, std::vector<BSONElement>>> paths{{TestPath{}, {}}};
+
+        // Decompress complete objects to the vector.
+        col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
+
+        ASSERT_EQ(paths[0].second.size(), 4);
+        ASSERT_EQ(paths[0].second[0].type(), Object);
+        ASSERT_BSONOBJ_EQ(paths[0].second[0].Obj(), fromjson("{a: 10, b: {c: 30}}"));
+        ASSERT_BSONOBJ_EQ(paths[0].second[1].Obj(), fromjson("{a: 11, b: {c: 31}}"));
+        ASSERT_BSONOBJ_EQ(paths[0].second[2].Obj(), fromjson("{a: 12, b: {c: 32}}"));
+        ASSERT_BSONOBJ_EQ(paths[0].second[3].Obj(), fromjson("{a: 13, b: {c: 33}}"));
+    }
+    {
+        boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+        std::vector<std::pair<TestPath, std::vector<BSONElement>>> paths{{TestPath{{"b"}}, {}}};
+
+        col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
+
+        ASSERT_EQ(paths[0].second.size(), 4);
+        ASSERT_EQ(paths[0].second[0].type(), Object);
+        ASSERT_BSONOBJ_EQ(paths[0].second[0].Obj(), fromjson("{c: 30}"));
+        ASSERT_BSONOBJ_EQ(paths[0].second[1].Obj(), fromjson("{c: 31}"));
+        ASSERT_BSONOBJ_EQ(paths[0].second[2].Obj(), fromjson("{c: 32}"));
+        ASSERT_BSONOBJ_EQ(paths[0].second[3].Obj(), fromjson("{c: 33}"));
+    }
+    {
+        boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+        std::vector<std::pair<TestPath, std::vector<BSONElement>>> paths{{TestPath{{"a"}}, {}},
+                                                                         {TestPath{{"b"}}, {}}};
+
+        col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
+
+        ASSERT_EQ(paths[0].second.size(), 4);
+        ASSERT_EQ(paths[0].second[0].type(), NumberInt);
+        ASSERT_EQ(paths[0].second[0].Int(), 10);
+        ASSERT_EQ(paths[0].second[1].Int(), 11);
+        ASSERT_EQ(paths[0].second[2].Int(), 12);
+        ASSERT_EQ(paths[0].second[3].Int(), 13);
+
+        ASSERT_EQ(paths[1].second.size(), 4);
+        ASSERT_EQ(paths[1].second[0].type(), Object);
+        ASSERT_BSONOBJ_EQ(paths[1].second[0].Obj(), fromjson("{c: 30}"));
+        ASSERT_BSONOBJ_EQ(paths[1].second[1].Obj(), fromjson("{c: 31}"));
+        ASSERT_BSONOBJ_EQ(paths[1].second[2].Obj(), fromjson("{c: 32}"));
+        ASSERT_BSONOBJ_EQ(paths[1].second[3].Obj(), fromjson("{c: 33}"));
+    }
+}
+
+TEST_F(BSONColumnBlockBasedTest, DecompressSiblingObjects) {
+    auto col = bsonColumnFromObjs({
+        fromjson("{a: {aa: 100}, b: {c: 30}}"),
+        fromjson("{a: {aa: 101}, b: {c: 31}}"),
+        fromjson("{a: {aa: 102}, b: {c: 32}}"),
+        fromjson("{a: {aa: 103}, b: {c: 33}}"),
+    });
+
+    boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
+    std::vector<std::pair<TestPath, std::vector<BSONElement>>> paths{{TestPath{{"a"}}, {}},
+                                                                     {TestPath{{"b"}}, {}}};
+
+    col.decompress<BSONElementMaterializer>(allocator, std::span(paths));
+
+    ASSERT_EQ(paths[0].second.size(), 4);
+    ASSERT_EQ(paths[0].second[0].type(), Object);
+    ASSERT_BSONOBJ_EQ(paths[0].second[0].Obj(), fromjson("{aa: 100}"));
+    ASSERT_BSONOBJ_EQ(paths[0].second[1].Obj(), fromjson("{aa: 101}"));
+    ASSERT_BSONOBJ_EQ(paths[0].second[2].Obj(), fromjson("{aa: 102}"));
+    ASSERT_BSONOBJ_EQ(paths[0].second[3].Obj(), fromjson("{aa: 103}"));
+
+    ASSERT_EQ(paths[1].second.size(), 4);
+    ASSERT_EQ(paths[1].second[0].type(), Object);
+    ASSERT_BSONOBJ_EQ(paths[1].second[0].Obj(), fromjson("{c: 30}"));
+    ASSERT_BSONOBJ_EQ(paths[1].second[1].Obj(), fromjson("{c: 31}"));
+    ASSERT_BSONOBJ_EQ(paths[1].second[2].Obj(), fromjson("{c: 32}"));
+    ASSERT_BSONOBJ_EQ(paths[1].second[3].Obj(), fromjson("{c: 33}"));
 }
 
 }  // namespace
