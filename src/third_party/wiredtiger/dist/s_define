@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # Complain about unused #defines.
-cd -- "$(dirname -- "${BASH_SOURCE[0]}")" || exit $?
-[[ `uname -s` == Darwin ]] && EGREP="./pygrep.py -E" FGREP="./pygrep.py -F" || EGREP=egrep FGREP=fgrep
+. `dirname -- ${BASH_SOURCE[0]}`/common_functions.sh
+cd_dist
+use_pygrep
 
 # List of source files to search.
 l=`sed -e '/^[a-z]/!d' -e 's/[	 ].*$//' -e 's,^,../,' filelist`
@@ -21,7 +22,8 @@ sed -e '/^$/d' -e '/^#/d' < s_define.list
 # Ignore configuration objects #defines
 # Ignore statistic "keys" generated for applications #defines
 search=`cat $dl |
-    sed -e '/configuration section: BEGIN/,/configuration section: END/d' \
+    sed -e '/API configuration keys: BEGIN/,/API configuration keys: END/d' \
+        -e '/configuration section: BEGIN/,/configuration section: END/d' \
         -e '/Statistics section: BEGIN/,/Statistics section: END/d' |
     egrep '^#define' |
     sed 's/#define[	 ][	 ]*\([A-Za-z_][A-Za-z0-9_]*\).*/\1/' |

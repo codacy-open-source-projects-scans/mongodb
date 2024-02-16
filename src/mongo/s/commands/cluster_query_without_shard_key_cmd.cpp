@@ -410,7 +410,8 @@ public:
 
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
-            const auto opMsgRequest = OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
+            const auto opMsgRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                ns().dbName(), auth::ValidatedTenancyScope::get(opCtx), writeCmdObj);
             auto parsedInfoFromRequest = parseWriteRequest(opCtx, opMsgRequest);
             const auto& nss = parsedInfoFromRequest.nss;
 
@@ -431,11 +432,13 @@ public:
                 }
             }
 
+            const auto& collectionUUID = cri.cm.getUUID();
             const auto& timeseriesFields = cri.cm.isSharded() &&
                     cri.cm.getTimeseriesFields().has_value() &&
                     parsedInfoFromRequest.isTimeseriesNamespace
                 ? cri.cm.getTimeseriesFields()
                 : boost::none;
+
             auto cmdObj =
                 createAggregateCmdObj(opCtx, parsedInfoFromRequest, nss, timeseriesFields);
 
@@ -530,6 +533,7 @@ public:
                 auto [upsertDoc, userUpsertDoc] = write_without_shard_key::generateUpsertDocument(
                     opCtx,
                     parsedInfoFromRequest.updateRequest.get(),
+                    collectionUUID,
                     timeseriesFields
                         ? boost::make_optional(timeseriesFields->getTimeseriesOptions())
                         : boost::none,
@@ -549,10 +553,12 @@ public:
         void explain(OperationContext* opCtx,
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* result) override {
+            auto vts = auth::ValidatedTenancyScope::get(opCtx);
             const auto writeCmdObj = [&] {
                 const auto explainCmdObj = request().getWriteCmd();
                 const auto opMsgRequestExplainCmd =
-                    OpMsgRequest::fromDBAndBody(ns().dbName(), explainCmdObj);
+                    OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                        ns().dbName(), vts, explainCmdObj);
                 auto explainRequest = ExplainCommandRequest::parse(
                     IDLParserContext("_clusterQueryWithoutShardKeyExplain"),
                     opMsgRequestExplainCmd.body);
@@ -561,8 +567,8 @@ public:
 
             // Parse into OpMsgRequest to append the $db field, which is required for command
             // parsing.
-            const auto opMsgRequestWriteCmd =
-                OpMsgRequest::fromDBAndBody(ns().dbName(), writeCmdObj);
+            const auto opMsgRequestWriteCmd = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                ns().dbName(), vts, writeCmdObj);
             auto parsedInfoFromRequest = parseWriteRequest(opCtx, opMsgRequestWriteCmd);
 
             // Get all shard ids for shards that have chunks in the desired namespace.

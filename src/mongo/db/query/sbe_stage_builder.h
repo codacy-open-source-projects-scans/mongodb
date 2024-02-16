@@ -1076,11 +1076,11 @@ private:
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildGroup(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
-    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildGroupImpl(
-        const GroupNode* groupNode,
+    std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots> buildGroupImpl(
+        std::unique_ptr<sbe::PlanStage> stage,
         const PlanStageReqs& reqs,
-        std::unique_ptr<sbe::PlanStage> childStage,
-        PlanStageSlots childOutputs);
+        PlanStageSlots childOutputs,
+        const GroupNode* groupNode);
 
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildLookup(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
@@ -1088,16 +1088,17 @@ private:
     std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildUnpackTsBucket(
         const QuerySolutionNode* root, const PlanStageReqs& reqs);
 
+    MONGO_COMPILER_NOINLINE
     std::unique_ptr<BuildProjectionPlan> makeBuildProjectionPlan(const QuerySolutionNode* root,
                                                                  const PlanStageReqs& reqs);
 
-    std::unique_ptr<sbe::PlanStage> buildBlockToRow(std::unique_ptr<sbe::PlanStage> stage,
-                                                    PlanStageSlots& outputs);
-
-    std::pair<std::unique_ptr<sbe::PlanStage>, TypedSlotVector> buildBlockToRow(
+    MONGO_COMPILER_NOINLINE
+    std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> buildProjectionImpl(
+        const QuerySolutionNode* root,
+        const PlanStageReqs& reqs,
+        std::unique_ptr<BuildProjectionPlan> plan,
         std::unique_ptr<sbe::PlanStage> stage,
-        PlanStageSlots& outputs,
-        TypedSlotVector individualSlots);
+        PlanStageSlots outputs);
 
     /**
      * Given a scalar filter Expression it tries to produced the vectorised stage. If this is
@@ -1161,4 +1162,13 @@ private:
     StageBuilderState _state;
 };  // class SlotBasedStageBuilder
 
+std::unique_ptr<sbe::PlanStage> buildBlockToRow(std::unique_ptr<sbe::PlanStage> stage,
+                                                StageBuilderState& state,
+                                                PlanStageSlots& outputs);
+
+std::pair<std::unique_ptr<sbe::PlanStage>, TypedSlotVector> buildBlockToRow(
+    std::unique_ptr<sbe::PlanStage> stage,
+    StageBuilderState& state,
+    PlanStageSlots& outputs,
+    TypedSlotVector individualSlots);
 }  // namespace mongo::stage_builder

@@ -87,7 +87,9 @@ struct BucketDocument {
  * Returns the document for writing a new bucket with a write batch.
  */
 BucketDocument makeNewDocumentForWrite(
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch, const BSONObj& metadata);
+    const NamespaceString& nss,
+    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
+    const BSONObj& metadata);
 
 /**
  * Returns the document for writing a new bucket with 'measurements'. Calculates the min and max
@@ -97,6 +99,7 @@ BucketDocument makeNewDocumentForWrite(
  */
 BucketDocument makeNewDocumentForWrite(
     const NamespaceString& nss,
+    const UUID& collectionUUID,
     const OID& bucketId,
     const std::vector<BSONObj>& measurements,
     const BSONObj& metadata,
@@ -111,6 +114,7 @@ BucketDocument makeNewDocumentForWrite(
  */
 BSONObj makeBucketDocument(const std::vector<BSONObj>& measurements,
                            const NamespaceString& nss,
+                           const UUID& collectionUUID,
                            const TimeseriesOptions& options,
                            const StringDataComparator* comparator);
 
@@ -159,13 +163,13 @@ write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
     std::vector<StmtId>&& stmtIds = {});
 
 /**
- * Builds the decompress and update command request from a time-series insert write batch.
+ * Builds the DocDiff update command request from a time-series insert write batch.
+ * Assumes min/max in WriteBatch have already been updated to reflect new measurements in batch.
  */
-write_ops::UpdateCommandRequest makeTimeseriesDecompressAndUpdateOp(
+write_ops::UpdateCommandRequest makeTimeseriesCompressedDiffUpdateOp(
     OperationContext* opCtx,
     std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
     const NamespaceString& bucketsNs,
-    const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds = {});
 
 enum class BucketReopeningPermittance {
@@ -183,7 +187,6 @@ enum class BucketReopeningPermittance {
 StatusWith<timeseries::bucket_catalog::InsertResult> attemptInsertIntoBucket(
     OperationContext* opCtx,
     bucket_catalog::BucketCatalog& bucketCatalog,
-    const NamespaceString& viewNs,
     const Collection* bucketsColl,
     TimeseriesOptions& timeSeriesOptions,
     const BSONObj& measurementDoc,

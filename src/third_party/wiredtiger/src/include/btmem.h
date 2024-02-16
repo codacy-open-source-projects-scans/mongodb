@@ -99,7 +99,7 @@ struct __wt_page_header {
  * __wt_page_header_byteswap --
  *     Handle big- and little-endian transformation of a page header.
  */
-static inline void
+static WT_INLINE void
 __wt_page_header_byteswap(WT_PAGE_HEADER *dsk)
 {
 #ifdef WORDS_BIGENDIAN
@@ -901,11 +901,11 @@ struct __wt_page {
  *
  * The reader does the opposite. The more complex of the two is as follows:
  *  - read prepare_state
- *  - WT_READ_BARRIER
+ *  - WT_ACQUIRE_BARRIER
  *  - if locked, retry
  *  - read start_ts
  *  - read durable_ts
- *  - WT_READ_BARRIER
+ *  - WT_ACQUIRE_BARRIER
  *  - read prepare_state
  *  - if prepare state has changed, retry
  */

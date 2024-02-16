@@ -89,8 +89,8 @@ MONGO_FAIL_POINT_DEFINE(pauseBeforeMarkKeepOpen);
 MONGO_FAIL_POINT_DEFINE(alwaysLogConnAcquisitionToWireTime)
 
 namespace {
-CounterMetric totalTimeForEgressConnectionAcquiredToWireMicros(
-    "network.totalTimeForEgressConnectionAcquiredToWireMicros");
+auto& totalTimeForEgressConnectionAcquiredToWireMicros =
+    *MetricBuilder<Counter64>{"network.totalTimeForEgressConnectionAcquiredToWireMicros"};
 }  // namespace
 
 Future<AsyncDBClient::Handle> AsyncDBClient::connect(
@@ -267,7 +267,10 @@ Future<bool> AsyncDBClient::completeSpeculativeAuth(std::shared_ptr<SaslClientSe
 Future<void> AsyncDBClient::initWireVersion(const std::string& appName,
                                             executor::NetworkConnectionHook* const hook) {
     auto requestObj = _buildHelloRequest(appName, hook);
-    auto opMsgRequest = OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, requestObj);
+    auto opMsgRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
+        DatabaseName::kAdmin,
+        auth::ValidatedTenancyScope::kNotRequired /* admin is not per-tenant. */,
+        requestObj);
 
     auto msgId = nextMessageId();
     return _call(opMsgRequest.serialize(), msgId)

@@ -186,7 +186,6 @@ variables:
   - func: "run hang analyzer"
   - func: "wait for resmoke to shutdown"
 
-
 ################################################
 #                    Tasks                     #
 ################################################
@@ -781,6 +780,20 @@ tasks:
       binary: bash
       args:
       - "src/evergreen/external_auth_azure_teardown.sh"
+
+- <<: *task_template
+  name: external_auth_oidc_gcp
+  tags: ["assigned_to_jira_team_server_security"]
+  commands:
+  - func: "f_expansions_write"
+  - func: "do setup"
+  - func: "f_expansions_write"
+  - command: subprocess.exec
+    params:
+      binary: bash
+      args:
+      - "src/evergreen/external_auth_gcp_setup.sh"
+  - func: "run tests"
 
 - <<: *task_template
   name: external_auth_windows
@@ -1420,17 +1433,17 @@ tasks:
   tags: ["assigned_to_jira_team_server_catalog_and_routing"]
   commands:
   - func: "generate resmoke tasks"
+    # The hardcoded timeout is to overrule history-based timeout after test number increases,
+    # which could be removed after gaining enough history for the new tests.
+    vars:
+      exec_timeout_secs: 4800 # 80min
+      timeout_secs: 4800 # 80min
 
 - <<: *gen_task_template
   name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
   tags: ["assigned_to_jira_team_server_catalog_and_routing"]
   commands:
   - func: "generate resmoke tasks"
-    # The hardcoded timeout is to overrule history-based timeout after test number increases,
-    # which could be removed after gaining enough history for the new tests.
-    vars:
-      exec_timeout_secs: 4800 # 80min
-      timeout_secs: 4800 # 80min
 
 - <<: *gen_task_template
   name: change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough_gen
@@ -1734,6 +1747,18 @@ tasks:
       <<: *jstestfuzz_config_vars
       jstestfuzz_vars: --jsTestsDir ../jstests
       suite: jstestfuzz_sharded_session
+      resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+
+## jstestfuzz sharded cluster with replica set endpoint ##
+- <<: *jstestfuzz_template
+  name: jstestfuzz_sharded_with_replica_set_endpoint_gen
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "jstestfuzz", "common", "sharding", "require_npm", "random_name", "feature_flag_guarded"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      <<: *jstestfuzz_config_vars
+      jstestfuzz_vars: --jsTestsDir ../jstests
+      suite: jstestfuzz_sharded_with_replica_set_endpoint
       resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
 - <<: *gen_task_template

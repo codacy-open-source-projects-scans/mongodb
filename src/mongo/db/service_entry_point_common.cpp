@@ -159,6 +159,7 @@
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/s/stale_exception.h"
+#include "mongo/s/transaction_router.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/service_executor.h"
@@ -193,16 +194,17 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
-MONGO_FAIL_POINT_DEFINE(includeAdditionalParticipantInResponse);
 MONGO_FAIL_POINT_DEFINE(enforceDirectShardOperationsCheck);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
-CounterMetric notPrimaryLegacyUnackWrites("repl.network.notPrimaryLegacyUnacknowledgedWrites");
+auto& notPrimaryLegacyUnackWrites =
+    *MetricBuilder<Counter64>{"repl.network.notPrimaryLegacyUnacknowledgedWrites"};
 
 // Tracks the number of times an unacknowledged write failed due to not primary error
 // resulted in network disconnection.
-CounterMetric notPrimaryUnackWrites("repl.network.notPrimaryUnacknowledgedWrites");
+auto& notPrimaryUnackWrites =
+    *MetricBuilder<Counter64>{"repl.network.notPrimaryUnacknowledgedWrites"};
 
 namespace {
 
@@ -441,36 +443,41 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
     topologyVersion.serialize(&topologyVersionBuilder);
 }
 
+// TODO SERVER-85353 Remove commandName and nss parameters, which are used only for the failpoint
+// in TxnRouter::getAdditionalParticipantsForResponse
 void appendAdditionalParticipants(OperationContext* opCtx,
                                   BSONObjBuilder* commandBodyFieldsBob,
                                   const std::string& commandName,
-                                  const NamespaceString& nss) {
-    // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns.
-    if (gFeatureFlagAllowAdditionalParticipants.isEnabledAndIgnoreFCVUnsafe()) {
-        std::vector<BSONElement> shardIdsFromFpData;
-        if (MONGO_unlikely(
-                includeAdditionalParticipantInResponse.shouldFail([&](const BSONObj& data) {
-                    if (data.hasField("cmdName") && data.hasField("ns") &&
-                        data.hasField("shardId")) {
-                        shardIdsFromFpData = data.getField("shardId").Array();
-                        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns");
-                        return ((data.getStringField("cmdName") == commandName) && (fpNss == nss));
-                    }
-                    return false;
-                }))) {
+                                  const NamespaceString& nss,
+                                  bool errorResponse) {
+    auto txnRouter = TransactionRouter::get(opCtx);
+    if (!txnRouter)
+        return;
 
-            std::vector<BSONObj> participantArray;
-            for (auto& element : shardIdsFromFpData) {
-                // TODO SERVER-81568 Get readOnly value from TransactionRouter
-                auto participant = BSON("shardId" << ShardId(element.valueStringData().toString())
-                                                  << "readOnly" << false);
-                participantArray.emplace_back(participant);
-            }
-            auto additionalParticipants = BSON("additionalParticipants" << participantArray);
+    auto additionalParticipants =
+        txnRouter.getAdditionalParticipantsForResponse(opCtx, !errorResponse, commandName, nss);
+    if (!additionalParticipants)
+        return;
 
-            commandBodyFieldsBob->appendElements(additionalParticipants);
+    std::vector<BSONObj> participantArray;
+    for (const auto& p : *additionalParticipants) {
+        auto shardId = ShardId(p.first);
+
+        // The "readOnly" value is set for participants upon a successful response, and is not set
+        // upon an unsuccessful response.
+        if (errorResponse) {
+            participantArray.emplace_back(BSON("shardId" << shardId));
+            continue;
         }
+
+        auto readOnly = p.second;
+        // If this request finished successfully, all participants should have had their "readOnly"
+        // values set
+        invariant(readOnly);
+        participantArray.emplace_back(BSON("shardId" << shardId << "readOnly" << *readOnly));
     }
+
+    commandBodyFieldsBob->appendElements(BSON("additionalParticipants" << participantArray));
 }
 
 class RunCommandOpTimes {
@@ -647,7 +654,8 @@ private:
     }
 
     StatusWith<repl::ReadConcernArgs> _extractReadConcern(OperationContext* opCtx,
-                                                          bool startTransaction);
+                                                          bool startTransaction,
+                                                          bool startOrContinueTransaction);
 
     const std::shared_ptr<HandleRequest::ExecutionContext> _execContext;
 
@@ -1050,6 +1058,15 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
 
 void CheckoutSessionAndInvokeCommand::_tapError(Status status) {
     const OperationSessionInfoFromClient& sessionOptions = _ecd->getSessionOptions();
+    auto opCtx = _ecd->getExecutionContext()->getOpCtx();
+
+    auto bodyBuilder = _ecd->getExecutionContext()->getReplyBuilder()->getBodyBuilder();
+    appendAdditionalParticipants(opCtx,
+                                 &bodyBuilder,
+                                 _ecd->getExecutionContext()->getCommand()->getName(),
+                                 _ecd->getInvocation()->ns(),
+                                 true /* errorResponse */);
+
     if (status.code() == ErrorCodes::CommandOnShardedViewNotSupportedOnMongod) {
         // Exceptions are used to resolve views in a sharded cluster, so they should be handled
         // specially to avoid unnecessary aborts.
@@ -1066,7 +1083,6 @@ void CheckoutSessionAndInvokeCommand::_tapError(Status status) {
             return;
         }
 
-        auto opCtx = _ecd->getExecutionContext()->getOpCtx();
         auto txnParticipant = TransactionParticipant::get(opCtx);
         if (!txnParticipant) {
             // No code paths that can throw this error should yield their session but uassert
@@ -1104,6 +1120,11 @@ Future<void> CheckoutSessionAndInvokeCommand::_commitInvocation() {
             auto txnResponseMetadata = txnParticipant.getResponseMetadata();
             auto bodyBuilder = replyBuilder->getBodyBuilder();
             bodyBuilder.appendElements(txnResponseMetadata);
+            appendAdditionalParticipants(execContext->getOpCtx(),
+                                         &bodyBuilder,
+                                         _ecd->getExecutionContext()->getCommand()->getName(),
+                                         _ecd->getInvocation()->ns(),
+                                         false /* errorResponse */);
         }
     }
 
@@ -1219,7 +1240,6 @@ void RunCommandImpl::_epilogue() {
                                             _isInternalClient(),
                                             _ecd->getLastOpBeforeRun(),
                                             _ecd->getLastOpAfterRun());
-        appendAdditionalParticipants(opCtx, &body, command->getName(), _ecd->getInvocation()->ns());
     }
 
     auto commandBodyBob = replyBuilder->getBodyBuilder();
@@ -1393,8 +1413,8 @@ Date_t ExecCommandDatabase::_lastDirectConnectionWarningTime = Date_t();
  * if the read concern is not valid for the command.
  * Note that the validation performed is not necessarily exhaustive.
  */
-StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(OperationContext* opCtx,
-                                                                           bool startTransaction) {
+StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(
+    OperationContext* opCtx, bool startTransaction, bool startOrContinueTransaction) {
     auto& request = _execContext->getRequest();
     repl::ReadConcernArgs readConcernArgs;
 
@@ -1488,7 +1508,7 @@ StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(Opera
 
     // If we are starting a transaction, we need to check whether the read concern is
     // appropriate for running a transaction.
-    if (startTransaction) {
+    if (startTransaction || startOrContinueTransaction) {
         if (!isReadConcernLevelAllowedInTransaction(readConcernArgs.getLevel())) {
             return {ErrorCodes::InvalidOptions,
                     "The readConcern level must be either 'local' (default), 'majority' or "
@@ -1759,19 +1779,24 @@ void ExecCommandDatabase::_initiateCommand() {
     // original read concern.
     auto skipReadConcern = opCtx->getClient()->isInDirectClient();
     bool startTransaction = static_cast<bool>(_sessionOptions.getStartTransaction());
+    bool startOrContinueTransaction =
+        static_cast<bool>(_sessionOptions.getStartOrContinueTransaction());
     if (!skipReadConcern) {
-        auto newReadConcernArgs = uassertStatusOK(_extractReadConcern(opCtx, startTransaction));
+        auto newReadConcernArgs = uassertStatusOK(
+            _extractReadConcern(opCtx, startTransaction, startOrContinueTransaction));
 
         // Ensure that the RC being set on the opCtx has provenance.
         invariant(newReadConcernArgs.getProvenance().hasSource(),
                   fmt::format("unexpected unset provenance on readConcern: {}",
                               newReadConcernArgs.toBSONInner().toString()));
 
-        // TODO SERVER-85643 Check for startOrContinueTransaction as well
+        // If startOrContinueTransaction is set, that means that the shard is trying to
+        // add another shard to the transaction, so the command should allow specifying a
+        // readConcern even if it is not the first command in the transaction.
         uassert(ErrorCodes::InvalidOptions,
                 "Only the first command in a transaction may specify a readConcern",
-                startTransaction || !opCtx->inMultiDocumentTransaction() ||
-                    newReadConcernArgs.isEmpty());
+                startTransaction || startOrContinueTransaction ||
+                    !opCtx->inMultiDocumentTransaction() || newReadConcernArgs.isEmpty());
 
         {
             // We must obtain the client lock to set the ReadConcernArgs on the operation context as
@@ -1781,7 +1806,7 @@ void ExecCommandDatabase::_initiateCommand() {
         }
     }
 
-    if (startTransaction) {
+    if (startTransaction || startOrContinueTransaction) {
         _setLockStateForTransaction(opCtx);
 
         // Remember whether or not this operation is starting a transaction, in case something later
@@ -2060,8 +2085,6 @@ void ExecCommandDatabase::_handleFailure(Status status) {
                                         _isInternalClient(),
                                         getLastOpBeforeRun(),
                                         getLastOpAfterRun());
-    appendAdditionalParticipants(
-        opCtx, &_extraFieldsBuilder, command->getName(), _execContext->nsString());
 
     BSONObjBuilder metadataBob;
     behaviors.appendReplyMetadata(opCtx, request, &metadataBob);
@@ -2070,7 +2093,8 @@ void ExecCommandDatabase::_handleFailure(Status status) {
     // it here, so if it is valid it can be used to compute the proper operationTime.
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
     if (readConcernArgs.isEmpty()) {
-        auto readConcernArgsStatus = _extractReadConcern(opCtx, false /*startTransaction*/);
+        auto readConcernArgsStatus = _extractReadConcern(
+            opCtx, false /*startTransaction*/, false /* startOrContinueTransaction */);
         if (readConcernArgsStatus.isOK()) {
             // We must obtain the client lock to set the ReadConcernArgs on the operation context as
             // it may be concurrently read by CurrentOp.

@@ -719,6 +719,7 @@ enum class Builtin : uint16_t {
     valueBlockCount,
     valueBlockDateDiff,
     valueBlockDateTrunc,
+    valueBlockDateAdd,
     valueBlockTrunc,
     valueBlockRound,
     valueBlockSum,
@@ -742,6 +743,8 @@ enum class Builtin : uint16_t {
     valueBlockNone,
     valueBlockIsMember,
     valueBlockCoerceToBool,
+    valueBlockMod,
+    valueBlockConvert,
 
     cellFoldValues_F,
     cellFoldValues_P,
@@ -1685,6 +1688,9 @@ private:
                                     TimeZone* timezone,
                                     DayOfWeek* startOfWeek);
 
+    template <bool IsBlockBuiltin = false>
+    bool validateDateAddParameters(TimeUnit* unit, int64_t* amount, TimeZone* timezone);
+
     FastTuple<bool, value::TypeTags, value::Value> builtinSplit(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDate(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDateWeekYear(ArityType arity);
@@ -2020,6 +2026,7 @@ private:
 
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockDateDiff(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockDateTrunc(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockDateAdd(ArityType arity);
 
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockRound(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockTrunc(ArityType arity);
@@ -2043,6 +2050,8 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockNone(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockIsMember(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockCoerceToBool(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockMod(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockConvert(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCellFoldValues_F(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCellFoldValues_P(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCellBlockGetFlatValuesBlock(

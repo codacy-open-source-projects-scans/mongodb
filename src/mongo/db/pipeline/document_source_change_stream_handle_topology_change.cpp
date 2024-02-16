@@ -108,7 +108,8 @@ bool isShardConfigEvent(const Document& eventDoc) {
     // Check whether this event occurred on the config.shards collection.
     auto nsObj = eventDoc[DocumentSourceChangeStream::kNamespaceField];
     const bool isConfigDotShardsEvent = nsObj["db"_sd].getType() == BSONType::String &&
-        nsObj["db"_sd].getStringData() == NamespaceString::kConfigsvrShardsNamespace.db() &&
+        nsObj["db"_sd].getStringData() ==
+            NamespaceString::kConfigsvrShardsNamespace.db(omitTenant) &&
         nsObj["coll"_sd].getType() == BSONType::String &&
         nsObj["coll"_sd].getStringData() == NamespaceString::kConfigsvrShardsNamespace.coll();
 
@@ -170,8 +171,7 @@ StageConstraints DocumentSourceChangeStreamHandleTopologyChange::constraints(
     // stages and ensures that they get pushed down to the shards, as this stage bisects the change
     // streams pipeline.
     constraints.canSwapWithMatch = true;
-    constraints.canSwapWithRedact = true;
-    constraints.canSwapWithSingleDocTransform = true;
+    constraints.canSwapWithSingleDocTransformOrRedact = true;
 
     return constraints;
 }

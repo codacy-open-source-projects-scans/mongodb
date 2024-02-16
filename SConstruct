@@ -2,6 +2,7 @@
 
 import atexit
 import copy
+import distro
 import errno
 import functools
 import json
@@ -40,9 +41,7 @@ import mongo.toolchain as mongo_toolchain
 import mongo.generators as mongo_generators
 import mongo.install_actions as install_actions
 
-# TODO SERVER-79172
-# We cannot set the limit to python 3.10 since python 3.9 is needed for windows testing
-EnsurePythonVersion(3, 9)
+EnsurePythonVersion(3, 10)
 EnsureSConsVersion(3, 1, 1)
 
 utc_starttime = datetime.utcnow()
@@ -950,6 +949,16 @@ def fatal_error(env, msg, *args):
     Exit(1)
 
 
+def bazel_by_default():
+    try:
+        return distro.name() == "Ubuntu" and distro.version().split(
+            ".")[0] == "22" and platform.machine() == "aarch64"
+    except Exception as e:
+        print(f"Error determining if Bazel should be enabled by default: {e}")
+        print("Defaulting to disable Bazel")
+        return False
+
+
 # Apply the default variables files, and walk the provided
 # arguments. Interpret any falsy argument (like the empty string) as
 # resetting any prior state. This makes the argument
@@ -1078,7 +1087,7 @@ env_vars.Add(
     help=
     'Enables/disables building with bazel. Note that this project is in flight, and thus subject to breaking changes. See https://jira.mongodb.org/browse/PM-3332 for details.',
     converter=functools.partial(bool_var_converter, var='BAZEL_BUILD_ENABLED'),
-    default="0",
+    default="1" if bazel_by_default() else "0",
 )
 
 env_vars.Add(
@@ -2209,6 +2218,13 @@ if env.TargetOSIs('windows') and not visibility_annotations_enabled:
     if link_model not in ['object', 'static', 'dynamic-sdk']:
         env.FatalError(
             "Windows builds must use the 'object', 'dynamic-sdk', or 'static' link models")
+
+# TODO(SERVER-85904): remove check when object mode & LTO are supported in bazel
+if link_model == "object" and env.get("BAZEL_BUILD_ENABLED"):
+    env.FatalError(
+        "Bazel-enabled builds currently do not support the \"object\" link model. "
+        "Please add BAZEL_BUILD_ENABLED=0 to the end of your command line argument if you need to build with the \"object\" link model."
+    )
 
 # The 'object' mode for libdeps is enabled by setting _LIBDEPS to $_LIBDEPS_OBJS. The other two
 # modes operate in library mode, enabled by setting _LIBDEPS to $_LIBDEPS_LIBS.

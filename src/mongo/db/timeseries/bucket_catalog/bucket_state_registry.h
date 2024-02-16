@@ -41,7 +41,6 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/timeseries_tracked_types.h"
 #include "mongo/db/timeseries/timeseries_tracking_context.h"
@@ -49,6 +48,7 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -123,7 +123,7 @@ using DirectWriteCounter = std::int32_t;
  */
 struct BucketStateRegistry {
     using Era = std::uint64_t;
-    using ShouldClearFn = std::function<bool(const NamespaceString&)>;
+    using ShouldClearFn = std::function<bool(const UUID&)>;
 
     mutable Mutex mutex =
         MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "BucketStateRegistry::mutex");
@@ -159,7 +159,7 @@ BucketStateRegistry::Era getBucketCountForEra(BucketStateRegistry& registry,
  * predicate.
  */
 void clearSetOfBuckets(BucketStateRegistry& registry,
-                       std::function<bool(const NamespaceString&)>&& shouldClear);
+                       std::function<bool(const UUID&)>&& shouldClear);
 
 /**
  * Returns the number of clear operations currently stored in the clear registry.
@@ -210,16 +210,16 @@ bool conflictsWithInsertions(std::variant<BucketState, DirectWriteCounter>& stat
  * operating on a potentially stale bucket. Returns WriteConflict if the current bucket state
  * conflicts with reopening.
  *
- * |   Current State    |   Result
- * |--------------------|-----------
+ * |   Current State    |         Result
+ * |--------------------|------------------------
  * | Untracked          | kNormal
  * | Normal             | kNormal
  * | Cleared            | kNormal
  * | Frozen             | kFrozen
- * | Prepared           | invariants
- * | PreparedAndCleared | throws WCE
- * | PreparedAndFrozen  | throws WCE
- * | DirectWriteCounter | throws WCE
+ * | Prepared           | TimeseriesBucketFrozen
+ * | PreparedAndCleared | WriteConflict
+ * | PreparedAndFrozen  | WriteConflict
+ * | DirectWriteCounter | WriteConflict
  */
 Status initializeBucketState(BucketStateRegistry& registry,
                              const BucketId& bucketId,

@@ -165,7 +165,10 @@ OpMsg runCommandInLocalTxn(OperationContext* opCtx,
     return OpMsg::parseOwned(
         opCtx->getService()
             ->getServiceEntryPoint()
-            ->handleRequest(opCtx, OpMsgRequest::fromDBAndBody(db, bob.obj()).serialize())
+            ->handleRequest(opCtx,
+                            OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                                db, auth::ValidatedTenancyScope::get(opCtx), bob.obj())
+                                .serialize())
             .get()
             .response);
 }
@@ -236,8 +239,11 @@ BSONObj commitOrAbortTransaction(OperationContext* opCtx,
     const auto replyOpMsg = OpMsg::parseOwned(
         newOpCtx->getService()
             ->getServiceEntryPoint()
-            ->handleRequest(newOpCtx.get(),
-                            OpMsgRequest::fromDBAndBody(DatabaseName::kAdmin, cmdObj).serialize())
+            ->handleRequest(
+                newOpCtx.get(),
+                OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                    DatabaseName::kAdmin, auth::ValidatedTenancyScope::get(opCtx), cmdObj)
+                    .serialize())
             .get()
             .response);
     return replyOpMsg.body;
@@ -854,8 +860,15 @@ Status ShardingCatalogManager::_initConfigCollections(OperationContext* opCtx) {
 // TODO (SERVER-83264): Move new validator to _initConfigSettings and remove old validator once 8.0
 // becomes last LTS.
 BSONObj createConfigSettingsValidator() {
-    if (feature_flags::gBalancerSettingsSchema.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+    // (Generic FCV reference): on versions where the balancerSettingsSchema feature flag is
+    // enabled, install an extended validator. This must be the case even for transitional FCV
+    // states, as the validator is installed during FCV upgrade.
+    auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    auto targetVersion = fcvSnapshot.isUpgradingOrDowngrading()
+        ? getTransitionFCVFromAndTo(fcvSnapshot.getVersion()).second
+        : fcvSnapshot.getVersion();
+
+    if (feature_flags::gBalancerSettingsSchema.isEnabledOnVersion(targetVersion)) {
         const auto noopValidator = BSON(
             "properties" << BSON(
                 "_id" << BSON("enum" << BSON_ARRAY(AutoMergeSettingsType::kKey

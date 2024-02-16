@@ -1,5 +1,6 @@
 import atexit
 import functools
+import getpass
 import json
 import os
 import platform
@@ -12,7 +13,9 @@ import threading
 import time
 from typing import List, Dict, Set, Tuple, Any
 import urllib.request
+import requests
 import sys
+import socket
 
 import SCons
 
@@ -354,6 +357,87 @@ def create_idlc_builder(env: SCons.Environment.Environment) -> None:
     env['BUILDERS']['BazelIdlc'] = create_bazel_builder(env['BUILDERS']["Idlc"])
 
 
+def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
+    running_in_evergreen = env.GetOption("evergreen-tmp-dir") is not None
+
+    if running_in_evergreen and not os.path.exists("./engflow.cert"):
+        print(
+            "ERROR: ./engflow.cert not found, which is required to build in evergreen without BAZEL_FLAGS=--config=local set. Please reach out to #server-dev-platform for help."
+        )
+        return False
+
+    if not running_in_evergreen and not os.path.exists(
+            f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt"):
+        # Temporary logic to copy over the credentials for users that ran the installation steps using the old directory (/engflow/).
+        if os.path.exists("/engflow/creds/engflow.crt") and os.path.exists(
+                "/engflow/creds/engflow.key"):
+            print(
+                "Moving EngFlow credentials from the legacy directory (/engflow/) to the new directory (~/.engflow/)."
+            )
+            try:
+                os.makedirs(f"/home/{getpass.getuser()}/.engflow/creds/", exist_ok=True)
+                shutil.move("/engflow/creds/engflow.crt",
+                            f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt")
+                shutil.move("/engflow/creds/engflow.key",
+                            f"/home/{getpass.getuser()}/.engflow/creds/engflow.key")
+                with open(f"/home/{getpass.getuser()}/.bazelrc", "a") as bazelrc:
+                    bazelrc.write(
+                        f"build --tls_client_certificate=/home/{getpass.getuser()}/.engflow/creds/engflow.crt\n"
+                    )
+                    bazelrc.write(
+                        f"build --tls_client_key=/home/{getpass.getuser()}/.engflow/creds/engflow.key\n"
+                    )
+            except OSError as exc:
+                print(exc)
+                print(
+                    "Failed to update cert location, please move them manually. Otherwise you can pass 'BAZEL_FLAGS=\"--config=local\"' on the SCons command line."
+                )
+
+            return True
+
+        # Pull the external hostname of the system from aws
+        response = requests.get(
+            "http://instance-data.ec2.internal/latest/meta-data/public-hostname")
+        if response.status_code == 200:
+            public_hostname = response.text
+        else:
+            public_hostname = "{{REPLACE_WITH_WORKSTATION_HOST_NAME}}"
+        print(
+            f"""\nERROR: ~/.engflow/creds/engflow.crt not found. Please reach out to #server-dev-platform if you need help with the steps below.
+
+(If the below steps are not working, remote execution can be disabled by passing BAZEL_FLAGS=--config=local at the end of your scons.py invocation)
+
+Please complete the following steps to generate a certificate:
+- (If not in the Engineering org) Request access to the MANA group https://mana.corp.mongodbgov.com/resources/659ec4b9bccf3819e5608712
+- Go to https://sodalite.cluster.engflow.com/gettingstarted (Uses mongodbcorp.okta.com auth URL)
+- Login with OKTA, then click the \"GENERATE AND DOWNLOAD MTLS CERTIFICATE\" button
+  - (If logging in with OKTA doesn't work) Login with Google using your MongoDB email, then click the "GENERATE AND DOWNLOAD MTLS CERTIFICATE" button
+- On your local system (usually your MacBook), open a terminal and run:
+
+ZIP_FILE=~/Downloads/engflow-mTLS.zip
+
+curl https://raw.githubusercontent.com/mongodb/mongo/master/buildscripts/setup_engflow_creds.sh -o setup_engflow_creds.sh
+chmod +x ./setup_engflow_creds.sh
+./setup_engflow_creds.sh {getpass.getuser()} {public_hostname} $ZIP_FILE\n""")
+        return False
+
+    if not running_in_evergreen and \
+        (not os.access(f"/home/{getpass.getuser()}/.engflow/creds/engflow.crt", os.R_OK) or
+        not os.access(f"/home/{getpass.getuser()}/.engflow/creds/engflow.key", os.R_OK)):
+        print(
+            "Invalid permissions set on ~/.engflow/creds/engflow.crt or ~/.engflow/creds/engflow.key"
+        )
+        print("Please run the following command to fix the permissions:\n")
+        print(
+            f"sudo chown {getpass.getuser()}:{getpass.getuser()} /home/{getpass.getuser()}/.engflow/creds/engflow.crt /home/{getpass.getuser()}/.engflow/creds/engflow.key"
+        )
+        print(
+            f"sudo chmod 600 /home/{getpass.getuser()}/.engflow/creds/engflow.crt /home/{getpass.getuser()}/.engflow/creds/engflow.key"
+        )
+        return False
+    return True
+
+
 def generate_bazel_info_for_ninja(env: SCons.Environment.Environment) -> None:
     # create a json file which contains all the relevant info from this generation
     # that bazel will need to construct the correct command line for any given targets
@@ -431,10 +515,12 @@ def generate(env: SCons.Environment.Environment) -> None:
 
         if env.GetOption("release") is not None:
             build_mode = "release"
-        elif env.GetOption("dbg") == "on":
+        elif env.GetOption("dbg") == "on" and mongo_generators.get_opt_options(env) == "off":
             build_mode = "dbg"
+        elif env.GetOption("dbg") == "on" and mongo_generators.get_opt_options(env) == "on":
+            build_mode = "opt_debug"
         else:
-            build_mode = f"opt_{mongo_generators.get_opt_options(env)}"  # one of "on", "size", "debug"
+            build_mode = f"opt_{mongo_generators.get_opt_options(env)}"  # one of "on", "size", "off"
 
         # Deprecate tcmalloc-experimental
         allocator = "tcmalloc" if env.GetOption(
@@ -469,6 +555,10 @@ def generate(env: SCons.Environment.Environment) -> None:
             '--compilation_mode=dbg',  # always build this compilation mode as we always build with -g
         ]
 
+        if normalized_os == "macos":
+            minimum_macos_version = "11.0" if normalized_arch == "arm64" else "10.14"
+            bazel_internal_flags.append(f'--macos_minimum_os={minimum_macos_version}')
+
         http_client_option = env.GetOption("enable-http-client")
         if http_client_option is not None:
             if http_client_option in ["on", "auto"]:
@@ -483,8 +573,11 @@ def generate(env: SCons.Environment.Environment) -> None:
             formatted_options = [f'--//bazel/config:{_SANITIZER_MAP[opt]}=True' for opt in options]
             bazel_internal_flags.extend(formatted_options)
 
+        # Disable RE for external developers
+        is_external_developer = not os.path.exists("/opt/mongodbtoolchain")
+
         # TODO SERVER-85806 enable RE for amd64
-        if normalized_os != "linux" or normalized_arch not in ["arm64"]:
+        if normalized_os != "linux" or normalized_arch not in ["arm64"] or is_external_developer:
             bazel_internal_flags.append('--config=local')
 
         # Disable remote execution for public release builds.
@@ -505,6 +598,13 @@ def generate(env: SCons.Environment.Environment) -> None:
         # Store the bazel command line flags so scons can check if it should rerun the bazel targets
         # if the bazel command line changes.
         env['BAZEL_FLAGS_STR'] = str(bazel_internal_flags) + env.get("BAZEL_FLAGS", "")
+
+        if "--config=local" not in env['BAZEL_FLAGS_STR']:
+            print(
+                "Running bazel with remote execution enabled. To disable bazel remote execution, please add BAZEL_FLAGS=--config=local to the end of your scons command line invocation."
+            )
+            if not validate_remote_execution_certs(env):
+                sys.exit(1)
 
         # We always use --compilation_mode debug for now as we always want -g, so assume -dbg location
         out_dir_platform = "$TARGET_ARCH"

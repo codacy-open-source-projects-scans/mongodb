@@ -1245,6 +1245,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/s/query_analysis_sampler',
+        '$BUILD_DIR/mongo/s/sharding_router_api',
         '$BUILD_DIR/mongo/s/startup_initialization',
         '$BUILD_DIR/mongo/transport/service_executor',
         'audit',
@@ -1573,17 +1574,6 @@ env.Library(
     ],
 )
 
-env.Library(
-    target='cursor_stats',
-    source=[
-        'cursor_stats.cpp',
-    ],
-    LIBDEPS_PRIVATE=[
-        'commands/server_status_core',
-        'server_base',
-    ],
-)
-
 execEnv = env.Clone()
 execEnv.InjectThirdParty(libraries=['snappy'])
 execEnv.Library(
@@ -1654,6 +1644,7 @@ execEnv.Library(
         'query/classic_runtime_planner_for_sbe/multi_planner.cpp',
         'query/classic_runtime_planner_for_sbe/planner_interface.cpp',
         'query/classic_runtime_planner_for_sbe/single_solution_passthrough_planner.cpp',
+        'query/classic_runtime_planner_for_sbe/sub_planner.cpp',
         'query/cost_model/on_coefficients_change_updater_impl.cpp',
         'query/cqf_command_utils.cpp',
         'query/cqf_fast_paths.cpp',
@@ -1675,6 +1666,7 @@ execEnv.Library(
         'query/plan_ranker.cpp',
         'query/plan_yield_policy_impl.cpp',
         'query/plan_yield_policy_sbe.cpp',
+        'query/query_planner_params.cpp',
         'query/sbe_cached_solution_planner.cpp',
         'query/sbe_multi_planner.cpp',
         'query/sbe_plan_ranker.cpp',
@@ -1754,7 +1746,6 @@ execEnv.Library(
         'commands/server_status_core',
         'concurrency/exception_util',
         'curop_failpoint_helpers',
-        'cursor_stats',
         'exec/sbe/query_sbe_abt',
         'internal_transactions_feature_flag',
         'not_primary_error_tracker',
@@ -2567,6 +2558,7 @@ env.Library(
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_initializer',
         '$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer',
         '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_impl',
+        '$BUILD_DIR/mongo/s/resource_yielders',
         '$BUILD_DIR/mongo/s/sessions_collection_sharded',
         '$BUILD_DIR/mongo/s/sharding_initialization',
         '$BUILD_DIR/mongo/s/startup_initialization',

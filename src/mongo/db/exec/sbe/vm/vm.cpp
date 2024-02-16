@@ -5680,48 +5680,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSortArray(ArityT
     }
 }
 
-FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateAdd(ArityType arity) {
-    invariant(arity == 5);
-
-    auto [timezoneDBOwn, timezoneDBTag, timezoneDBVal] = getFromStack(0);
-    if (timezoneDBTag != value::TypeTags::timeZoneDB) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezoneDB = value::getTimeZoneDBView(timezoneDBVal);
-
-    auto [startDateOwn, startDateTag, startDateVal] = getFromStack(1);
-    if (!coercibleToDate(startDateTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto startDate = getDate(startDateTag, startDateVal);
-
-    auto [unitOwn, unitTag, unitVal] = getFromStack(2);
-    if (!value::isString(unitTag)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    std::string unitStr{value::getStringView(unitTag, unitVal)};
-    if (!isValidTimeUnit(unitStr)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto unit = parseTimeUnit(unitStr);
-
-    auto [amountOwn, amountTag, amountVal] = getFromStack(3);
-    if (amountTag != value::TypeTags::NumberInt64) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto amount = value::bitcastTo<int64_t>(amountVal);
-
-    auto [timezoneOwn, timezoneTag, timezoneVal] = getFromStack(4);
-    if (!value::isString(timezoneTag) || !isValidTimezone(timezoneTag, timezoneVal, timezoneDB)) {
-        return {false, value::TypeTags::Nothing, 0};
-    }
-    auto timezone = getTimezone(timezoneTag, timezoneVal, timezoneDB);
-
-    auto resDate = dateAdd(startDate, unit, amount, timezone);
-    return {
-        false, value::TypeTags::Date, value::bitcastFrom<int64_t>(resDate.toMillisSinceEpoch())};
-}
-
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinFtsMatch(ArityType arity) {
     invariant(arity == 2);
 
@@ -9538,6 +9496,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockDateDiff(arity);
         case Builtin::valueBlockDateTrunc:
             return builtinValueBlockDateTrunc(arity);
+        case Builtin::valueBlockDateAdd:
+            return builtinValueBlockDateAdd(arity);
         case Builtin::valueBlockTrunc:
             return builtinValueBlockTrunc(arity);
         case Builtin::valueBlockRound:
@@ -9584,6 +9544,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockIsMember(arity);
         case Builtin::valueBlockCoerceToBool:
             return builtinValueBlockCoerceToBool(arity);
+        case Builtin::valueBlockMod:
+            return builtinValueBlockMod(arity);
+        case Builtin::valueBlockConvert:
+            return builtinValueBlockConvert(arity);
         case Builtin::cellFoldValues_F:
             return builtinCellFoldValues_F(arity);
         case Builtin::cellFoldValues_P:
@@ -10042,6 +10006,8 @@ std::string builtinToString(Builtin b) {
             return "valueBlockDateDiff";
         case Builtin::valueBlockDateTrunc:
             return "valueBlockDateTrunc";
+        case Builtin::valueBlockDateAdd:
+            return "valueBlockDateAdd";
         case Builtin::valueBlockTrunc:
             return "valueBlockTrunc";
         case Builtin::valueBlockRound:
@@ -10088,6 +10054,10 @@ std::string builtinToString(Builtin b) {
             return "valueBlockIsMember";
         case Builtin::valueBlockCoerceToBool:
             return "valueBlockCoerceToBool";
+        case Builtin::valueBlockMod:
+            return "valueBlockMod";
+        case Builtin::valueBlockConvert:
+            return "valueBlockConvert";
         case Builtin::cellFoldValues_F:
             return "cellFoldValues_F";
         case Builtin::cellFoldValues_P:

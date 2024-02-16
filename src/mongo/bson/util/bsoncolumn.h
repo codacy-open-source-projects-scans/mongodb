@@ -393,6 +393,9 @@ concept Appendable =
     t.appendPreallocated(bsonVal);
 
     t.appendMissing();
+
+    // Repeat the last appended value
+    t.appendLast();
 };
 
 /**
@@ -470,67 +473,67 @@ public:
         : _collection(collection), _allocator(std::move(allocator)) {}
 
     void append(bool val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(int32_t val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(int64_t val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(Decimal128 val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(double val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(Timestamp val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(Date_t val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(OID val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(const StringData& val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(const BSONBinData& val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     void append(const BSONCode& val) {
-        collect(CMaterializer::materialize(*_allocator, val));
+        _collection.push_back(CMaterializer::materialize(*_allocator, val));
     }
 
     template <typename T>
     void append(const BSONElement& val) {
-        collect(CMaterializer::template materialize<T>(*_allocator, val));
+        _collection.push_back(CMaterializer::template materialize<T>(*_allocator, val));
     }
 
     void appendPreallocated(const BSONElement& val) {
-        collect(CMaterializer::materializePreallocated(val));
+        _collection.push_back(CMaterializer::materializePreallocated(val));
     }
 
     void appendMissing() {
-        collect(CMaterializer::materializeMissing(*_allocator));
+        _collection.push_back(CMaterializer::materializeMissing(*_allocator));
+    }
+
+    void appendLast() {
+        _collection.push_back(_collection.back());
     }
 
 private:
-    inline void collect(Element val) {
-        _collection.insert(_collection.end(), val);
-    }
-
     Container& _collection;
     boost::intrusive_ptr<ElementStorage> _allocator;
 };
@@ -577,60 +580,7 @@ public:
     void decompressIterative(Buffer& buffer, boost::intrusive_ptr<ElementStorage> allocator) const {
         BSONColumn::Iterator it(allocator, _binary, _binary + _size);
         for (; it.more(); ++it) {
-            BSONElement elem = *it;
-            switch (elem.type()) {
-                case NumberInt:
-                    buffer.template append<int32_t>(elem);
-                    break;
-                case NumberLong:
-                    buffer.template append<int64_t>(elem);
-                    break;
-                case NumberDouble:
-                    buffer.template append<double>(elem);
-                    break;
-                case NumberDecimal:
-                    buffer.template append<Decimal128>(elem);
-                    break;
-                case Bool:
-                    buffer.template append<bool>(elem);
-                    break;
-                case jstOID:
-                    buffer.template append<OID>(elem);
-                    break;
-                case Date:
-                    buffer.template append<Date_t>(elem);
-                    break;
-                case Code:
-                    buffer.template append<BSONCode>(elem);
-                    break;
-                case String:
-                    buffer.template append<StringData>(elem);
-                    break;
-                case bsonTimestamp:
-                    buffer.template append<Timestamp>(elem);
-                    break;
-                case BinData:
-                    buffer.template append<BSONBinData>(elem);
-                    break;
-                // Below are types that cannot be compressed, so we will append the BSONElement.
-                case DBRef:
-                case RegEx:
-                case Symbol:
-                case CodeWScope:
-                case Object:
-                case Array:
-                case Undefined:
-                case jstNULL:
-                case MaxKey:
-                case MinKey:
-                    buffer.template append<BSONElement>(elem);
-                    break;
-                case EOO:
-                    buffer.appendMissing();
-                    break;
-                default:
-                    MONGO_UNREACHABLE
-            }
+            buffer.appendPreallocated(*it);
         }
     }
 

@@ -16,7 +16,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.9,<4.0"
+python = ">=3.10,<4.0"
 # OPTIONAL
 # Libdeps depdencies
 networkx = "*"                                    # This is also used as a part of build_metrics so it is sort of required
@@ -79,6 +79,7 @@ service_identity = "18.1.0"
 twisted = "21.2.0"
 'zope.interface' = "5.0.0"
 ldaptor = "19.0.0"
+google-cloud-compute = "^1.15.0"
 
 [tool.poetry.group.idl.dependencies]
 unittest-xml-reporting = "3.0.4" # Pinned because newer versions require lxml which fails to install
@@ -103,6 +104,7 @@ types-setuptools = "57.4.12" # latest is 68.0.0.0, but that causes pip install r
 types-requests = "2.31.0.1"
 tqdm = "*"
 colorama = "^0.4.6"
+evergreen-lint = "^0.1.5"
 
 [tool.poetry.group.platform.dependencies]
 pypiwin32 = { version = ">=223", markers = "sys_platform == 'win32'" }

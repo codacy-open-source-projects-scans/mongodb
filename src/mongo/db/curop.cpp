@@ -97,7 +97,7 @@
 namespace mongo {
 namespace {
 
-auto& oplogGetMoreStats = makeServerStatusMetric<TimerStats>("repl.network.oplogGetMoresProcessed");
+auto& oplogGetMoreStats = *MetricBuilder<TimerStats>("repl.network.oplogGetMoresProcessed");
 
 BSONObj serializeDollarDbInOpDescription(boost::optional<TenantId> tenantId,
                                          const BSONObj& cmdObj,
@@ -1792,7 +1792,8 @@ void OpDebug::setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats) {
     sortTotalDataSizeBytes = planSummaryStats.sortTotalDataSizeBytes;
     keysSorted = planSummaryStats.keysSorted;
     fromMultiPlanner = planSummaryStats.fromMultiPlanner;
-    fromPlanCache = planSummaryStats.fromPlanCache;
+    // Don't clobber flag which may have been set directly.
+    fromPlanCache = fromPlanCache || planSummaryStats.fromPlanCache;
     replanReason = planSummaryStats.replanReason;
     collectionScans = planSummaryStats.collectionScans;
     collectionScansNonTailable = planSummaryStats.collectionScansNonTailable;

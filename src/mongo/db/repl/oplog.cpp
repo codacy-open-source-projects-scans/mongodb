@@ -1088,7 +1088,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
+              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"deleteIndexes",
@@ -1097,7 +1097,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
+              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"dropIndex",
@@ -1106,7 +1106,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
+              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"dropIndexes",
@@ -1115,7 +1115,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
+              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"renameCollection",
@@ -1630,6 +1630,19 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     }
                 }
 
+                // If an oplog entry has a recordId, this means that the collection is a
+                // recordIdReplicated collection, and therefore we should use the recordId
+                // present.
+                // Because this code is run on secondaries as well as on primaries that use
+                // applyOps, this has the effect of preserving recordIds when applyOps is run,
+                // which is intentional.
+                for (size_t i = 0; i < insertObjs.size(); i++) {
+                    if (insertOps[i]->getDurableReplOperation().getRecordId()) {
+                        insertObjs[i].replRid =
+                            *insertOps[i]->getDurableReplOperation().getRecordId();
+                    }
+                }
+
                 OpDebug* const nullOpDebug = nullptr;
                 Status status = collection_internal::insertDocuments(opCtx,
                                                                      collection,
@@ -1714,6 +1727,13 @@ Status applyOperation_inlock(OperationContext* opCtx,
                         auto oplogInfo = LocalOplogInfo::get(opCtx);
                         auto oplogSlots = oplogInfo->getNextOpTimes(opCtx, /*batchSize=*/1);
                         insertStmt.oplogSlot = oplogSlots.front();
+                    }
+
+                    // If an oplog entry has a recordId, this means that the collection is a
+                    // recordIdReplicated collection, and therefore we should use the recordId
+                    // present.
+                    if (op.getDurableReplOperation().getRecordId()) {
+                        insertStmt.replRid = *op.getDurableReplOperation().getRecordId();
                     }
 
                     OpDebug* const nullOpDebug = nullptr;
@@ -2386,7 +2406,10 @@ Status applyCommand_inlock(OperationContext* opCtx,
                 Command* cmd = CommandHelpers::findCommand(opCtx, o.firstElement().fieldName());
                 invariant(cmd);
 
-                auto ns = cmd->parse(opCtx, OpMsgRequest::fromDBAndBody(nss.dbName(), o))->ns();
+                auto ns = cmd->parse(opCtx,
+                                     OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                                         nss.dbName(), auth::ValidatedTenancyScope::get(opCtx), o))
+                              ->ns();
 
                 if (mode == OplogApplication::Mode::kInitialSync) {
                     // Aborting an index build involves writing to the catalog. This write needs to

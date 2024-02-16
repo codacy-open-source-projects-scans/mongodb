@@ -114,13 +114,13 @@ MONGO_FAIL_POINT_DEFINE(pauseBatchApplicationAfterWritingOplogEntries);
 MONGO_FAIL_POINT_DEFINE(hangAfterRecordingOpApplicationStartTime);
 
 // The oplog entries applied
-CounterMetric opsAppliedStats("repl.apply.ops");
+auto& opsAppliedStats = *MetricBuilder<Counter64>{"repl.apply.ops"};
 
 // Tracks the oplog application batch size.
-CounterMetric oplogApplicationBatchSize("repl.apply.batchSize");
+auto& oplogApplicationBatchSize = *MetricBuilder<Counter64>{"repl.apply.batchSize"};
 
 // Number and time of each ApplyOps worker pool round
-auto& applyBatchStats = makeServerStatusMetric<TimerStats>("repl.apply.batches");
+auto& applyBatchStats = *MetricBuilder<TimerStats>("repl.apply.batches");
 
 /**
  * Used for logging a report of ops that take longer than "slowMS" to apply. This is called
@@ -576,7 +576,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
 
         // Blocks up to a second waiting for a batch to be ready to apply. If one doesn't become
         // ready in time, we'll loop again so we can do the above checks periodically.
-        OplogBatch ops = _oplogBatcher->getNextBatch(Seconds(1));
+        OplogApplierBatch ops = _oplogBatcher->getNextBatch(Seconds(1));
         if (ops.empty()) {
             if (ops.mustShutdown()) {
                 // Shut down and exit oplog application loop.

@@ -42,6 +42,9 @@ TimeseriesTest.run((insert) => {
         topLevelScalar: 123,
         topLevelArray: [1, 2, 3, 4],
         arrOfObj: [{x: 1}, {x: 2}, {x: 3}, {x: 4}],
+        emptyArray: [],
+        nestedArray: [{subField: [1]}, {subField: [2]}, {subField: 3}],
+        sometimesDoublyNestedArray: [[1], [2], [3], []]
     });
     insert(coll, {
         _id: 1,
@@ -50,6 +53,9 @@ TimeseriesTest.run((insert) => {
         topLevelScalar: 456,
         topLevelArray: [101, 102, 103, 104],
         arrOfObj: [{x: 101}, {x: 102}, {x: 103}, {x: 104}],
+        emptyArray: [],
+        nestedArray: [{subField: [101]}, {subField: [102]}, {subField: 103}],
+        sometimesDoublyNestedArray: [[101], 102, [103]]
     });
     insert(coll, {
         _id: 2,
@@ -71,6 +77,8 @@ TimeseriesTest.run((insert) => {
         [metaFieldName]: "cpu",
         // Different schema from above.
         arrOfObj: [{x: [101, 102, 103]}, {x: [104]}],
+        nestedArray: [{subField: []}, {subField: []}],
+        sometimesDoublyNestedArray: [[]],
     });
 
     const kTestCases = [
@@ -210,7 +218,7 @@ TimeseriesTest.run((insert) => {
                 }
             },
             ids: [0],
-            usesBlockProcessing: false
+            usesBlockProcessing: true
         },
         {
             pred: {
@@ -228,8 +236,94 @@ TimeseriesTest.run((insert) => {
                 }
             },
             ids: [4],
+            usesBlockProcessing: true
+        },
+        {
+            pred: {
+                "$expr": {
+                    "$eq": [
+                        {"$dateAdd": {"startDate": "$time", "unit": "millisecond", amount: 100}},
+                        new Date(datePrefix + 600)
+                    ]
+                }
+            },
+            ids: [4],
+            usesBlockProcessing: true
+        },
+        {
+            pred: {
+                "$expr": {
+                    "$eq": [
+                        {
+                            "$dateSubtract":
+                                {"startDate": "$time", "unit": "millisecond", amount: 100}
+                        },
+                        new Date(datePrefix)
+                    ]
+                }
+            },
+            ids: [0],
+            usesBlockProcessing: true
+        },
+
+        // Comparisons with an empty array.
+        {pred: {"emptyArray": {$exists: true}}, ids: [0, 1], usesBlockProcessing: true},
+        {pred: {"emptyArray": {$exists: false}}, ids: [2, 3, 4], usesBlockProcessing: true},
+        {pred: {"emptyArray": null}, ids: [2, 3, 4], usesBlockProcessing: false},
+        {pred: {"emptyArray": []}, ids: [0, 1], usesBlockProcessing: false},
+        {pred: {"emptyArray": "foobar"}, ids: [], usesBlockProcessing: true},
+        {pred: {"emptyArray": {$type: "array"}}, ids: [0, 1], usesBlockProcessing: false},
+        // Case where there's a predicate which always returns the same value.
+        {pred: {"emptyArray": {$lt: NaN}}, ids: [], usesBlockProcessing: true},
+
+        {pred: {"nestedArray": {$exists: true}}, ids: [0, 1, 4], usesBlockProcessing: true},
+        {pred: {"nestedArray": {$exists: false}}, ids: [2, 3], usesBlockProcessing: true},
+        {pred: {"nestedArray": null}, ids: [2, 3], usesBlockProcessing: false},
+        {pred: {"nestedArray": []}, ids: [], usesBlockProcessing: false},
+        {pred: {"nestedArray": "foobar"}, ids: [], usesBlockProcessing: true},
+        {pred: {"nestedArray": {$type: "array"}}, ids: [0, 1, 4], usesBlockProcessing: false},
+
+        {
+            pred: {"nestedArray.subField": {$exists: true}},
+            ids: [0, 1, 4],
             usesBlockProcessing: false
         },
+        {pred: {"nestedArray.subField": {$exists: false}}, ids: [2, 3], usesBlockProcessing: false},
+        {pred: {"nestedArray.subField": null}, ids: [2, 3], usesBlockProcessing: false},
+        {pred: {"nestedArray.subField": []}, ids: [4], usesBlockProcessing: false},
+        {pred: {"nestedArray.subField": 103}, ids: [1], usesBlockProcessing: true},
+        {pred: {"nestedArray.subField": 101}, ids: [1], usesBlockProcessing: true},
+        {pred: {"nestedArray.subField": 1}, ids: [0], usesBlockProcessing: true},
+        {
+            pred: {"nestedArray.subField": {$type: "array"}},
+            ids: [0, 1, 4],
+            usesBlockProcessing: false
+        },
+
+        {
+            pred: {"sometimesDoublyNestedArray": {$exists: true}},
+            ids: [0, 1, 4],
+            usesBlockProcessing: true
+        },
+        {
+            pred: {"sometimesDoublyNestedArray": {$exists: false}},
+            ids: [2, 3],
+            usesBlockProcessing: true
+        },
+        {pred: {"sometimesDoublyNestedArray": null}, ids: [2, 3], usesBlockProcessing: false},
+        {pred: {"sometimesDoublyNestedArray": []}, ids: [0, 4], usesBlockProcessing: false},
+        {pred: {"sometimesDoublyNestedArray": 102}, ids: [1], usesBlockProcessing: true},
+        // 101 is within a nested array, so it does not match. However, searching for [101] does
+        // match.
+        {pred: {"sometimesDoublyNestedArray": 101}, ids: [], usesBlockProcessing: true},
+        {pred: {"sometimesDoublyNestedArray": [101]}, ids: [1], usesBlockProcessing: false},
+        {pred: {"sometimesDoublyNestedArray": 102}, ids: [1], usesBlockProcessing: true},
+        {
+            pred: {"sometimesDoublyNestedArray": {$type: "array"}},
+            ids: [0, 1, 4],
+            usesBlockProcessing: false
+        },
+        {pred: {"sometimesDoublyNestedArray": [101]}, ids: [1], usesBlockProcessing: false},
     ];
 
     // $match pushdown requires sbe to be fully enabled and featureFlagTimeSeriesInSbe to be set.
@@ -250,13 +344,12 @@ TimeseriesTest.run((insert) => {
         const explain = coll.explain().aggregate(pipe);
         const engineUsed = getEngine(explain);
         const singleNodeQueryPlanner = getQueryPlanner(getSingleNodeExplain(explain));
-        printjson(singleNodeQueryPlanner);
         function testCaseAndExplainFn(description) {
             return () => description + " for test case " + tojson(testCase) +
                 " failed with explain " + tojson(singleNodeQueryPlanner);
         }
 
-        if (sbeEnabled) {
+        if (sbeEnabled || singleNodeQueryPlanner.winningPlan.slotBasedPlan) {
             const sbePlan = singleNodeQueryPlanner.winningPlan.slotBasedPlan.stages;
 
             if (testCase.usesBlockProcessing) {
@@ -281,5 +374,39 @@ TimeseriesTest.run((insert) => {
         ];
         const res = coll.aggregate(pipe).toArray()
         assert.eq(res.length, coll.count(), res);
+    }
+
+    // Make sure that the bitmap from the previous stage is forwarded to the next stage
+    coll.drop();
+    assert.commandWorked(db.createCollection(coll.getName(), {
+        timeseries: {timeField: timeFieldName, metaField: metaFieldName},
+    }));
+    assert.contains(bucketsColl.getName(), db.getCollectionNames())
+
+    insert(
+        coll,
+        {_id: 0, [timeFieldName]: new Date(datePrefix + 100), [metaFieldName]: "cpu", a: 1, b: 1});
+    insert(
+        coll,
+        {_id: 0, [timeFieldName]: new Date(datePrefix + 200), [metaFieldName]: "cpu", a: 2, b: 0});
+    insert(
+        coll,
+        {_id: 0, [timeFieldName]: new Date(datePrefix + 300), [metaFieldName]: "cpu", a: 1, b: 3});
+
+    {
+        const pipeline = [
+            {$addFields: {ex: 3}},
+            {$match: {a: {$eq: 1}}},
+            {$match: {$expr: {$lt: ["$b", "$ex"]}}},
+            {
+                $group: {
+                    "_id": {"time": {"$dateTrunc": {"date": "$time", "unit": "minute"}}},
+                    "suma": {"$sum": "$a"}
+                }
+            }
+        ];
+
+        const res = coll.aggregate(pipeline).toArray();
+        assert.docEq([{"_id": {"time": ISODate("1970-01-20T10:55:00Z")}, "suma": 1}], res);
     }
 });

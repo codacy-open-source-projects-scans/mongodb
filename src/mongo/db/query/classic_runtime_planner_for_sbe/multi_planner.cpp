@@ -42,11 +42,8 @@ namespace mongo::classic_runtime_planner_for_sbe {
 MultiPlanner::MultiPlanner(OperationContext* opCtx,
                            PlannerData plannerData,
                            PlanYieldPolicy::YieldPolicy yieldPolicy,
-                           std::vector<std::unique_ptr<QuerySolution>> candidatePlans,
-                           PlanCachingMode cachingMode)
-    : PlannerBase(opCtx, std::move(plannerData)),
-      _yieldPolicy(yieldPolicy),
-      _cachingMode(cachingMode) {
+                           std::vector<std::unique_ptr<QuerySolution>> candidatePlans)
+    : PlannerBase(opCtx, std::move(plannerData)), _yieldPolicy(yieldPolicy) {
     _multiPlanStage =
         std::make_unique<MultiPlanStage>(cq()->getExpCtxRaw(),
                                          collections().getMainCollectionPtrOrAcquisition(),
@@ -69,21 +66,31 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::plan() {
                                _yieldPolicy,
                                collections().getMainCollectionPtrOrAcquisition());
 
-    // TODO SERVER-85248: Update the sbe plan cache after best plan is chosen.
     uassertStatusOK(_multiPlanStage->pickBestPlan(trialPeriodYieldPolicy.get()));
 
     std::unique_ptr<QuerySolution> winningSolution = _multiPlanStage->extractBestSolution();
 
     // Extend the winning solution with the agg pipeline and build the execution tree.
     if (!cq()->cqPipeline().empty()) {
+        // TODO: SERVER-86174 Avoid unnecessary fillOutPlannerParams() and
+        // fillOutSecondaryCollectionsInformation() planner param calls.
+        auto& queryPlannerParams = plannerParams();
+        queryPlannerParams.fillOutSecondaryCollectionsPlannerParams(opCtx(), *cq(), collections());
         winningSolution = QueryPlanner::extendWithAggPipeline(
-            *cq(),
-            std::move(winningSolution),
-            fillOutSecondaryCollectionsInformation(opCtx(), collections(), cq()));
+            *cq(), std::move(winningSolution), queryPlannerParams.secondaryCollectionsInfo);
     }
 
     auto sbePlanAndData = stage_builder::buildSlotBasedExecutableTree(
         opCtx(), collections(), *cq(), *winningSolution, sbeYieldPolicy());
+
+    plan_cache_util::updateSbePlanCacheFromClassicCandidates(opCtx(),
+                                                             collections(),
+                                                             PlanCachingMode::AlwaysCache,
+                                                             *cq(),
+                                                             _multiPlanStage->planRankingDecision(),
+                                                             _multiPlanStage->candidates(),
+                                                             sbePlanAndData,
+                                                             winningSolution.get());
 
     return prepareSbePlanExecutor(std::move(winningSolution),
                                   std::move(sbePlanAndData),

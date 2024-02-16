@@ -61,6 +61,9 @@ public:
     boost::optional<Record> next() final {
         return {};
     }
+    boost::optional<Record> seek(const RecordId& start, BoundInclusion boundInclusion) {
+        return {};
+    }
     boost::optional<Record> seekExact(const RecordId& id) final {
         return {};
     }
@@ -300,12 +303,6 @@ public:
 
     virtual Status initAsEmpty(OperationContext* opCtx) {
         return Status::OK();
-    }
-
-    void insertWithRecordIdInValue_forTest(OperationContext* opCtx,
-                                           const key_string::Value& keyString,
-                                           RecordId rid) override {
-        MONGO_UNREACHABLE;
     }
 };
 
