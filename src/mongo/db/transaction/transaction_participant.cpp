@@ -214,6 +214,12 @@ void fassertOnRepeatedExecution(const LogicalSessionId& lsid,
 }
 
 void validateTransactionHistoryApplyOpsOplogEntry(const repl::OplogEntry& oplogEntry) {
+    // A multiOpType of MultiOplogEntryType::kApplyOpsAppliedSeparately
+    // indicates this applyOps is not expected to be part of an internal transaction.
+    if (oplogEntry.getMultiOpType().value_or(repl::MultiOplogEntryType::kLegacyMultiOpType) ==
+        repl::MultiOplogEntryType::kApplyOpsAppliedSeparately)
+        return;
+
     uassert(5875601,
             "Found an applyOps oplog entry for retryable writes that were executed without "
             "using a retryable internal transaction",
@@ -356,10 +362,11 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
 
             auto stmtIds = entry.getStatementIds();
 
-            if (isInternalSessionForRetryableWrite(lsid)) {
+            if (isInternalSessionForRetryableWrite(lsid) ||
+                entry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps) {
                 uassert(5875605,
-                        "Found an oplog entry for retryable internal transaction with top-level "
-                        "'stmtId' field",
+                        "Found an oplog entry for retryable internal transaction or applyOps with "
+                        "top-level 'stmtId' field",
                         stmtIds.empty());
 
                 if (entry.getCommandType() == repl::OplogEntry::CommandType::kCommitTransaction) {

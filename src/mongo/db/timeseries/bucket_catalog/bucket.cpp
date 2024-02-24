@@ -58,12 +58,12 @@ uint8_t numDigits(uint32_t num) {
 
 Bucket::Bucket(TrackingContext& trackingContext,
                const BucketId& bId,
-               const BucketKey& k,
+               BucketKey k,
                StringData tf,
                Date_t mt,
                BucketStateRegistry& bsr)
     : bucketId(bId),
-      key(k),
+      key(std::move(k)),
       timeField(tf.toString()),
       minTime(mt),
       bucketStateRegistry(bsr),
@@ -71,7 +71,8 @@ Bucket::Bucket(TrackingContext& trackingContext,
       minmax(trackingContext),
       schema(trackingContext),
       usingAlwaysCompressedBuckets(feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-          serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {}
+          serverGlobalParams.featureCompatibility.acquireFCVSnapshot())),
+      intermediateBuilders(trackingContext) {}
 
 Bucket::~Bucket() {
     decrementBucketCountForEra(bucketStateRegistry, lastChecked);
@@ -137,7 +138,8 @@ void calculateBucketFieldsAndSizeChange(const Bucket& bucket,
     }
 }
 
-std::shared_ptr<WriteBatch> activeBatch(Bucket& bucket,
+std::shared_ptr<WriteBatch> activeBatch(TrackingContext& trackingContext,
+                                        Bucket& bucket,
                                         OperationId opId,
                                         std::uint8_t stripe,
                                         ExecutionStatsController& stats) {
@@ -145,8 +147,9 @@ std::shared_ptr<WriteBatch> activeBatch(Bucket& bucket,
     if (it == bucket.batches.end()) {
         it = bucket.batches
                  .try_emplace(opId,
-                              std::make_shared<WriteBatch>(BucketHandle{bucket.bucketId, stripe},
-                                                           bucket.key,
+                              std::make_shared<WriteBatch>(trackingContext,
+                                                           BucketHandle{bucket.bucketId, stripe},
+                                                           bucket.key.cloneAsUntracked(),
                                                            opId,
                                                            stats,
                                                            bucket.timeField))

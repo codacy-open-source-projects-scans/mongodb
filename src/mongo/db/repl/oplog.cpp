@@ -612,7 +612,13 @@ void appendOplogEntryChainInfo(OperationContext* opCtx,
     invariant(txnParticipant);
     oplogEntry->setSessionId(opCtx->getLogicalSessionId());
     oplogEntry->setTxnNumber(opCtx->getTxnNumber());
-    oplogEntry->setStatementIds(stmtIds);
+    // If this is a multi-operation retryable oplog entry, the statement IDs should not be included
+    // because they were included in the individual operations.
+    if (oplogLink->multiOpType != MultiOplogEntryType::kLegacyMultiOpType) {
+        oplogEntry->setMultiOpType(oplogLink->multiOpType);
+    } else {
+        oplogEntry->setStatementIds(stmtIds);
+    }
     if (oplogLink->prevOpTime.isNull()) {
         oplogLink->prevOpTime = txnParticipant.getLastWriteOpTime();
     }
@@ -1088,7 +1094,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"deleteIndexes",
@@ -1097,7 +1103,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"dropIndex",
@@ -1106,7 +1112,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"dropIndexes",
@@ -1115,7 +1121,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           return dropIndexesForApplyOps(
-              opCtx, extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd), cmd);
+              opCtx, extractNsFromUUID(opCtx, entry.getUuid().value()), cmd);
       },
       {ErrorCodes::NamespaceNotFound, ErrorCodes::IndexNotFound}}},
     {"renameCollection",
@@ -2280,7 +2286,11 @@ Status applyCommand_inlock(OperationContext* opCtx,
     if (!nss.isValid()) {
         return {ErrorCodes::InvalidNamespace, "invalid ns: " + nss.toStringForErrorMsg()};
     }
-    {
+    // The dbCheck batch might be operating on an older snapshot than what the secondary currently
+    // has. Therefore, we should skip this check for dbCheck, as we know for sure it succeeded on
+    // the primary, which means the collection must exist in the snapshot the dbcheck will run on.
+    // Therefore, deferring the Point-in-Time (PIT) namespace existence check to dbCheck.
+    if (strcmp(o.firstElementFieldName(), "dbCheck") != 0) {
         auto catalog = CollectionCatalog::get(opCtx);
         if (!catalog->lookupCollectionByNamespace(opCtx, nss) && catalog->lookupView(opCtx, nss)) {
             return {ErrorCodes::CommandNotSupportedOnView,
@@ -2508,7 +2518,7 @@ Status applyCommand_inlock(OperationContext* opCtx,
         }
     }
 
-    AuthorizationManager::get(opCtx->getServiceContext())->logOp(opCtx, "c", nss, o, nullptr);
+    AuthorizationManager::get(opCtx->getService())->logOp(opCtx, "c", nss, o, nullptr);
     return Status::OK();
 }
 

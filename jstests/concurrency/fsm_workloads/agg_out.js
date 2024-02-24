@@ -10,7 +10,9 @@
  * Unfortunately, there aren't very many assertions we can make here, so this is mostly to test that
  * the server doesn't deadlock or crash.
  *
- * @tags: [requires_capped]
+ * @tags: [
+ *   requires_capped,
+ * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {isMongos} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
@@ -86,6 +88,9 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             // Locally it fails with explicit collection dropped error. When doing remote reads,
             // it fails with cursor not found error.
             ErrorCodes.CursorNotFound,
+            // When running in suites with random migrations $out can fail copying the indexes due
+            // to a resharding operation in progress
+            ErrorCodes.ReshardCollectionInProgress,
         ];
         assert.commandWorkedOrFailedWithCode(res, allowedErrorCodes);
 

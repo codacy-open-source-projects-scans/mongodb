@@ -43,6 +43,7 @@
 #include "mongo/db/exec/sbe/values/util.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/util/itoa.h"
 
 namespace mongo::sbe::value {
@@ -81,6 +82,8 @@ TsBucketPathExtractor::extractCellBlocks(const BSONObj& bucketObj) {
         return timeseries::BucketUnpacker::computeMeasurementCount(bucketObj,
                                                                    StringData(_timeField));
     }();
+
+    const int bucketVersion = bucketObj.getIntField(timeseries::kBucketControlVersionFieldName);
 
     const BSONElement bucketDataElem = bucketObj[timeseries::kBucketDataFieldName];
     invariant(!bucketDataElem.eoo());
@@ -137,6 +140,7 @@ TsBucketPathExtractor::extractCellBlocks(const BSONObj& bucketObj) {
                                                       false /*owned*/,
                                                       columnTag,
                                                       columnVal,
+                                                      bucketVersion,
                                                       isTimeField,
                                                       controlMin,
                                                       controlMax));
@@ -225,6 +229,7 @@ TsBlock::TsBlock(size_t ncells,
                  bool owned,
                  TypeTags blockTag,
                  Value blockVal,
+                 int bucketVersion,
                  bool isTimeField,
                  std::pair<TypeTags, Value> controlMin,
                  std::pair<TypeTags, Value> controlMax)
@@ -232,6 +237,7 @@ TsBlock::TsBlock(size_t ncells,
       _blockTag(blockTag),
       _blockVal(blockVal),
       _count(ncells),
+      _bucketVersion(bucketVersion),
       _isTimeField(isTimeField),
       _controlMin(copyValue(controlMin.first, controlMin.second)),
       _controlMax(copyValue(controlMax.first, controlMax.second)) {
@@ -300,66 +306,6 @@ void TsBlock::deblockFromBsonColumn(std::vector<TypeTags>& deblockedTags,
     }
 }
 
-/**
- * This is implicitly optimized for dense blocks but we may want to revisit this in the future.
- */
-boost::optional<DeblockedHomogeneousVals> TsBlock::extractHomogeneous() {
-    // Check if we have already called extractHomogeneous on this block.
-    if (_decompressedBlock) {
-        return _decompressedBlock->extractHomogeneous();
-    }
-
-    ensureDeblocked();
-    invariant(_decompressedBlock);
-    auto deblocked = _decompressedBlock->extract();
-
-    bool foundNonNothing = false;
-    TypeTags acc = TypeTags::Nothing;
-    HomogeneousBlockBitset bitset;
-    bitset.resize(deblocked.count(), true);
-    std::vector<Value> vals;
-    vals.resize(deblocked.count());
-    size_t valsIdx = 0;
-    for (size_t i = 0; i < deblocked.count(); ++i) {
-        if (deblocked.tags()[i] == TypeTags::Nothing) {
-            bitset[i] = false;
-            continue;
-        } else if (!foundNonNothing) {
-            // TODO SERVER-83799 Remove check for Boolean
-            if (!DeblockedHomogeneousVals::validHomogeneousType(deblocked.tags()[i]) ||
-                deblocked.tags()[i] == TypeTags::Boolean) {
-                return boost::none;
-            }
-            foundNonNothing = true;
-            acc = deblocked.tags()[i];
-        } else if (foundNonNothing && deblocked.tags()[i] != acc) {
-            return boost::none;
-        }
-        vals[valsIdx++] = deblocked.vals()[i];
-    }
-    // Resize vals in case there were Nothings present in the block.
-    vals.resize(valsIdx);
-
-    switch (acc) {
-        case TypeTags::NumberInt32:
-            _decompressedBlock = std::make_unique<Int32Block>(std::move(vals), std::move(bitset));
-            break;
-        case TypeTags::NumberInt64:
-            _decompressedBlock = std::make_unique<Int64Block>(std::move(vals), std::move(bitset));
-            break;
-        case TypeTags::NumberDouble:
-            _decompressedBlock = std::make_unique<DoubleBlock>(std::move(vals), std::move(bitset));
-            break;
-        case TypeTags::Date:
-            _decompressedBlock = std::make_unique<DateBlock>(std::move(vals), std::move(bitset));
-            break;
-        default:
-            MONGO_UNREACHABLE;
-    }
-
-    return _decompressedBlock->extractHomogeneous();
-}
-
 std::unique_ptr<TsBlock> TsBlock::cloneStrongTyped() const {
     // TODO: If we've already decoded the output, there's no need to re-copy the entire bson
     // column. We could instead just copy the decoded values and metadata.
@@ -367,7 +313,8 @@ std::unique_ptr<TsBlock> TsBlock::cloneStrongTyped() const {
     auto [cpyTag, cpyVal] = copyValue(_blockTag, _blockVal);
     ValueGuard guard(cpyTag, cpyVal);
     // The new copy must own the copied underlying buffer.
-    auto cpy = std::make_unique<TsBlock>(_count, /*owned*/ true, cpyTag, cpyVal);
+    auto cpy = std::make_unique<TsBlock>(
+        _count, /*owned*/ true, cpyTag, cpyVal, _bucketVersion, _isTimeField);
     guard.reset();
 
     // TODO: This might not be necessary now that TsBlock doesn't really use _deblockedStorage
@@ -395,23 +342,22 @@ DeblockedTagVals TsBlock::deblock(boost::optional<DeblockedTagValStorage>& stora
 }
 
 std::pair<TypeTags, Value> TsBlock::tryMin() const {
-    // If the _blockTag is TypeTags::bsonObject, then the underlying bucket is using the v1
-    // schema. Since v1 buckets are unsorted and the bucket min of the time field is a lower
-    // bound, we just ignore it and return Nothting since verifying the true minimum requires
-    // traversing the entire block anyways.
-    if (_isTimeField && _blockTag != TypeTags::bsonObject) {
-        // control.min is only a lower bound for the time field but v2 buckets are sorted by
-        // time, so we can easily get the true min by reading the first element in the block.
-        auto blockColumn = getBSONColumn();
-        auto it = blockColumn.begin();
-        auto [trueMinTag, trueMinVal] = bson::convertFrom</*View*/ true>(*it);
-        return value::copyValue(trueMinTag, trueMinVal);
-    } else if (!isObject(_controlMin.first) && !isArray(_controlMin.first) && !_isTimeField) {
-        // Timeseries computes min and max for arrays/objects differently from our language. As
-        // a result, the min/max value is not guaranteed to a member of the block so we choose
-        // not to expose it.
+    // V1 and v3 buckets store the time field unsorted. In all versions, the control.min of the time
+    // field is rounded down. If computing the true minimum requires traversing the whole column,
+    // we just return Nothing.
+    if (_isTimeField) {
+        if (isTimeFieldSorted()) {
+            // control.min is only a lower bound for the time field but v2 buckets are sorted by
+            // time, so we can easily get the true min by reading the first element in the block.
+            auto blockColumn = getBSONColumn();
+            auto it = blockColumn.begin();
+            auto [trueMinTag, trueMinVal] = bson::convertFrom</*View*/ true>(*it);
+            return value::copyValue(trueMinTag, trueMinVal);
+        }
+    } else if (canUseControlValue(_controlMin.first)) {
         return _controlMin;
     }
+
     return std::pair{TypeTags::Nothing, Value{0u}};
 }
 
@@ -426,8 +372,12 @@ void TsBlock::ensureDeblocked() {
             deblockFromBsonColumn(tags, vals);
         }
 
-        _decompressedBlock = std::make_unique<HeterogeneousBlock>(std::move(tags), std::move(vals));
+        _decompressedBlock = buildBlockFromStorage(std::move(tags), std::move(vals));
     }
+}
+
+bool TsBlock::isTimeFieldSorted() const {
+    return _bucketVersion == timeseries::kTimeseriesControlCompressedSortedVersion;
 }
 
 ValueBlock& TsCellBlockForTopLevelField::getValueBlock() {
@@ -444,23 +394,6 @@ std::unique_ptr<CellBlock> TsCellBlockForTopLevelField::clone() const {
     return std::unique_ptr<TsCellBlockForTopLevelField>(
         new TsCellBlockForTopLevelField(*precomputedCount, std::move(tsBlockClone)));
 }
-
-TsCellBlockForTopLevelField::TsCellBlockForTopLevelField(size_t count,
-                                                         bool owned,
-                                                         TypeTags topLevelTag,
-                                                         Value topLevelVal,
-                                                         bool isTimefield,
-                                                         std::pair<TypeTags, Value> controlMin,
-                                                         std::pair<TypeTags, Value> controlMax)
-    : TsCellBlockForTopLevelField(
-          count,
-          // The 'count' means the number of cells in this TsCellBlockForTopLevelField and as of
-          // now, we only support top-level fields only, the number of values per cell is always 1
-          // and the number of cells in this TsCellBlockForTopLevelField is always the same as the
-          // number of values in '_tsBlock'. So, we pass 'count' to '_tsBlock' as the number of
-          // values in it.
-          std::make_unique<TsBlock>(
-              count, owned, topLevelTag, topLevelVal, isTimefield, controlMin, controlMax)) {}
 
 TsCellBlockForTopLevelField::TsCellBlockForTopLevelField(TsBlock* block) : _unownedTsBlock(block) {
     auto count = block->tryCount();

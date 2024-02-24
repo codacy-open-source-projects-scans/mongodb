@@ -46,15 +46,15 @@ public:
     // Get a batch from the underlying OplogBuffer for the OplogWriter to write to disk. If the
     // buffer is empty, the batcher will wait for the next batch until the maxWaitTime timeout is
     // hit, so this function can return an empty batch.
-    OplogBatchBSONObj getNextBatch(OperationContext* opCtx, Seconds maxWaitTime);
+    OplogWriterBatch getNextBatch(OperationContext* opCtx, Seconds maxWaitTime);
 
 private:
     /**
-     * Merge all OplogBatchBSONObjes into one OplogBatchBSONObj.
+     * Merge all OplogWriterBatches into one OplogWriterBatch.
      */
-    OplogBatchBSONObj _mergeBatches(std::vector<OplogBatchBSONObj>& batches,
-                                    size_t totalBytes,
-                                    size_t totalOps);
+    OplogWriterBatch _mergeBatches(std::vector<OplogWriterBatch>& batches,
+                                   size_t totalBytes,
+                                   size_t totalOps);
 
     /**
      * Wait until the buffer is not empty or deadline arrives then return true if we should process
@@ -74,8 +74,13 @@ private:
      * time.
      */
     bool _pollFromBuffer(OperationContext* opCtx,
-                         OplogBatchBSONObj* batch,
+                         OplogWriterBatch* batch,
                          boost::optional<Date_t>& delaySecsLatestTimestamp);
+
+    /**
+     * Check if applier is Draining. If so, wait to avoid caller busy waiting if needed.
+     */
+    bool _processDrainingIfNecessary();
 
 private:
     // This should be a OplogBuffer that supports batch operations.
@@ -84,7 +89,10 @@ private:
 
     // Keep the last batch from buffer when the batch is not passing secondaryDelaySecs. This will
     // be reset to null once that batch passes secondaryDelaySecs and return to the caller.
-    boost::optional<OplogBatchBSONObj> _stashedBatch = boost::none;
+    boost::optional<OplogWriterBatch> _stashedBatch = boost::none;
+
+    // Indicates whether we already see the oplogBuffer in drain mode.
+    bool _enteredDraining = false;
 };
 
 }  // namespace repl

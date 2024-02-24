@@ -268,6 +268,8 @@ public:
                             boost::optional<long long> newCappedSize,
                             boost::optional<long long> newCappedMax) final;
 
+    void unsetRecordIdsReplicated(OperationContext* opCtx) final;
+
     //
     // Stats
     //
@@ -454,8 +456,6 @@ private:
         // of their own. The collection's validator will respect this collation. If null, the
         // default collation is simple binary compare.
         std::unique_ptr<CollatorInterface> _collator;
-
-        const bool _recordIdsReplicated;
 
         const bool _isCapped;
         const bool _needCappedLock;

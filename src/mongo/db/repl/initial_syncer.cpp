@@ -1540,7 +1540,7 @@ void InitialSyncer::_getNextApplierBatchCallback(
 
     std::string logMsg = str::stream()
         << "Initial Syncer is about to apply the next oplog batch of size: "
-        << batchResult.getValue().size();
+        << batchResult.getValue().count();
     pauseAtInitialSyncFuzzerSyncronizationPoints(logMsg);
 
     if (MONGO_unlikely(failInitialSyncBeforeApplyingBatch.shouldFail())) {
@@ -2162,11 +2162,8 @@ Status InitialSyncer::_enqueueDocuments(OplogFetcher::Documents::const_iterator 
 
     invariant(_oplogBuffer);
 
-    // Wait for enough space.
-    _oplogApplier->waitForSpace(makeOpCtx().get(), info.toApplyDocumentBytes);
-
     // Buffer docs for later application.
-    _oplogApplier->enqueue(makeOpCtx().get(), begin, end);
+    _oplogApplier->enqueue(makeOpCtx().get(), begin, end, info.toApplyDocumentBytes);
 
     _lastFetched = info.lastDocument;
 

@@ -212,10 +212,10 @@ TEST_F(ParseNsOrUUID, ParseValidColl) {
 TEST_F(ParseNsOrUUID, ParseValidCollLocalOpLogDollarMain) {
     auto cmd = BSON("query"
                     << "oplog.$main");
-    auto parsedNss = CommandHelpers::parseNsOrUUID(
-        DatabaseName::createDatabaseName_forTest(
-            boost::none, NamespaceString::kLocalOplogDollarMain.db(omitTenant)),
-        cmd);
+    auto parsedNss =
+        CommandHelpers::parseNsOrUUID(DatabaseName::createDatabaseName_forTest(
+                                          boost::none, NamespaceString::kLocalOplogDollarMain.db()),
+                                      cmd);
     ASSERT_EQ(parsedNss.nss(), NamespaceString::kLocalOplogDollarMain);
 }
 
@@ -250,10 +250,10 @@ public:
             auto* opCtx = opCtxHolder.get();
             _managerState->setAuthzVersion(opCtx, AuthorizationManager::schemaVersion26Final);
         }
-        auto uniqueAuthzManager = std::make_unique<AuthorizationManagerImpl>(
-            getServiceContext(), std::move(localManagerState));
+        auto uniqueAuthzManager =
+            std::make_unique<AuthorizationManagerImpl>(getService(), std::move(localManagerState));
         _authzManager = uniqueAuthzManager.get();
-        AuthorizationManager::set(getServiceContext(), std::move(uniqueAuthzManager));
+        AuthorizationManager::set(getService(), std::move(uniqueAuthzManager));
         _authzManager->setAuthEnabled(true);
 
         _session = _transportLayer.createSession();

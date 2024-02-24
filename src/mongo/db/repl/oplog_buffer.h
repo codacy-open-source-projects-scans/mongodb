@@ -97,7 +97,8 @@ public:
      */
     virtual void push(OperationContext* opCtx,
                       Batch::const_iterator begin,
-                      Batch::const_iterator end) = 0;
+                      Batch::const_iterator end,
+                      boost::optional<std::size_t> bytes = boost::none) = 0;
 
     /**
      * Returns when enough space is available.
@@ -143,7 +144,7 @@ public:
      * Returns false if oplog buffer is empty. "batch" is left unchanged.
      * Otherwise, removes last batch (saves in "batch") from the oplog buffer and returns true.
      */
-    virtual bool tryPopBatch(OperationContext* opCtx, OplogBatchBSONObj* batch) {
+    virtual bool tryPopBatch(OperationContext* opCtx, OplogBatch<Value>* batch) {
         MONGO_UNIMPLEMENTED;
     }
 
@@ -202,6 +203,10 @@ public:
     virtual void exitDrainMode() {
         MONGO_UNIMPLEMENTED;
     }
+
+    virtual bool inDrainMode() {
+        MONGO_UNIMPLEMENTED;
+    }
 };
 
 class OplogBuffer::Counters {
@@ -233,9 +238,19 @@ public:
         size.increment(std::size_t(value.objsize()));
     }
 
+    void incrementN(std::size_t cnt, std::size_t sz) {
+        count.increment(cnt);
+        size.increment(sz);
+    }
+
     void decrement(const Value& value) {
         count.decrement(1);
         size.decrement(std::size_t(value.objsize()));
+    }
+
+    void decrementN(std::size_t cnt, std::size_t sz) {
+        count.decrement(cnt);
+        size.decrement(sz);
     }
 
     // Number of operations in this OplogBuffer.
@@ -252,7 +267,7 @@ public:
  * An OplogBuffer interface which also supports random access by timestamp.
  * The entries in a RandomAccessOplogBuffer must be pushed in strict timestamp order.
  *
- * The user of a RandomAccesOplogBuffer may seek to or find timestamps which have already been read
+ * The user of a RandomAccessOplogBuffer may seek to or find timestamps which have already been read
  * from the buffer.  It is up to the implementing subclass to ensure that such timestamps are
  * available to be read.
  */

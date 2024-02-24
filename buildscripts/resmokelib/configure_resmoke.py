@@ -365,7 +365,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
         # Windows PATH variable requires absolute paths.
         _config.INSTALL_DIR = os.path.abspath(_expand_user(os.path.normpath(_config.INSTALL_DIR)))
 
-        for binary in ["mongo", "mongod", "mongos", "dbtest"]:
+        for binary in ["mongo", "mongod", "mongos", "mongot-localdev/mongot", "dbtest"]:
             keyname = binary + "_executable"
             if config.get(keyname, None) is None:
                 config[keyname] = os.path.join(_config.INSTALL_DIR, binary)
@@ -414,6 +414,10 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
 
     _config.MONGOCRYPTD_SET_PARAMETERS = _merge_set_params(config.pop("mongocryptd_set_parameters"))
 
+    _config.MONGOT_EXECUTABLE = _expand_user(config.pop("mongot-localdev/mongot_executable"))
+    mongot_set_parameters = config.pop("mongot_set_parameters")
+    _config.MONGOT_SET_PARAMETERS = _merge_set_params(mongot_set_parameters)
+
     _config.MRLOG = config.pop("mrlog")
     _config.NO_JOURNAL = config.pop("no_journal")
     _config.NUM_CLIENTS_PER_FIXTURE = config.pop("num_clients_per_fixture")
@@ -429,6 +433,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.NUM_SHARDS = config.pop("num_shards")
     _config.CONFIG_SHARD = utils.pick_catalog_shard_node(
         config.pop("config_shard"), _config.NUM_SHARDS)
+    _config.EMBEDDED_ROUTER = config.pop("embedded_router")
     _config.ORIGIN_SUITE = config.pop("origin_suite")
     _config.PERF_REPORT_FILE = config.pop("perf_report_file")
     _config.CEDAR_REPORT_FILE = config.pop("cedar_report_file")

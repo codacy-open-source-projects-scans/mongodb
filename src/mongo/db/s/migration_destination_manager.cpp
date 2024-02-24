@@ -897,11 +897,22 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
     return {donorIndexSpecs, donorIdIndexSpec};
 }
 
+
+MigrationDestinationManager::CollectionOptionsAndUUID
+MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
+                                                  const NamespaceStringOrUUID& nssOrUUID,
+                                                  boost::optional<Timestamp> afterClusterTime) {
+    const auto dbInfo =
+        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nssOrUUID.dbName()));
+    return getCollectionOptions(
+        opCtx, nssOrUUID, dbInfo->getPrimary(), dbInfo->getVersion(), afterClusterTime);
+}
+
 MigrationDestinationManager::CollectionOptionsAndUUID
 MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
                                                   const NamespaceStringOrUUID& nssOrUUID,
                                                   const ShardId& fromShardId,
-                                                  const boost::optional<ChunkManager>& cm,
+                                                  const boost::optional<DatabaseVersion>& dbVersion,
                                                   boost::optional<Timestamp> afterClusterTime) {
     auto fromShard =
         uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, fromShardId));
@@ -911,9 +922,11 @@ MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
     auto cmd = nssOrUUID.isNamespaceString()
         ? BSON("listCollections" << 1 << "filter" << BSON("name" << nssOrUUID.nss().coll()))
         : BSON("listCollections" << 1 << "filter" << BSON("info.uuid" << nssOrUUID.uuid()));
-    if (cm) {
-        cmd = appendDbVersionIfPresent(cmd, cm->dbVersion());
+
+    if (dbVersion) {
+        cmd = appendDbVersionIfPresent(cmd, *dbVersion);
     }
+
     if (afterClusterTime) {
         cmd = cmd.addFields(makeLocalReadConcernWithAfterClusterTime(*afterClusterTime));
     }
@@ -1169,7 +1182,7 @@ void MigrationDestinationManager::_migrateThread(CancellationToken cancellationT
             CancelableOperationContext(client->makeOperationContext(), cancellationToken, executor);
         auto opCtx = uniqueOpCtx.get();
 
-        if (AuthorizationManager::get(opCtx->getServiceContext())->isAuthEnabled()) {
+        if (AuthorizationManager::get(opCtx->getService())->isAuthEnabled()) {
             AuthorizationSession::get(opCtx->getClient())->grantInternalAuthorization(opCtx);
         }
 

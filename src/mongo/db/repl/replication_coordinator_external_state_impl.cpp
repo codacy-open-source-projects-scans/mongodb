@@ -52,6 +52,7 @@
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
@@ -161,6 +162,9 @@ namespace {
 MONGO_FAIL_POINT_DEFINE(dropPendingCollectionReaperHang);
 MONGO_FAIL_POINT_DEFINE(skipDurableTimestampUpdates);
 
+// The maximum size of the oplog buffer is set to 256MB.
+constexpr std::size_t kOplogBufferSize = 256 * 1024 * 1024;
+
 // The count of items in the buffer
 OplogBuffer::Counters bufferGauge("repl.buffer");
 
@@ -247,7 +251,10 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
         return;
 
     invariant(replCoord);
-    _oplogBuffer = std::make_unique<OplogBufferBlockingQueue>(&bufferGauge);
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    invariant(storageEngine);
+
+    _oplogBuffer = std::make_unique<OplogBufferBlockingQueue>(kOplogBufferSize, &bufferGauge);
 
     // No need to log OplogBuffer::startup because the blocking queue implementation
     // does not start any threads or access the storage layer.
@@ -287,6 +294,10 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     _syncSourceFeedbackThread = std::make_unique<stdx::thread>([this, bgSyncPtr, replCoord] {
         _syncSourceFeedback.run(_taskExecutor.get(), bgSyncPtr, replCoord);
     });
+
+    // Notify the storage engine that we have completed startup recovery and are transitioning to
+    // steady state replication.
+    storageEngine->notifyReplStartupRecoveryComplete(opCtx);
 }
 
 void ReplicationCoordinatorExternalStateImpl::_stopDataReplication_inlock(
@@ -496,7 +507,7 @@ void ReplicationCoordinatorExternalStateImpl::onDrainComplete(OperationContext* 
     invariant(shard_role_details::getLocker(opCtx)->getAdmissionPriority() ==
                   AdmissionContext::Priority::kImmediate,
               "Replica Set state changes are critical to the cluster and should not be throttled");
-
+    // TODO(SERVER-85698): Also exit drain mode for the writer buffer.
     if (_oplogBuffer) {
         _oplogBuffer->exitDrainMode();
     }
@@ -579,7 +590,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     // On subsequent transitions to primary the indexes will have already been created.
     static std::once_flag verifySystemIndexesOnce;
     std::call_once(verifySystemIndexesOnce, [opCtx] {
-        const auto globalAuthzManager = AuthorizationManager::get(opCtx->getServiceContext());
+        const auto globalAuthzManager = AuthorizationManager::get(opCtx->getService());
         if (globalAuthzManager->shouldValidateAuthSchemaOnStartup()) {
             fassert(50877, verifySystemIndexes(opCtx));
         }
@@ -887,15 +898,18 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
         TransactionCoordinatorService::get(_service)->onStepDown();
     }
     if (ShardingState::get(_service)->enabled()) {
-        CatalogCacheLoader::get(_service).onStepDown();
-
         if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             // Called earlier for config servers.
             TransactionCoordinatorService::get(_service)->onStepDown();
+            CatalogCacheLoader::get(_service).onStepDown();
+            // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
+        } else if (gFeatureFlagTransitionToCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
+            CatalogCacheLoader::get(_service).onStepDown();
         }
     } else if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
-        // If this mongod has a router service, it needs to run stepdown
-        // hooks even if the shard-role isn't initialized yet.
+        // TODO(SERVER-86759): Investigate if the router path is not initialized, if this can hit
+        // MONGO_UNREACHABLE. If this mongod has a router service, it needs to run stepdown hooks
+        // even if the shard-role isn't initialized yet.
         // TODO SERVER-84243: Update this code once CatalogCacheLoader is split between
         // router and shard roles.
         if (Grid::get(_service)->isShardingInitialized()) {
@@ -999,17 +1013,19 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepUp(_service);
         TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
 
-        CatalogCacheLoader::get(_service).onStepUp();
+        // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
+        if (gFeatureFlagTransitionToCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
+            CatalogCacheLoader::get(_service).onStepUp();
+        }
     }
     if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         if (ShardingState::get(opCtx)->enabled()) {
             VectorClockMutable::get(opCtx)->recoverDirect(opCtx);
 
-            CatalogCacheLoader::get(_service).onStepUp();
-
             if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
                 // Called earlier for config servers.
                 TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
+                CatalogCacheLoader::get(_service).onStepUp();
             }
 
             const auto configsvrConnStr =
@@ -1146,6 +1162,7 @@ void ReplicationCoordinatorExternalStateImpl::stopProducer() {
     if (_bgSync) {
         _bgSync->stop(false);
     }
+    // TODO(SERVER-85698): Only drain the writer buffer here.
     if (_oplogBuffer) {
         _oplogBuffer->enterDrainMode();
     }
@@ -1153,6 +1170,7 @@ void ReplicationCoordinatorExternalStateImpl::stopProducer() {
 
 void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
     stdx::lock_guard<Latch> lk(_threadMutex);
+    // TODO(SERVER-85698): Also exit drain mode for the writer buffer.
     if (_oplogBuffer) {
         _oplogBuffer->exitDrainMode();
     }

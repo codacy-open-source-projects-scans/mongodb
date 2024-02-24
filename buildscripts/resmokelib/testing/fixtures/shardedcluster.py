@@ -33,7 +33,7 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             (2) Each shard-server in the cluster is started with the "--routerPort" CLI switch to enable routing.
             (3) An arbitrary subset of size `num_routers` of the shard-servers are chosen at fixture startup to serve as the routers,
                 and all routing requests are directed to the routing ports of those nodes.
-            TODO SERVER-81470: Support a mix of routing-enabled and routing-disabled shard servers in embedded router mode.
+            TODO SERVER-86554: Support a mix of shard servers with the routerPort opened and not.
         """
 
         interface.Fixture.__init__(self, logger, job_num, fixturelib, dbpath_prefix=dbpath_prefix)
@@ -107,7 +107,8 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
                 "balancerMigrationsThrottlingMs"] = self.mongod_options["set_parameters"].get(
                     "balancerMigrationsThrottlingMs", 100)  # millis
 
-        self._dbpath_prefix = os.path.join(self._dbpath_prefix, self.config.FIXTURE_SUBDIR)
+        self._dbpath_prefix = os.path.join(dbpath_prefix if dbpath_prefix else self._dbpath_prefix,
+                                           self.config.FIXTURE_SUBDIR)
 
         self.configsvr = None
         self.mongos = []
@@ -139,17 +140,17 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         for shard in self.shards:
             shard.setup()
 
-    def _all_mongo_d_s(self):
-        """Return a list of all `mongo{d,s}` `Process` instances in this fixture."""
+    def _all_mongo_d_s_t(self):
+        """Return a list of all `mongo{d,s,t}` `Process` instances in this fixture."""
         # When config_shard is None, we have an additional replset for the configsvr.
         all_nodes = [self.configsvr] if self.config_shard is None else []
         all_nodes += self.mongos
         all_nodes += self.shards
-        return sum([node._all_mongo_d_s() for node in all_nodes], [])
+        return sum([node._all_mongo_d_s_t() for node in all_nodes], [])
 
     def get_shardsvrs(self):
         """Return a list of the `MongodFixture`s for all of the shardsvrs in the cluster."""
-        return sum([shard._all_mongo_d_s() for shard in self.shards], [])
+        return sum([shard._all_mongo_d_s_t() for shard in self.shards], [])
 
     def refresh_logical_session_cache(self, target):
         """Refresh logical session cache with no timeout."""
@@ -410,6 +411,7 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             del mongod_options["shardsvr"]
             mongod_options["configsvr"] = ""
             replset_config_options["configsvr"] = True
+            mongod_options["set_parameters"]["featureFlagTransitionToCatalogShard"] = "true"
             mongod_options["storageEngine"] = "wiredTiger"
 
             configsvr_options = self.configsvr_options.copy()
@@ -460,6 +462,10 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         """Return options that may be passed to a mongos."""
         mongos_options = self.mongos_options.copy()
         mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
+        if self.config_shard is not None:
+            if "set_parameters" not in mongos_options:
+                mongos_options["set_parameters"] = {}
+            mongos_options["set_parameters"]["featureFlagTransitionToCatalogShard"] = "true"
         mongos_options["set_parameters"] = mongos_options.get("set_parameters",
                                                               self.fixturelib.make_historic(
                                                                   {})).copy()
@@ -667,7 +673,7 @@ class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
 
         self.mongos = mongos
 
-    def _all_mongo_d_s(self):
+    def _all_mongo_d_s_t(self):
         """Return the standalone `mongos` `Process` instance."""
         return [self]
 

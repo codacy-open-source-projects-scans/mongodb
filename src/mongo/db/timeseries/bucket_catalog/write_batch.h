@@ -72,8 +72,9 @@ struct CommitInfo {
  */
 struct WriteBatch {
     WriteBatch() = delete;
-    WriteBatch(const BucketHandle& bucketHandle,
-               const BucketKey& bucketKey,
+    WriteBatch(TrackingContext& trackingContext,
+               const BucketHandle& bucketHandle,
+               BucketKey bucketKey,
                OperationId opId,
                ExecutionStatsController& stats,
                StringData timeField);
@@ -109,11 +110,10 @@ struct WriteBatch {
      */
     InsertionOrderedColumnMap intermediateBuilders;
 
-    /**
-     * The purpose of this is to check that the new set of measurements don't overlap in time with
-     * the committed measurements.
-     */
-    Timestamp maxCommittedTime;
+    // Whether the measurements in the bucket are sorted by timestamp or not.
+    // True by default, if a v2 buckets gets promoted to v3 this is set to false.
+    // It should not be used for v1 buckets.
+    bool bucketIsSortedByTime = true;
 
     bool openedDueToMetadata =
         false;  // If true, bucket has been opened due to the inserted measurement having different

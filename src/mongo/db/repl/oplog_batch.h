@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2019-present MongoDB, Inc.
+ *    Copyright (C) 2024-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -43,10 +43,15 @@ namespace repl {
 template <class T>
 class OplogBatch {
 public:
-    explicit OplogBatch() : _batch(), _byteSize(0) {}
+    OplogBatch() : _batch(), _byteSize(0) {}
 
     OplogBatch(std::vector<T> entries, size_t byteSize)
         : _batch(std::move(entries)), _byteSize(byteSize) {}
+
+    OplogBatch(typename std::vector<T>::const_iterator begin,
+               typename std::vector<T>::const_iterator end,
+               size_t byteSize)
+        : _batch(begin, end), _byteSize(byteSize) {}
 
     bool empty() const {
         return _batch.empty();
@@ -66,11 +71,11 @@ public:
         return _batch;
     }
 
-    size_t size() const {
+    size_t count() const {
         return _batch.size();
     }
 
-    std::size_t getByteSize() {
+    std::size_t byteSize() {
         return _byteSize;
     }
 
@@ -91,7 +96,7 @@ private:
  */
 class OplogApplierBatch : public OplogBatch<OplogEntry> {
 public:
-    explicit OplogApplierBatch() : OplogBatch<OplogEntry>() {}
+    OplogApplierBatch() : OplogBatch<OplogEntry>() {}
 
     OplogApplierBatch(std::vector<OplogEntry> entries, size_t bytesSize)
         : OplogBatch<OplogEntry>(std::move(entries), bytesSize) {}
@@ -129,7 +134,31 @@ private:
     boost::optional<long long> _termWhenExhausted;
 };
 
-using OplogBatchBSONObj = OplogBatch<BSONObj>;
+/**
+ * Stores a batch of oplog entry BSON for oplog writer.
+ */
+class OplogWriterBatch : public OplogBatch<BSONObj> {
+public:
+    OplogWriterBatch() : OplogBatch<BSONObj>() {}
+
+    OplogWriterBatch(std::vector<BSONObj> entries, size_t bytesSize)
+        : OplogBatch<BSONObj>(std::move(entries), bytesSize) {}
+
+    /**
+     * A batch with this set indicates that the buffer is in drain mode and the batch must be empty.
+     */
+    bool exhausted() const {
+        return _exhausted;
+    }
+
+    void setExhausted() {
+        invariant(empty());
+        _exhausted = true;
+    }
+
+private:
+    bool _exhausted = false;
+};
 
 }  // namespace repl
 }  // namespace mongo

@@ -1,5 +1,7 @@
 """Repository rules for rules_py_simple"""
 
+load("//bazel:utils.bzl", "retry_download_and_extract")
+
 _OS_MAP = {
     "macos": "@platforms//os:osx",
     "linux": "@platforms//os:linux",
@@ -10,6 +12,7 @@ _ARCH_MAP = {
     "amd64": "@platforms//cpu:x86_64",
     "aarch64": "@platforms//cpu:arm64",
     "x86_64": "@platforms//cpu:x86_64",
+    "ppc64le": "@platforms//cpu:ppc64le",
 }
 
 URLS_MAP = {
@@ -21,6 +24,11 @@ URLS_MAP = {
     "linux_amd64": {
         "sha": "ee37a7eae6e80148c7e3abc56e48a397c1664f044920463ad0df0fc706eacea8",
         "url": "https://github.com/indygreg/python-build-standalone/releases/download/20231002/cpython-3.11.6+20231002-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "interpreter_path": "bin/python3",
+    },
+    "linux_ppc64le": {
+        "sha": "7937035f690a624dba4d014ffd20c342e843dd46f89b0b0a1e5726b85deb8eaf",
+        "url": "https://github.com/indygreg/python-build-standalone/releases/download/20231002/cpython-3.11.6+20231002-ppc64le-unknown-linux-gnu-install_only.tar.gz",
         "interpreter_path": "bin/python3",
     },
     "windows_amd64": {
@@ -73,7 +81,9 @@ def _py_download(ctx):
         interpreter_path = platform_info["interpreter_path"]
 
     ctx.report_progress("downloading python")
-    ctx.download_and_extract(
+    retry_download_and_extract(
+        ctx = ctx,
+        tries = 5,
         url = urls,
         sha256 = sha,
         stripPrefix = "python",
@@ -116,7 +126,7 @@ py_download = repository_rule(
             doc = "Host operating system.",
         ),
         "arch": attr.string(
-            values = ["amd64", "aarch64"],
+            values = ["amd64", "aarch64", "ppc64le"],
             doc = "Host architecture.",
         ),
         "interpreter_path": attr.string(
@@ -158,6 +168,15 @@ def setup_mongo_python_toolchains():
     )
 
     py_download(
+        name = "py_linux_ppc64le",
+        arch = "ppc64le",
+        os = "linux",
+        build_tpl = "//bazel/toolchains:python_toolchain.BUILD",
+        sha256 = URLS_MAP["linux_ppc64le"]["sha"],
+        urls = [URLS_MAP["linux_ppc64le"]["url"]],
+    )
+
+    py_download(
         name = "py_windows_x86_64",
         arch = "amd64",
         os = "windows",
@@ -188,6 +207,7 @@ def setup_mongo_python_toolchains():
     return (
         "@py_linux_arm64//:python_toolchain",
         "@py_linux_x86_64//:python_toolchain",
+        "@py_linux_ppc64le//:python_toolchain",
         "@py_windows_x86_64//:python_toolchain",
         "@py_macos_arm64//:python_toolchain",
         "@py_macos_x86_64//:python_toolchain",

@@ -28,6 +28,7 @@
  */
 
 
+#include "mongo/logv2/log_severity.h"
 #include <boost/optional.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
@@ -304,10 +305,11 @@ void ExecCommandClient::_prologue() {
         iassert(Status(ErrorCodes::SkipCommandExecution, "Failed to check authorization"));
     }
 
-    // attach tracking
-    rpc::TrackingMetadata trackingMetadata;
-    trackingMetadata.initWithOperName(c->getName());
-    rpc::TrackingMetadata::get(opCtx) = trackingMetadata;
+    if (shouldLog(logv2::LogComponent::kTracking, logv2::LogSeverity::Debug(1))) {
+        rpc::TrackingMetadata trackingMetadata;
+        trackingMetadata.initWithOperName(c->getName());
+        rpc::TrackingMetadata::get(opCtx) = trackingMetadata;
+    }
 }
 
 Future<void> ExecCommandClient::_run() {
@@ -359,18 +361,6 @@ void ExecCommandClient::_onCompletion() {
     auto opCtx = _rec->getOpCtx();
     auto body = _rec->getReplyBuilder()->getBodyBuilder();
     appendRequiredFieldsToResponse(opCtx, &body);
-
-    auto seCtx = transport::ServiceExecutorContext::get(opCtx->getClient());
-    if (!seCtx) {
-        // We were run by a background worker.
-        return;
-    }
-
-    if (!_invocation->isSafeForBorrowedThreads()) {
-        // If the last command wasn't safe for a borrowed thread,
-        // then let's move off of it.
-        seCtx->setThreadModel(seCtx->kSynchronous);
-    }
 }
 
 Future<void> ExecCommandClient::run() {

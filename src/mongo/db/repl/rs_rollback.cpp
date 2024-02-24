@@ -346,7 +346,7 @@ Status rollback_internal::updateFixUpInfoFromLocalOplogEntry(OperationContext* o
             auto txnObj = txnBob.obj();
 
             DocID txnDoc(txnObj, txnObj.firstElement(), transactionTableUUID.value());
-            txnDoc.ns = redactTenant(NamespaceString::kSessionTransactionsTableNamespace);
+            txnDoc.ns = NamespaceString::kSessionTransactionsTableNamespace.ns();
 
             fixUpInfo.docsToRefetch.insert(txnDoc);
             fixUpInfo.refetchTransactionDocs = true;
@@ -1734,7 +1734,7 @@ void syncFixUp(OperationContext* opCtx,
             nullptr /* aboutToDelete callback */);
     }
 
-    Status status = AuthorizationManager::get(opCtx->getServiceContext())->initialize(opCtx);
+    Status status = AuthorizationManager::get(opCtx->getService())->initialize(opCtx);
     if (!status.isOK()) {
         LOGV2_FATAL_NOTRACE(40496,
                             "Failed to reinitialize auth data after rollback",

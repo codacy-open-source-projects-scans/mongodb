@@ -113,9 +113,9 @@ ServiceContextMongoDTest::ServiceContextMongoDTest(Options options)
     if (options._mockAuthzExternalState) {
         _authzExternalState = options._mockAuthzExternalState.get();
         auto uniqueAuthzManager = std::make_unique<AuthorizationManagerImpl>(
-            serviceContext, std::move(options._mockAuthzExternalState));
-        AuthorizationManager::set(serviceContext, std::move(uniqueAuthzManager));
-        AuthorizationManager::get(serviceContext)->setAuthEnabled(true);
+            getService(), std::move(options._mockAuthzExternalState));
+        AuthorizationManager::set(getService(), std::move(uniqueAuthzManager));
+        AuthorizationManager::get(getService())->setAuthEnabled(true);
     }
 
     if (options._useMockClock) {
@@ -176,9 +176,7 @@ ServiceContextMongoDTest::ServiceContextMongoDTest(Options options)
     ShardingState::create_forTest_DO_NOT_USE(serviceContext);
     CollectionShardingStateFactory::set(
         serviceContext, std::make_unique<CollectionShardingStateFactoryShard>(serviceContext));
-
-    auto opCtx = serviceContext->makeOperationContext(getClient());
-    serviceContext->getStorageEngine()->notifyStartupComplete(opCtx.get());
+    serviceContext->getStorageEngine()->notifyStorageStartupRecoveryComplete();
 
     if (options._indexBuildsCoordinator) {
         IndexBuildsCoordinator::set(serviceContext, std::move(options._indexBuildsCoordinator));

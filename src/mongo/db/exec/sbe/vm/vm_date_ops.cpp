@@ -329,12 +329,8 @@ namespace {
  * parameters.
  */
 FastTuple<bool, value::TypeTags, value::Value> makeNothingBlock(value::ValueBlock* valueBlockIn) {
-    auto count = valueBlockIn->tryCount();
-    if (!count) {
-        count = valueBlockIn->extract().count();
-    }
-    auto out =
-        std::make_unique<value::MonoBlock>(*count, value::TypeTags::Nothing, value::Value{0u});
+    auto out = std::make_unique<value::MonoBlock>(
+        valueBlockIn->count(), value::TypeTags::Nothing, value::Value{0u});
     return {
         true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(out.release())};
 }
@@ -362,13 +358,8 @@ struct DateTruncFunctor {
     DayOfWeek _startOfWeek;
 };
 
-static constexpr auto dateTruncOpType =
-    ColumnOpType{ColumnOpType::kMonotonic | ColumnOpType::kOutputNonNothingOnExpectedInput,
-                 value::TypeTags::Date,
-                 value::TypeTags::Nothing,
-                 ColumnOpType::ReturnNothingOnMissing{}};
-
-static const auto dateTruncOp = value::makeColumnOpWithParams<dateTruncOpType, DateTruncFunctor>();
+static const auto dateTruncOp =
+    value::makeColumnOpWithParams<ColumnOpType::kMonotonic, DateTruncFunctor>();
 
 struct DateDiffFunctor {
     DateDiffFunctor(Date_t endDate, TimeUnit unit, TimeZone timeZone, DayOfWeek startOfWeek)
@@ -395,13 +386,8 @@ struct DateDiffFunctor {
     DayOfWeek _startOfWeek;
 };
 
-static constexpr auto dateDiffOpType =
-    ColumnOpType{ColumnOpType::kMonotonic | ColumnOpType::kOutputNonNothingOnExpectedInput,
-                 value::TypeTags::Date,
-                 value::TypeTags::Nothing,
-                 ColumnOpType::ReturnNothingOnMissing{}};
-
-static const auto dateDiffOp = value::makeColumnOpWithParams<dateDiffOpType, DateDiffFunctor>();
+static const auto dateDiffOp =
+    value::makeColumnOpWithParams<ColumnOpType::kMonotonic, DateDiffFunctor>();
 
 struct DateDiffMillisecondFunctor {
     DateDiffMillisecondFunctor(Date_t endDate) : _endDate(endDate) {}
@@ -422,7 +408,7 @@ struct DateDiffMillisecondFunctor {
 };
 
 static const auto dateDiffMillisecondOp =
-    value::makeColumnOpWithParams<dateDiffOpType, DateDiffMillisecondFunctor>();
+    value::makeColumnOpWithParams<ColumnOpType::kMonotonic, DateDiffMillisecondFunctor>();
 
 struct DateAddFunctor {
     DateAddFunctor(TimeUnit unit, int64_t amount, TimeZone timeZone)
@@ -446,13 +432,8 @@ struct DateAddFunctor {
     TimeZone _timeZone;
 };
 
-static constexpr auto dateAddOpType =
-    ColumnOpType{ColumnOpType::kMonotonic | ColumnOpType::kOutputNonNothingOnExpectedInput,
-                 value::TypeTags::Date,
-                 value::TypeTags::Nothing,
-                 ColumnOpType::ReturnNothingOnMissing{}};
-
-static const auto dateAddOp = value::makeColumnOpWithParams<dateAddOpType, DateAddFunctor>();
+static const auto dateAddOp =
+    value::makeColumnOpWithParams<ColumnOpType::kMonotonic, DateAddFunctor>();
 }  // namespace
 
 /**

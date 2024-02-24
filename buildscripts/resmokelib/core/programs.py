@@ -208,6 +208,17 @@ def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos
     return make_process(logger, args, **process_kwargs), final_mongos_options
 
 
+def mongot_program(logger, job_num, executable=None, process_kwargs=None, mongot_options=None):
+    """Return a Process instance that starts a mongot."""
+    args = [executable]
+    mongot_options = mongot_options.copy()
+    final_mongot_options = mongot_options.copy()
+    # Apply the rest of the command line arguments.
+    _apply_kwargs(args, mongot_options)
+    process_kwargs = make_historic(utils.default_if_none(process_kwargs, {}))
+    return make_process(logger, args, **process_kwargs), final_mongot_options
+
+
 def mongo_shell_program(logger, executable=None, connection_string=None, filename=None,
                         test_filename=None, process_kwargs=None, **kwargs):
     """Return a Process instance that starts a mongo shell.
@@ -348,6 +359,9 @@ def mongo_shell_program(logger, executable=None, connection_string=None, filenam
 
     if "configShard" not in test_data and config.CONFIG_SHARD is not None:
         test_data["configShard"] = True
+
+    if "embeddedRouter" not in test_data and config.EMBEDDED_ROUTER is not None:
+        test_data["embeddedRouter"] = True
 
     # There's a periodic background thread that checks for and aborts expired transactions.
     # "transactionLifetimeLimitSeconds" specifies for how long a transaction can run before expiring

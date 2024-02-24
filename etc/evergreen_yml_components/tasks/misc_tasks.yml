@@ -6,7 +6,6 @@
 variables:
 - &antithesis_task_template
   name: antithesis_task_template
-  tags: ["assigned_to_jira_team_devprod_correctness", "antithesis"]
   depends_on:
     name: archive_dist_test_debug
   commands:
@@ -136,24 +135,31 @@ variables:
 tasks:
 - <<: *antithesis_task_template
   name: antithesis_concurrency_sharded_multi_stmt_txn_kill_primary
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
   - func: "antithesis image build and push"
     vars:
       suite: concurrency_sharded_multi_stmt_txn_kill_primary
+      resmoke_args: >-
+        --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_concurrency_sharded_with_stepdowns_and_balancer
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
   - func: "antithesis image build and push"
     vars:
       suite: concurrency_sharded_with_stepdowns_and_balancer
+      resmoke_args: >-
+        --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_concurrency_sharded_with_stepdowns_and_balancer_config_shard
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
@@ -164,9 +170,11 @@ tasks:
         --configShard=0
         --numShards=2
         --excludeWithAnyTags=config_shard_incompatible
+        --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_config_fuzzer_stress_concurrency_sharded_replication
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
@@ -177,42 +185,55 @@ tasks:
         --fuzzMongodConfigs=stress
         --fuzzMongosConfigs=normal
         --excludeWithAnyTags=does_not_support_config_fuzzer
+        --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_core
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
   - func: "antithesis image build and push"
     vars:
       suite: core
+      resmoke_args: >-
+        --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_fcv_upgrade_downgrade_sharded_collections_jscore_passthrough
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
   - func: "antithesis image build and push"
     vars:
       suite: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough
+      resmoke_args: >-
+        --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_jstestfuzz_sharded
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
   - func: "antithesis image build and push"
     vars:
       suite: jstestfuzz_sharded
+      resmoke_args: >-
+        --runAllFeatureFlagTests
 
 - <<: *antithesis_task_template
   name: antithesis_replica_sets_jscore_passthrough
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant", "antithesis"]
   commands:
   - func: "do setup"
   - func: "do setup for antithesis"
   - func: "antithesis image build and push"
     vars:
       suite: replica_sets_jscore_passthrough
+      resmoke_args: >-
+        --runAllFeatureFlagTests
 
 - name: build_metrics_tasks_gen
   tags: ["assigned_to_jira_team_devprod_build"]
@@ -249,7 +270,7 @@ tasks:
       - src/build_metrics_task_gen.json
 
 - name: check_feature_flag_tags
-  tags: ["assigned_to_jira_team_devprod_correctness"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant"]
   patch_only: true
   commands:
   - command: manifest.load
@@ -266,7 +287,7 @@ tasks:
       - "./src/evergreen/feature_flag_tags_check.sh"
 
 - name: check_for_todos
-  tags: ["assigned_to_jira_team_devprod_correctness"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant"]
   exec_timeout_secs: 600 # 10 minute timeout
   commands:
   - command: manifest.load
@@ -331,7 +352,7 @@ tasks:
       - "./src/evergreen/generate_buildid_debug_symbols_mapping.sh"
 
 - name: idl_tests
-  tags: ["assigned_to_jira_team_server_servicearch"]
+  tags: ["assigned_to_jira_team_server_servicearch", "default"]
   depends_on:
   - name: archive_dist_test
   commands:
@@ -357,7 +378,7 @@ tasks:
 # Smoke test to ensure the Server still works with Jepsen
 - <<: *run_jepsen_template
   name: jepsen-config_fuzzer_smoke
-  tags: ["assigned_to_jira_team_server_repl"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -373,7 +394,7 @@ tasks:
 # Smoke test to ensure the Server still works with Jepsen
 - <<: *run_jepsen_template
   name: jepsen-smoke
-  tags: ["assigned_to_jira_team_server_repl"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -386,7 +407,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_config_fuzzer_list-append
-  tags: ["assigned_to_jira_team_server_repl", "jepsen_docker"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen_docker"]
   commands:
   - func: "do setup"
   - func: "do jepsen docker setup"
@@ -395,7 +416,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_config_fuzzer_read-concern-majority
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -409,7 +430,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_config_fuzzer_read-concern-majority_w1
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -424,7 +445,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_config_fuzzer_register_findAndModify
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -439,7 +460,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_config_fuzzer_register_linearizableRead
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -454,7 +475,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_config_fuzzer_set_linearizableRead
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -469,7 +490,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_list-append
-  tags: ["assigned_to_jira_team_server_repl", "jepsen_docker"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen_docker"]
   commands:
   - func: "do setup"
   - func: "do jepsen docker setup"
@@ -477,7 +498,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_read-concern-majority
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -489,7 +510,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_read-concern-majority_w1
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -502,7 +523,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_register_findAndModify
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -515,7 +536,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_register_linearizableRead
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -528,7 +549,7 @@ tasks:
 
 - <<: *run_jepsen_template
   name: jepsen_set_linearizableRead
-  tags: ["assigned_to_jira_team_server_repl", "jepsen"]
+  tags: ["assigned_to_jira_team_server_repl", "non_deterministic", "run_on_single_variant", "jepsen"]
   commands:
   - func: "do setup"
   - func: "do jepsen setup"
@@ -540,7 +561,7 @@ tasks:
       jepsen_test_name: set
 
 - name: lint_clang_format
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: timeout.update
     params:
@@ -554,12 +575,13 @@ tasks:
   - func: "cleanup environment"
   - func: "set up venv"
   - func: "upload pip requirements"
+  - func: "get engflow creds"
   - func: "scons lint"
     vars:
       targets: lint-clang-format
 
 - name: lint_cpplint
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: timeout.update
     params:
@@ -573,12 +595,13 @@ tasks:
   - func: "cleanup environment"
   - func: "set up venv"
   - func: "upload pip requirements"
+  - func: "get engflow creds"
   - func: "scons lint"
     vars:
       targets: lint-lint.py
 
 - name: lint_errorcodes
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -587,12 +610,13 @@ tasks:
   - func: "cleanup environment"
   - func: "set up venv"
   - func: "upload pip requirements"
+  - func: "get engflow creds"
   - func: "scons lint"
     vars:
       targets: lint-errorcodes
 
 - name: lint_eslint
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: timeout.update
     params:
@@ -606,6 +630,7 @@ tasks:
   - func: "cleanup environment"
   - func: "set up venv"
   - func: "upload pip requirements"
+  - func: "get engflow creds"
   - func: "scons lint"
     vars:
       targets: lint-eslint
@@ -625,7 +650,7 @@ tasks:
 
 # Check that the mutational fuzzer can parse JS files modified in a patch build.
 - name: lint_fuzzer_sanity_patch
-  tags: ["assigned_to_jira_team_devprod_correctness"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "default", "run_on_single_variant"]
   patch_only: true
   commands:
   - command: manifest.load
@@ -638,7 +663,7 @@ tasks:
   - func: "lint fuzzer sanity patch"
 
 - name: lint_large_files_check
-  tags: ["assigned_to_jira_team_devprod_build"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant"]
   exec_timeout_secs: 600 # 10 minute timeout
   commands:
   - command: manifest.load
@@ -661,7 +686,7 @@ tasks:
 
 # Confirm that the poetry.lock file is up to date with pyproject.toml
 - name: lint_poetry_lock
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -679,7 +704,7 @@ tasks:
       - "evergreen/functions/poetry_lock_check.py"
 
 - name: lint_bazel
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: timeout.update
     params:
@@ -712,7 +737,7 @@ tasks:
       - "lint-all"
 
 - name: lint_pylinters
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: timeout.update
     params:
@@ -726,12 +751,13 @@ tasks:
   - func: "cleanup environment"
   - func: "set up venv"
   - func: "upload pip requirements"
+  - func: "get engflow creds"
   - func: "scons lint"
     vars:
       targets: lint-pylinters
 
 - name: lint_sconslinters
-  tags: ["assigned_to_jira_team_devprod_build", "lint"]
+  tags: ["assigned_to_jira_team_devprod_build", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: timeout.update
     params:
@@ -745,12 +771,13 @@ tasks:
   - func: "cleanup environment"
   - func: "set up venv"
   - func: "upload pip requirements"
+  - func: "get engflow creds"
   - func: "scons lint"
     vars:
       targets: lint-sconslinters
 
 - name: lint_shellscripts
-  tags: ["assigned_to_jira_team_devprod_correctness", "lint"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "development_and_release_critical", "run_on_single_variant", "lint"]
   commands:
   - command: manifest.load
   - func: "git get project and add git tag"
@@ -767,7 +794,7 @@ tasks:
       - "src/evergreen/lint_shellscripts.sh"
 
 - name: lint_yaml
-  tags: ["assigned_to_jira_team_devprod_correctness", "lint"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "development_and_release_critical", "run_on_single_variant", "lint"]
   depends_on: []
   commands:
   - command: manifest.load
@@ -797,7 +824,7 @@ tasks:
   - func: "monitor mongo fork 10gen"
 
 - name: powercycle
-  tags: ["assigned_to_jira_team_server_storage_engines", "powercycle"]
+  tags: ["assigned_to_jira_team_server_storage_engines", "default", "run_on_single_variant", "powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -823,7 +850,7 @@ tasks:
       num_tasks: 1
 
 - name: powercycle_kill_mongod
-  tags: ["assigned_to_jira_team_server_storage_engines", "powercycle"]
+  tags: ["assigned_to_jira_team_server_storage_engines", "default", "run_on_single_variant", "powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -837,7 +864,7 @@ tasks:
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_last_lts_fcv
-  tags: ["assigned_to_jira_team_server_storage_engines", "powercycle"]
+  tags: ["assigned_to_jira_team_server_storage_engines", "default", "run_on_single_variant", "powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -851,7 +878,7 @@ tasks:
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_replication
-  tags: ["assigned_to_jira_team_server_storage_engines", "powercycle"]
+  tags: ["assigned_to_jira_team_server_storage_engines", "default", "run_on_single_variant", "powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -865,7 +892,7 @@ tasks:
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_replication_smalloplog
-  tags: ["assigned_to_jira_team_server_storage_engines", "powercycle"]
+  tags: ["assigned_to_jira_team_server_storage_engines", "default", "run_on_single_variant", "powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -887,7 +914,7 @@ tasks:
       gen_task: powercycle_smoke_skip_compile_gen
 
 - name: powercycle_smoke
-  tags: ["assigned_to_jira_team_devprod_correctness"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "default"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -918,7 +945,7 @@ tasks:
       run_powercycle_args: --sshAccessRetryCount=1800
 
 - name: powercycle_syncdelay
-  tags: ["assigned_to_jira_team_server_storage_engines", "powercycle"]
+  tags: ["assigned_to_jira_team_server_storage_engines", "default", "run_on_single_variant", "powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -932,7 +959,7 @@ tasks:
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: powercycle_write_concern_majority
-  tags: ["assigned_to_jira_team_server_storage_engines", "powercycle"]
+  tags: ["assigned_to_jira_team_server_storage_engines", "default", "run_on_single_variant", "powercycle"]
   exec_timeout_secs: 7200 # 2 hour timeout for the task overall
   depends_on:
   - name: archive_dist_test_debug
@@ -946,7 +973,7 @@ tasks:
     timeout_secs: 1800 # 30 minute timeout for no output
 
 - name: selinux_rhel7_enterprise
-  tags: ["assigned_to_jira_team_server_security"]
+  tags: ["assigned_to_jira_team_server_security", "default"]
   depends_on:
   - name: archive_dist_test
   - name: package
@@ -965,7 +992,7 @@ tasks:
       test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
 
 - name: selinux_rhel7_org
-  tags: ["assigned_to_jira_team_server_security"]
+  tags: ["assigned_to_jira_team_server_security", "default"]
   depends_on:
   - name: archive_dist_test
   - name: package
@@ -984,7 +1011,7 @@ tasks:
       test_list: jstests/selinux/*.js
 
 - name: selinux_rhel8_enterprise
-  tags: ["assigned_to_jira_team_server_security"]
+  tags: ["assigned_to_jira_team_server_security", "default"]
   depends_on:
   - name: archive_dist_test
   - name: package
@@ -1002,7 +1029,7 @@ tasks:
       test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
 
 - name: selinux_rhel8_org
-  tags: ["assigned_to_jira_team_server_security"]
+  tags: ["assigned_to_jira_team_server_security", "default"]
   depends_on:
   - name: archive_dist_test
   - name: package
@@ -1020,7 +1047,7 @@ tasks:
       test_list: jstests/selinux/*.js
 
 - name: selinux_rhel9_enterprise
-  tags: ["assigned_to_jira_team_server_security"]
+  tags: ["assigned_to_jira_team_server_security", "default"]
   depends_on:
   - name: archive_dist_test
   - name: package
@@ -1038,7 +1065,7 @@ tasks:
       test_list: jstests/selinux/*.js src/mongo/db/modules/enterprise/jstests/selinux/*.js
 
 - name: selinux_rhel9_org
-  tags: ["assigned_to_jira_team_server_security"]
+  tags: ["assigned_to_jira_team_server_security", "default"]
   depends_on:
   - name: archive_dist_test
   - name: package
@@ -1068,7 +1095,7 @@ tasks:
   - func: "sync repo with copybara"
 
 - name: test_api_version_compatibility
-  tags: ["assigned_to_jira_team_server_repl"]
+  tags: ["assigned_to_jira_team_server_repl", "development_and_release_critical", "run_on_single_variant"]
   depends_on:
   - name: archive_dist_test
   commands:
@@ -1122,7 +1149,7 @@ tasks:
       docker_password: ${dockerhub_password}
 
 - name: validate_commit_message
-  tags: ["assigned_to_jira_team_devprod_correctness"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "development_and_release_critical", "run_on_single_variant"]
   exec_timeout_secs: 600 # 10 minute timeout
   commands:
   - command: manifest.load
@@ -1190,7 +1217,7 @@ tasks:
   - func: "generate version"
 
 - name: version_gen_validation
-  tags: ["assigned_to_jira_team_devprod_correctness"]
+  tags: ["assigned_to_jira_team_devprod_correctness", "development_and_release_critical", "run_on_single_variant"]
   commands:
   - command: manifest.load
   - func: "git get project"
@@ -1209,15 +1236,18 @@ tasks:
 task_groups:
 - <<: *compile_task_group_template
   name: build_metrics_gen_TG
+  tags: []
   tasks:
   - build_metrics_tasks_gen
 
 - <<: *compile_task_group_template
   name: libdeps_graph_linting_TG
+  tags: ["default", "run_on_single_variant"]
   tasks:
   - libdeps_graph_linting
 
 - <<: *compile_task_group_template
   name: iwyu_self_test_TG
+  tags: ["default", "run_on_single_variant"]
   tasks:
   - iwyu_self_test

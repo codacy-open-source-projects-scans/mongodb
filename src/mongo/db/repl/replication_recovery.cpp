@@ -230,7 +230,10 @@ public:
         return _peekOrPop(value, Mode::kPeek);
     }
 
-    void push(OperationContext*, Batch::const_iterator, Batch::const_iterator) final {
+    void push(OperationContext*,
+              Batch::const_iterator,
+              Batch::const_iterator,
+              boost::optional<std::size_t> bytes) final {
         MONGO_UNREACHABLE;
     }
     void waitForSpace(OperationContext*, std::size_t) final {
@@ -522,6 +525,12 @@ boost::optional<Timestamp> ReplicationRecoveryImpl::recoverFromOplog(
     LOGV2_FATAL_CONTINUE(
         21570, "Caught exception during replication recovery", "error"_attr = exceptionToStatus());
     std::terminate();
+}
+
+void ReplicationRecoveryImpl::truncateOplogToTimestamp(OperationContext* opCtx,
+                                                       Timestamp truncateAfterTimestamp) {
+    _truncateOplogTo(
+        opCtx, truncateAfterTimestamp, std::make_unique<boost::optional<Timestamp>>().get());
 }
 
 void ReplicationRecoveryImpl::_recoverFromStableTimestamp(OperationContext* opCtx,

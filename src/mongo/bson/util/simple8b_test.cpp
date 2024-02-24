@@ -656,6 +656,34 @@ TEST(Simple8b, MultipleFlushes) {
     }
 }
 
+TEST(Simple8b, BitShiftLargerThan64) {
+    // Construct a simple8b block directly that forces a bit shift larger than 64. The following
+    // example will have a bit shift of 68. We do not expect this to happen with sensible encoders,
+    // so we have to construct the simple8b block with a hex value.
+    //
+    // The binary is 10101011110011011100101110101001110100111110010101 10001 1101 1000
+    // Extended selector = 8 (1000), extension value = 13 (1101), shift = 68 (10001), and the value
+    // was chosen randomly to fit the remaining 51 bits.
+    // This produces the hex string: 55E6E5D4E9F2B1D8
+
+    // The expected value is the original value << (68 % 64 = 4) in decimal.
+    uint64_t expectedVal = 12089623907203408;
+    BufBuilder buffer;
+    buffer.appendNum(0x55E6E5D4E9F2B1D8);
+
+    auto size = buffer.len();
+    auto sharedBuffer = buffer.release();
+
+    Simple8b<uint64_t> s8b(sharedBuffer.get(), size);
+    auto it = s8b.begin();
+
+    // This is validating an undefined encoding, and is subject to change in future versions of the
+    // decoder. This test is to validate the modulo behavior.
+    ASSERT_EQ(*it, expectedVal);
+    ++it;
+    ASSERT_FALSE(it.more());
+}
+
 TEST(Simple8b, Selector7BaseTest) {
     // 57344 = 1110000000000000 = 3 value bits and 13 zeros
     // This should be encoded as:
@@ -1468,4 +1496,33 @@ TEST(Simple8b, ValueTooLargeBitCountUsedForExtendedSelectors) {
     uint64_t value = 0x646075fffc000200;
     Simple8bBuilder<uint64_t> builder;
     ASSERT_FALSE(builder.append(value, [](uint64_t) { ASSERT(false); }));
+}
+
+TEST(Simple8b, ResetRLEAfterLargeValue) {
+    // Large value that can be only be stored in the extended selectors that encodes a bit shift
+    uint64_t large = 0xC000000000000000;
+
+    std::vector<uint64_t> blocks;
+    auto writer = [&blocks](uint64_t block) {
+        blocks.push_back(block);
+    };
+    Simple8bBuilder<uint64_t> b;
+
+    // Write as many of these large values we need to ensure a non-RLE block is written followed by
+    // an RLE block.
+    for (int i = 0; i < simple8b_internal::kRleMultiplier + 7; ++i) {
+        ASSERT_TRUE(b.append(large, writer));
+    }
+
+    // Add a large value that can only fit in the base selector which can encode up to 60 meaningful
+    // bits. When terminating RLE we should completely reset to allow this value to be appended.
+    ASSERT_TRUE(b.append(0x07FFFFFFFFFFFFFF, writer));
+
+    b.flush(writer);
+
+    // In total 3 simple8b blocks should have been written
+    ASSERT_EQ(blocks.size(), 3);
+    // The second block should be an RLE block
+    ASSERT_TRUE((blocks[1] & simple8b_internal::kBaseSelectorMask) ==
+                simple8b_internal::kRleSelector);
 }

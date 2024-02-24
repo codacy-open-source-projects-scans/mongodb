@@ -38,7 +38,6 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <iterator>
 #include <memory>
 #include <span>
@@ -53,6 +52,7 @@
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/bsoncolumn_helpers.h"
+#include "mongo/bson/util/bsoncolumn_interleaved.h"
 #include "mongo/bson/util/bsoncolumn_util.h"
 #include "mongo/bson/util/simple8b.h"
 #include "mongo/bson/util/simple8b_type_util.h"
@@ -194,7 +194,7 @@ public:
                 int64_t lastEncodedValue = 0;
                 int64_t lastEncodedValueForDeltaOfDelta = 0;
                 uint8_t scaleIndex;
-                bool deltaOfDelta;
+                bool deltaOfDelta = false;
             };
 
             /**
@@ -670,6 +670,18 @@ private:
                                           const BSONElement& reference,
                                           const Materialize& materialize);
 
+    /* Like decompressAllDelta, but does not have branching to avoid re-materialization
+       of repeated values, intended to be used on primitive types where this does not
+       result in additional allocation */
+    template <typename T, typename Encoding, class Buffer, typename Materialize>
+    requires Appendable<Buffer>
+    static const char* decompressAllDeltaPrimitive(const char* ptr,
+                                                   const char* end,
+                                                   Buffer& buffer,
+                                                   Encoding last,
+                                                   const BSONElement& reference,
+                                                   const Materialize& materialize);
+
     template <typename T, class Buffer, typename Materialize, typename Decode>
     requires Appendable<Buffer>
     static const char* decompressAllDeltaOfDelta(const char* ptr,
@@ -711,10 +723,10 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<ElementStorage> alloc
     const char* control = _binary;
     const char* end = _binary + _size;
     while (*control != EOO) {
+        BlockBasedInterleavedDecompressor<CMaterializer> decompressor{*allocator, control, end};
         invariant(bsoncolumn::isInterleavedStartControlByte(*control),
                   "non-interleaved data is not yet handled via this API");
-        control = BlockBasedInterleavedDecompressor<CMaterializer>::decompress(
-            *allocator, control, end, pathCollectors);
+        control = decompressor.decompress(pathCollectors);
         invariant(control < end);
     }
 }

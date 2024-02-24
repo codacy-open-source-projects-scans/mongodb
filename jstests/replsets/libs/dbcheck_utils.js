@@ -10,6 +10,11 @@ export const logQueries = {
         "msg": "found extra index key entry without corresponding document",
         "data.context.indexSpec": {$exists: true}
     },
+    missingIndexKeysQuery: {
+        "severity": "error",
+        "msg": "Document has missing index keys",
+        "data.context.missingIndexKeys": {$exists: true},
+    },
     recordDoesNotMatchQuery: {
         "severity": "error",
         "msg":
@@ -24,6 +29,7 @@ export const logQueries = {
         severity: "warning",
         "msg": "abandoning dbCheck extra index keys check because index no longer exists"
     },
+    errorQuery: {"severity": "error"},
     warningQuery: {"severity": "warning"},
     infoOrErrorQuery:
         {$or: [{"severity": "info", "operation": "dbCheckBatch"}, {"severity": "error"}]},
@@ -112,6 +118,10 @@ export const runDbCheck = (replSet,
                            awaitCompletion = false,
                            waitForHealthLogDbCheckStop = true,
                            allowedErrorCodes = []) => {
+    if (!parameters.hasOwnProperty('maxBatchTimeMillis')) {
+        // Make this huge because stalls and pauses sometimes break this test.
+        parameters['maxBatchTimeMillis'] = 20000;
+    }
     let dbCheckCommand = {dbCheck: collName};
     for (let parameter in parameters) {
         dbCheckCommand[parameter] = parameters[parameter];

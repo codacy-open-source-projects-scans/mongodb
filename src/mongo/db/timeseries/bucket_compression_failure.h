@@ -54,7 +54,7 @@ public:
     OID bucketId() const;
 
 private:
-    const UUID& _collectionUUID;
+    UUID _collectionUUID;
     OID _bucketId;
 };
 

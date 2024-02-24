@@ -147,6 +147,7 @@ buildvariants:
     - name: tpch_1_denormalized
     - name: tpch_10_normalized
     - name: tpch_10_denormalized
+    - name: genny_execution_ValidationFull
 
 - <<: *amazon2_x86_compile_variant_dependency
   name: perf-standalone-classic-query-engine.intel.aws.2023-11
@@ -376,7 +377,7 @@ buildvariants:
 - <<: *amazon2_x86_openssl111_compile_variant_dependency
   name: atlas-like-replica-intel-openSSL-111.2023-09
   display_name: PERF M60-like-replica.2023-09 Intel OpenSSL 1.1.1 3-Node ReplSet
-  cron: &atlas-like-repl-cron "0 0 * * 0,4"  # 00:00 on Sunday,Thursday
+  cron: *atlas-like-repl-cron
   modules: *perf_modules
   expansions:
     mongodb_setup: atlas-like-replica-openssl11.2023-09

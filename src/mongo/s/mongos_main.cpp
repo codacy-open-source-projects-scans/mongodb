@@ -917,7 +917,9 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                                   "Build user and roles graph",
                                                   &startupTimeElapsedBuilder);
-        Status status = AuthorizationManager::get(serviceContext)->initialize(opCtx);
+        Status status =
+            AuthorizationManager::get(serviceContext->getService(ClusterRole::RouterServer))
+                ->initialize(opCtx);
         if (!status.isOK()) {
             LOGV2_ERROR(22858, "Error initializing authorization data", "error"_attr = status);
             return ExitCode::shardingError;
@@ -981,7 +983,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     // parameters are guaranteed to have been initialized from disk at this point.
     audit::logStartupOptions(tc.get(), serverGlobalParams.parsedOpts);
 
-    serviceContext->notifyStartupComplete();
+    serviceContext->notifyStorageStartupRecoveryComplete();
 
 #if !defined(_WIN32)
     initialize_server_global_state::signalForkSuccess();

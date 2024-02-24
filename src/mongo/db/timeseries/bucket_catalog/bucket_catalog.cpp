@@ -117,10 +117,9 @@ void prepareWriteBatchForCommit(WriteBatch& batch, Bucket& bucket) {
     // See corollary in finish().
     batch.intermediateBuilders = std::move(bucket.intermediateBuilders);
     batch.uncompressedBucketDoc = std::move(bucket.uncompressedBucketDoc);
-    batch.maxCommittedTime = bucket.maxCommittedTime;
+    batch.bucketIsSortedByTime = bucket.bucketIsSortedByTime;
     bucket.uncompressedBucketDoc = {};
     bucket.memoryUsage -= batch.uncompressedBucketDoc.objsize();
-    bucket.memoryUsage -= batch.intermediateBuilders.getMemoryUsage();
 
     if (bucket.compressedBucketDoc) {
         batch.compressedBucketDoc = std::move(bucket.compressedBucketDoc);
@@ -584,12 +583,11 @@ boost::optional<ClosedBucket> finish(OperationContext* opCtx,
     if (bucket) {
         // Move BSONColumnBuilders from WriteBatch to Bucket.
         // See corollary in prepareWriteBatchForCommit().
-        bucket->maxCommittedTime = batch->maxCommittedTime;
+        bucket->bucketIsSortedByTime = batch->bucketIsSortedByTime;
         bucket->intermediateBuilders = std::move(batch->intermediateBuilders);
         bucket->preparedBatch.reset();
 
         auto prevMemoryUsage = bucket->memoryUsage;
-        bucket->memoryUsage += bucket->intermediateBuilders.getMemoryUsage();
 
         // The uncompressed and compressed images should have already been moved to the batch by
         // this point.
@@ -705,13 +703,15 @@ void directWriteFinish(BucketStateRegistry& registry, const UUID& collectionUUID
     removeDirectWrite(registry, BucketId{collectionUUID, oid});
 }
 
-void clear(BucketCatalog& catalog, ShouldClearFn&& shouldClear) {
-    clearSetOfBuckets(catalog.bucketStateRegistry, std::move(shouldClear));
+void clear(BucketCatalog& catalog, tracked_vector<UUID> clearedCollectionUUIDs) {
+    clearSetOfBuckets(catalog.bucketStateRegistry, std::move(clearedCollectionUUIDs));
 }
 
 void clear(BucketCatalog& catalog, const UUID& collectionUUID) {
-    clear(catalog,
-          [collectionUUID](const UUID& bucketUuid) { return bucketUuid == collectionUUID; });
+    tracked_vector<UUID> clearedCollectionUUIDs =
+        make_tracked_vector<UUID>(catalog.trackingContext);
+    clearedCollectionUUIDs.push_back(collectionUUID);
+    clear(catalog, std::move(clearedCollectionUUIDs));
 }
 
 void freeze(BucketCatalog& catalog, const UUID& collectionUUID, const OID& oid) {
