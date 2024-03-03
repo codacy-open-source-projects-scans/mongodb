@@ -39,10 +39,7 @@
 
 namespace mongo::classic_runtime_planner_for_sbe {
 
-SubPlanner::SubPlanner(OperationContext* opCtx,
-                       PlannerData plannerData,
-                       PlanYieldPolicy::YieldPolicy yieldPolicy)
-    : PlannerBase(opCtx, std::move(plannerData)), _yieldPolicy(yieldPolicy) {
+SubPlanner::SubPlanner(PlannerDataForSBE plannerData) : PlannerBase(std::move(plannerData)) {
     _subplanStage =
         std::make_unique<SubplanStage>(cq()->getExpCtxRaw(),
                                        collections().getMainCollectionPtrOrAcquisition(),
@@ -59,10 +56,11 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SubPlanner::plan() {
         makeClassicYieldPolicy(opCtx(),
                                cq()->nss(),
                                static_cast<PlanStage*>(_subplanStage.get()),
-                               _yieldPolicy,
+                               yieldPolicy(),
                                collections().getMainCollectionPtrOrAcquisition());
 
-    uassertStatusOK(_subplanStage->pickBestPlan(trialPeriodYieldPolicy.get()));
+    uassertStatusOK(_subplanStage->pickBestPlan(trialPeriodYieldPolicy.get(),
+                                                false /* shouldConstructClassicExecutableTree */));
 
     std::unique_ptr<QuerySolution> solution;
 
@@ -87,6 +85,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SubPlanner::plan() {
     return prepareSbePlanExecutor(std::move(solution),
                                   std::move(sbePlanAndData),
                                   false /*isFromPlanCache*/,
-                                  cachedPlanHash());
+                                  cachedPlanHash(),
+                                  nullptr /*classicRuntimePlannerStage*/);
 }
 }  // namespace mongo::classic_runtime_planner_for_sbe

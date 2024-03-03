@@ -199,7 +199,7 @@ Locker::ClientState Locker::getClientState() const {
 void Locker::getFlowControlTicket(OperationContext* opCtx, LockMode lockMode) {
     auto ticketholder = FlowControlTicketholder::get(opCtx);
     if (ticketholder && lockMode == LockMode::MODE_IX && _clientState.load() == kInactive &&
-        _admCtx.getPriority() != AdmissionContext::Priority::kImmediate &&
+        AdmissionContext::get(opCtx).getPriority() != AdmissionContext::Priority::kExempt &&
         !_uninterruptibleLocksRequested) {
         // FlowControl only acts when a MODE_IX global lock is being taken. The clientState is only
         // being modified here to change serverStatus' `globalLock.currentQueue` metrics. This
@@ -447,7 +447,7 @@ ResourceId Locker::getWaitingResource() const {
 MONGO_TSAN_IGNORE
 void Locker::getLockerInfo(
     LockerInfo* lockerInfo,
-    const boost::optional<SingleThreadedLockStats> alreadyCountedStats) const {
+    const boost::optional<SingleThreadedLockStats>& alreadyCountedStats) const {
     invariant(lockerInfo);
 
     // Zero-out the contents
@@ -480,11 +480,11 @@ void Locker::getLockerInfo(
         lockerInfo->stats.subtract(*alreadyCountedStats);
 }
 
-boost::optional<Locker::LockerInfo> Locker::getLockerInfo(
-    const boost::optional<SingleThreadedLockStats> alreadyCountedStats) const {
+Locker::LockerInfo Locker::getLockerInfo(
+    const boost::optional<SingleThreadedLockStats>& alreadyCountedStats) const {
     Locker::LockerInfo lockerInfo;
     getLockerInfo(&lockerInfo, alreadyCountedStats);
-    return std::move(lockerInfo);
+    return lockerInfo;
 }
 
 bool Locker::canSaveLockState() {
@@ -999,7 +999,7 @@ bool Locker::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadl
 
         if (auto ticket = holder->waitForTicketUntil(
                 _uninterruptibleLocksRequested ? *Interruptible::notInterruptible() : *opCtx,
-                &_admCtx,
+                &AdmissionContext::get(opCtx),
                 deadline,
                 _timeQueuedForTicketMicros)) {
             _ticket = std::move(*ticket);

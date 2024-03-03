@@ -735,6 +735,7 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> buildGroupAggregation(
     const SbSlotVector& blockAccInternalArgSlots,
     boost::optional<SbSlot> bitmapInternalSlot,
     boost::optional<SbSlot> accInternalSlot,
+    PlanYieldPolicy* yieldPolicy,
     PlanNodeId nodeId) {
     constexpr auto kBlockSelectivityBitmap = PlanStageSlots::kBlockSelectivityBitmap;
 
@@ -787,7 +788,8 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> buildGroupAggregation(
                                       blockAccArgSlots,
                                       blockAccInternalArgSlots,
                                       *bitmapInternalSlot,
-                                      *accInternalSlot);
+                                      *accInternalSlot,
+                                      yieldPolicy);
         } else {
             return b.makeHashAgg(std::move(stage),
                                  buildVariableTypes(childOutputs, individualSlots),
@@ -795,7 +797,8 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> buildGroupAggregation(
                                  std::move(sbAggExprs),
                                  state.getCollatorSlot(),
                                  allowDiskUse,
-                                 std::move(mergingExprs));
+                                 std::move(mergingExprs),
+                                 yieldPolicy);
         }
     }();
 
@@ -960,9 +963,12 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildGroup(const Query
 
     const auto& childNode = groupNode->children[0].get();
 
-    // Builds the child and gets the child result slot. We can process block values.
-    auto [childStage, childOutputs] =
-        build(childNode, computeChildReqsForGroup(reqs, *groupNode).setCanProcessBlockValues(true));
+    // Builds the child and gets the child result slot. If the GroupNode doesn't need the full
+    // result object, then we can process block values.
+    auto childReqs = computeChildReqsForGroup(reqs, *groupNode);
+    childReqs.setCanProcessBlockValues(!childReqs.hasResult());
+
+    auto [childStage, childOutputs] = build(childNode, childReqs);
     auto stage = std::move(childStage);
 
     // Build the group stage in a separate helper method, so that the variables that are not needed
@@ -1287,6 +1293,7 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
                               blockAccInternalArgSlots,
                               bitmapInternalSlot,
                               accInternalSlot,
+                              _yieldPolicy,
                               nodeId);
     stage = std::move(outStage);
 

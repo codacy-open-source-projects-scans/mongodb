@@ -35,10 +35,9 @@
 
 namespace mongo::classic_runtime_planner_for_sbe {
 
-CachedPlanner::CachedPlanner(OperationContext* opCtx,
-                             PlannerData plannerData,
+CachedPlanner::CachedPlanner(PlannerDataForSBE plannerData,
                              std::unique_ptr<sbe::CachedPlanHolder> cachedPlanHolder)
-    : PlannerBase(opCtx, std::move(plannerData)), _cachedPlanHolder(std::move(cachedPlanHolder)) {}
+    : PlannerBase(std::move(plannerData)), _cachedPlanHolder(std::move(cachedPlanHolder)) {}
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
     LOGV2_DEBUG(8523404, 5, "Recovering SBE plan from the cache");
@@ -47,6 +46,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
                                   {std::move(_cachedPlanHolder->cachedPlan->root),
                                    std::move(_cachedPlanHolder->cachedPlan->planStageData)},
                                   true /*isFromPlanCache*/,
-                                  boost::none /*cachedPlanHash*/);
+                                  boost::none /*cachedPlanHash*/,
+                                  nullptr /*classicRuntimePlannerStage*/);
 }
 }  // namespace mongo::classic_runtime_planner_for_sbe

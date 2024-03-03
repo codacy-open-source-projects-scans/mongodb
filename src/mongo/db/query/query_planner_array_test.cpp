@@ -168,14 +168,11 @@ TEST_F(QueryPlannerTest, ElemMatchValueMatch) {
     addIndex(BSON("foo" << 1 << "bar" << 1));
     runQuery(fromjson("{foo: {$elemMatch: {$gt: 5, $lt: 10}}}"));
 
-    ASSERT_EQUALS(getNumSolutions(), 3U);
+    assertNumSolutions(2);
     assertSolutionExists("{cscan: {dir: 1, filter: {foo:{$elemMatch:{$gt:5,$lt:10}}}}}");
     assertSolutionExists(
         "{fetch: {filter: {foo: {$elemMatch: {$gt: 5, $lt: 10}}}, node: "
         "{ixscan: {filter: null, pattern: {foo: 1}}}}}");
-    assertSolutionExists(
-        "{fetch: {filter: {foo: {$elemMatch: {$gt: 5, $lt: 10}}}, node: "
-        "{ixscan: {filter: null, pattern: {foo: 1, bar: 1}}}}}");
 }
 
 TEST_F(QueryPlannerTest, ElemMatchValueIndexability) {
@@ -2308,7 +2305,7 @@ TEST_F(QueryPlannerTest, ElemMatchValueNENull) {
     assertSolutionExists(
         "{fetch: {filter: {a: {$elemMatch: {$ne: null}}}, node: {"
         "  ixscan: {pattern: {a:1}, bounds: {"
-        "    a: [['MinKey',null,true,false], [null,'MaxKey',false,true]]"
+        "    a: [['MinKey',undefined,true,false], [null,'MaxKey',false,true]]"
         "}}}}}");
 }
 
@@ -2320,7 +2317,7 @@ TEST_F(QueryPlannerTest, ElemMatchValueNotGteOrNotLteNull) {
     const auto ixScanSol =
         "{fetch: {node: {"
         "  ixscan: {pattern: {a:1}, bounds: {"
-        "    a: [['MinKey',null,true,false], [null,'MaxKey',false,true]]"
+        "    a: [['MinKey',undefined,true,false], [null,'MaxKey',false,true]]"
         "}}}}}";
 
     assertNumSolutions(2U);
@@ -2355,7 +2352,7 @@ TEST_F(QueryPlannerTest, ElemMatchValueNENullOnMultikeyIndex) {
     assertSolutionExists(
         "{fetch: {filter: {a: {$elemMatch: {$ne: null}}}, node: {"
         "  ixscan: {pattern: {a: 1}, bounds: {"
-        "    a: [['MinKey',null,true,false], [null,'MaxKey',false,true]]"
+        "    a: [['MinKey',undefined,true,false], [null,'MaxKey',false,true]]"
         "}}}}}");
 }
 
@@ -2392,7 +2389,7 @@ TEST_F(QueryPlannerTest, CompoundIndexBoundsDottedNotEqualsNullWithProjectionMul
         "{proj: {spec: {_id: 0, 'c.d': 1}, node: {"
         "  ixscan: {filter: null, pattern: {'a': 1, 'c.d': 1}, bounds: {"
         "    'a': [['foo',{},false,false]], "
-        "    'c.d':[['MinKey',null,true,false],[null,'MaxKey',false,true]]"
+        "    'c.d':[['MinKey',undefined,true,false],[null,'MaxKey',false,true]]"
         "}}}}}");
 }
 
@@ -2510,8 +2507,8 @@ TEST_F(QueryPlannerTest, CompoundIndexBoundsNotEqualsNullReverseIndex) {
         "      pattern: {a: 1, b: -1, c: 1},"
         "      bounds: {"
         "        a: [['foo', {}, false, false]],"
-        "        b: [['MaxKey', null, true, false], [null, 'MinKey', false, true]],"
-        "        c: [['MinKey', null, true, false], [null, 'MaxKey', false, true]]"
+        "        b: [['MaxKey', null, true, false], [undefined, 'MinKey', false, true]],"
+        "        c: [['MinKey', undefined, true, false], [null, 'MaxKey', false, true]]"
         "      },"
         "      dir: 1"
         "    }"

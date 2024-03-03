@@ -27,7 +27,7 @@ import {
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {checkSbeFullyEnabled} from "jstests/libs/sbe_util.js";
 
-// TODO SERVER-85240: Remove this check when explain is properly implemented for classic runtime
+// TODO SERVER-85238: Remove this check when replanning is properly implemented for classic runtime
 // planning for SBE.
 if (FeatureFlagUtil.isPresentAndEnabled(db, "ClassicRuntimePlanningForSbe")) {
     jsTestLog("Skipping test since featureFlagClassicRuntimePlanningForSbe is enabled");
@@ -54,8 +54,7 @@ function assertRejectedPlanCached(explain, indexName) {
                                    : getWinningPlan(getQueryPlanner(explain));
     assert(!winningPlan.isCached, explain);
     for (const rejectedPlan of getRejectedPlans(explain)) {
-        const inputStage = sbeEnabled ? rejectedPlan.queryPlan.inputStage
-                                      : getRejectedPlan(rejectedPlan).inputStage;
+        const inputStage = getRejectedPlan(rejectedPlan).inputStage;
         if (inputStage.stage === "IXSCAN" && inputStage.indexName === indexName) {
             assert(rejectedPlan.isCached, explain);
         } else {
@@ -90,8 +89,8 @@ function predicateTest(explainMode) {
     // Create indexes so we have plan alternatives and need to cache.
     coll.createIndex({a: 1});
     coll.createIndex({b: 1});
-    coll.createIndex({a: 1, b: 1});
-    coll.createIndex({b: 1, a: 1});
+    coll.createIndex({a: -1, b: 1});
+    coll.createIndex({b: -1, a: 1});
 
     // Nothing should be cached at first.
     assertWinningPlanCacheStatus(coll.find({a: {$eq: 1}}).explain(explainMode), false);

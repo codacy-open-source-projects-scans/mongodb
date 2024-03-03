@@ -41,6 +41,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
@@ -92,9 +93,11 @@ public:
                     bool isOpen,
                     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
                     bool generatedByBonsai,
-                    OptimizerCounterInfo optCounterInfo = {},
-                    std::unique_ptr<RemoteCursorMap> remoteCursors = nullptr,
-                    std::unique_ptr<RemoteExplainVector> remoteExplains = nullptr);
+                    boost::optional<size_t> cachedPlanHash,
+                    OptimizerCounterInfo optCounterInfo,
+                    std::unique_ptr<RemoteCursorMap> remoteCursors,
+                    std::unique_ptr<RemoteExplainVector> remoteExplains,
+                    std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage);
 
     CanonicalQuery* getCanonicalQuery() const override {
         return _cq.get();

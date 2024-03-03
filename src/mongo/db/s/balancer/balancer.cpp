@@ -155,7 +155,7 @@ public:
                       Milliseconds selectionTime,
                       Milliseconds throttleTime,
                       Milliseconds migrationTime) {
-        invariant(!_errMsg);
+        tassert(8245236, "Error message is not empty", !_errMsg);
         _numCandidateChunks = numCandidateChunks;
         _numChunksMoved = numChunksMoved;
         _numImbalancedCachedCollections = numImbalancedCachedCollections;
@@ -250,34 +250,6 @@ protected:
     MigrationsAndResponses _migrationsAndResponses;
     int _numCompleted;
 };
-
-/**
- * Occasionally prints a log message with shard versions if the versions are not the same
- * in the cluster.
- */
-void warnOnMultiVersion(const vector<ClusterStatistics::ShardStatistics>& clusterStats) {
-    static const auto& majorMinorRE = *new pcre::Regex(R"re(^(\d+)\.(\d+)\.)re");
-    auto&& vii = VersionInfoInterface::instance();
-    auto hasMyVersion = [&](auto&& stat) {
-        auto m = majorMinorRE.match(stat.mongoVersion);
-        return m && std::stoi(std::string{m[1]}) == vii.majorVersion() &&
-            std::stoi(std::string{m[2]}) == vii.minorVersion();
-    };
-
-    // If we're all the same version, don't message
-    if (std::all_of(clusterStats.begin(), clusterStats.end(), hasMyVersion))
-        return;
-
-    BSONObjBuilder shardVersions;
-    for (const auto& stat : clusterStats) {
-        shardVersions << stat.shardId << stat.mongoVersion;
-    }
-
-    LOGV2_WARNING(21875,
-                  "Multiversion cluster detected",
-                  "localVersion"_attr = vii.version(),
-                  "shardVersions"_attr = shardVersions.done());
-}
 
 Chunk getChunkForMaxBound(const ChunkManager& cm, const BSONObj& max) {
     boost::optional<Chunk> chunkWithMaxBound;
@@ -596,8 +568,7 @@ Balancer::Balancer()
           _clusterStats.get(), [this]() { _onActionsStreamPolicyStateUpdate(); })),
       _autoMergerPolicy(
           std::make_unique<AutoMergerPolicy>([this]() { _onActionsStreamPolicyStateUpdate(); })),
-      _moveUnshardedPolicy(std::make_unique<MoveUnshardedPolicy>()),
-      _imbalancedCollectionsCache(std::make_unique<stdx::unordered_set<NamespaceString>>()) {}
+      _moveUnshardedPolicy(std::make_unique<MoveUnshardedPolicy>()) {}
 
 Balancer::~Balancer() {
     onShutdown();
@@ -633,7 +604,7 @@ void Balancer::onBecomeArbiter() {
 
 void Balancer::initiate(OperationContext* opCtx) {
     stdx::lock_guard<Latch> scopedLock(_mutex);
-    _imbalancedCollectionsCache->clear();
+    _imbalancedCollectionsCache.clear();
     invariant(_threadSetState == ThreadSetState::Terminated);
     _threadSetState = ThreadSetState::Running;
 
@@ -749,9 +720,15 @@ void Balancer::_consumeActionStreamLoop() {
     executor::ScopedTaskExecutor executor(
         Grid::get(opCtx.get())->getExecutorPool()->getFixedExecutor());
 
-    ScopeGuard onExitCleanup([this, &executor] {
+    ScopeGuard onExitCleanup([this, &opCtx, &executor] {
         _defragmentationPolicy->interruptAllDefragmentations();
-        _autoMergerPolicy->disable();
+        try {
+            _autoMergerPolicy->disable(opCtx.get());
+        } catch (const DBException& e) {
+            LOGV2_WARNING(8145100,
+                          "Failed to log in config.changelog when disabling the auto merger",
+                          "error"_attr = redact(e));
+        }
         // Explicitly cancel and drain any outstanding streaming action already dispatched to the
         // task executor.
         executor->shutdown();
@@ -1007,7 +984,7 @@ void Balancer::_mainThread() {
                     lastDrainingShardsCheckTime = Date_t::now();
                 }
 
-                _autoMergerPolicy->disable();
+                _autoMergerPolicy->disable(opCtx.get());
 
                 LOGV2_DEBUG(21859, 1, "Skipping balancing round because balancing is disabled");
                 _endRound(opCtx.get(), kBalanceRoundDefaultInterval);
@@ -1015,7 +992,7 @@ void Balancer::_mainThread() {
             }
 
             if (balancerConfig->shouldBalanceForAutoMerge()) {
-                _autoMergerPolicy->enable();
+                _autoMergerPolicy->enable(opCtx.get());
             }
 
             LOGV2_DEBUG(21860,
@@ -1024,16 +1001,11 @@ void Balancer::_mainThread() {
                         "waitForDelete"_attr = balancerConfig->waitForDelete(),
                         "secondaryThrottle"_attr = balancerConfig->getSecondaryThrottle().toBSON());
 
-            static Occasionally sampler;
-            if (sampler.tick()) {
-                warnOnMultiVersion(uassertStatusOK(_clusterStats->getStats(opCtx.get())));
-            }
-
             // Collect and apply up-to-date configuration values on the cluster collections.
             _defragmentationPolicy->startCollectionDefragmentations(opCtx.get());
 
             // Reactivate the Automerger if needed.
-            _autoMergerPolicy->checkInternalUpdates();
+            _autoMergerPolicy->checkInternalUpdates(opCtx.get());
 
             // The current configuration is allowing the balancer to perform operations.
             // Unblock the secondary thread if needed.
@@ -1072,11 +1044,9 @@ void Balancer::_mainThread() {
                 const auto chunksToDefragment =
                     _defragmentationPolicy->selectChunksToMove(opCtx.get(), &availableShards);
 
-                const auto chunksToRebalance = uassertStatusOK(
-                    _chunkSelectionPolicy->selectChunksToMove(opCtx.get(),
-                                                              shardStats,
-                                                              &availableShards,
-                                                              _imbalancedCollectionsCache.get()));
+                const auto chunksToRebalance =
+                    uassertStatusOK(_chunkSelectionPolicy->selectChunksToMove(
+                        opCtx.get(), shardStats, &availableShards, &_imbalancedCollectionsCache));
                 const Milliseconds selectionTimeMillis{selectionTimer.millis()};
 
                 if (chunksToRebalance.empty() && chunksToDefragment.empty() &&
@@ -1115,7 +1085,7 @@ void Balancer::_mainThread() {
                     roundDetails.setSucceeded(
                         static_cast<int>(chunksToRebalance.size() + chunksToDefragment.size()),
                         _balancedLastTime.rebalancedChunks + _balancedLastTime.defragmentedChunks,
-                        _imbalancedCollectionsCache->size(),
+                        _imbalancedCollectionsCache.size(),
                         static_cast<int>(unshardedToMove.size()),
                         _balancedLastTime.unshardedCollections,
                         selectionTimeMillis,
@@ -1183,7 +1153,7 @@ void Balancer::_mainThread() {
 void Balancer::_applyStreamingActionResponseToPolicy(const BalancerStreamAction& action,
                                                      const BalancerStreamActionResponse& response,
                                                      ActionsStreamPolicy* policy) {
-    invariant(_outstandingStreamingOps.addAndFetch(-1) >= 0);
+    tassert(8245242, "No action in progress", _outstandingStreamingOps.addAndFetch(-1) >= 0);
     ThreadClient tc("BalancerSecondaryThread::applyActionResponse",
                     getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
@@ -1375,7 +1345,7 @@ void Balancer::_onActionsStreamPolicyStateUpdate() {
 
 void Balancer::notifyPersistedBalancerSettingsChanged(OperationContext* opCtx) {
     if (!Grid::get(opCtx)->getBalancerConfiguration()->shouldBalanceForAutoMerge()) {
-        _autoMergerPolicy->disable();
+        _autoMergerPolicy->disable(opCtx);
     }
 
     // Try to awake the main balancer thread

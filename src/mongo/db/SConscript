@@ -174,7 +174,14 @@ env.Library(
     ],
 )
 
-env.Library(
+startupEnv = env.Clone()
+
+if startupEnv['MONGO_ALLOCATOR'] == 'tcmalloc-google':
+    startupEnv.Append(CPPDEFINES=['MONGO_HAVE_GOOGLE_TCMALLOC'])
+elif startupEnv['MONGO_ALLOCATOR'] == 'tcmalloc-gperf':
+    startupEnv.Append(CPPDEFINES=['MONGO_HAVE_GPERF_TCMALLOC'])
+
+startupEnv.Library(
     target='startup_warnings_mongod',
     source=[
         'startup_warnings_mongod.cpp',
@@ -785,6 +792,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/bson/util/bson_extract',
+        '$BUILD_DIR/mongo/db/auth/security_token_auth',
         '$BUILD_DIR/mongo/executor/network_interface_factory',
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
@@ -879,6 +887,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/query/cursor_response_idl',
+        '$BUILD_DIR/mongo/util/concurrency/admission_context',
         'api_parameters',
     ],
     LIBDEPS_PRIVATE=[
@@ -887,7 +896,6 @@ env.Library(
         '$BUILD_DIR/mongo/rpc/rewrite_state_change_errors',
         '$BUILD_DIR/mongo/rpc/rpc',
         '$BUILD_DIR/mongo/transport/service_executor',
-        '$BUILD_DIR/mongo/util/concurrency/admission_context',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
         '$BUILD_DIR/mongo/util/diagnostic_info'
         if get_option('use-diagnostic-latches') == 'on' else [],
@@ -976,6 +984,7 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/s/replica_set_endpoint_feature_flag',
         '$BUILD_DIR/mongo/s/grid',
+        '$BUILD_DIR/mongo/util/concurrency/admission_context',
         'concurrency/lock_manager',
         'shard_role_api_stor_ex',
         'storage/write_unit_of_work',
@@ -1639,12 +1648,18 @@ execEnv.Library(
         'pipeline/sbe_pushdown.cpp',
         'query/all_indices_required_checker.cpp',
         'query/bind_input_params.cpp',
-        'query/classic_stage_builder.cpp',
+        'query/classic_runtime_planner/cached_planner.cpp',
+        'query/classic_runtime_planner/idhack_planner.cpp',
+        'query/classic_runtime_planner/multi_planner.cpp',
+        'query/classic_runtime_planner/planner_interface.cpp',
+        'query/classic_runtime_planner/single_solution_passthrough_planner.cpp',
+        'query/classic_runtime_planner/sub_planner.cpp',
         'query/classic_runtime_planner_for_sbe/cached_planner.cpp',
         'query/classic_runtime_planner_for_sbe/multi_planner.cpp',
         'query/classic_runtime_planner_for_sbe/planner_interface.cpp',
         'query/classic_runtime_planner_for_sbe/single_solution_passthrough_planner.cpp',
         'query/classic_runtime_planner_for_sbe/sub_planner.cpp',
+        'query/classic_stage_builder.cpp',
         'query/cost_model/on_coefficients_change_updater_impl.cpp',
         'query/cqf_command_utils.cpp',
         'query/cqf_fast_paths.cpp',
@@ -1670,6 +1685,7 @@ execEnv.Library(
         'query/sbe_cached_solution_planner.cpp',
         'query/sbe_multi_planner.cpp',
         'query/sbe_plan_ranker.cpp',
+        'query/sbe_planner_interfaces.cpp',
         'query/sbe_runtime_planner.cpp',
         'query/sbe_stage_builder.cpp',
         'query/sbe_stage_builder_abt_helpers.cpp',

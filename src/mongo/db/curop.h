@@ -1005,9 +1005,7 @@ public:
     const std::string& getMessage() const {
         return _message;
     }
-    const ProgressMeter& getProgressMeter() {
-        return _progressMeter;
-    }
+
     CurOp* parent() const {
         return _parent;
     }
@@ -1132,7 +1130,7 @@ private:
     OpDebug _debug;
     std::string _failPointMessage;  // Used to store FailPoint information.
     std::string _message;
-    ProgressMeter _progressMeter;
+    boost::optional<ProgressMeter> _progressMeter;
     AtomicWord<int> _numYields{0};
     // A GenericCursor containing information about the active cursor for a getMore operation.
     boost::optional<GenericCursor> _genericCursor;
@@ -1142,6 +1140,9 @@ private:
     // The snapshot of lock stats taken when this CurOp instance is pushed to a
     // CurOpStack.
     boost::optional<SingleThreadedLockStats> _lockStatsBase;
+
+    // The time accrued waiting for tickets when this CurOp instance is pushed to a CurOpStack.
+    Microseconds _ticketWaitTimeAtStart{0};
 
     SharedUserAcquisitionStats _userAcquisitionStats{std::make_shared<UserAcquisitionStats>()};
 
@@ -1160,6 +1161,9 @@ private:
 
     // Flag to decide if diagnostic information should be omitted.
     bool _shouldOmitDiagnosticInformation{false};
+
+    // TODO SERVER-87201: Remove need to zero out blocked time prior to operation starting.
+    Milliseconds _blockedTimeAtStart{0};
 };
 
 }  // namespace mongo

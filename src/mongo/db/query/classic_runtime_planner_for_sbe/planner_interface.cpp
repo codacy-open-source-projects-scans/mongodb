@@ -34,14 +34,14 @@
 
 namespace mongo::classic_runtime_planner_for_sbe {
 
-PlannerBase::PlannerBase(OperationContext* opCtx, PlannerData plannerData)
-    : _opCtx(opCtx), _plannerData(std::move(plannerData)) {}
+PlannerBase::PlannerBase(PlannerDataForSBE plannerData) : _plannerData(std::move(plannerData)) {}
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> PlannerBase::prepareSbePlanExecutor(
     std::unique_ptr<QuerySolution> solution,
     std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData> sbePlanAndData,
     bool isFromPlanCache,
-    boost::optional<size_t> cachedPlanHash) {
+    boost::optional<size_t> cachedPlanHash,
+    std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage) {
     const auto* expCtx = cq()->getExpCtxRaw();
     auto remoteCursors =
         expCtx->explain ? nullptr : search_helpers::getSearchRemoteCursors(cq()->cqPipeline());
@@ -49,7 +49,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> PlannerBase::prepareSbePlan
         ? search_helpers::getSearchRemoteExplains(expCtx, cq()->cqPipeline())
         : nullptr;
 
-    stage_builder::prepareSlotBasedExecutableTree(_opCtx,
+    stage_builder::prepareSlotBasedExecutableTree(opCtx(),
                                                   sbePlanAndData.first.get(),
                                                   &sbePlanAndData.second,
                                                   *cq(),
@@ -62,9 +62,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> PlannerBase::prepareSbePlan
     tassert(8551900,
             "Solution must be present if cachedPlanHash is present",
             solution != nullptr || !cachedPlanHash.has_value());
-    bool matchesCachedPlan = cachedPlanHash && *cachedPlanHash == solution->hash();
     return uassertStatusOK(
-        plan_executor_factory::make(_opCtx,
+        plan_executor_factory::make(opCtx(),
                                     extractCq(),
                                     nullptr /* pipeline - It is not nullptr only in Bonsai */,
                                     std::move(solution),
@@ -74,10 +73,11 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> PlannerBase::prepareSbePlan
                                     std::move(nss),
                                     extractSbeYieldPolicy(),
                                     isFromPlanCache,
-                                    matchesCachedPlan,
+                                    cachedPlanHash,
                                     false /* generatedByBonsai */,
                                     OptimizerCounterInfo{} /* used for Bonsai */,
                                     std::move(remoteCursors),
-                                    std::move(remoteExplains)));
+                                    std::move(remoteExplains),
+                                    std::move(classicRuntimePlannerStage)));
 }
 }  // namespace mongo::classic_runtime_planner_for_sbe

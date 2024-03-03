@@ -8,7 +8,6 @@
 // ]
 
 import {hasRejectedPlans} from "jstests/libs/analyze_plan.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 /**
  * Tests running explain on a variety of explainable commands (find, update, remove, etc.) when
@@ -17,16 +16,9 @@ import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 var coll = db.explainMultiPlan;
 coll.drop();
 
-// TODO SERVER-85240: Remove this check when explain is properly implemented for classic runtime
-// planning for SBE.
-if (FeatureFlagUtil.isPresentAndEnabled(db, "ClassicRuntimePlanningForSbe")) {
-    jsTestLog("Skipping test since featureFlagClassicRuntimePlanningForSbe is enabled");
-    quit();
-}
-
 // Create indices to ensure there are multiple plans available.
 assert.commandWorked(coll.createIndex({a: 1, b: 1}));
-assert.commandWorked(coll.createIndex({a: 1, b: -1}));
+assert.commandWorked(coll.createIndex({a: -1, b: -1}));
 
 // Insert some data to work with.
 var bulk = coll.initializeOrderedBulkOp();

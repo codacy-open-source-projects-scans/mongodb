@@ -134,11 +134,10 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
     }
 
     const auto rangeDeleterPriority = rangeDeleterHighPriority.load()
-        ? AdmissionContext::Priority::kImmediate
+        ? AdmissionContext::Priority::kExempt
         : AdmissionContext::Priority::kLow;
 
-    ScopedAdmissionPriorityForLock priority{shard_role_details::getLocker(opCtx),
-                                            rangeDeleterPriority};
+    ScopedAdmissionPriority priority{opCtx, rangeDeleterPriority};
 
     // Extend bounds to match the index we found
     const KeyPattern indexKeyPattern(shardKeyIdx->keyPattern());

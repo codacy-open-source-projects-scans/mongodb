@@ -397,6 +397,7 @@ std::pair<SlotId /* keyValuesSetSlot */, std::unique_ptr<sbe::PlanStage>> buildK
     SlotId recordSlot,
     const FieldPath& fp,
     boost::optional<SlotId> collatorSlot,
+    PlanYieldPolicy* yieldPolicy,
     const PlanNodeId nodeId,
     SlotIdGenerator& slotIdGenerator) {
     // Create the branch to stream individual key values from every terminal of the path.
@@ -424,6 +425,7 @@ std::pair<SlotId /* keyValuesSetSlot */, std::unique_ptr<sbe::PlanStage>> buildK
         boost::none /* we group _all_ key values into a single set, so collator is irrelevant */,
         state.allowDiskUse,
         makeSlotExprPairVec(spillSlot, std::move(aggSetUnionExpr)),
+        yieldPolicy,
         nodeId);
 
     // The set in 'keyValuesSetSlot' might end up empty if the localField contained only missing and
@@ -458,6 +460,7 @@ std::pair<SlotId /* keyValuesSetSlot */, std::unique_ptr<sbe::PlanStage>> buildK
 std::pair<SlotId /* resultSlot */, std::unique_ptr<sbe::PlanStage>> buildForeignMatchedArray(
     std::unique_ptr<sbe::PlanStage> innerBranch,
     SlotId foreignRecordSlot,
+    PlanYieldPolicy* yieldPolicy,
     const PlanNodeId nodeId,
     SlotIdGenerator& slotIdGenerator,
     bool allowDiskUse) {
@@ -482,6 +485,7 @@ std::pair<SlotId /* resultSlot */, std::unique_ptr<sbe::PlanStage>> buildForeign
                             makeFunction("aggConcatArraysCapped",
                                          makeVariable(spillSlot),
                                          makeInt32Constant(sizeCap))),
+        yieldPolicy,
         nodeId);
 
     // 'accumulatorSlot' is either Nothing or contains an array of size two, where the front element
@@ -571,6 +575,7 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildForei
     std::unique_ptr<sbe::PlanStage> foreignStage,
     SlotId foreignRecordSlot,
     const FieldPath& foreignFieldName,
+    PlanYieldPolicy* yieldPolicy,
     const PlanNodeId nodeId,
     SlotIdGenerator& slotIdGenerator,
     FrameIdGenerator& frameIdGenerator,
@@ -640,6 +645,7 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildForei
         // be returned.
         return buildForeignMatchedArray(std::move(foreignOutputStage),
                                         foreignRecordSlot,
+                                        yieldPolicy,
                                         nodeId,
                                         slotIdGenerator,
                                         allowDiskUse);
@@ -655,6 +661,7 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildNljLo
     SlotId foreignRecordSlot,
     const FieldPath& foreignFieldName,
     boost::optional<SlotId> collatorSlot,
+    PlanYieldPolicy* yieldPolicy,
     const PlanNodeId nodeId,
     SlotIdGenerator& slotIdGenerator,
     FrameIdGenerator& frameIdGenerator,
@@ -668,6 +675,7 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildNljLo
                                                       localRecordSlot,
                                                       localFieldName,
                                                       collatorSlot,
+                                                      yieldPolicy,
                                                       nodeId,
                                                       slotIdGenerator);
 
@@ -678,6 +686,7 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildNljLo
                                                                     std::move(foreignStage),
                                                                     foreignRecordSlot,
                                                                     foreignFieldName,
+                                                                    yieldPolicy,
                                                                     nodeId,
                                                                     slotIdGenerator,
                                                                     frameIdGenerator,
@@ -722,6 +731,11 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildNljLo
  *         project lowKey = ks (1, 0, valueForIndexBounds, 1),
  *                 highKey = ks (1, 0, valueForIndexBounds, 2)
  *         union [valueForIndexBounds] [
+ *           cfilter {isNull (localValue)}
+ *           project [valueForIndexBounds = undefined]
+ *           limit 1
+ *           coscan
+ *           ,
  *           cfilter {isArray (localValue)}
  *           project [valueForIndexBounds = fillEmpty (getElement (localValue, 0), undefined)]
  *           limit 1
@@ -741,6 +755,7 @@ std::pair<SlotId /* matched docs */, std::unique_ptr<sbe::PlanStage>> buildNljLo
  *   filter {isMember (foreignValue, localValueSet)}
  *   // Below is the tree performing path traversal on the 'foreignDocument' and producing value
  *   // into 'foreignValue'.
+ *
  */
 std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
     StageBuilderState& state,
@@ -778,6 +793,7 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
                                                              localRecordSlot,
                                                              localFieldName,
                                                              collatorSlot,
+                                                             yieldPolicy,
                                                              nodeId,
                                                              slotIdGenerator);
 
@@ -793,6 +809,9 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
     // We need to lookup value in 'singleLocalValueSlot' in the index defined on the foreign
     // collection. To do this, we need to generate set of point intervals corresponding to this
     // value. Single value can correspond to multiple point intervals:
+    // - Null values:
+    //   a. [Null, Null]
+    //   b. [Undefined, Undefined]
     // - Array values:
     //   a. If array is empty, [Undefined, Undefined]
     //   b. If array is NOT empty, [array[0], array[0]] (point interval composed from the first
@@ -803,6 +822,12 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
     // To implement these rules, we use the union stage:
     //   union pointValue [
     //       // Branch 1
+    //       cfilter isNull(rawValue)
+    //       project pointValue = Undefined
+    //       limit 1
+    //       coscan
+    //       ,
+    //       // Branch 2
     //       filter isArray(rawValue) && !isMember(pointValue, localKeyValueSet)
     //       project pointValue = fillEmpty(
     //           getElement(rawValue, 0),
@@ -811,14 +836,22 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
     //       limit 1
     //       coscan
     //       ,
-    //       // Branch 2
+    //       // Branch 3
     //       project pointValue = rawValue
     //       limit 1
     //       coscan
     //   ]
     //
-    // For array values, branches (1) and (2) both produce values. For all other types, only (2)
-    // produces a value.
+    // For null values, only branches (1) and (3) produce values. For array values, only branches
+    // (2) and (3) produce values. For all other types, only (3) produces value.
+    auto nullBranchOutput = slotIdGenerator.generate();
+    auto nullBranch = makeProjectStage(makeLimitCoScanTree(nodeId, 1),
+                                       nodeId,
+                                       nullBranchOutput,
+                                       makeConstant(TypeTags::bsonUndefined, 0));
+    nullBranch = makeS<FilterStage<true /*IsConst*/>>(
+        std::move(nullBranch), makeFunction("isNull", makeVariable(singleLocalValueSlot)), nodeId);
+
     auto arrayBranchOutput = slotIdGenerator.generate();
     auto arrayBranch = makeProjectStage(
         makeLimitCoScanTree(nodeId, 1),
@@ -845,11 +878,11 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
                                         makeVariable(singleLocalValueSlot));
 
     auto valueForIndexBounds = slotIdGenerator.generate();
-    auto valueGeneratorStage =
-        makeS<UnionStage>(makeSs(std::move(arrayBranch), std::move(valueBranch)),
-                          makeVector(makeSV(arrayBranchOutput), makeSV(valueBranchOutput)),
-                          makeSV(valueForIndexBounds),
-                          nodeId);
+    auto valueGeneratorStage = makeS<UnionStage>(
+        makeSs(std::move(nullBranch), std::move(arrayBranch), std::move(valueBranch)),
+        makeVector(makeSV(nullBranchOutput), makeSV(arrayBranchOutput), makeSV(valueBranchOutput)),
+        makeSV(valueForIndexBounds),
+        nodeId);
 
     // For hashed indexes, we need to hash value before computing keystrings.
     if (index.type == INDEX_HASHED) {
@@ -976,6 +1009,7 @@ std::pair<SlotId, std::unique_ptr<sbe::PlanStage>> buildIndexJoinLookupStage(
                                                                      std::move(scanNljStage),
                                                                      foreignRecordSlot,
                                                                      foreignFieldName,
+                                                                     yieldPolicy,
                                                                      nodeId,
                                                                      slotIdGenerator,
                                                                      frameIdGenerator,
@@ -1006,6 +1040,7 @@ std::pair<SlotId /*matched docs*/, std::unique_ptr<sbe::PlanStage>> buildHashJoi
     SlotId foreignRecordSlot,
     const FieldPath& foreignFieldName,
     boost::optional<SlotId> collatorSlot,
+    PlanYieldPolicy* yieldPolicy,
     const PlanNodeId nodeId,
     SlotIdGenerator& slotIdGenerator,
     bool hasUnwindSrc) {
@@ -1018,6 +1053,7 @@ std::pair<SlotId /*matched docs*/, std::unique_ptr<sbe::PlanStage>> buildHashJoi
                                                       localRecordSlot,
                                                       localFieldName,
                                                       collatorSlot,
+                                                      yieldPolicy,
                                                       nodeId,
                                                       slotIdGenerator);
 
@@ -1028,6 +1064,7 @@ std::pair<SlotId /*matched docs*/, std::unique_ptr<sbe::PlanStage>> buildHashJoi
                                                          foreignRecordSlot,
                                                          foreignFieldName,
                                                          collatorSlot,
+                                                         yieldPolicy,
                                                          nodeId,
                                                          slotIdGenerator);
 
@@ -1091,6 +1128,7 @@ std::pair<SlotId /*matched docs*/, std::unique_ptr<sbe::PlanStage>> buildLookupS
     SlotId foreignRecordSlot,
     const FieldPath& foreignFieldName,
     boost::optional<SlotId> collatorSlot,
+    PlanYieldPolicy* yieldPolicy,
     const PlanNodeId nodeId,
     SlotIdGenerator& slotIdGenerator,
     FrameIdGenerator& frameIdGenerator,
@@ -1105,6 +1143,7 @@ std::pair<SlotId /*matched docs*/, std::unique_ptr<sbe::PlanStage>> buildLookupS
                                        foreignRecordSlot,
                                        foreignFieldName,
                                        collatorSlot,
+                                       yieldPolicy,
                                        nodeId,
                                        slotIdGenerator,
                                        frameIdGenerator,
@@ -1118,6 +1157,7 @@ std::pair<SlotId /*matched docs*/, std::unique_ptr<sbe::PlanStage>> buildLookupS
                                             foreignRecordSlot,
                                             foreignFieldName,
                                             collatorSlot,
+                                            yieldPolicy,
                                             nodeId,
                                             slotIdGenerator,
                                             hasUnwindSrc);
@@ -1288,6 +1328,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                         foreignResultSlot,
                                         eqLookupNode->joinFieldForeign,
                                         collatorSlot,
+                                        _yieldPolicy,
                                         eqLookupNode->nodeId(),
                                         _slotIdGenerator,
                                         _frameIdGenerator,
@@ -1402,6 +1443,7 @@ SlotBasedStageBuilder::buildEqLookupUnwind(const QuerySolutionNode* root,
                                         foreignResultSlot,
                                         eqLookupUnwindNode->joinFieldForeign,
                                         collatorSlot,
+                                        _yieldPolicy,
                                         eqLookupUnwindNode->nodeId(),
                                         _slotIdGenerator,
                                         _frameIdGenerator,

@@ -126,7 +126,7 @@ StatusWith<ShardSplitDonorDocument> getStateDocument(OperationContext* opCtx,
     if (!collection) {
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "Collection not found looking for state document: "
-                                    << NamespaceString::kShardSplitDonorsNamespace.ns());
+                                    << redactTenant(NamespaceString::kShardSplitDonorsNamespace));
     }
 
     BSONObj result;
@@ -321,8 +321,7 @@ bool processReplSetStepUpRequest(executor::NetworkInterfaceMock* net,
         if (commandName == cmdObj.firstElementFieldName() && !statusToReturn.isOK()) {
             net->scheduleErrorResponse(noi, statusToReturn);
         } else {
-            const auto opmsg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                request.dbname, request.validatedTenancyScope(), request.cmdObj);
+            const auto opmsg = static_cast<OpMsgRequest>(request);
             const auto reply = node->runCommand(request.id, opmsg)->getCommandReply();
             net->scheduleSuccessfulResponse(
                 noi, executor::RemoteCommandResponse(reply, Milliseconds(0)));
@@ -357,8 +356,7 @@ void processIncomingRequest(executor::NetworkInterfaceMock* net,
         return;
     }
 
-    const auto opmsg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-        request.dbname, request.validatedTenancyScope(), request.cmdObj);
+    const auto opmsg = static_cast<OpMsgRequest>(request);
     const auto reply = node->runCommand(request.id, opmsg)->getCommandReply();
     net->scheduleSuccessfulResponse(noi, executor::RemoteCommandResponse(reply, Milliseconds(0)));
 }

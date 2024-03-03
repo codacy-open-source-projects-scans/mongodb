@@ -4,6 +4,7 @@ import getpass
 import hashlib
 import json
 import os
+import distro
 import platform
 import queue
 import shlex
@@ -15,6 +16,7 @@ import time
 from typing import List, Dict, Set, Tuple, Any
 import urllib.request
 import requests
+from retry import retry
 import sys
 import socket
 
@@ -44,9 +46,25 @@ _SANITIZER_MAP = {
     "undefined": "ubsan",
 }
 
+_DISTRO_MAP = {
+    "Ubuntu 22.04": "ubuntu22",
+    "Amazon Linux 2": "amazon_linux_2",
+    "Amazon Linux 2023": "amazon_linux_2023",
+}
+
 _S3_HASH_MAPPING = {
     "https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-ppc64le":
         "dd21c75817533ff601bf797e64f0eb2f7f6b813af26c829f0bda30e328caef46",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-amd64":
+        "f2ba5f721a995b54bab68c6b76a340719888aa740310e634771086b6d1528ecd",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-arm64":
+        "69fa21cd2ccffc2f0970c21aa3615484ba89e3553ecce1233a9d8ad9570d170e",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-linux-amd64":
+        "d28b588ac0916abd6bf02defb5433f6eddf7cba35ffa808eabb65a44aab226f7",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-linux-arm64":
+        "861a16ba9979613e70bd3d2f9d9ab5e3b59fe79471c5753acdc9c431ab6c9d94",
+    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-windows-amd64.exe":
+        "d04555245a99dfb628e33da24e2b9198beb8f46d7e7661c313eb045f6a59f5e4",
 }
 
 
@@ -283,7 +301,8 @@ def bazel_batch_build_thread(log_dir: str) -> None:
 
             if targets_to_build:
                 bazel_debug(
-                    f"BAZEL_COMMAND: {Globals.bazel_base_build_command + list(targets_to_build)}")
+                    f"BAZEL_COMMAND: {' '.join(Globals.bazel_base_build_command + list(targets_to_build))}"
+                )
                 start_time = time.time()
                 bazel_proc = subprocess.run(
                     Globals.bazel_base_build_command + list(targets_to_build),
@@ -373,7 +392,7 @@ def create_idlc_builder(env: SCons.Environment.Environment) -> None:
 
 
 def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
-    running_in_evergreen = os.environ.get("CI")
+    running_in_evergreen = env.GetOption("evergreen-tmp-dir") is not None
 
     if running_in_evergreen and not os.path.exists("./engflow.cert"):
         print(
@@ -485,6 +504,11 @@ def generate_bazel_info_for_ninja(env: SCons.Environment.Environment) -> None:
     env["NINJA_BAZEL_INPUTS"] = ninja_bazel_ins
 
 
+@retry(tries=5, delay=3)
+def download_path_with_retry(*args, **kwargs):
+    urllib.request.urlretrieve(*args, **kwargs)
+
+
 def sha256_file(filename: str) -> str:
     sha256_hash = hashlib.sha256()
     with open(filename, "rb") as f:
@@ -543,20 +567,19 @@ def generate(env: SCons.Environment.Environment) -> None:
             bazel_bin_dir, "bazel") if normalized_arch in ["ppc64le"] else os.path.join(
                 bazel_bin_dir, "bazelisk")
 
-        # TODO(SERVER-81038): remove once bazel/bazelisk is self-hosted.
         if not os.path.exists(bazel_executable):
             print(f"Downloading {bazel_executable}...")
             # TODO(SERVER-86050): remove the branch once bazelisk is built on s390x & ppc64le
             if normalized_arch in ["ppc64le"]:
                 s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-{normalized_arch}"
-                urllib.request.urlretrieve(s3_path, bazel_executable)
-                verify_s3_hash(s3_path, bazel_executable)
             else:
                 ext = ".exe" if normalized_os == "windows" else ""
                 os_str = normalized_os.replace("macos", "darwin")
-                urllib.request.urlretrieve(
-                    f"https://github.com/bazelbuild/bazelisk/releases/download/v1.17.0/bazelisk-{os_str}-{normalized_arch}{ext}",
-                    bazel_executable)
+                s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-{os_str}-{normalized_arch}{ext}"
+
+            download_path_with_retry(s3_path, bazel_executable)
+            verify_s3_hash(s3_path, bazel_executable)
+
             print(f"Downloaded {bazel_executable}")
             os.chmod(bazel_executable, stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         else:
@@ -583,6 +606,11 @@ def generate(env: SCons.Environment.Environment) -> None:
         else:
             allocator = env.GetOption("allocator")
 
+        if normalized_os == "linux" and f"{distro.name()} {distro.version()}" in _DISTRO_MAP:
+            distro_or_os = _DISTRO_MAP[f"{distro.name()} {distro.version()}"]
+        else:
+            distro_or_os = normalized_os
+
         bazel_internal_flags = [
             f'--//bazel/config:compiler_type={env.ToolchainName()}',
             f'--//bazel/config:build_mode={build_mode}',
@@ -607,8 +635,8 @@ def generate(env: SCons.Environment.Environment) -> None:
             f'--//bazel/config:streams_release_build={env.GetOption("streams-release-build") is not None}',
             f'--//bazel/config:build_enterprise={env.GetOption("modules") == "enterprise"}',
             f'--//bazel/config:visibility_support={env.GetOption("visibility-support")}',
-            f'--platforms=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
-            f'--host_platform=//bazel/platforms:{normalized_os}_{normalized_arch}_{env.ToolchainName()}',
+            f'--platforms=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}',
+            f'--host_platform=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}',
             '--compilation_mode=dbg',  # always build this compilation mode as we always build with -g
         ]
 

@@ -641,6 +641,14 @@ public:
     }
 
     /**
+     * Increment counter for how many times this command has been rejected
+     * due to query settings.
+     */
+    void incrementCommandsRejected() const {
+        _commandsRejected->increment();
+    }
+
+    /**
      * Generates a reply from the 'help' information associated with a command. The state of
      * the passed ReplyBuilder will be in kOutputDocs after calling this method.
      */
@@ -734,6 +742,7 @@ private:
     // Counters for how many times this command has been executed and failed
     Counter64* _commandsExecuted{};
     Counter64* _commandsFailed{};
+    Counter64* _commandsRejected{};
 };
 
 /**
@@ -904,6 +913,14 @@ public:
     }
 
     /**
+     * Returns true if this command invocation should wait until there are ingress admission tickets
+     * available before it is allowed to run.
+     */
+    virtual bool isSubjectToIngressAdmissionControl() const {
+        return false;
+    }
+
+    /**
      * The command definition that this invocation runs.
      * Note: nonvirtual.
      */
@@ -1063,6 +1080,14 @@ public:
      * can guarantee they will only perform reads may ignore prepare conflicts.
      */
     virtual bool canIgnorePrepareConflicts() const {
+        return false;
+    }
+
+    /**
+     * Returns true if this command should wait until there are ingress admission tickets
+     * available before it is allowed to run.
+     */
+    virtual bool isSubjectToIngressAdmissionControl() const {
         return false;
     }
 

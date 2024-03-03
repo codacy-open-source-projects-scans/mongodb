@@ -40,11 +40,9 @@
 
 namespace mongo::classic_runtime_planner_for_sbe {
 
-MultiPlanner::MultiPlanner(OperationContext* opCtx,
-                           PlannerData plannerData,
-                           PlanYieldPolicy::YieldPolicy yieldPolicy,
+MultiPlanner::MultiPlanner(PlannerDataForSBE plannerData,
                            std::vector<std::unique_ptr<QuerySolution>> candidatePlans)
-    : PlannerBase(opCtx, std::move(plannerData)), _yieldPolicy(yieldPolicy) {
+    : PlannerBase(std::move(plannerData)) {
     _multiPlanStage =
         std::make_unique<MultiPlanStage>(cq()->getExpCtxRaw(),
                                          collections().getMainCollectionPtrOrAcquisition(),
@@ -52,7 +50,7 @@ MultiPlanner::MultiPlanner(OperationContext* opCtx,
                                          PlanCachingMode::NeverCache);
     for (auto&& solution : candidatePlans) {
         auto nextPlanRoot = stage_builder::buildClassicExecutableTree(
-            opCtx, collections().getMainCollectionPtrOrAcquisition(), *cq(), *solution, ws());
+            opCtx(), collections().getMainCollectionPtrOrAcquisition(), *cq(), *solution, ws());
         _multiPlanStage->addPlan(std::move(solution), std::move(nextPlanRoot), ws());
     }
 }
@@ -64,7 +62,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::plan() {
         makeClassicYieldPolicy(opCtx(),
                                cq()->nss(),
                                static_cast<PlanStage*>(_multiPlanStage.get()),
-                               _yieldPolicy,
+                               yieldPolicy(),
                                collections().getMainCollectionPtrOrAcquisition());
 
     uassertStatusOK(_multiPlanStage->pickBestPlan(trialPeriodYieldPolicy.get()));
@@ -79,7 +77,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::plan() {
                                         extractWs(),
                                         std::move(_multiPlanStage),
                                         collections().getMainCollectionPtrOrAcquisition(),
-                                        _yieldPolicy,
+                                        yieldPolicy(),
                                         plannerOptions(),
                                         std::move(nss),
                                         nullptr /* querySolution */,
@@ -90,19 +88,16 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::plan() {
 
     // Extend the winning solution with the agg pipeline and build the execution tree.
     if (!cq()->cqPipeline().empty()) {
-        // TODO: SERVER-86174 Avoid unnecessary fillOutPlannerParams() and
-        // fillOutSecondaryCollectionsInformation() planner param calls.
-        auto& queryPlannerParams = plannerParams();
-        queryPlannerParams.fillOutSecondaryCollectionsPlannerParams(opCtx(), *cq(), collections());
         winningSolution = QueryPlanner::extendWithAggPipeline(
-            *cq(), std::move(winningSolution), queryPlannerParams.secondaryCollectionsInfo);
+            *cq(), std::move(winningSolution), plannerParams().secondaryCollectionsInfo);
     }
 
     auto sbePlanAndData = _buildSbePlanAndUpdatePlanCache(winningSolution.get());
     return prepareSbePlanExecutor(std::move(winningSolution),
                                   std::move(sbePlanAndData),
                                   false /*isFromPlanCache*/,
-                                  cachedPlanHash());
+                                  cachedPlanHash(),
+                                  std::move(_multiPlanStage));
 }
 
 MultiPlanner::SbePlanAndData MultiPlanner::_buildSbePlanAndUpdatePlanCache(

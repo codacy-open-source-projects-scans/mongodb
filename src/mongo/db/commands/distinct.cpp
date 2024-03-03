@@ -125,28 +125,6 @@ bool isInternalClient(OperationContext* opCtx) {
     return opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
 }
 
-query_settings::QuerySettings lookupQuerySettingsForDistinct(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const ParsedDistinctCommand& parsedRequest,
-    const NamespaceString& nss) {
-    auto serializationContext = parsedRequest.distinctCommandRequest->getSerializationContext();
-
-    if (auto querySettings = parsedRequest.distinctCommandRequest->getQuerySettings()) {
-        // Use the query settings passed as part of the command arguments.
-        return *querySettings;
-    }
-
-    auto queryShapeHashFn = [&]() {
-        query_shape::DistinctCmdShape shape(parsedRequest, expCtx);
-        return shape.sha256Hash(expCtx->opCtx, serializationContext);
-    };
-
-    auto settings =
-        query_settings::lookupQuerySettings(expCtx, nss, serializationContext, queryShapeHashFn);
-    query_settings::failIfRejectedBySettings(expCtx, settings);
-    return settings;
-}
-
 CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
                                    const NamespaceString& nss,
                                    const BSONObj& cmdObj,
@@ -181,7 +159,11 @@ CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
                                        extensionsCallback,
                                        MatchExpressionParser::kAllowAllSpecialFeatures);
 
-    expCtx->setQuerySettings(lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
+    // TODO: SERVER-73632 Remove feature flag for PM-635.
+    // Query settings will only be looked up on mongos and therefore should be part of command body
+    // on mongod if present.
+    expCtx->setQuerySettings(
+        query_settings::lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
     return CanonicalDistinct::parse(std::move(expCtx), std::move(parsedDistinct));
 }
 
@@ -268,6 +250,10 @@ public:
         return ReadConcernSupportResult::allSupportedAndDefaultPermitted();
     }
 
+    bool isSubjectToIngressAdmissionControl() const override {
+        return true;
+    }
+
     bool shouldAffectReadOptionCounters() const override {
         return true;
     }
@@ -320,7 +306,7 @@ public:
     Status explain(OperationContext* opCtx,
                    const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
-                   rpc::ReplyBuilderInterface* result) const override {
+                   rpc::ReplyBuilderInterface* replyBuilder) const override {
         const DatabaseName dbName = request.getDbName();
         const BSONObj& cmdObj = request.body;
         // Acquire locks. The RAII object is optional, because in the case of a view, the locks
@@ -345,39 +331,17 @@ public:
         auto canonicalDistinct = parseDistinctCmd(
             opCtx, nss, cmdObj, ExtensionsCallbackReal(opCtx, &nss), defaultCollator, verbosity);
 
-        SerializationContext serializationCtx = request.getSerializationContext();
-
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
-
-            auto viewAggregation = canonicalDistinct.asAggregationCommand();
-            if (!viewAggregation.isOK()) {
-                return viewAggregation.getStatus();
-            }
-
-            auto viewAggCmd =
-                OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                    nss.dbName(), request.validatedTenancyScope, viewAggregation.getValue())
-                    .body;
-            auto viewAggRequest = aggregation_request_helper::parseFromBSON(
-                opCtx,
-                nss,
-                viewAggCmd,
-                verbosity,
-                APIParameters::get(opCtx).getAPIStrict().value_or(false),
-                serializationCtx);
-
-            // An empty PrivilegeVector is acceptable because these privileges are only checked
-            // on getMore and explain will not open a cursor.
-            return runAggregate(
-                opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
+            runDistinctOnView(opCtx, canonicalDistinct, verbosity, replyBuilder);
+            return Status::OK();
         }
 
         auto executor = createExecutorForDistinctCommand(
             opCtx, std::move(canonicalDistinct), collectionOrView->getCollection());
-
-        auto bodyBuilder = result->getBodyBuilder();
+        SerializationContext serializationCtx = request.getSerializationContext();
+        auto bodyBuilder = replyBuilder->getBodyBuilder();
         Explain::explainStages(executor.get(),
                                collectionOrView->getCollectionPtr(),
                                verbosity,
@@ -388,10 +352,10 @@ public:
         return Status::OK();
     }
 
-    bool run(OperationContext* opCtx,
-             const DatabaseName& dbName,
-             const BSONObj& cmdObj,
-             BSONObjBuilder& result) override {
+    bool runWithReplyBuilder(OperationContext* opCtx,
+                             const DatabaseName& dbName,
+                             const BSONObj& cmdObj,
+                             rpc::ReplyBuilderInterface* replyBuilder) override {
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
@@ -468,17 +432,7 @@ public:
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
-
-            auto viewAggregation = canonicalDistinct.asAggregationCommand();
-            uassertStatusOK(viewAggregation.getStatus());
-
-            auto vts = auth::ValidatedTenancyScope::get(opCtx);
-            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                dbName, vts, std::move(viewAggregation.getValue()));
-
-            BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
-            uassertStatusOK(ViewResponseFormatter(aggResult).appendAsDistinctResponse(
-                &result, dbName.tenantId()));
+            runDistinctOnView(opCtx, canonicalDistinct, boost::none /* verbosity */, replyBuilder);
             return true;
         }
 
@@ -564,6 +518,7 @@ public:
             curOp->debug().execStats = std::move(stats);
         }
 
+        BSONObjBuilder result = replyBuilder->getBodyBuilder();
         BSONArrayBuilder valueListBuilder(result.subarrayStart("values"));
         for (const auto& value : values) {
             valueListBuilder.append(value);
@@ -578,6 +533,67 @@ public:
 
         uassert(31299, "distinct too big, 16mb cap", result.len() < kMaxResponseSize);
         return true;
+    }
+
+    /**
+     * This method is defined by the parent class and is supposed to be directly invoked by
+     * runWithReplyBuilder(). However, since runWithReplyBuilder is overriden here, run() method
+     * will never be called.
+     */
+    bool run(OperationContext* opCtx,
+             const DatabaseName& dbName,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) {
+        tasserted(8687400, "distinct command should have not invoked this method");
+        return true;
+    }
+
+    void runDistinctOnView(OperationContext* opCtx,
+                           const CanonicalDistinct& canonicalDistinct,
+                           boost::optional<ExplainOptions::Verbosity> verbosity,
+                           rpc::ReplyBuilderInterface* replyBuilder) const {
+        const auto& nss = canonicalDistinct.getQuery()->nss();
+        const auto& dbName = nss.dbName();
+        const auto& vts = auth::ValidatedTenancyScope::get(opCtx);
+        const auto viewAggCmd =
+            OpMsgRequestBuilder::createWithValidatedTenancyScope(
+                dbName, vts, uassertStatusOK(canonicalDistinct.asAggregationCommand()))
+                .body;
+        const auto serializationContext = vts != boost::none
+            ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
+            : SerializationContext::stateCommandRequest();
+        auto viewAggRequest = aggregation_request_helper::parseFromBSON(
+            opCtx,
+            nss,
+            viewAggCmd,
+            verbosity,
+            APIParameters::get(opCtx).getAPIStrict().value_or(false),
+            serializationContext);
+
+        // If running explain distinct on view, then aggregate is executed without plivilege checks
+        // and without response formatting.
+        if (verbosity) {
+            uassertStatusOK(
+                runAggregate(opCtx, viewAggRequest, viewAggCmd, PrivilegeVector(), replyBuilder));
+            return;
+        }
+
+        const auto privileges = uassertStatusOK(
+            auth::getPrivilegesForAggregate(AuthorizationSession::get(opCtx->getClient()),
+                                            viewAggRequest.getNamespace(),
+                                            viewAggRequest,
+                                            false /* isMongos */));
+        uassertStatusOK(runAggregate(opCtx, viewAggRequest, viewAggCmd, privileges, replyBuilder));
+
+        // Copy the result from the aggregate command.
+        auto resultBuilder = replyBuilder->getBodyBuilder();
+        CommandHelpers::extractOrAppendOk(resultBuilder);
+        ViewResponseFormatter responseFormatter(resultBuilder.asTempObj().copy());
+
+        // Reset the builder state, as the response will be written to the same builder.
+        resultBuilder.resetToEmpty();
+        uassertStatusOK(
+            responseFormatter.appendAsDistinctResponse(&resultBuilder, dbName.tenantId()));
     }
 
     void appendMirrorableRequest(BSONObjBuilder* bob, const BSONObj& cmdObj) const override {

@@ -195,6 +195,7 @@ env.Library(
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/util/concurrency/admission_context',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
         '$BUILD_DIR/mongo/util/fail_point',
         'storage_options',
@@ -358,6 +359,17 @@ bmEnv.Library(
         '$BUILD_DIR/mongo/db/shard_role_api',
         '$BUILD_DIR/third_party/shim_benchmark',
         'sorted_data_interface_test_harness',
+    ],
+)
+bmEnv.Library(
+    target='record_store_bm',
+    source=[
+        'record_store_bm_cursor.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/shard_role_api',
+        '$BUILD_DIR/third_party/shim_benchmark',
+        'record_store_test_harness',
     ],
 )
 

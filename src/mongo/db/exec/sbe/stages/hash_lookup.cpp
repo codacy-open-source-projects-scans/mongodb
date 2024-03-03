@@ -53,7 +53,8 @@ HashLookupStage::HashLookupStage(std::unique_ptr<PlanStage> outer,
                                  boost::optional<value::SlotId> collatorSlot,
                                  PlanNodeId planNodeId,
                                  bool participateInTrialRunTracking)
-    : PlanStage("hash_lookup"_sd, planNodeId, participateInTrialRunTracking),
+    : PlanStage(
+          "hash_lookup"_sd, nullptr /* yieldPolicy */, planNodeId, participateInTrialRunTracking),
       _outerKeySlot(outerKeySlot),
       _innerKeySlot(innerKeySlot),
       _innerProjectSlot(innerProjectSlot),
@@ -184,7 +185,7 @@ void HashLookupStage::open(bool reOpen) {
         value::MaterializedRow value{1};
 
         // Copy the projected value.
-        auto [tag, val] = _inInnerProjectAccessor->copyOrMoveValue();
+        auto [tag, val] = _inInnerProjectAccessor->getCopyOfValue();
         value.reset(0, true, tag, val);
 
         // This where we put the value in here. This can grow need to spill.

@@ -767,10 +767,10 @@ bool handleGroupedInserts(OperationContext* opCtx,
         }
     }
 
-    boost::optional<ScopedAdmissionPriorityForLock> priority;
+    boost::optional<ScopedAdmissionPriority> priority;
     if (nsString == NamespaceString::kConfigSampledQueriesNamespace ||
         nsString == NamespaceString::kConfigSampledQueriesDiffNamespace) {
-        priority.emplace(shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kLow);
+        priority.emplace(opCtx, AdmissionContext::Priority::kLow);
     }
 
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1177,6 +1177,7 @@ void explainUpdateOp(OperationContext* opCtx,
     updateRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
     updateRequest.setUpdateConstants(op->getConstants());
     updateRequest.setLetParameters(req.getLet());
+    updateRequest.setSort(op->getSort().value_or(BSONObj()));
     updateRequest.setHint(op->getHint());
     updateRequest.setCollation(op->getCollation().value_or(BSONObj()));
     updateRequest.setArrayFilters(op->getArrayFilters().value_or(std::vector<BSONObj>()));
@@ -1291,6 +1292,10 @@ public:
             return true;
         }
 
+        bool isSubjectToIngressAdmissionControl() const override {
+            return true;
+        }
+
         NamespaceString ns() const final {
             return NamespaceString(request().getDbName());
         }
@@ -1329,6 +1334,9 @@ public:
 
             if (!_firstUpdateOp->getFilter().isEmpty()) {
                 bob->append("filter", _firstUpdateOp->getFilter());
+            }
+            if (_firstUpdateOp->getSort()) {
+                bob->append("sort", *_firstUpdateOp->getSort());
             }
             if (!_firstUpdateOp->getHint().isEmpty()) {
                 bob->append("hint", _firstUpdateOp->getHint());

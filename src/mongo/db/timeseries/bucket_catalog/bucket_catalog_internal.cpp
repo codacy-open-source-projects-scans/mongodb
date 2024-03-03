@@ -118,13 +118,6 @@ void abortWriteBatch(WriteBatch& batch, const Status& status) {
     batch.promise.setError(status);
 }
 
-void updateCompressionStatistics(BucketCatalog& catalog, const Bucket& bucket) {
-    ExecutionStatsController stats =
-        getOrInitializeExecutionStats(catalog, bucket.key.collectionUUID);
-    stats.incNumBytesUncompressed(bucket.uncompressedBucketDoc.objsize());
-    stats.incNumBytesCompressed(bucket.compressedBucketDoc->objsize());
-}
-
 /**
  * Returns a prepared write batch matching the specified 'key' if one exists, by searching the set
  * of open buckets associated with 'key'.
@@ -446,21 +439,19 @@ StatusWith<unique_tracked_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
         }
         bucket->size = decompressedBucketDoc.value().objsize();
         bucket->compressedBucketDoc = bucketDoc;
-        bucket->memoryUsage += bucketDoc.objsize();
     } else {
         bucket->size = bucketDoc.objsize();
         if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            bucket->uncompressedBucketDoc = bucketDoc;
-            bucket->memoryUsage += bucketDoc.objsize();
+            bucket->uncompressedBucketDoc = makeTrackedBson(catalog.trackingContext, bucketDoc);
         }
     }
 
     // Populate the top-level data field names.
     const BSONObj& dataObj = bucketDoc.getObjectField(kBucketDataFieldName);
     for (const BSONElement& dataElem : dataObj) {
-        auto hashedKey = StringSet::hasher().hashed_key(dataElem.fieldName());
-        bucket->fieldNames.emplace(hashedKey);
+        bucket->fieldNames.emplace(make_tracked_string(
+            catalog.trackingContext, dataElem.fieldName(), dataElem.fieldNameSize() - 1));
     }
 
     auto swMinMax = generateMinMaxFromBucketDoc(catalog.trackingContext, bucketDoc, comparator);
@@ -569,7 +560,6 @@ StatusWith<std::reference_wrapper<Bucket>> reopenBucket(OperationContext* opCtx,
     stripe.openBucketsByKey[key.cloneAsUntracked()].emplace(unownedBucket);
     stats.incNumBucketsReopened();
 
-    catalog.memoryUsage.addAndFetch(unownedBucket->memoryUsage);
     catalog.numberOfActiveBuckets.fetchAndAdd(1);
 
     return *unownedBucket;
@@ -633,6 +623,7 @@ std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     std::reference_wrapper<Bucket> bucketToUse{existingBucket};
     if (!isNewlyOpenedBucket) {
         auto [action, reason] = determineRolloverAction(opCtx,
+                                                        catalog.trackingContext,
                                                         doc,
                                                         info,
                                                         existingBucket,
@@ -652,11 +643,14 @@ std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
         }
     }
     Bucket& bucket = bucketToUse.get();
-    const auto previousMemoryUsage = bucket.memoryUsage;
 
     if (isNewlyOpenedBucket) {
-        calculateBucketFieldsAndSizeChange(
-            bucket, doc, info.options.getMetaField(), newFieldNamesToBeInserted, sizeToBeAdded);
+        calculateBucketFieldsAndSizeChange(catalog.trackingContext,
+                                           bucket,
+                                           doc,
+                                           info.options.getMetaField(),
+                                           newFieldNamesToBeInserted,
+                                           sizeToBeAdded);
     }
 
     auto batch = activeBatch(
@@ -664,7 +658,8 @@ std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     batch->measurements.push_back(doc);
     for (auto&& field : newFieldNamesToBeInserted) {
         batch->newFieldNamesToBeInserted[field] = field.hash();
-        bucket.uncommittedFieldNames.emplace(field);
+        bucket.uncommittedFieldNames.emplace(
+            TrackedStringMapHashedKey{catalog.trackingContext, field.key(), field.hash()});
     }
 
     bucket.numMeasurements++;
@@ -677,10 +672,7 @@ std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
         auto updateStatus = bucket.schema.update(
             doc, info.options.getMetaField(), info.key.metadata.getComparator());
         invariant(updateStatus == Schema::UpdateStatus::Updated);
-    } else {
-        catalog.memoryUsage.fetchAndSubtract(previousMemoryUsage);
     }
-    catalog.memoryUsage.fetchAndAdd(bucket.memoryUsage);
 
     return batch;
 }
@@ -741,7 +733,6 @@ void removeBucket(
     auto allIt = stripe.openBucketsById.find(bucket.bucketId);
     invariant(allIt != stripe.openBucketsById.end());
 
-    catalog.memoryUsage.fetchAndSubtract(bucket.memoryUsage);
     markBucketNotIdle(stripe, stripeLock, bucket);
 
     // If the bucket was rolled over, then there may be a different open bucket for this metadata.
@@ -804,11 +795,7 @@ void archiveBucket(OperationContext* opCtx,
     auto& archivedSet = stripe.archivedBuckets[bucket.key.hash];
     auto it = archivedSet.find(bucket.minTime);
     if (it == archivedSet.end()) {
-        // TODO SERVER-85293: remove conversion to tracked_string.
-        archivedSet.emplace(
-            bucket.minTime,
-            ArchivedBucket{bucket.bucketId,
-                           make_tracked_string(catalog.trackingContext, bucket.timeField)});
+        archivedSet.emplace(bucket.minTime, ArchivedBucket{bucket.bucketId, bucket.timeField});
         archived = true;
     }
 
@@ -1200,6 +1187,7 @@ Bucket& rollover(OperationContext* opCtx,
 
 std::pair<RolloverAction, RolloverReason> determineRolloverAction(
     OperationContext* opCtx,
+    TrackingContext& trackingContext,
     const BSONObj& doc,
     CreationInfo& info,
     Bucket& bucket,
@@ -1257,8 +1245,12 @@ std::pair<RolloverAction, RolloverReason> determineRolloverAction(
     // We restrict the ceiling of the bucket max size under cache pressure.
     int32_t absoluteMaxSize = std::min(largeMeasurementsMaxBucketSize, cacheDerivedBucketMaxSize);
 
-    calculateBucketFieldsAndSizeChange(
-        bucket, doc, info.options.getMetaField(), newFieldNamesToBeInserted, sizeToBeAdded);
+    calculateBucketFieldsAndSizeChange(trackingContext,
+                                       bucket,
+                                       doc,
+                                       info.options.getMetaField(),
+                                       newFieldNamesToBeInserted,
+                                       sizeToBeAdded);
     if (bucket.size + sizeToBeAdded > effectiveMaxSize) {
         bool keepBucketOpenForLargeMeasurements =
             bucket.numMeasurements < static_cast<std::uint64_t>(gTimeseriesBucketMinCount);
@@ -1354,14 +1346,11 @@ void closeOpenBucket(OperationContext* opCtx,
                      WithLock stripeLock,
                      Bucket& bucket,
                      ClosedBuckets& closedBuckets) {
-    // Skip creating a ClosedBucket when the bucket is already compressed. Check that
-    // compressed is set because reopened uncompressed buckets can get closed without operations
-    // against them.
-    if (bucket.usingAlwaysCompressedBuckets && bucket.compressedBucketDoc) {
+    // Skip creating a ClosedBucket when the bucket is already compressed.
+    if (bucket.usingAlwaysCompressedBuckets) {
         // Remove the bucket from the bucket state registry.
         stopTrackingBucketState(catalog.bucketStateRegistry, bucket.bucketId);
 
-        updateCompressionStatistics(catalog, bucket);
         removeBucket(catalog, stripe, stripeLock, bucket, RemovalMode::kClose);
         return;
     }
@@ -1372,7 +1361,7 @@ void closeOpenBucket(OperationContext* opCtx,
         closedBuckets.emplace_back(
             &catalog.bucketStateRegistry,
             bucket.bucketId,
-            bucket.timeField,
+            std::string{bucket.timeField.data(), bucket.timeField.size()},
             bucket.numMeasurements,
             getOrInitializeExecutionStats(catalog, bucket.bucketId.collectionUUID));
     } catch (...) {
@@ -1388,14 +1377,11 @@ void closeOpenBucket(OperationContext* opCtx,
                      WithLock stripeLock,
                      Bucket& bucket,
                      boost::optional<ClosedBucket>& closedBucket) {
-    // Skip creating a ClosedBucket when the bucket is already compressed. Check that
-    // compressed is set because reopened uncompressed buckets can get closed without operations
-    // against them.
-    if (bucket.usingAlwaysCompressedBuckets && bucket.compressedBucketDoc) {
+    // Skip creating a ClosedBucket when the bucket is already compressed.
+    if (bucket.usingAlwaysCompressedBuckets) {
         // Remove the bucket from the bucket state registry.
         stopTrackingBucketState(catalog.bucketStateRegistry, bucket.bucketId);
 
-        updateCompressionStatistics(catalog, bucket);
         removeBucket(catalog, stripe, stripeLock, bucket, RemovalMode::kClose);
         return;
     }
@@ -1406,7 +1392,7 @@ void closeOpenBucket(OperationContext* opCtx,
         closedBucket =
             boost::in_place(&catalog.bucketStateRegistry,
                             bucket.bucketId,
-                            bucket.timeField,
+                            std::string{bucket.timeField.data(), bucket.timeField.size()},
                             bucket.numMeasurements,
                             getOrInitializeExecutionStats(catalog, bucket.bucketId.collectionUUID));
     } catch (...) {
@@ -1431,7 +1417,7 @@ void closeArchivedBucket(BucketCatalog& catalog,
         closedBuckets.emplace_back(
             &catalog.bucketStateRegistry,
             bucket.bucketId,
-            bucket.timeField.c_str(),
+            std::string{bucket.timeField.data(), bucket.timeField.size()},
             boost::none,
             getOrInitializeExecutionStats(catalog, bucket.bucketId.collectionUUID));
     } catch (...) {
@@ -1450,9 +1436,10 @@ void runPostCommitDebugChecks(OperationContext* opCtx,
         uint32_t diskCount = isCompressedBucket(queriedBucket)
             ? static_cast<uint32_t>(queriedBucket.getObjectField(kBucketControlFieldName)
                                         .getIntField(kBucketControlCountFieldName))
-            : static_cast<uint32_t>(queriedBucket.getObjectField(kBucketDataFieldName)
-                                        .getObjectField(bucket.timeField)
-                                        .nFields());
+            : static_cast<uint32_t>(
+                  queriedBucket.getObjectField(kBucketDataFieldName)
+                      .getObjectField(StringData{bucket.timeField.data(), bucket.timeField.size()})
+                      .nFields());
         invariant(memCount == diskCount,
                   str::stream() << "Expected in-memory (" << memCount << ") and on-disk ("
                                 << diskCount

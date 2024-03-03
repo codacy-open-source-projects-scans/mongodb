@@ -515,6 +515,66 @@ TEST_F(TxnParticipantTest, IsActiveTransactionParticipantSetCorrectly) {
     ASSERT(opCtx()->isActiveTransactionParticipant());
 }
 
+TEST_F(TxnParticipantTest, IsStartingMultiDocumentTransactionSetCorrectly) {
+    auto sessionCheckout = checkOutSession();
+    ASSERT(TransactionParticipant::get(opCtx()));
+    ASSERT(opCtx()->isStartingMultiDocumentTransaction());
+    sessionCheckout->checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
+
+    // Now swap out the opCtx to represent a new op coming in to continue the transaction
+    auto continueTxn = [&](OperationContext* newOpCtx) {
+        newOpCtx->setLogicalSessionId(*opCtx()->getLogicalSessionId());
+        newOpCtx->setTxnNumber(*opCtx()->getTxnNumber());
+        newOpCtx->setInMultiDocumentTransaction();
+
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(newOpCtx);
+        auto newOpCtxSession = mongoDSessionCatalog->checkOutSession(newOpCtx);
+        auto txnParticipant = TransactionParticipant::get(newOpCtx);
+
+        txnParticipant.unstashTransactionResources(newOpCtx, "insert");
+        txnParticipant.stashTransactionResources(newOpCtx);
+
+        txnParticipant.beginOrContinue(newOpCtx,
+                                       {*newOpCtx->getTxnNumber()},
+                                       false /* autocommit */,
+                                       TransactionParticipant::TransactionActions::kContinue);
+        ASSERT(!newOpCtx->isStartingMultiDocumentTransaction());
+    };
+
+    runFunctionFromDifferentOpCtx(continueTxn);
+}
+
+TEST_F(TxnParticipantTest, IsStartingMultiDocumentTransactionSetCorrectlyUsingStartOrContinue) {
+    auto sessionCheckout =
+        checkOutSession(TransactionParticipant::TransactionActions::kStartOrContinue);
+    ASSERT(TransactionParticipant::get(opCtx()));
+    ASSERT(opCtx()->isStartingMultiDocumentTransaction());
+    sessionCheckout->checkIn(opCtx(), OperationContextSession::CheckInReason::kDone);
+
+    // Now swap out the opCtx to represent a new op coming in to continue the transaction
+    auto continueTxn = [&](OperationContext* newOpCtx) {
+        newOpCtx->setLogicalSessionId(*opCtx()->getLogicalSessionId());
+        newOpCtx->setTxnNumber(*opCtx()->getTxnNumber());
+        newOpCtx->setInMultiDocumentTransaction();
+
+        auto mongoDSessionCatalog = MongoDSessionCatalog::get(newOpCtx);
+        auto newOpCtxSession = mongoDSessionCatalog->checkOutSession(newOpCtx);
+        auto txnParticipant = TransactionParticipant::get(newOpCtx);
+
+        txnParticipant.unstashTransactionResources(newOpCtx, "insert");
+        txnParticipant.stashTransactionResources(newOpCtx);
+
+        txnParticipant.beginOrContinue(
+            newOpCtx,
+            {*newOpCtx->getTxnNumber()},
+            false /* autocommit */,
+            TransactionParticipant::TransactionActions::kStartOrContinue);
+        ASSERT(!newOpCtx->isStartingMultiDocumentTransaction());
+    };
+
+    runFunctionFromDifferentOpCtx(continueTxn);
+}
+
 // Test that transaction lock acquisition times out in `maxTransactionLockRequestTimeoutMillis`
 // milliseconds.
 TEST_F(TxnParticipantTest, TransactionThrowsLockTimeoutIfLockIsUnavailable) {
@@ -4126,9 +4186,7 @@ std::string buildTransactionInfoString(OperationContext* opCtx,
         &timeActiveAndInactiveInfo, txnParticipant, tickSource, tickSource->getTicks());
 
     BSONObjBuilder locks;
-    if (lockerInfo) {
-        lockerInfo->stats.report(&locks);
-    }
+    lockerInfo.stats.report(&locks);
 
     // Puts all the substrings together into one expected info string. The expected info string will
     // look something like this:
@@ -4292,9 +4350,7 @@ BSONObj buildTransactionInfoBSON(OperationContext* opCtx,
         attrs.append("numYields", 0);
 
         BSONObjBuilder locks;
-        if (lockerInfo) {
-            lockerInfo->stats.report(&locks);
-        }
+        lockerInfo.stats.report(&locks);
         attrs.append("locks", locks.obj());
 
         attrs.append("wasPrepared", wasPrepared);
@@ -4345,9 +4401,8 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterCommit) {
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
-        opCtx(), &lockerInfo->stats, true, apiParameters, readConcernArgs);
+        opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
 
     std::string expectedTransactionInfo =
         buildTransactionInfoString(opCtx(),
@@ -4395,9 +4450,8 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterCommit) {
     txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, {});
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
-        opCtx(), &lockerInfo->stats, true, apiParameters, readConcernArgs);
+        opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
 
     std::string expectedTransactionInfo =
         buildTransactionInfoString(opCtx(),
@@ -4438,10 +4492,9 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterAbort) {
     txnParticipant.abortTransaction(opCtx());
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
 
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
-        opCtx(), &lockerInfo->stats, false, apiParameters, readConcernArgs);
+        opCtx(), &lockerInfo.stats, false, apiParameters, readConcernArgs);
 
     std::string expectedTransactionInfo =
         buildTransactionInfoString(opCtx(),
@@ -4488,10 +4541,9 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterAbort) {
     txnParticipant.abortTransaction(opCtx());
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
 
     std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
-        opCtx(), &lockerInfo->stats, false, apiParameters, readConcernArgs);
+        opCtx(), &lockerInfo.stats, false, apiParameters, readConcernArgs);
 
     std::string expectedTransactionInfo =
         buildTransactionInfoString(opCtx(),
@@ -4526,7 +4578,6 @@ DEATH_TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogWithNoLockerInfoS
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
 
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     txnParticipant.commitUnpreparedTransaction(opCtx());
@@ -4585,10 +4636,9 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowCommit) {
     stopCapturingLogMessages();
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
 
     BSONObj expected = txnParticipant.getTransactionInfoBSONForLogForTest(
-        opCtx(), &lockerInfo->stats, true, apiParameters, readConcernArgs);
+        opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
     ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(expected));
 }
 
@@ -4639,10 +4689,9 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowCommit) {
     stopCapturingLogMessages();
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
 
     BSONObj expected = txnParticipant.getTransactionInfoBSONForLogForTest(
-        opCtx(), &lockerInfo->stats, true, apiParameters, readConcernArgs);
+        opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
     ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(expected));
 }
 
@@ -4685,8 +4734,6 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowAbort) {
     txnParticipant.abortTransaction(opCtx());
     stopCapturingLogMessages();
 
-    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
 
     auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
                                                             txnParticipant,
@@ -4747,8 +4794,6 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowAbort) {
     txnParticipant.abortTransaction(opCtx());
     stopCapturingLogMessages();
 
-    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
 
     auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
                                                             txnParticipant,
@@ -4812,8 +4857,6 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterExceptionInPrepare) {
     ASSERT(txnParticipant.transactionIsAborted());
     stopCapturingLogMessages();
 
-    const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    ASSERT(lockerInfo);
     auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
                                                             txnParticipant,
                                                             "aborted",

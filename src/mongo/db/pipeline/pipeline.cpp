@@ -517,13 +517,6 @@ bool Pipeline::canParameterize() {
     return false;
 }
 
-bool Pipeline::needsPrimaryShardMerger() const {
-    return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
-        return stage->constraints(SplitState::kSplitForMerge).hostRequirement ==
-            HostTypeRequirement::kPrimaryShard;
-    });
-}
-
 boost::optional<ShardId> Pipeline::needsSpecificShardMerger() const {
     for (const auto& stage : _sources) {
         if (auto mergeShardId = stage->constraints(SplitState::kSplitForMerge).mergeShardId) {
@@ -551,7 +544,6 @@ bool Pipeline::needsShard() const {
     return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
         auto hostType = stage->constraints().resolvedHostTypeRequirement(pCtx);
         return (hostType == HostTypeRequirement::kAnyShard ||
-                hostType == HostTypeRequirement::kPrimaryShard ||
                 hostType == HostTypeRequirement::kAllShardHosts);
     });
 }
@@ -775,7 +767,6 @@ Status Pipeline::canRunOnMongos() const {
         auto hostRequirement = constraints.resolvedHostTypeRequirement(pCtx);
 
         const bool needsShard = (hostRequirement == HostTypeRequirement::kAnyShard ||
-                                 hostRequirement == HostTypeRequirement::kPrimaryShard ||
                                  hostRequirement == HostTypeRequirement::kAllShardHosts);
 
         const bool mustWriteToDisk =
@@ -893,9 +884,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
             pipeline.release(), opts.shardTargetingPolicy, std::move(opts.readConcern));
     }
 
-    // After parsing the pipeline to detect if $$USER_ROLES is referenced, set the value of
-    // $$USER_ROLES for the pipeline.
-    expCtx->setUserRoles();
+    expCtx->initializeReferencedSystemVariables();
 
     return pipeline;
 }

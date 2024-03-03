@@ -29,6 +29,7 @@
 
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
 
+#include "mongo/s/resharding/common_types_gen.h"
 #include <absl/container/node_hash_map.h>
 #include <algorithm>
 #include <boost/cstdint.hpp>
@@ -632,7 +633,11 @@ void ReshardingRecipientService::RecipientStateMachine::interrupt(Status status)
 boost::optional<BSONObj> ReshardingRecipientService::RecipientStateMachine::reportForCurrentOp(
     MongoProcessInterface::CurrentOpConnectionsMode,
     MongoProcessInterface::CurrentOpSessionsMode) noexcept {
-    if (_recipientCtx.getState() == RecipientStateEnum::kBuildingIndex) {
+    auto state = [this] {
+        stdx::lock_guard lk(_mutex);
+        return _recipientCtx.getState();
+    }();
+    if (state == RecipientStateEnum::kBuildingIndex) {
         _fetchBuildIndexMetrics();
     }
     return _metrics->reportForCurrentOp();
@@ -701,37 +706,40 @@ void ReshardingRecipientService::RecipientStateMachine::
 
         if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            _externalState->withShardVersionRetry(
-                opCtx.get(),
-                _metadata.getSourceNss(),
-                "validating shard key index for reshardCollection"_sd,
-                [&] {
-                    shardkeyutil::validateShardKeyIsNotEncrypted(
-                        opCtx.get(),
-                        _metadata.getSourceNss(),
-                        ShardKeyPattern(_metadata.getReshardingKey()));
-                    // This behavior in this phase is only used to validate whether this resharding
-                    // should be permitted, we need to call
-                    // validateShardKeyIndexExistsOrCreateIfPossible again in the buildIndex phase
-                    // to make sure we have the indexSpecs even after restart.
-                    shardkeyutil::ValidationBehaviorsReshardingBulkIndex behaviors;
-                    behaviors.setOpCtxAndCloneTimestamp(opCtx.get(), *_cloneTimestamp);
+            if (!_metadata.getProvenance() ||
+                _metadata.getProvenance() == ProvenanceEnum::kReshardCollection) {
+                _externalState->withShardVersionRetry(
+                    opCtx.get(),
+                    _metadata.getSourceNss(),
+                    "validating shard key index for reshardCollection"_sd,
+                    [&] {
+                        shardkeyutil::validateShardKeyIsNotEncrypted(
+                            opCtx.get(),
+                            _metadata.getSourceNss(),
+                            ShardKeyPattern(_metadata.getReshardingKey()));
+                        // This behavior in this phase is only used to validate whether this
+                        // resharding should be permitted, we need to call
+                        // validateShardKeyIndexExistsOrCreateIfPossible again in the buildIndex
+                        // phase to make sure we have the indexSpecs even after restart.
+                        shardkeyutil::ValidationBehaviorsReshardingBulkIndex behaviors;
+                        behaviors.setOpCtxAndCloneTimestamp(opCtx.get(), *_cloneTimestamp);
 
-                    // Do not need to pass in time-series options because we cannot reshard a
-                    // time-series collection.
-                    // TODO SERVER-84741 pass in time-series options and ensure the shard key is
-                    // partially rewritten.
-                    shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
-                        opCtx.get(),
-                        _metadata.getSourceNss(),
-                        ShardKeyPattern{_metadata.getReshardingKey()},
-                        CollationSpec::kSimpleSpec,
-                        false /* unique */,
-                        true /* enforceUniquenessCheck */,
-                        behaviors,
-                        boost::none /* tsOpts */,
-                        false /* updatedToHandleTimeseriesIndex */);
-                });
+                        // Do not need to pass in time-series options because we cannot reshard a
+                        // time-series collection.
+                        // TODO SERVER-84741 pass in time-series options and ensure the shard key is
+                        // partially rewritten.
+                        shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
+                            opCtx.get(),
+                            _metadata.getSourceNss(),
+                            ShardKeyPattern{_metadata.getReshardingKey()},
+                            CollationSpec::kSimpleSpec,
+                            false /* unique */,
+                            true /* enforceUniquenessCheck */,
+                            behaviors,
+                            boost::none /* tsOpts */,
+                            false /* updatedToHandleTimeseriesIndex */);
+                    });
+            }
         } else {
             _externalState->withShardVersionRetry(
                 opCtx.get(),
@@ -912,16 +920,20 @@ ReshardingRecipientService::RecipientStateMachine::_buildIndexThenTransitionToAp
                    // partially rewritten.
                    shardkeyutil::ValidationBehaviorsReshardingBulkIndex behaviors;
                    behaviors.setOpCtxAndCloneTimestamp(opCtx.get(), *_cloneTimestamp);
-                   shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
-                       opCtx.get(),
-                       _metadata.getSourceNss(),
-                       ShardKeyPattern{_metadata.getReshardingKey()},
-                       CollationSpec::kSimpleSpec,
-                       false /* unique */,
-                       true /* enforceUniquenessCheck */,
-                       behaviors,
-                       boost::none /* tsOpts */,
-                       false /* updatedToHandleTimeseriesIndex */);
+
+                   if (!_metadata.getProvenance() ||
+                       _metadata.getProvenance() == ProvenanceEnum::kReshardCollection) {
+                       shardkeyutil::validateShardKeyIndexExistsOrCreateIfPossible(
+                           opCtx.get(),
+                           _metadata.getSourceNss(),
+                           ShardKeyPattern{_metadata.getReshardingKey()},
+                           CollationSpec::kSimpleSpec,
+                           false /* unique */,
+                           true /* enforceUniquenessCheck */,
+                           behaviors,
+                           boost::none /* tsOpts */,
+                           false /* updatedToHandleTimeseriesIndex */);
+                   }
 
                    // Get all indexSpecs need to build.
                    auto* indexBuildsCoordinator = IndexBuildsCoordinator::get(opCtx.get());
@@ -1281,7 +1293,8 @@ ExecutorFuture<void> ReshardingRecipientService::RecipientStateMachine::_updateC
     repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
     auto clientOpTime = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     return WaitForMajorityService::get(opCtx->getServiceContext())
-        .waitUntilMajorityForWrite(clientOpTime, CancellationToken::uncancelable())
+        .waitUntilMajorityForWrite(
+            opCtx->getServiceContext(), clientOpTime, CancellationToken::uncancelable())
         .thenRunOn(**executor)
         .then([this, &factory] {
             auto opCtx = factory.makeOperationContext(&cc());

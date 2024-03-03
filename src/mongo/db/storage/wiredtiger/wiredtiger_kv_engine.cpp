@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/collection_options_gen.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/repl/member_state.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/storage/backup_block.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
@@ -487,6 +488,11 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
         ss << "timing_stress_for_test=[history_store_checkpoint_delay,checkpoint_slow],";
     }
 
+    if (gFeatureFlagPrefetch.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        ss << "prefetch=(available=true,default=false),";
+    }
+
     ss << WiredTigerCustomizationHooks::get(getGlobalServiceContext())
               ->getTableCreateConfig("system");
     ss << WiredTigerExtensions::get(getGlobalServiceContext())->getOpenExtensionsConfig();
@@ -649,22 +655,38 @@ void WiredTigerKVEngine::notifyReplStartupRecoveryComplete(OperationContext* opC
     if (!gEnableAutoCompaction)
         return;
 
-    // Notify the storage engine that it is safe to take stable checkpoints, as the data is now in a
-    // stable state. Background compaction should not be executed if:
-    // - checkpoints are disabled or,
-    // - user writes are not allowed.
-    uassert(8373400,
-            "The autoCompact command should not be executed",
-            opCtx->getServiceContext()->userWritesAllowed() && storageGlobalParams.syncdelay > 0);
+    if (!TestingProctor::instance().isEnabled()) {
+        LOGV2_FATAL_NOTRACE(8730900, "enableAutoCompaction is a test-only parameter");
+    }
 
+    // TODO SERVER-84357: exclude the oplog table.
     StorageEngine::AutoCompactOptions options{/*enable=*/true,
                                               /*runOnce=*/false,
                                               /*freeSpaceTargetMB=*/boost::none,
                                               /*excludedIdents*/ std::vector<StringData>()};
 
-    Lock::GlobalLock lk(opCtx, MODE_IX);
+    // Holding the global lock to prevent racing with storage shutdown. However, no need to hold the
+    // RSTL nor acquire a flow control ticket. This doesn't care about the replica state of the node
+    // and the operation is not replicated.
+    Lock::GlobalLock lk{
+        opCtx,
+        MODE_IS,
+        Date_t::max(),
+        Lock::InterruptBehavior::kThrow,
+        Lock::GlobalLockSkipOptions{.skipFlowControlTicket = true, .skipRSTLLock = true}};
+
     auto status = autoCompact(opCtx, options);
-    uassert(8373401, "Failed to execute autoCompact.", status.isOK());
+    if (status.isOK()) {
+        LOGV2(8704102, "AutoCompact enabled");
+        return;
+    }
+
+    // Proceed with startup if background compaction fails to start. Crash for unexpected error
+    // codes.
+    if (status != ErrorCodes::IllegalOperation && status != ErrorCodes::ObjectIsBusy) {
+        invariantStatusOK(
+            status.withContext("Background compaction failed to start due to an unexpected error"));
+    }
 }
 
 void WiredTigerKVEngine::appendGlobalStats(OperationContext* opCtx, BSONObjBuilder& b) {
@@ -2796,15 +2818,11 @@ void WiredTigerKVEngine::sizeStorerPeriodicFlush() {
 
 Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx,
                                        const StorageEngine::AutoCompactOptions& options) {
-    dassert(shard_role_details::getLocker(opCtx)->isWriteLocked());
+    dassert(shard_role_details::getLocker(opCtx)->isLocked());
 
-    WiredTigerSessionCache* cache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
-    if (cache->isEphemeral()) {
-        return Status::OK();
-    }
-
-    WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
-    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+    auto status = WiredTigerUtil::canRunAutoCompact(opCtx, isEphemeral());
+    if (!status.isOK())
+        return status;
 
     StringBuilder config;
     if (options.enable) {
@@ -2827,17 +2845,15 @@ Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx,
         config << "background=false";
     }
 
+    WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSessionNoTxn()->getSession();
     int ret = s->compact(s, nullptr, config.str().c_str());
-
-    if (ret == EBUSY) {
-        StringBuilder msg;
-        msg << "Auto compact failed to " << (options.enable ? "start" : "stop")
-            << ", resource busy";
-        return Status(ErrorCodes::ObjectIsBusy, msg.str());
-    }
-    uassertStatusOK(wtRCToStatus(ret, s));
-
-    return Status::OK();
+    status = wtRCToStatus(ret, s, "WiredTigerKVEngine::autoCompact()");
+    if (!status.isOK())
+        LOGV2_ERROR(8704101,
+                    "WiredTigerKVEngine::autoCompact() failed",
+                    "config"_attr = config.str(),
+                    "error"_attr = status);
+    return status;
 }
 
 }  // namespace mongo

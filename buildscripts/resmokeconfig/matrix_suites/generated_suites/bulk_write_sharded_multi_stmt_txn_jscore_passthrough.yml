@@ -61,7 +61,6 @@ selector:
   - jstests/core/**/stages*.js
   - jstests/core/**/startup_log.js
   - jstests/core/**/top.js
-  - jstests/core/**/explain_missing_database.js
   - jstests/core/**/geo_2d_explain.js
   - jstests/core/**/geo_s2explain.js
   - jstests/core/**/geo_s2sparse.js
@@ -189,7 +188,6 @@ selector:
   - jstests/core/**/find_and_modify_concurrent_update.js
   - jstests/core/**/fsync.js
   - jstests/core/**/geo_update_btree.js
-  - jstests/core/**/killop_drop_collection.js
   - jstests/core/**/loadserverscripts.js
   - jstests/core/**/mr_killop.js
   - jstests/core/**/removeb.js
@@ -235,4 +233,5 @@ selector:
   - requires_timeseries
   roots:
   - jstests/core/**/*.js
+  - jstests/core_sharding/**/*.js
 test_kind: multi_stmt_txn_passthrough

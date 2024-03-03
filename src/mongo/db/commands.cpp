@@ -966,6 +966,10 @@ private:
         return _command->supportsReadConcern(cmdObj(), level, isImplicitDefault);
     }
 
+    bool isSubjectToIngressAdmissionControl() const override {
+        return _command->isSubjectToIngressAdmissionControl();
+    }
+
     bool supportsReadMirroring() const override {
         return _command->supportsReadMirroring(cmdObj());
     }
@@ -1031,6 +1035,7 @@ void Command::initializeClusterRole(ClusterRole role) {
     for (auto&& [ptr, stat] : {
              std::pair{&_commandsExecuted, "total"},
              std::pair{&_commandsFailed, "failed"},
+             std::pair{&_commandsRejected, "rejected"},
          })
         *ptr = &*MetricBuilder<Counter64>{"commands.{}.{}"_format(_name, stat)}.setRole(role);
     doInitializeClusterRole(role);

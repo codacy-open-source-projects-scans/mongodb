@@ -330,6 +330,16 @@ public:
         return deltas;
     }
 
+    template <typename It>
+    static std::vector<boost::optional<uint128_t>> deltaString(It begin, It end, BSONElement prev) {
+        std::vector<boost::optional<uint128_t>> deltas;
+        for (; begin != end; ++begin) {
+            deltas.push_back(deltaString(*begin, prev));
+            prev = *begin;
+        }
+        return deltas;
+    }
+
     static uint64_t deltaBool(BSONElement val, BSONElement prev) {
         return Simple8bTypeUtil::encodeInt64(val.Bool() - prev.Bool());
     }
@@ -338,6 +348,20 @@ public:
         int64_t delta = val.Date().toMillisSinceEpoch() - prev.Date().toMillisSinceEpoch();
         int64_t prevDelta = prev.Date().toMillisSinceEpoch() - prevprev.Date().toMillisSinceEpoch();
         return deltaOfDelta(delta, prevDelta);
+    }
+
+    template <typename It>
+    static std::vector<boost::optional<uint64_t>> deltaOfDeltaDates(It begin,
+                                                                    It end,
+                                                                    BSONElement prev,
+                                                                    BSONElement prevprev) {
+        std::vector<boost::optional<uint64_t>> deltas;
+        for (; begin != end; ++begin) {
+            deltas.push_back(deltaOfDeltaDate(*begin, prev, prevprev));
+            prevprev = prev;
+            prev = *begin;
+        }
+        return deltas;
     }
 
     static void appendLiteral(BufBuilder& builder, BSONElement elem) {
@@ -1289,6 +1313,115 @@ TEST_F(BSONColumnTest, MultipleSimple8bBlocksAfterControl) {
     verifyDecompression(binData, elems, true);
 }
 
+TEST_F(BSONColumnTest, MultipleSimple8bBlocksAfterControl128) {
+    BSONColumnBuilder cb;
+
+    std::vector<BSONElement> elems;
+    for (int i = 0; i < 100; ++i) {
+        // Generate strings from integer to make it easier to control the delta values
+        auto str = Simple8bTypeUtil::decodeString(i % 2);
+        elems.push_back(createElementString(StringData(str.str.data(), str.size)));
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0100);
+    appendSimple8bBlocks128(
+        expected, deltaString(elems.begin() + 1, elems.end(), elems.front()), 5);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems, true);
+}
+
+TEST_F(BSONColumnTest, MultipleSimple8bBlockRewriteAtEnd) {
+    BSONColumnBuilder cb;
+
+    // This data set uncovered an interesting edge case. Appending 75 elements, call intermediate()
+    // appending the remaining 20 and call intermediate again. This results in the total binary
+    // length not changing in the second intermediate call and the control block from the two
+    // intermediate calls being identical. When calculating the offset for the first byte that
+    // changed in the second intermediate call we must take care to consider the simple8b blocks
+    // that got re-written at the end (to contain more elements).
+    std::vector<Date_t> timestamps = {
+        Date_t::fromMillisSinceEpoch(1709224256311), Date_t::fromMillisSinceEpoch(1709224256318),
+        Date_t::fromMillisSinceEpoch(1709224256326), Date_t::fromMillisSinceEpoch(1709224256333),
+        Date_t::fromMillisSinceEpoch(1709224256340), Date_t::fromMillisSinceEpoch(1709224256348),
+        Date_t::fromMillisSinceEpoch(1709224256355), Date_t::fromMillisSinceEpoch(1709224256363),
+        Date_t::fromMillisSinceEpoch(1709224256370), Date_t::fromMillisSinceEpoch(1709224256378),
+        Date_t::fromMillisSinceEpoch(1709224256385), Date_t::fromMillisSinceEpoch(1709224256392),
+        Date_t::fromMillisSinceEpoch(1709224256400), Date_t::fromMillisSinceEpoch(1709224256407),
+        Date_t::fromMillisSinceEpoch(1709224256415), Date_t::fromMillisSinceEpoch(1709224256422),
+        Date_t::fromMillisSinceEpoch(1709224256429), Date_t::fromMillisSinceEpoch(1709224256437),
+        Date_t::fromMillisSinceEpoch(1709224256444), Date_t::fromMillisSinceEpoch(1709224256452),
+        Date_t::fromMillisSinceEpoch(1709224256459), Date_t::fromMillisSinceEpoch(1709224256466),
+        Date_t::fromMillisSinceEpoch(1709224256474), Date_t::fromMillisSinceEpoch(1709224256481),
+        Date_t::fromMillisSinceEpoch(1709224256489), Date_t::fromMillisSinceEpoch(1709224256496),
+        Date_t::fromMillisSinceEpoch(1709224256504), Date_t::fromMillisSinceEpoch(1709224256511),
+        Date_t::fromMillisSinceEpoch(1709224256519), Date_t::fromMillisSinceEpoch(1709224256526),
+        Date_t::fromMillisSinceEpoch(1709224256533), Date_t::fromMillisSinceEpoch(1709224256541),
+        Date_t::fromMillisSinceEpoch(1709224256548), Date_t::fromMillisSinceEpoch(1709224256556),
+        Date_t::fromMillisSinceEpoch(1709224256563), Date_t::fromMillisSinceEpoch(1709224256570),
+        Date_t::fromMillisSinceEpoch(1709224256578), Date_t::fromMillisSinceEpoch(1709224256585),
+        Date_t::fromMillisSinceEpoch(1709224256592), Date_t::fromMillisSinceEpoch(1709224256600),
+        Date_t::fromMillisSinceEpoch(1709224256607), Date_t::fromMillisSinceEpoch(1709224256614),
+        Date_t::fromMillisSinceEpoch(1709224256622), Date_t::fromMillisSinceEpoch(1709224256629),
+        Date_t::fromMillisSinceEpoch(1709224256636), Date_t::fromMillisSinceEpoch(1709224256644),
+        Date_t::fromMillisSinceEpoch(1709224256651), Date_t::fromMillisSinceEpoch(1709224256658),
+        Date_t::fromMillisSinceEpoch(1709224256666), Date_t::fromMillisSinceEpoch(1709224256673),
+        Date_t::fromMillisSinceEpoch(1709224256681), Date_t::fromMillisSinceEpoch(1709224256688),
+        Date_t::fromMillisSinceEpoch(1709224256695), Date_t::fromMillisSinceEpoch(1709224256703),
+        Date_t::fromMillisSinceEpoch(1709224256710), Date_t::fromMillisSinceEpoch(1709224256718),
+        Date_t::fromMillisSinceEpoch(1709224256725), Date_t::fromMillisSinceEpoch(1709224256733),
+        Date_t::fromMillisSinceEpoch(1709224256740), Date_t::fromMillisSinceEpoch(1709224256747),
+        Date_t::fromMillisSinceEpoch(1709224256755), Date_t::fromMillisSinceEpoch(1709224256762),
+        Date_t::fromMillisSinceEpoch(1709224256769), Date_t::fromMillisSinceEpoch(1709224256777),
+        Date_t::fromMillisSinceEpoch(1709224256784), Date_t::fromMillisSinceEpoch(1709224256792),
+        Date_t::fromMillisSinceEpoch(1709224256799), Date_t::fromMillisSinceEpoch(1709224256806),
+        Date_t::fromMillisSinceEpoch(1709224256814), Date_t::fromMillisSinceEpoch(1709224256821),
+        Date_t::fromMillisSinceEpoch(1709224256829), Date_t::fromMillisSinceEpoch(1709224256836),
+        Date_t::fromMillisSinceEpoch(1709224256843), Date_t::fromMillisSinceEpoch(1709224256851),
+        Date_t::fromMillisSinceEpoch(1709224256858), Date_t::fromMillisSinceEpoch(1709224256866),
+        Date_t::fromMillisSinceEpoch(1709224256873), Date_t::fromMillisSinceEpoch(1709224256880),
+        Date_t::fromMillisSinceEpoch(1709224256888), Date_t::fromMillisSinceEpoch(1709224256895),
+        Date_t::fromMillisSinceEpoch(1709224256903), Date_t::fromMillisSinceEpoch(1709224256910),
+        Date_t::fromMillisSinceEpoch(1709224256917), Date_t::fromMillisSinceEpoch(1709224256925),
+        Date_t::fromMillisSinceEpoch(1709224256932), Date_t::fromMillisSinceEpoch(1709224256940),
+        Date_t::fromMillisSinceEpoch(1709224256947), Date_t::fromMillisSinceEpoch(1709224256954),
+        Date_t::fromMillisSinceEpoch(1709224256962), Date_t::fromMillisSinceEpoch(1709224256969),
+        Date_t::fromMillisSinceEpoch(1709224256976), Date_t::fromMillisSinceEpoch(1709224256984),
+        Date_t::fromMillisSinceEpoch(1709224256991), Date_t::fromMillisSinceEpoch(1709224256999),
+        Date_t::fromMillisSinceEpoch(1709224257006),
+    };
+
+    std::vector<BSONElement> elems;
+    for (auto&& ts : timestamps) {
+        elems.push_back(createDate(ts));
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0100);
+    appendSimple8bBlocks64(
+        expected,
+        deltaOfDeltaDates(elems.begin() + 1, elems.end(), elems.front(), elems.front()),
+        5);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems, true);
+}
+
 TEST_F(BSONColumnTest, LargeDeltaIsLiteral) {
     BSONColumnBuilder cb;
 
@@ -1587,6 +1720,27 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaNoRescale) {
     appendSimple8bControl(expected, 0b1101, 0b0000);
     appendSimple8bBlocks64(
         expected, deltaDouble(deltaEnd, elems.end(), *(deltaEnd - 1), 100000000), 1);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems, true);
+}
+
+TEST_F(BSONColumnTest, DoubleIncreaseScaleNotPossible) {
+    BSONColumnBuilder cb;
+
+    std::vector<BSONElement> elems = {createElementDouble(-153764908544737.4),
+                                      createElementDouble(-85827904635132.83)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock64(expected, deltaDoubleMemory(elems[1], elems[0]));
     appendEOO(expected);
 
     auto binData = cb.finalize();

@@ -209,6 +209,26 @@ tasks:
 ## compile - build bazel targets ##
 ## The bazel migration is in progress & this
 ## task ensures we can build with bazel.
+- name: bazel_workstation_unittests
+  tags: ["assigned_to_jira_team_devprod_build", "bazel_check"]
+  depends_on:
+  - name: version_expansions_gen
+    variant: generate-tasks-for-version
+  commands:
+  - func: "get engflow creds"
+  - func: "scons compile"
+    vars:
+      targets: >-
+        install-all
+        prove-unittests
+      task_compile_flags: >-
+        BAZEL_BUILD_ENABLED=1
+        BAZEL_INTEGRATION_DEBUG=1
+        ICECC=
+        CCACHE=
+        --build-profile=opt
+        --ninja=disabled
+
 # TODO(SERVER-82195): simplify this to avoid duplication of parameters in other tests.
 - name: compile_bazel_dist_test
   tags: ["assigned_to_jira_team_devprod_build", "bazel_check"]
@@ -216,8 +236,6 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
-  - func: "fetch bazel"
   - func: "scons compile"
     vars:
       targets: >-
@@ -234,14 +252,6 @@ tasks:
   - func: "verify build output present"
     vars:
       output: build/fast/mongo/db/commands/libfsync_locked.a
-  - func: "bazel compile (gcc)"
-    vars:
-      targets: src/mongo/db/commands:fsync_locked
-      compiler: gcc
-  - func: "bazel compile (clang)"
-    vars:
-      targets: src/mongo/db/commands:fsync_locked
-      compiler: clang
 
 - name: compile_bazel_dist_test_windows
   tags: ["assigned_to_jira_team_devprod_build", "bazel_check"]
@@ -249,8 +259,6 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
-  - func: "fetch bazel"
   - func: "scons compile"
     vars:
       targets: >-
@@ -268,44 +276,15 @@ tasks:
     vars:
       output: build/fast/mongo/db/commands/fsync_locked.lib
 
-- name: compile_bazel_dist_test_macos
-  tags: ["assigned_to_jira_team_devprod_build", "bazel_check"]
-  depends_on:
-  - name: version_expansions_gen
-    variant: generate-tasks-for-version
-  commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
-  - func: "fetch bazel"
-  - func: "scons compile"
-    vars:
-      targets: >-
-        build/fast/mongo/db/commands/libfsync_locked.a
-        build/fast/mongo/db/commands/libtest_commands_enabled.a
-      # MacOS needs the sandbox_writable_path set to tmpdir to allow the bazel sandbox to write to /data/mci/{id}/tmp
-      task_compile_flags: >-
-        BAZEL_BUILD_ENABLED=1
-        BAZEL_INTEGRATION_DEBUG=1
-        BAZEL_FLAGS="--subcommands --verbose_failures --sandbox_debug"
-        ICECC=
-        --build-profile=fast
-        --ninja=disabled
-        --link-model=static
-        --modules=
-  - func: "verify build output present"
-    vars:
-      output: build/fast/mongo/db/commands/libfsync_locked.a
-
-
 # Validates that the bazel mongo toolchain can be used to compile targets that
 # contain C and asssembly source code files.
 # TODO(SERVER-82195): simplify this to avoid duplication of parameters in other tests.
-- name: compile_bazel_c_and_asm_targets
+- name: compile_bazel_c_and_asm_targets_gcc
   tags: ["assigned_to_jira_team_devprod_build", "bazel_check"]
   depends_on:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
   - func: "fetch bazel"
   - func: "bazel compile (gcc)"
     vars:
@@ -321,8 +300,6 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
-  - func: "fetch bazel"
   - func: "scons compile"
     vars:
       targets: >-
@@ -346,8 +323,6 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
-  - func: "fetch bazel"
   - func: "scons compile"
     vars:
       targets: >-
@@ -372,12 +347,10 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
-  - func: "fetch bazel"
   - func: "scons compile"
     vars:
       targets: >-
-        +visibility_test1
+        +visibility_test1 +visibility_test2
       separate_debug: on
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
@@ -397,14 +370,11 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
-  - func: "fetch bazel"
   - func: "scons compile"
     vars:
       targets: >-
-        +visibility_test1
+        +visibility_test1 +visibility_test2
       separate_debug: on
-      # TODO(SERVER-86893): Remove --config=local once asan+clang is working with remote execution
       task_compile_flags: >-
         BAZEL_BUILD_ENABLED=1
         BAZEL_INTEGRATION_DEBUG=1
@@ -413,7 +383,6 @@ tasks:
         --ninja=disabled
         --link-model=dynamic
         --modules=
-        BAZEL_FLAGS=--config=local
   - func: "verify build output present"
     vars:
       output: build/install/bin/visibility_test1
@@ -424,12 +393,13 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
   - func: "fetch bazel"
   - func: "bazel run"
     vars:
       target: >-
         //src/mongo/platform:visibility_test1
+  teardown_task:
+  - func: "attach bazel invocation"
 
 - name: run_bazel_program_windows
   tags: ["assigned_to_jira_team_devprod_build", "bazel_check"]
@@ -437,7 +407,6 @@ tasks:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
-  # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
   - func: "fetch bazel"
   - func: "bazel run"
     vars:
@@ -449,6 +418,8 @@ tasks:
         --compilation_mode=dbg
         --//bazel/config:build_mode=dbg
         --copt /std:c++20
+  teardown_task:
+  - func: "attach bazel invocation"
 
 ## compile - build all scons targets except unittests ##
 - name: compile_dist_test_half
@@ -2145,7 +2116,7 @@ tasks:
 
 - name: crypt_push
   run_on: rhel8.7-small
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "publish_crypt"]
+  tags: ["assigned_to_jira_team_server_security", "publish_crypt"]
   patchable: false
   stepback: false
   depends_on:
@@ -2356,12 +2327,18 @@ task_groups:
   tags: []
   tasks:
   - compile_bazel_dist_test
-  - compile_bazel_c_and_asm_targets
+  - compile_bazel_c_and_asm_targets_gcc
   - compile_bazel_libunwind
   - compile_bazel_program
   - run_bazel_scons_unittest
   - run_bazel_scons_unittest_sanitize
   - run_bazel_program
+
+- <<: *compile_task_group_template
+  name: bazel_workstation_TG
+  tags: []
+  tasks:
+  - bazel_workstation_unittests
 
 - <<: *compile_bazel_task_group_template
   name: compile_bazel_ninja_TG
@@ -2380,7 +2357,7 @@ task_groups:
   name: compile_bazel_macos_TG
   tags: []
   tasks:
-  - compile_bazel_dist_test_macos
+  - compile_bazel_dist_test
 
 - <<: *compile_task_group_template
   name: compile_upload_benchmarks_TG
@@ -2657,7 +2634,7 @@ task_groups:
   - ninja_dev_compile_smoke_test
 
 - name: clang_tidy_TG
-  tags: ["development_and_release_critical", "run_on_single_variant"]
+  tags: ["development_critical_single_variant"]
   setup_group_can_fail_task: true
   setup_group:
   - command: manifest.load
@@ -2691,7 +2668,7 @@ task_groups:
   - clang_tidy
 
 - name: visibility_test_TG
-  tags: ["default", "run_on_single_variant"]
+  tags: ["default"]
   setup_group_can_fail_task: true
   max_hosts: 1
   setup_group:
@@ -2732,7 +2709,7 @@ task_groups:
   - "stitch_support_run_tests"
 
 - name: crypt_build
-  tags: ["release_critical", "crypt"]
+  tags: ["release_critical", "incompatible_community", "crypt"]
   setup_task:
   - func: "f_expansions_write"
   - func: "apply compile expansions"
@@ -2762,7 +2739,7 @@ task_groups:
   - "crypt_create_lib"
 
 - name: crypt_build_debug_and_test
-  tags: ["default", "run_on_single_variant"]
+  tags: ["default"]
   setup_task:
   - func: "f_expansions_write"
   - func: "apply compile expansions"

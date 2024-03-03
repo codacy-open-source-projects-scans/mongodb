@@ -397,6 +397,10 @@ public:
             return kSupportsReadConcernResult;
         }
 
+        bool isSubjectToIngressAdmissionControl() const override {
+            return !_cmd.getTerm().has_value();
+        }
+
         bool allowsAfterClusterTime() const override {
             return false;
         }
@@ -816,6 +820,7 @@ public:
 
             // The presence of a term in the request indicates that this is an internal replication
             // oplog read request.
+            boost::optional<ScopedAdmissionPriority> admissionPriority;
             if (_cmd.getTerm() && nss == NamespaceString::kRsOplogNamespace) {
                 // Validate term before acquiring locks.
                 auto replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -831,8 +836,7 @@ public:
                 // Stalling on ticket acquisition can cause complicated deadlocks. Primaries may
                 // depend on data reaching secondaries in order to proceed; and secondaries may get
                 // stalled replicating because of an inability to acquire a read ticket.
-                shard_role_details::getLocker(opCtx)->setAdmissionPriority(
-                    AdmissionContext::Priority::kImmediate);
+                admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
             }
 
             // Perform validation checks which don't cause the cursor to be deleted on failure.

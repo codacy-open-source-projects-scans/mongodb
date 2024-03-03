@@ -64,9 +64,52 @@ static constexpr uint8_t kCountMask = 0x0F;
 static constexpr uint8_t kControlMask = 0xF0;
 static constexpr std::ptrdiff_t kNoSimple8bControl = -1;
 static constexpr int kFinalizedOffset = -1;
+static constexpr size_t kDefaultBufferSize = 32;
 
 static constexpr std::array<uint8_t, Simple8bTypeUtil::kMemoryAsInteger + 1>
     kControlByteForScaleIndex = {0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0x80};
+
+template <class F>
+ptrdiff_t incrementSimple8bCount(BufBuilder& buffer,
+                                 ptrdiff_t& controlByteOffset,
+                                 uint8_t scaleIndex,
+                                 F controlBlockWriter) {
+    char* byte;
+    uint8_t count;
+    uint8_t control = kControlByteForScaleIndex[scaleIndex];
+
+    if (controlByteOffset == kNoSimple8bControl) {
+        // Allocate new control byte if we don't already have one. Record its offset so we can find
+        // it even if the underlying buffer reallocates.
+        byte = buffer.skip(1);
+        controlByteOffset = std::distance(buffer.buf(), byte);
+        count = 0;
+    } else {
+        // Read current count from previous control byte
+        byte = buffer.buf() + controlByteOffset;
+
+        // If previous byte was written with a different control byte then we can't re-use and need
+        // to start a new one
+        if ((*byte & kControlMask) != control) {
+            controlBlockWriter(controlByteOffset, buffer.len() - controlByteOffset);
+
+            controlByteOffset = kNoSimple8bControl;
+            incrementSimple8bCount(buffer, controlByteOffset, scaleIndex, controlBlockWriter);
+            return kNoSimple8bControl;
+        }
+        count = (*byte & kCountMask) + 1;
+    }
+
+    // Write back new count and clear offset if we have reached max count
+    *byte = control | (count & kCountMask);
+    if (count + 1 == kMaxCount) {
+        auto prevControlByteOffset = controlByteOffset;
+        controlByteOffset = kNoSimple8bControl;
+        return prevControlByteOffset;
+    }
+
+    return kNoSimple8bControl;
+}
 
 // Encodes the double with the lowest possible scale index. In worst case we will interpret the
 // memory as integer which is guaranteed to succeed.
@@ -338,10 +381,12 @@ private:
      * Performs the reopen for 64 and 128 bit types respectively.
      */
     void _reopen64BitTypes(EncodingState& regular,
+                           EncodingState::Encoder64& encoder,
                            BufBuilder& buffer,
                            int& offset,
                            uint8_t& lastControl) const;
     void _reopen128BitTypes(EncodingState& regular,
+                            EncodingState::Encoder128& encoder,
                             BufBuilder& buffer,
                             int& offset,
                             uint8_t& lastControl) const;
@@ -487,15 +532,13 @@ bool BSONColumnBuilder::BinaryReopen::scan(const char* binary, int size) {
 }
 
 void BSONColumnBuilder::BinaryReopen::reopen(BSONColumnBuilder& builder) const {
-    builder._is.regular._scaleIndex = current.scaleIndex;
-    bool use128bit = uses128bit(lastUncompressed.type());
-    builder._is.regular._storeWith128 = use128bit;
-
     // When the binary ends with an uncompressed element it is simple to re-initialize the
     // compressor
     if (!current.control) {
+        EncodingState::Encoder64& encoder =
+            std::get<EncodingState::Encoder64>(builder._is.regular._encoder);
         // Set last double in previous block (if any).
-        builder._is.regular._lastValueInPrevBlock = last.lastAtEndOfBlock;
+        encoder.lastValueInPrevBlock = last.lastAtEndOfBlock;
 
         // Append the last element to finish setting up the compressor
         builder.append(lastUncompressed);
@@ -507,16 +550,31 @@ void BSONColumnBuilder::BinaryReopen::reopen(BSONColumnBuilder& builder) const {
         return;
     }
 
-    if (!use128bit) {
-        _reopen64BitTypes(
-            builder._is.regular, builder._bufBuilder, builder._is.offset, builder._is.lastControl);
+    if (!uses128bit(lastUncompressed.type())) {
+        EncodingState::Encoder64& encoder =
+            std::get<EncodingState::Encoder64>(builder._is.regular._encoder);
+        encoder.scaleIndex = current.scaleIndex;
+
+        _reopen64BitTypes(builder._is.regular,
+                          encoder,
+                          builder._bufBuilder,
+                          builder._is.offset,
+                          builder._is.lastControl);
     } else {
-        _reopen128BitTypes(
-            builder._is.regular, builder._bufBuilder, builder._is.offset, builder._is.lastControl);
+        EncodingState::Encoder128& encoder =
+            builder._is.regular._encoder.emplace<EncodingState::Encoder128>();
+        _reopen128BitTypes(builder._is.regular,
+                           encoder,
+                           builder._bufBuilder,
+                           builder._is.offset,
+                           builder._is.lastControl);
     }
+
+    builder._is.lastBufLength = builder._bufBuilder.len();
 }
 
 void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
+                                                        EncodingState::Encoder64& encoder,
                                                         BufBuilder& buffer,
                                                         int& offset,
                                                         uint8_t& lastControl) const {
@@ -545,7 +603,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
 
     // When RLE is setup we append as many values as we can to detect when we overflow
     int currIndex = _appendUntilOverflow(
-        s8bBuilder, regular._simple8bBuilder64, overflow, lastForS8b, control, currNumBlocks - 1);
+        s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
 
     // If we have not yet overflowed then continue the same operation from the previous
     // simple8b block
@@ -558,7 +616,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
         int overflowIndex;
         if (current.scaleIndex == last.scaleIndex) {
             overflowIndex = _appendUntilOverflow(s8bBuilder,
-                                                 regular._simple8bBuilder64,
+                                                 encoder.simple8bBuilder,
                                                  overflow,
                                                  lastForS8b,
                                                  last.control,
@@ -576,7 +634,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
             for (auto&& elem : s8b) {
                 last = elem;
             }
-            regular._simple8bBuilder64.setLastForRLE(last);
+            encoder.simple8bBuilder.setLastForRLE(last);
         }
 
         // Check if we overflowed in the first simple8b in this second control block. We can
@@ -623,7 +681,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
 
         if (type == NumberDouble) {
             // Set last value from last in block before previous
-            regular._lastValueInPrevBlock = last.lastAtEndOfBlock;
+            encoder.lastValueInPrevBlock = last.lastAtEndOfBlock;
         }
     } else {
         // Overflow, copy everything from the control byte up to the overflow point
@@ -637,10 +695,10 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
         // Update count inside last control byte
         char* lastControlToUpdate = buffer.buf() + regular._controlByteOffset;
         *lastControlToUpdate =
-            kControlByteForScaleIndex[regular._scaleIndex] | (currIndex & kCountMask);
+            kControlByteForScaleIndex[encoder.scaleIndex] | (currIndex & kCountMask);
 
         // Set last value from last in previous control block
-        regular._lastValueInPrevBlock = current.lastAtEndOfBlock;
+        encoder.lastValueInPrevBlock = current.lastAtEndOfBlock;
 
         // Calculate correct last in previous control, we need to account for our pending
         // values.
@@ -656,10 +714,10 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
             }
 
             auto encoded =
-                Simple8bTypeUtil::encodeDouble(regular._lastValueInPrevBlock, regular._scaleIndex);
+                Simple8bTypeUtil::encodeDouble(encoder.lastValueInPrevBlock, encoder.scaleIndex);
             uassert(8288105, "Invalid double encoding in BSON Column", encoded);
-            regular._lastValueInPrevBlock =
-                Simple8bTypeUtil::decodeDouble(calcDelta(*encoded, delta), regular._scaleIndex);
+            encoder.lastValueInPrevBlock =
+                Simple8bTypeUtil::decodeDouble(calcDelta(*encoded, delta), encoder.scaleIndex);
         }
     }
 
@@ -668,13 +726,16 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
     auto appendPending = [&](const Simple8b<uint64_t>& s8b) {
         for (auto&& elem : s8b) {
             if (elem) {
-                regular._simple8bBuilder64.append(
-                    *elem,
-                    EncodingState::Simple8bBlockWriter(
-                        regular, buffer, EncodingState::NoopControlBlockWriter{}));
+                encoder.append(type,
+                               *elem,
+                               buffer,
+                               regular._controlByteOffset,
+                               EncodingState::NoopControlBlockWriter{});
             } else {
-                regular._simple8bBuilder64.skip(EncodingState::Simple8bBlockWriter(
-                    regular, buffer, EncodingState::NoopControlBlockWriter{}));
+                encoder.skip(type,
+                             buffer,
+                             regular._controlByteOffset,
+                             EncodingState::NoopControlBlockWriter{});
             }
         }
     };
@@ -699,7 +760,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
     }
 
     // Reset last value if RLE is not possible due to the values appended above
-    regular._simple8bBuilder64.resetLastForRLEIfNeeded();
+    encoder.simple8bBuilder.resetLastForRLEIfNeeded();
 
     // Finally we need to set the necessary state to calculate deltas for future inserts. We
     // can take this from our decompressor state.
@@ -722,20 +783,22 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
 
         return d64.materialize(*allocator, lastUncompressed, ""_sd);
     }());
-    // _prevEncoded64 is just set for a few types
+    // _prevEncoded64 is just set for a few types. We don't use Encoder64::initialize() as it
+    // overwrites more members already set by this function.
     if (deltaOfDelta) {
         if (type == jstOID) {
-            regular._prevEncoded64 = d64.lastEncodedValueForDeltaOfDelta;
+            encoder.prevEncoded64 = d64.lastEncodedValueForDeltaOfDelta;
         }
-        regular._prevDelta = d64.lastEncodedValue;
+        encoder.prevDelta = d64.lastEncodedValue;
     } else {
         if (type == NumberDouble) {
-            regular._prevEncoded64 = d64.lastEncodedValue;
+            encoder.prevEncoded64 = d64.lastEncodedValue;
         }
     }
 }
 
 void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
+                                                         EncodingState::Encoder128& encoder,
                                                          BufBuilder& buffer,
                                                          int& offset,
                                                          uint8_t& lastControl) const {
@@ -763,7 +826,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
 
     // When RLE is setup we append as many values as we can to detect when we overflow
     int currIndex = _appendUntilOverflow(
-        s8bBuilder, regular._simple8bBuilder128, overflow, lastForS8b, control, currNumBlocks - 1);
+        s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
 
     // If we have not yet overflowed then continue the same operation from the previous
     // simple8b block
@@ -771,12 +834,8 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
 
         auto blocks = numSimple8bBlocksForControlByte(*last.control);
         // Append values from control block to detect overflow.
-        auto overflowIndex = _appendUntilOverflow(s8bBuilder,
-                                                  regular._simple8bBuilder128,
-                                                  overflow,
-                                                  lastForS8b,
-                                                  last.control,
-                                                  blocks - 1);
+        auto overflowIndex = _appendUntilOverflow(
+            s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, last.control, blocks - 1);
 
         // Check if we overflowed in the first simple8b in this second control block. We can
         // then disregard this control block and proceed as-if we didn't overflow in the
@@ -813,12 +872,13 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
         buffer.appendBuf(control, 1 + (currIndex + 1) * sizeof(uint64_t));
 
         // Set binary offset to this control byte (the binary starts with it, see the copy above)
-        regular._controlByteOffset = control - scannedBinary;
+        regular._controlByteOffset = 0;
+        offset = control - scannedBinary;
 
         // Update count inside last control byte
         char* lastControlToUpdate = buffer.buf() + regular._controlByteOffset;
-        *lastControlToUpdate =
-            kControlByteForScaleIndex[regular._scaleIndex] | (currIndex & kCountMask);
+        *lastControlToUpdate = kControlByteForScaleIndex[Simple8bTypeUtil::kMemoryAsInteger] |
+            (currIndex & kCountMask);
     }
 
     // Append remaining values from our current control block and add all from the next
@@ -826,13 +886,16 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
     auto appendPending = [&](const Simple8b<uint128_t>& s8b) {
         for (auto&& elem : s8b) {
             if (elem) {
-                regular._simple8bBuilder128.append(
-                    *elem,
-                    EncodingState::Simple8bBlockWriter(
-                        regular, buffer, EncodingState::NoopControlBlockWriter{}));
+                encoder.append(lastUncompressed.type(),
+                               *elem,
+                               buffer,
+                               regular._controlByteOffset,
+                               EncodingState::NoopControlBlockWriter{});
             } else {
-                regular._simple8bBuilder128.skip(EncodingState::Simple8bBlockWriter(
-                    regular, buffer, EncodingState::NoopControlBlockWriter{}));
+                encoder.skip(lastUncompressed.type(),
+                             buffer,
+                             regular._controlByteOffset,
+                             EncodingState::NoopControlBlockWriter{});
             }
         }
     };
@@ -855,7 +918,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
     }
 
     // Reset last value if RLE is not possible due to the values appended above
-    regular._simple8bBuilder128.resetLastForRLEIfNeeded();
+    encoder.simple8bBuilder.resetLastForRLEIfNeeded();
 
     // Finally we need to set the necessary state to calculate deltas for future inserts. We
     // can take this from our decompressor state.
@@ -871,7 +934,7 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
         }
         return d128.materialize(*allocator, lastUncompressed, ""_sd);
     }());
-    regular._initializeFromPrevious();
+    encoder.initialize(regular._previous());
 }
 
 template <typename T>
@@ -946,14 +1009,14 @@ int BSONColumnBuilder::BinaryReopen::_appendUntilOverflow(Simple8bBuilder<T>& ov
 
 BSONColumnBuilder::InternalState::InternalState() : lastControl(bsoncolumn::kInvalidControlByte) {}
 
-BSONColumnBuilder::BSONColumnBuilder() : BSONColumnBuilder(BufBuilder()) {}
+BSONColumnBuilder::BSONColumnBuilder() : BSONColumnBuilder(BufBuilder(kDefaultBufferSize)) {}
 
 BSONColumnBuilder::BSONColumnBuilder(BufBuilder builder) : _bufBuilder(std::move(builder)) {
     _bufBuilder.reset();
 }
 
 BSONColumnBuilder::BSONColumnBuilder(const char* binary, int size)
-    : BSONColumnBuilder(BufBuilder()) {
+    : BSONColumnBuilder(BufBuilder(kDefaultBufferSize)) {
     using namespace bsoncolumn;
 
     // Handle empty case
@@ -1147,18 +1210,23 @@ BSONColumnBuilder::BinaryDiff BSONColumnBuilder::intermediate() {
     // Copy data into new buffer that we need to keep in the builder. If we have no control byte in
     // regular mode we're currently writing on, then we can consume the entire binary. Otherwise we
     // can only consume up to this control byte as it may change in the future.
-    BufBuilder buffer;
-    if (controlOffset == kNoSimple8bControl) {
-        newState.offset += length;
-        newState.lastControl = kInvalidControlByte;
-    } else {
+    BufBuilder buffer = [&]() {
+        if (controlOffset == kNoSimple8bControl) {
+            newState.offset += length;
+            newState.lastControl = kInvalidControlByte;
+            newState.lastBufLength = 0;
+            return BufBuilder(/*initsize=*/0);
+        }
+
         // After calling intermediate, the control byte we're currently working on need to be the
         // first byte in the new binary going forward. This is the first byte that may change when
         // more data is appended.
+        BufBuilder buffer(length - controlOffset);
         buffer.appendChar(lastControlByte);
         buffer.appendBuf(_bufBuilder.buf() + controlOffset + 1, length - controlOffset - 1);
         newState.regular._controlByteOffset = 0;
         newState.offset += controlOffset;
+        newState.lastBufLength = length - controlOffset;
 
         // Compare the control byte at the beginning of the finalized binary against state of last
         // finalized binary. If they are the same we can advance the point of the first byte that
@@ -1168,14 +1236,17 @@ BSONColumnBuilder::BinaryDiff BSONColumnBuilder::intermediate() {
             // When lastControl has been set, the control byte we're working on is always at the
             // beginning of the binary.
             uint8_t controlByteThisBinary = *_bufBuilder.buf();
-            if (prevOffset != 0 && _is.lastControl == controlByteThisBinary) {
-                identicalBytes = length - controlOffset;
+            if (prevOffset != 0 && _is.lastControl == controlByteThisBinary &&
+                _is.lastBufLength > controlOffset) {
+                identicalBytes = _is.lastBufLength - controlOffset;
             }
             newState.lastControl = controlByteThisBinary;
         } else {
             newState.lastControl = *(_bufBuilder.buf() + controlOffset);
         }
-    }
+
+        return buffer;
+    }();
 
     // Swap buffers so we return the finalized one and keep the data we need to keep in this
     // builder.
@@ -1235,8 +1306,228 @@ bool Element::operator==(const Element& rhs) const {
     return memcmp(value.value(), rhs.value.value(), size) == 0;
 }
 
-EncodingState::EncodingState()
-    : _controlByteOffset(kNoSimple8bControl), _scaleIndex(Simple8bTypeUtil::kMemoryAsInteger) {
+EncodingState::Encoder64::Encoder64() : scaleIndex(Simple8bTypeUtil::kMemoryAsInteger) {}
+
+void EncodingState::Encoder64::initialize(Element elem) {
+    switch (elem.type) {
+        case NumberDouble: {
+            lastValueInPrevBlock = elem.value.Double();
+            std::tie(prevEncoded64, scaleIndex) = scaleAndEncodeDouble(lastValueInPrevBlock, 0);
+        } break;
+        case jstOID: {
+            prevEncoded64 = Simple8bTypeUtil::encodeObjectId(elem.value.ObjectID());
+        } break;
+        default:
+            break;
+    }
+}
+
+template <class F>
+bool EncodingState::Encoder64::appendDelta(Element elem,
+                                           Element previous,
+                                           BufBuilder& buffer,
+                                           ptrdiff_t& controlByteOffset,
+                                           F controlBlockWriter) {
+    // Variable to indicate that it was possible to encode this BSONElement as an integer
+    // for storage inside Simple8b. If encoding is not possible the element is stored as
+    // uncompressed.
+    bool encodingPossible = true;
+    // Value to store in Simple8b if encoding is possible.
+    int64_t value = 0;
+    switch (elem.type) {
+        case NumberDouble:
+            return _appendDouble(elem.value.Double(),
+                                 previous.value.Double(),
+                                 buffer,
+                                 controlByteOffset,
+                                 controlBlockWriter);
+        case NumberInt:
+            value = calcDelta(elem.value.Int32(), previous.value.Int32());
+            break;
+        case NumberLong:
+            value = calcDelta(elem.value.Int64(), previous.value.Int64());
+            break;
+        case jstOID: {
+            auto oid = elem.value.ObjectID();
+            auto prevOid = previous.value.ObjectID();
+            encodingPossible = objectIdDeltaPossible(oid, prevOid);
+            if (!encodingPossible)
+                break;
+
+            int64_t curEncoded = Simple8bTypeUtil::encodeObjectId(oid);
+            value = calcDelta(curEncoded, prevEncoded64);
+            prevEncoded64 = curEncoded;
+            break;
+        }
+        case bsonTimestamp: {
+            value = calcDelta(elem.value.TimestampValue(), previous.value.TimestampValue());
+            break;
+        }
+        case Date:
+            value = calcDelta(elem.value.Date().toMillisSinceEpoch(),
+                              previous.value.Date().toMillisSinceEpoch());
+            break;
+        case Bool:
+            value = calcDelta(elem.value.Boolean(), previous.value.Boolean());
+            break;
+        case Undefined:
+        case jstNULL:
+            value = 0;
+            break;
+        case RegEx:
+        case DBRef:
+        case CodeWScope:
+        case Symbol:
+        case Object:
+        case Array:
+            encodingPossible = false;
+            break;
+        default:
+            MONGO_UNREACHABLE;
+    };
+    if (usesDeltaOfDelta(elem.type)) {
+        int64_t currentDelta = value;
+        value = calcDelta(currentDelta, prevDelta);
+        prevDelta = currentDelta;
+    }
+    if (encodingPossible) {
+        return append(elem.type,
+                      Simple8bTypeUtil::encodeInt64(value),
+                      buffer,
+                      controlByteOffset,
+                      controlBlockWriter);
+    }
+    return false;
+}
+
+template <class F>
+bool EncodingState::Encoder64::append(BSONType type,
+                                      uint64_t value,
+                                      BufBuilder& buffer,
+                                      ptrdiff_t& controlByteOffset,
+                                      F controlBlockWriter) {
+    return simple8bBuilder.append(
+        value,
+        Simple8bBlockWriter64<F>(*this, buffer, controlByteOffset, type, controlBlockWriter));
+}
+
+template <class F>
+void EncodingState::Encoder64::skip(BSONType type,
+                                    BufBuilder& buffer,
+                                    ptrdiff_t& controlByteOffset,
+                                    F controlBlockWriter) {
+    simple8bBuilder.skip(
+        Simple8bBlockWriter64<F>(*this, buffer, controlByteOffset, type, controlBlockWriter));
+}
+
+template <class F>
+void EncodingState::Encoder64::flush(BSONType type,
+                                     BufBuilder& buffer,
+                                     ptrdiff_t& controlByteOffset,
+                                     F controlBlockWriter) {
+    simple8bBuilder.flush(
+        Simple8bBlockWriter64<F>(*this, buffer, controlByteOffset, type, controlBlockWriter));
+}
+
+void EncodingState::Encoder128::initialize(Element elem) {
+    switch (elem.type) {
+        case String:
+        case Code: {
+            prevEncoded128 = Simple8bTypeUtil::encodeString(elem.value.String());
+        } break;
+        case BinData: {
+            auto binData = elem.value.BinData();
+            prevEncoded128 = Simple8bTypeUtil::encodeBinary(static_cast<const char*>(binData.data),
+                                                            binData.length);
+        } break;
+        case NumberDecimal: {
+            prevEncoded128 = Simple8bTypeUtil::encodeDecimal128(elem.value.Decimal());
+        } break;
+        default:
+            break;
+    }
+}
+
+template <class F>
+bool EncodingState::Encoder128::appendDelta(Element elem,
+                                            Element previous,
+                                            BufBuilder& buffer,
+                                            ptrdiff_t& controlByteOffset,
+                                            F controlBlockWriter) {
+    auto appendEncoded = [&](int128_t encoded) {
+        // If previous wasn't encodable we cannot store 0 in Simple8b as that would create
+        // an ambiguity between 0 and repeat of previous
+        if (prevEncoded128 || encoded != 0) {
+            bool appended = append(
+                elem.type,
+                Simple8bTypeUtil::encodeInt128(calcDelta(encoded, prevEncoded128.value_or(0))),
+                buffer,
+                controlByteOffset,
+                controlBlockWriter);
+            prevEncoded128 = encoded;
+            return appended;
+        }
+        return false;
+    };
+
+    switch (elem.type) {
+        case String:
+        case Code:
+            if (auto encoded = Simple8bTypeUtil::encodeString(elem.value.String())) {
+                return appendEncoded(*encoded);
+            }
+            break;
+        case BinData: {
+            auto binData = elem.value.BinData();
+            auto prevBinData = previous.value.BinData();
+            // We only do delta encoding of binary if the binary type and size are
+            // exactly the same. To support size difference we'd need to add a count to
+            // be able to reconstruct binaries starting with zero bytes. We don't want
+            // to waste bits for this.
+            if (binData.length != prevBinData.length || binData.type != prevBinData.type)
+                return false;
+
+            if (auto encoded = Simple8bTypeUtil::encodeBinary(
+                    static_cast<const char*>(binData.data), binData.length)) {
+                return appendEncoded(*encoded);
+            }
+        } break;
+        case NumberDecimal:
+            return appendEncoded(Simple8bTypeUtil::encodeDecimal128(elem.value.Decimal()));
+            break;
+        default:
+            MONGO_UNREACHABLE;
+    };
+    return false;
+}
+
+template <class F>
+bool EncodingState::Encoder128::append(BSONType type,
+                                       uint128_t value,
+                                       BufBuilder& buffer,
+                                       ptrdiff_t& controlByteOffset,
+                                       F controlBlockWriter) {
+    return simple8bBuilder.append(
+        value, Simple8bBlockWriter128<F>(buffer, controlByteOffset, controlBlockWriter));
+}
+
+template <class F>
+void EncodingState::Encoder128::skip(BSONType type,
+                                     BufBuilder& buffer,
+                                     ptrdiff_t& controlByteOffset,
+                                     F controlBlockWriter) {
+    simple8bBuilder.skip(Simple8bBlockWriter128<F>(buffer, controlByteOffset, controlBlockWriter));
+}
+
+template <class F>
+void EncodingState::Encoder128::flush(BSONType type,
+                                      BufBuilder& buffer,
+                                      ptrdiff_t& controlByteOffset,
+                                      F controlBlockWriter) {
+    simple8bBuilder.flush(Simple8bBlockWriter128<F>(buffer, controlByteOffset, controlBlockWriter));
+}
+
+EncodingState::EncodingState() : _controlByteOffset(kNoSimple8bControl) {
     // Store EOO type with empty field name as previous.
     _storePrevious(BSONElement());
 }
@@ -1250,138 +1541,39 @@ void EncodingState::append(Element elem, BufBuilder& buffer, F controlBlockWrite
     // and write uncompressed literal. Reset all default values.
     if (previous.type != elem.type) {
         _storePrevious(elem);
-        _simple8bBuilder128.flush(Simple8bBlockWriter<F>(*this, buffer, controlBlockWriter));
-        _simple8bBuilder64.flush(Simple8bBlockWriter<F>(*this, buffer, controlBlockWriter));
+        visit(
+            [&](auto& encoder) {
+                encoder.flush(type, buffer, _controlByteOffset, controlBlockWriter);
+            },
+            _encoder);
+
         _writeLiteralFromPrevious(buffer, controlBlockWriter);
         return;
     }
 
+    visit([&](auto& encoder) { appendDelta(encoder, elem, previous, buffer, controlBlockWriter); },
+          _encoder);
+}
+
+template <class Encoder, class F>
+void EncodingState::appendDelta(
+    Encoder& encoder, Element elem, Element previous, BufBuilder& buffer, F controlBlockWriter) {
+    auto type = elem.type;
     // Store delta in Simple-8b if types match
     bool compressed = !usesDeltaOfDelta(type) && elem == previous;
     if (compressed) {
-        if (_storeWith128) {
-            _simple8bBuilder128.append(0,
-                                       Simple8bBlockWriter<F>(*this, buffer, controlBlockWriter));
-        } else {
-            _simple8bBuilder64.append(0, Simple8bBlockWriter<F>(*this, buffer, controlBlockWriter));
-        }
+        encoder.append(type, 0, buffer, _controlByteOffset, controlBlockWriter);
     }
 
     if (!compressed) {
-        if (_storeWith128) {
-            auto appendEncoded = [&](int128_t encoded) {
-                // If previous wasn't encodable we cannot store 0 in Simple8b as that would create
-                // an ambiguity between 0 and repeat of previous
-                if (_prevEncoded128 || encoded != 0) {
-                    compressed = _simple8bBuilder128.append(
-                        Simple8bTypeUtil::encodeInt128(
-                            calcDelta(encoded, _prevEncoded128.value_or(0))),
-                        Simple8bBlockWriter(*this, buffer, controlBlockWriter));
-                    _prevEncoded128 = encoded;
-                }
-            };
-
-            switch (type) {
-                case String:
-                case Code:
-                    if (auto encoded = Simple8bTypeUtil::encodeString(elem.value.String())) {
-                        appendEncoded(*encoded);
-                    }
-                    break;
-                case BinData: {
-                    auto binData = elem.value.BinData();
-                    auto prevBinData = previous.value.BinData();
-                    // We only do delta encoding of binary if the binary type and size are
-                    // exactly the same. To support size difference we'd need to add a count to
-                    // be able to reconstruct binaries starting with zero bytes. We don't want
-                    // to waste bits for this.
-                    if (binData.length != prevBinData.length || binData.type != prevBinData.type)
-                        break;
-
-                    if (auto encoded = Simple8bTypeUtil::encodeBinary(
-                            static_cast<const char*>(binData.data), binData.length)) {
-                        appendEncoded(*encoded);
-                    }
-                } break;
-                case NumberDecimal:
-                    appendEncoded(Simple8bTypeUtil::encodeDecimal128(elem.value.Decimal()));
-                    break;
-                default:
-                    MONGO_UNREACHABLE;
-            };
-        } else if (type == NumberDouble) {
-            compressed = _appendDouble(
-                elem.value.Double(), previous.value.Double(), buffer, controlBlockWriter);
-        } else {
-            // Variable to indicate that it was possible to encode this BSONElement as an integer
-            // for storage inside Simple8b. If encoding is not possible the element is stored as
-            // uncompressed.
-            bool encodingPossible = true;
-            // Value to store in Simple8b if encoding is possible.
-            int64_t value = 0;
-            switch (type) {
-                case NumberInt:
-                    value = calcDelta(elem.value.Int32(), previous.value.Int32());
-                    break;
-                case NumberLong:
-                    value = calcDelta(elem.value.Int64(), previous.value.Int64());
-                    break;
-                case jstOID: {
-                    auto oid = elem.value.ObjectID();
-                    auto prevOid = previous.value.ObjectID();
-                    encodingPossible = objectIdDeltaPossible(oid, prevOid);
-                    if (!encodingPossible)
-                        break;
-
-                    int64_t curEncoded = Simple8bTypeUtil::encodeObjectId(oid);
-                    value = calcDelta(curEncoded, _prevEncoded64);
-                    _prevEncoded64 = curEncoded;
-                    break;
-                }
-                case bsonTimestamp: {
-                    value = calcDelta(elem.value.TimestampValue(), previous.value.TimestampValue());
-                    break;
-                }
-                case Date:
-                    value = calcDelta(elem.value.Date().toMillisSinceEpoch(),
-                                      previous.value.Date().toMillisSinceEpoch());
-                    break;
-                case Bool:
-                    value = calcDelta(elem.value.Boolean(), previous.value.Boolean());
-                    break;
-                case Undefined:
-                case jstNULL:
-                    value = 0;
-                    break;
-                case RegEx:
-                case DBRef:
-                case CodeWScope:
-                case Symbol:
-                case Object:
-                case Array:
-                    encodingPossible = false;
-                    break;
-                default:
-                    MONGO_UNREACHABLE;
-            };
-            if (usesDeltaOfDelta(type)) {
-                int64_t currentDelta = value;
-                value = calcDelta(currentDelta, _prevDelta);
-                _prevDelta = currentDelta;
-            }
-            if (encodingPossible) {
-                compressed = _simple8bBuilder64.append(
-                    Simple8bTypeUtil::encodeInt64(value),
-                    Simple8bBlockWriter(*this, buffer, controlBlockWriter));
-            }
-        }
+        compressed =
+            encoder.appendDelta(elem, previous, buffer, _controlByteOffset, controlBlockWriter);
     }
     _storePrevious(elem);
 
     // Store uncompressed literal if value is outside of range of encodable values.
     if (!compressed) {
-        _simple8bBuilder128.flush(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
-        _simple8bBuilder64.flush(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
+        encoder.flush(type, buffer, _controlByteOffset, controlBlockWriter);
         _writeLiteralFromPrevious(buffer, controlBlockWriter);
     }
 }
@@ -1389,34 +1581,40 @@ void EncodingState::append(Element elem, BufBuilder& buffer, F controlBlockWrite
 template <class F>
 void EncodingState::skip(BufBuilder& buffer, F controlBlockWriter) {
     auto before = buffer.len();
-    if (_storeWith128) {
-        _simple8bBuilder128.skip(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
-    } else {
-        _simple8bBuilder64.skip(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
-    }
+    visit(
+        [&](auto& encoder) {
+            encoder.skip(_previous().type, buffer, _controlByteOffset, controlBlockWriter);
+        },
+        _encoder);
+
     // Rescale previous known value if this skip caused Simple-8b blocks to be written
     if (before != buffer.len() && _previous().type == NumberDouble) {
-        std::tie(_prevEncoded64, _scaleIndex) = scaleAndEncodeDouble(_lastValueInPrevBlock, 0);
+        auto& encoder = std::get<Encoder64>(_encoder);
+        std::tie(encoder.prevEncoded64, encoder.scaleIndex) =
+            scaleAndEncodeDouble(encoder.lastValueInPrevBlock, 0);
     }
 }
 
 template <class F>
 void EncodingState::flush(BufBuilder& buffer, F controlBlockWriter) {
-    _simple8bBuilder128.flush(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
-    _simple8bBuilder64.flush(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
+    visit(
+        [&](auto& encoder) {
+            encoder.flush(_previous().type, buffer, _controlByteOffset, controlBlockWriter);
+        },
+        _encoder);
 
     if (_controlByteOffset != kNoSimple8bControl) {
         controlBlockWriter(_controlByteOffset, buffer.len() - _controlByteOffset);
     }
 }
 
-boost::optional<Simple8bBuilder<uint64_t>> EncodingState::_tryRescalePending(
-    int64_t encoded, uint8_t newScaleIndex) {
+boost::optional<Simple8bBuilder<uint64_t>> EncodingState::Encoder64::_tryRescalePending(
+    int64_t encoded, uint8_t newScaleIndex) const {
     // Encode last value in the previous block with old and new scale index. We know that scaling
     // with the old index is possible.
-    int64_t prev = *Simple8bTypeUtil::encodeDouble(_lastValueInPrevBlock, _scaleIndex);
+    int64_t prev = *Simple8bTypeUtil::encodeDouble(lastValueInPrevBlock, scaleIndex);
     boost::optional<int64_t> prevRescaled =
-        Simple8bTypeUtil::encodeDouble(_lastValueInPrevBlock, newScaleIndex);
+        Simple8bTypeUtil::encodeDouble(lastValueInPrevBlock, newScaleIndex);
 
     // Fail if we could not rescale
     bool possible = prevRescaled.has_value();
@@ -1433,7 +1631,7 @@ boost::optional<Simple8bBuilder<uint64_t>> EncodingState::_tryRescalePending(
 
     // Iterate over our pending values, decode them back into double, rescale and append to our new
     // Simple8b builder
-    for (const auto& pending : _simple8bBuilder64) {
+    for (const auto& pending : simple8bBuilder) {
         if (!pending) {
             builder.skip(writeFn);
             continue;
@@ -1442,7 +1640,7 @@ boost::optional<Simple8bBuilder<uint64_t>> EncodingState::_tryRescalePending(
         // Apply delta to previous, decode to double and rescale
         prev = expandDelta(prev, Simple8bTypeUtil::decodeInt64(*pending));
         auto rescaled = Simple8bTypeUtil::encodeDouble(
-            Simple8bTypeUtil::decodeDouble(prev, _scaleIndex), newScaleIndex);
+            Simple8bTypeUtil::decodeDouble(prev, scaleIndex), newScaleIndex);
 
         // Fail if we could not rescale
         if (!rescaled || !prevRescaled)
@@ -1472,81 +1670,84 @@ boost::optional<Simple8bBuilder<uint64_t>> EncodingState::_tryRescalePending(
 }
 
 template <class F>
-bool EncodingState::_appendDouble(double value,
-                                  double previous,
-                                  BufBuilder& buffer,
-                                  F controlBlockWriter) {
+bool EncodingState::Encoder64::_appendDouble(double value,
+                                             double previous,
+                                             BufBuilder& buffer,
+                                             ptrdiff_t& controlByteOffset,
+                                             F controlBlockWriter) {
     // Scale with lowest possible scale index
-    auto [encoded, scaleIndex] = scaleAndEncodeDouble(value, _scaleIndex);
+    auto [encoded, scale] = scaleAndEncodeDouble(value, scaleIndex);
 
-    if (scaleIndex != _scaleIndex) {
+    if (scale != scaleIndex) {
         // New value need higher scale index. We have two choices:
         // (1) Re-scale pending values to use this larger scale factor
         // (2) Flush pending and start a new block with this higher scale factor
         // We try both options and select the one that compresses best
-        auto rescaled = _tryRescalePending(encoded, scaleIndex);
+        auto rescaled = _tryRescalePending(encoded, scale);
         if (rescaled) {
             // Re-scale possible, use this Simple8b builder
-            std::swap(_simple8bBuilder64, *rescaled);
-            _prevEncoded64 = encoded;
-            _scaleIndex = scaleIndex;
+            std::swap(simple8bBuilder, *rescaled);
+            prevEncoded64 = encoded;
+            scaleIndex = scale;
             return true;
         }
 
         // Re-scale not possible, flush and start new block with the higher scale factor
-        _simple8bBuilder64.flush(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
-        if (_controlByteOffset != kNoSimple8bControl) {
-            controlBlockWriter(_controlByteOffset, buffer.len() - _controlByteOffset);
+        flush(NumberDouble, buffer, controlByteOffset, controlBlockWriter);
+        if (controlByteOffset != kNoSimple8bControl) {
+            controlBlockWriter(controlByteOffset, buffer.len() - controlByteOffset);
         }
-        _controlByteOffset = kNoSimple8bControl;
+        controlByteOffset = kNoSimple8bControl;
 
         // Make sure value and previous are using the same scale factor.
         uint8_t prevScaleIndex;
-        std::tie(_prevEncoded64, prevScaleIndex) = scaleAndEncodeDouble(previous, scaleIndex);
-        if (scaleIndex != prevScaleIndex) {
-            std::tie(encoded, scaleIndex) = scaleAndEncodeDouble(value, prevScaleIndex);
-            std::tie(_prevEncoded64, prevScaleIndex) = scaleAndEncodeDouble(previous, scaleIndex);
+        std::tie(prevEncoded64, prevScaleIndex) = scaleAndEncodeDouble(previous, scale);
+        if (scale != prevScaleIndex) {
+            std::tie(encoded, scale) = scaleAndEncodeDouble(value, prevScaleIndex);
+            std::tie(prevEncoded64, prevScaleIndex) = scaleAndEncodeDouble(previous, scale);
         }
 
         // Record our new scale factor
-        _scaleIndex = scaleIndex;
+        scaleIndex = scale;
     }
 
     // Append delta and check if we wrote a Simple8b block. If we did we may be able to reduce the
     // scale factor when starting a new block
     auto before = buffer.len();
-    if (!_simple8bBuilder64.append(
-            Simple8bTypeUtil::encodeInt64(calcDelta(encoded, _prevEncoded64)),
-            Simple8bBlockWriter(*this, buffer, controlBlockWriter)))
+    if (!append(NumberDouble,
+                Simple8bTypeUtil::encodeInt64(calcDelta(encoded, prevEncoded64)),
+                buffer,
+                controlByteOffset,
+                controlBlockWriter))
         return false;
 
     if (buffer.len() == before) {
-        _prevEncoded64 = encoded;
+        prevEncoded64 = encoded;
         return true;
     }
 
     // Reset the scale factor to 0 and append all pending values to a new Simple8bBuilder. In
     // the worse case we will end up with an identical scale factor.
-    auto prevScale = _scaleIndex;
-    std::tie(_prevEncoded64, _scaleIndex) = scaleAndEncodeDouble(_lastValueInPrevBlock, 0);
+    auto prevScale = scaleIndex;
+    std::tie(prevEncoded64, scaleIndex) = scaleAndEncodeDouble(lastValueInPrevBlock, 0);
 
     // Create a new Simple8bBuilder.
     Simple8bBuilder<uint64_t> builder;
-    std::swap(_simple8bBuilder64, builder);
+    std::swap(simple8bBuilder, builder);
 
     // Iterate over previous pending values and re-add them recursively. That will increase the
     // scale factor as needed. No need to set '_prevEncoded64' in this code path as that will be
     // done in the recursive call to '_appendDouble' below.
-    auto prev = _lastValueInPrevBlock;
+    auto prev = lastValueInPrevBlock;
     auto prevEncoded = *Simple8bTypeUtil::encodeDouble(prev, prevScale);
     for (const auto& pending : builder) {
         if (pending) {
             prevEncoded = expandDelta(prevEncoded, Simple8bTypeUtil::decodeInt64(*pending));
             auto val = Simple8bTypeUtil::decodeDouble(prevEncoded, prevScale);
-            _appendDouble(val, prev, buffer, controlBlockWriter);
+            _appendDouble(val, prev, buffer, controlByteOffset, controlBlockWriter);
             prev = val;
         } else {
-            _simple8bBuilder64.skip(Simple8bBlockWriter(*this, buffer, controlBlockWriter));
+            skip(NumberDouble, buffer, controlByteOffset, controlBlockWriter);
         }
     }
     return true;
@@ -1589,11 +1790,6 @@ void EncodingState::_writeLiteralFromPrevious(BufBuilder& buffer, F controlBlock
 
     // Reset state
     _controlByteOffset = kNoSimple8bControl;
-    _scaleIndex = Simple8bTypeUtil::kMemoryAsInteger;
-    _prevDelta = 0;
-    _prevEncoded64 = 0;
-    _prevEncoded128 = boost::none;
-    _lastValueInPrevBlock = 0;
 
     _initializeFromPrevious();
 }
@@ -1601,30 +1797,10 @@ void EncodingState::_writeLiteralFromPrevious(BufBuilder& buffer, F controlBlock
 void EncodingState::_initializeFromPrevious() {
     // Initialize previous encoded when needed
     auto previous = _previous();
-    auto type = previous.type;
-    _storeWith128 = uses128bit(type);
-    switch (type) {
-        case NumberDouble:
-            _lastValueInPrevBlock = previous.value.Double();
-            std::tie(_prevEncoded64, _scaleIndex) = scaleAndEncodeDouble(_lastValueInPrevBlock, 0);
-            break;
-        case String:
-        case Code:
-            _prevEncoded128 = Simple8bTypeUtil::encodeString(previous.value.String());
-            break;
-        case BinData: {
-            auto binData = previous.value.BinData();
-            _prevEncoded128 = Simple8bTypeUtil::encodeBinary(static_cast<const char*>(binData.data),
-                                                             binData.length);
-        } break;
-        case NumberDecimal:
-            _prevEncoded128 = Simple8bTypeUtil::encodeDecimal128(previous.value.Decimal());
-            break;
-        case jstOID:
-            _prevEncoded64 = Simple8bTypeUtil::encodeObjectId(previous.value.ObjectID());
-            break;
-        default:
-            break;
+    if (uses128bit(previous.type)) {
+        _encoder.emplace<Encoder128>().initialize(previous);
+    } else {
+        _encoder.emplace<Encoder64>().initialize(previous);
     }
 }
 
@@ -1632,7 +1808,11 @@ template <class F>
 ptrdiff_t EncodingState::_incrementSimple8bCount(BufBuilder& buffer, F controlBlockWriter) {
     char* byte;
     uint8_t count;
-    uint8_t control = kControlByteForScaleIndex[_scaleIndex];
+    uint8_t scaleIndex = Simple8bTypeUtil::kMemoryAsInteger;
+    if (auto encoder = std::get_if<Encoder64>(&_encoder)) {
+        scaleIndex = encoder->scaleIndex;
+    }
+    uint8_t control = kControlByteForScaleIndex[scaleIndex];
 
     if (_controlByteOffset == kNoSimple8bControl) {
         // Allocate new control byte if we don't already have one. Record its offset so we can find
@@ -1668,9 +1848,25 @@ ptrdiff_t EncodingState::_incrementSimple8bCount(BufBuilder& buffer, F controlBl
 }
 
 template <class F>
-void EncodingState::Simple8bBlockWriter<F>::operator()(uint64_t block) {
+void EncodingState::Simple8bBlockWriter128<F>::operator()(uint64_t block) {
     // Write/update block count
-    ptrdiff_t fullControlOffset = _encoder._incrementSimple8bCount(_buffer, _controlBlockWriter);
+    ptrdiff_t fullControlOffset = incrementSimple8bCount(
+        _buffer, _controlByteOffset, Simple8bTypeUtil::kMemoryAsInteger, _controlBlockWriter);
+
+    // Write Simple-8b block in little endian byte order
+    _buffer.appendNum(block);
+
+    // Write control block if this Simple-8b block made it full.
+    if (fullControlOffset != kNoSimple8bControl) {
+        _controlBlockWriter(fullControlOffset, _buffer.len() - fullControlOffset);
+    }
+}
+
+template <class F>
+void EncodingState::Simple8bBlockWriter64<F>::operator()(uint64_t block) {
+    // Write/update block count
+    ptrdiff_t fullControlOffset = incrementSimple8bCount(
+        _buffer, _controlByteOffset, _encoder.scaleIndex, _controlBlockWriter);
 
     // Write Simple-8b block in little endian byte order
     _buffer.appendNum(block);
@@ -1680,26 +1876,24 @@ void EncodingState::Simple8bBlockWriter<F>::operator()(uint64_t block) {
         _controlBlockWriter(fullControlOffset, _buffer.len() - fullControlOffset);
     }
 
-    auto previous = _encoder._previous();
-    if (previous.type == NumberDouble) {
-        // If we are double we need to remember the last value written in the block. There could
-        // be multiple values pending still so we need to loop backwards and re-construct the
-        // value before the first value in pending.
-        auto current = _encoder._prevEncoded64;
-        for (auto it = _encoder._simple8bBuilder64.rbegin(),
-                  end = _encoder._simple8bBuilder64.rend();
-             it != end;
-             ++it) {
-            if (const boost::optional<uint64_t>& encoded = *it) {
-                // As we're going backwards we need to 'expandDelta' backwards which is the same
-                // as 'calcDelta'.
-                current = calcDelta(current, Simple8bTypeUtil::decodeInt64(*encoded));
-            }
-        }
+    // If we are double we need to remember the last value written in the block. There could
+    // be multiple values pending still so we need to loop backwards and re-construct the
+    // value before the first value in pending.
+    if (_type != NumberDouble)
+        return;
 
-        _encoder._lastValueInPrevBlock =
-            Simple8bTypeUtil::decodeDouble(current, _encoder._scaleIndex);
+    auto current = _encoder.prevEncoded64;
+    for (auto it = _encoder.simple8bBuilder.rbegin(), end = _encoder.simple8bBuilder.rend();
+         it != end;
+         ++it) {
+        if (const boost::optional<uint64_t>& encoded = *it) {
+            // As we're going backwards we need to 'expandDelta' backwards which is the same
+            // as 'calcDelta'.
+            current = calcDelta(current, Simple8bTypeUtil::decodeInt64(*encoded));
+        }
     }
+
+    _encoder.lastValueInPrevBlock = Simple8bTypeUtil::decodeDouble(current, _encoder.scaleIndex);
 }
 
 EncodingState::CloneableBuffer::CloneableBuffer(const CloneableBuffer& other) {
@@ -1732,10 +1926,10 @@ EncodingState::CloneableBuffer& EncodingState::CloneableBuffer::operator=(
 }
 }  // namespace bsoncolumn
 
-BSONColumnBuilder::InternalState::SubObjState::SubObjState() {}
+BSONColumnBuilder::InternalState::SubObjState::SubObjState() : buffer(kDefaultBufferSize) {}
 
 BSONColumnBuilder::InternalState::SubObjState::SubObjState(const SubObjState& other)
-    : state(other.state), controlBlocks(other.controlBlocks) {
+    : state(other.state), buffer(other.buffer.capacity()), controlBlocks(other.controlBlocks) {
     buffer.appendBuf(other.buffer.buf(), other.buffer.len());
 }
 
@@ -1942,39 +2136,58 @@ void BSONColumnBuilder::_flushSubObjMode() {
 void BSONColumnBuilder::assertInternalStateIdentical_forTest(const BSONColumnBuilder& other) const {
     // Verify that buffers are identical
     invariant(_bufBuilder.len() == other._bufBuilder.len());
-    invariant(memcmp(_bufBuilder.buf(), other._bufBuilder.buf(), _bufBuilder.len()) == 0);
+    if (_bufBuilder.len() > 0) {
+        invariant(memcmp(_bufBuilder.buf(), other._bufBuilder.buf(), _bufBuilder.len()) == 0);
+    }
 
     // Validate internal state of regular mode
     invariant(_is.mode == other._is.mode);
-    invariant(_is.regular._storeWith128 == other._is.regular._storeWith128);
     invariant(_is.regular._controlByteOffset == other._is.regular._controlByteOffset);
-    invariant(_is.regular._scaleIndex == other._is.regular._scaleIndex);
+    if (auto encoder = std::get_if<bsoncolumn::EncodingState::Encoder64>(&_is.regular._encoder)) {
+        auto encoderOther = std::get_if<EncodingState::Encoder64>(&other._is.regular._encoder);
+        invariant(encoderOther);
 
-    // Our mac toolchain does not have std::bit_cast yet.
-    auto bit_cast = [](double from) {
-        uint64_t to;
-        memcpy(&to, &from, sizeof(uint64_t));
-        return to;
-    };
-    // NaN does not compare equal to itself, so we bit cast and perform this comparison as interger
-    invariant(bit_cast(_is.regular._lastValueInPrevBlock) ==
-              bit_cast(other._is.regular._lastValueInPrevBlock));
-    invariant(_is.regular._prevDelta == other._is.regular._prevDelta);
-    invariant(_is.regular._prevEncoded64 == other._is.regular._prevEncoded64);
-    invariant(_is.regular._prevEncoded128 == other._is.regular._prevEncoded128);
+        invariant(encoder->scaleIndex == encoderOther->scaleIndex);
+
+        // Our mac toolchain does not have std::bit_cast yet.
+        auto bit_cast = [](double from) {
+            uint64_t to;
+            memcpy(&to, &from, sizeof(uint64_t));
+            return to;
+        };
+        // NaN does not compare equal to itself, so we bit cast and perform this comparison as
+        // interger
+        invariant(bit_cast(encoder->lastValueInPrevBlock) ==
+                  bit_cast(encoderOther->lastValueInPrevBlock));
+
+        invariant(encoder->prevDelta == encoderOther->prevDelta);
+        invariant(encoder->prevEncoded64 == encoderOther->prevEncoded64);
+
+        encoder->simple8bBuilder.assertInternalStateIdentical_forTest(
+            encoderOther->simple8bBuilder);
+
+
+    } else if (auto encoder =
+                   std::get_if<bsoncolumn::EncodingState::Encoder128>(&_is.regular._encoder)) {
+        auto encoderOther = std::get_if<EncodingState::Encoder128>(&other._is.regular._encoder);
+        invariant(encoderOther);
+
+        invariant(encoder->prevEncoded128 == encoderOther->prevEncoded128);
+
+        encoder->simple8bBuilder.assertInternalStateIdentical_forTest(
+            encoderOther->simple8bBuilder);
+    } else {
+        invariant(false);
+    }
+
     invariant(_is.regular._prev.size == other._is.regular._prev.size);
     invariant(memcmp(_is.regular._prev.buffer.get(),
                      other._is.regular._prev.buffer.get(),
                      _is.regular._prev.size) == 0);
 
-    // Validate simple8b builder states
-    _is.regular._simple8bBuilder64.assertInternalStateIdentical_forTest(
-        other._is.regular._simple8bBuilder64);
-    _is.regular._simple8bBuilder128.assertInternalStateIdentical_forTest(
-        other._is.regular._simple8bBuilder128);
-
     // Validate intermediate data
     invariant(_is.offset == other._is.offset);
+    invariant(_is.lastBufLength == other._is.lastBufLength);
     invariant(_is.lastControl == other._is.lastControl);
 }
 

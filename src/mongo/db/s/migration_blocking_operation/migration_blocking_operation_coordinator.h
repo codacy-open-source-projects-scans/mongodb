@@ -46,6 +46,9 @@ public:
 
     static std::shared_ptr<MigrationBlockingOperationCoordinator> getOrCreate(
         OperationContext* opCtx, const NamespaceString& nss);
+    static boost::optional<std::shared_ptr<MigrationBlockingOperationCoordinator>> get(
+        OperationContext* opCtx, const NamespaceString& nss);
+
     MigrationBlockingOperationCoordinator(ShardingDDLCoordinatorService* service,
                                           const BSONObj& initialState);
 
@@ -53,13 +56,6 @@ public:
 
     void beginOperation(OperationContext* opCtx, const UUID& operationUUID);
     void endOperation(OperationContext* opCtx, const UUID& operationUUID);
-
-    static void beginOperation(OperationContext* opCtx,
-                               const NamespaceString& nss,
-                               const UUID& operationUUID);
-    static void endOperation(OperationContext* opCtx,
-                             const NamespaceString& nss,
-                             const UUID& operationUUID);
 
 private:
     virtual StringData serializePhase(const Phase& phase) const override;

@@ -59,8 +59,6 @@ selector:
     # TODO (SERVER-79353): Support role-aware serverStatus on mongod with router role.
     - jstests/core/write/find_and_modify/find_and_modify_metrics.js
     - jstests/core/write/update/update_metrics.js
-    # TODO (SERVER-86393): Support FLE2 with replica set endpoint.
-    - jstests/core/queryable_encryption/basic_crud.js
     # TODO (SERVER-75857): Unify behavior between mongod and mongos when running explain on a
     # nonexistent database.
     - jstests/core/query/explain/explain_missing_database.js
@@ -76,9 +74,6 @@ selector:
     - jstests/core/views/invalid_system_views.js
     # TODO (SERVER-86364): Secondary reads assertion fails.
     - jstests/core/clustered/clustered_collection_creation.js
-    # TODO (SERVER-84243): Separate Shard-Role Catalog Cache and Loader. This test runs the fsync
-    # command so causes catalog cache refreshes which currently involve doing noop writes to hang.
-    - jstests/core/ddl/killop_drop_collection.js
 
     # The tests below are disabled because they assert that if there have not been any successful
     # writes the test database, it should remain empty or non-existent. This suite breaks this
@@ -148,9 +143,7 @@ executor:
     # TODO (SERVER-83433): Add back the test coverage for running db hash check on replica set that
     # is fsync locked and has replica set endpoint enabled.
     # - class: CheckReplDBHash
-    # TODO (SERVER-86630): Investigate ObjectIsBusy error in the replica set endpoint suite
-    # when the ValidateCollections hook is enabled
-    # - class: ValidateCollections
+    - class: ValidateCollections
     - class: ValidateDirectSecondaryReads
       shell_options:
         global_vars:

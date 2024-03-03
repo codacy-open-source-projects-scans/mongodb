@@ -506,6 +506,8 @@ enum class Builtin : uint16_t {
 
     // Special double summation.
     doubleDoubleSum,
+    // Accumulator to merge simple sums into a double double summation.
+    convertSimpleSumToDoubleDoubleSum,
     // A variant of the standard sum aggregate function which maintains a DoubleDouble as the
     // accumulator's underlying state.
     aggDoubleDoubleSum,
@@ -712,6 +714,8 @@ enum class Builtin : uint16_t {
 
     // Start of 2 byte builtins.
     valueBlockExists = 256,
+    valueBlockTypeMatch,
+    valueBlockIsTimezone,
     valueBlockFillEmpty,
     valueBlockFillEmptyBlock,
     valueBlockAggMin,
@@ -1732,6 +1736,8 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToSetCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollAddToSetCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetToArray(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinConvertPartialCountSumToDoubleDoubleSum(
+        ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDoubleDoubleSum(ArityType arity);
     // The template parameter is false for a regular DoubleDouble summation and true if merging
     // partially computed DoubleDouble sums.
@@ -1971,6 +1977,8 @@ private:
 
     // Block builtins
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockTypeMatch(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockIsTimezone(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmptyBlock(ArityType arity);
     template <bool less>

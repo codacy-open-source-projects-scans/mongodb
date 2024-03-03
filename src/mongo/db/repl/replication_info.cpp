@@ -55,6 +55,7 @@
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
@@ -292,30 +293,30 @@ public:
         result.append("latestOptime", replCoord->getMyLastAppliedOpTime().getTimestamp());
 
         auto earliestOplogTimestampFetch = [&]() -> Timestamp {
-            // Hold reference to the catalog for collection lookup without locks to be safe.
-            auto catalog = CollectionCatalog::get(opCtx);
-            auto oplog =
-                catalog->lookupCollectionByNamespace(opCtx, NamespaceString::kRsOplogNamespace);
-            if (!oplog) {
-                return Timestamp();
+            boost::optional<AutoGetOplog> oplog = boost::none;
+            try {
+                oplog.emplace(opCtx,
+                              OplogAccessMode::kRead,
+                              Date_t::now(),
+                              AutoGetOplogOptions{.skipRSTLLock = true});
+            } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
+            } catch (const ExceptionFor<ErrorCodes::MaxTimeMSExpired>&) {
             }
 
-            // Try to get the lock. If it's already locked, immediately return null timestamp.
-            Lock::GlobalLock lk(
-                opCtx, MODE_IS, Date_t::now(), Lock::InterruptBehavior::kLeaveUnlocked, [] {
-                    Lock::GlobalLockSkipOptions options;
-                    options.skipRSTLLock = true;
-                    return options;
-                }());
-            if (!lk.isLocked()) {
+            if (!oplog) {
                 LOGV2_DEBUG(
                     6294100, 2, "Failed to get global lock for oplog server status section");
                 return Timestamp();
             }
 
+            const auto& oplogCollection = oplog->getCollection();
+            if (!oplogCollection) {
+                return Timestamp();
+            }
+
             // Try getting earliest oplog timestamp using getEarliestOplogTimestamp
             auto swEarliestOplogTimestamp =
-                oplog->getRecordStore()->getEarliestOplogTimestamp(opCtx);
+                oplogCollection->getRecordStore()->getEarliestOplogTimestamp(opCtx);
 
             if (swEarliestOplogTimestamp.getStatus() == ErrorCodes::OplogOperationUnsupported) {
                 // Falling back to use getSingleton if the storage engine does not support
@@ -401,8 +402,7 @@ public:
                              const BSONObj& cmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) final {
         // Critical to monitoring and observability, categorize the command as immediate priority.
-        ScopedAdmissionPriorityForLock skipAdmissionControl(shard_role_details::getLocker(opCtx),
-                                                            AdmissionContext::Priority::kImmediate);
+        ScopedAdmissionPriority skipAdmissionControl(opCtx, AdmissionContext::Priority::kExempt);
 
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
         const bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);

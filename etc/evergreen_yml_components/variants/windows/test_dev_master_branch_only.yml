@@ -185,7 +185,6 @@ buildvariants:
     # run too long and hit execution timeouts.
     # burn_in_task_name: jsCore
   tasks:
-  - name: .cqf
   - name: query_golden_classic
   # - name: burn_in_tasks_gen
   #   depends_on:
@@ -216,6 +215,7 @@ buildvariants:
   - name: .jstestfuzz .common
   - name: noPassthrough_gen
   - name: noPassthroughWithMongod_gen
+  - name: .recordids_replicated
   - name: .replica_sets .common
   - name: .replica_sets .multi_oplog !.gcm
   - name: sasl

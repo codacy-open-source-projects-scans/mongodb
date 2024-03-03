@@ -164,6 +164,10 @@ public:
         return {Status::OK(), {kDefaultReadConcernNotPermitted}};
     }
 
+    bool isSubjectToIngressAdmissionControl() const override {
+        return true;
+    }
+
     /**
      * You are authorized to run an explain if you are authorized to run
      * the command that you are explaining. The auth check is performed recursively
@@ -180,7 +184,6 @@ private:
 
     const OpMsgRequest* _outerRequest;
     const DatabaseName _dbName;
-    const NamespaceString _ns;
     ExplainOptions::Verbosity _verbosity;
     std::unique_ptr<OpMsgRequest> _innerRequest;  // Lifespan must enclose that of _innerInvocation.
     std::unique_ptr<CommandInvocation> _innerInvocation;

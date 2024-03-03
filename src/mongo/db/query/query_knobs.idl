@@ -178,6 +178,14 @@ server_parameters:
     default: false
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
 
+  internalQueryPlannerEnableIndexPruning:
+    description: "Prunes unnecessary candidate plans so we trial less duplicate options."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalQueryPlannerEnableIndexPruning"
+    cpp_vartype: AtomicWord<bool>
+    default: true
+    on_update: plan_cache_util::clearSbeCacheOnParameterChange
+
   #
   # Plan cache
   #
@@ -472,7 +480,7 @@ server_parameters:
     cpp_varname: "internalInsertMaxBatchSize"
     cpp_vartype: AtomicWord<int>
     default:
-      expr: internalQueryExecYieldIterations.load() / 2
+      expr: 64
       is_constexpr: false
     validator:
       gt: 0

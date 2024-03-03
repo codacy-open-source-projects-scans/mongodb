@@ -314,7 +314,7 @@ void handleMultipleCursorsForExchange(OperationContext* opCtx,
  * batch). In some cases, serializing the command object can consume a significant amount of time
  * that we can optimize away if the results fit in a single batch.
  */
-using DeferredCmd = Deferred<BSONObj>;
+using DeferredCmd = DeferredFn<BSONObj>;
 
 /**
  * Gets the first batch of documents produced by this pipeline by calling 'getNext()' on the
@@ -1124,30 +1124,6 @@ query_shape::CollectionType determineCollectionType(
     return ctx ? ctx->getCollectionType() : query_shape::CollectionType::kUnknown;
 }
 
-// TODO: SERVER-73632 Remove feature flag for PM-635.
-// Remove query settings lookup as it is only done on mongos.
-query_settings::QuerySettings lookupQuerySettingsForAgg(
-    boost::intrusive_ptr<ExpressionContext> expCtx,
-    const AggregateCommandRequest& aggregateCommandRequest,
-    const Pipeline& pipeline,
-    const stdx::unordered_set<NamespaceString>& involvedNamespaces,
-    const NamespaceString& nss) {
-    auto opCtx = expCtx->opCtx;
-    const bool isInternalClient = opCtx->getClient()->session() &&
-        (opCtx->getClient()->isInternalClient() || opCtx->getClient()->isInDirectClient());
-    auto serializationContext = aggregateCommandRequest.getSerializationContext();
-    auto settings = isInternalClient
-        ? aggregateCommandRequest.getQuerySettings().get_value_or({})
-        : query_settings::lookupQuerySettings(expCtx, nss, serializationContext, [&]() {
-              query_shape::AggCmdShape shape(
-                  aggregateCommandRequest, nss, involvedNamespaces, pipeline, expCtx);
-              return shape.sha256Hash(opCtx, serializationContext);
-          });
-
-    query_settings::failIfRejectedBySettings(expCtx, settings);
-    return settings;
-}
-
 std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
     OperationContext* opCtx,
     const NamespaceString& origNss,
@@ -1224,16 +1200,18 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
         expCtx->stopExpressionCounters();
     }
 
-    // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
-    // $$USER_ROLES for the aggregation.
-    expCtx->setUserRoles();
+    expCtx->initializeReferencedSystemVariables();
 
     // Lookup the query settings and attach it to the 'expCtx'.
-    expCtx->setQuerySettings(lookupQuerySettingsForAgg(expCtx,
-                                                       request,
-                                                       *pipeline,
-                                                       liteParsedPipeline.getInvolvedNamespaces(),
-                                                       request.getNamespace()));
+    // TODO: SERVER-73632 Remove feature flag for PM-635.
+    // Query settings will only be looked up on mongos and therefore should be part of command body
+    // on mongod if present.
+    expCtx->setQuerySettings(
+        query_settings::lookupQuerySettingsForAgg(expCtx,
+                                                  request,
+                                                  *pipeline,
+                                                  liteParsedPipeline.getInvolvedNamespaces(),
+                                                  request.getNamespace()));
 
     return pipeline;
 }

@@ -189,12 +189,12 @@ private:
         curOp->_parent = _top;
 
         // If `curOp` is a sub-operation, we store the snapshot of lock stats as the base lock stats
-        // of the current operation.
+        // of the current operation. Also store the current ticket wait time as the base ticket
+        // wait time.
         if (_top) {
-            if (auto lockerInfo =
-                    shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none)) {
-                curOp->_lockStatsBase = lockerInfo->stats;
-            }
+            auto locker = shard_role_details::getLocker(opCtx());
+            curOp->_lockStatsBase = locker->getLockerInfo(boost::none).stats;
+            curOp->_ticketWaitTimeAtStart = locker->getTimeQueuedForTicketMicros();
         }
 
         _top = curOp;
@@ -398,10 +398,10 @@ void CurOp::setEndOfOpMetrics(long long nreturned) {
 }
 
 void CurOp::setMessage_inlock(StringData message) {
-    if (_progressMeter.isActive()) {
+    if (_progressMeter && _progressMeter->isActive()) {
         LOGV2_ERROR(
             20527, "Updating message", "old"_attr = redact(_message), "new"_attr = redact(message));
-        MONGO_verify(!_progressMeter.isActive());
+        MONGO_verify(!_progressMeter->isActive());
     }
     _message = message.toString();  // copy
 }
@@ -410,9 +410,14 @@ ProgressMeter& CurOp::setProgress_inlock(StringData message,
                                          unsigned long long progressMeterTotal,
                                          int secondsBetween) {
     setMessage_inlock(message);
-    _progressMeter.reset(progressMeterTotal, secondsBetween);
-    _progressMeter.setName(message);
-    return _progressMeter;
+    if (_progressMeter) {
+        _progressMeter->reset(progressMeterTotal, secondsBetween);
+        _progressMeter->setName(message);
+    } else {
+        _progressMeter.emplace(progressMeterTotal, secondsBetween, 100, "", message.toString());
+    }
+
+    return _progressMeter.value();
 }
 
 void CurOp::setNS_inlock(NamespaceString nss) {
@@ -434,6 +439,8 @@ TickSource::Tick CurOp::startTime() {
         _cpuTimer = cpuTimers->makeTimer();
         _cpuTimer->start();
     }
+
+    _blockedTimeAtStart = _sumBlockedTimeTotal();
 
     // The '_start' value is initialized to 0 and gets assigned on demand the first time it gets
     // accessed. The above thread ownership requirement ensures that there will never be
@@ -468,12 +475,14 @@ Microseconds CurOp::computeElapsedTimeTotal(TickSource::Tick startTime,
 
 Milliseconds CurOp::_sumBlockedTimeTotal() {
     auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(_lockStatsBase);
-    auto waitForLocks = duration_cast<Milliseconds>(
-        Microseconds(lockerInfo ? lockerInfo->stats.getCumulativeWaitTimeMicros() : 0));
-    auto waitForTickets = _debug.waitForTicketDurationMillis;
+    auto waitForTickets = _debug.waitForTicketDurationMillis +
+        duration_cast<Milliseconds>(Microseconds(
+            shard_role_details::getLocker(opCtx())->getFlowControlStats().timeAcquiringMicros));
+    auto waitForLocks =
+        duration_cast<Milliseconds>(Microseconds(lockerInfo.stats.getCumulativeWaitTimeMicros()));
     auto waitForWriteConcern = _debug.waitForWriteConcernDurationMillis;
 
-    return waitForLocks + waitForTickets + waitForWriteConcern;
+    return waitForTickets + waitForLocks + waitForWriteConcern;
 }
 
 void CurOp::enter_inlock(NamespaceString nss, int dbProfileLevel) {
@@ -533,11 +542,16 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
         oplogGetMoreStats.recordMillis(executionTimeMillis);
     }
 
+    // The ticket wait time from the locker reports wait times from preceding operations in the
+    // CurOpStack. The precise time queued for tickets of a sub-operation is the ticket wait time
+    // from the locker minus the ticket wait time taken when this operation started.
     _debug.waitForTicketDurationMillis = duration_cast<Milliseconds>(
-        shard_role_details::getLocker(opCtx)->getTimeQueuedForTicketMicros());
+        shard_role_details::getLocker(opCtx)->getTimeQueuedForTicketMicros() -
+        _ticketWaitTimeAtStart);
 
-    auto totalBlockedTime = _sumBlockedTimeTotal();
-    // TODO SERVER-86572: Identify paused durations that are being double counted as blocked
+    auto totalBlockedTime = _sumBlockedTimeTotal() - _blockedTimeAtStart;
+    // TODO SERVER-86069: Uncomment the below invariant
+    // invariant(Milliseconds(executionTimeMillis) >= totalBlockedTime);
     _debug.workingTimeMillis = Milliseconds(executionTimeMillis) - totalBlockedTime;
 
     bool shouldLogSlowOp, shouldProfileAtLevel1;
@@ -587,8 +601,8 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
                 // acquisition. Slow queries can happen for various reasons; however, if queries
                 // are slower due to ticket exhaustion, queueing in order to log can compound
                 // the issue.
-                ScopedAdmissionPriorityForLock skipAdmissionControl(
-                    shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kImmediate);
+                ScopedAdmissionPriority skipAdmissionControl(opCtx,
+                                                             AdmissionContext::Priority::kExempt);
                 Lock::GlobalLock lk(opCtx,
                                     MODE_IS,
                                     Date_t::now() + Milliseconds(500),
@@ -620,8 +634,7 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
         }();
 
         logv2::DynamicAttributes attr;
-        _debug.report(
-            opCtx, (lockerInfo ? &lockerInfo->stats : nullptr), operationMetricsPtr, &attr);
+        _debug.report(opCtx, &lockerInfo.stats, operationMetricsPtr, &attr);
 
         LOGV2_OPTIONS(51803, logOptions, "Slow query", attr);
 
@@ -855,13 +868,13 @@ void CurOp::reportState(BSONObjBuilder* builder,
     }
 
     if (!_message.empty()) {
-        if (_progressMeter.isActive()) {
+        if (_progressMeter && _progressMeter->isActive()) {
             StringBuilder buf;
-            buf << _message << " " << _progressMeter.toString();
+            buf << _message << " " << _progressMeter->toString();
             builder->append("msg", buf.str());
             BSONObjBuilder sub(builder->subobjStart("progress"));
-            sub.appendNumber("done", (long long)_progressMeter.done());
-            sub.appendNumber("total", (long long)_progressMeter.total());
+            sub.appendNumber("done", (long long)_progressMeter->done());
+            sub.appendNumber("total", (long long)_progressMeter->total());
             sub.done();
         } else {
             builder->append("msg", _message);
@@ -897,7 +910,7 @@ void CurOp::reportState(BSONObjBuilder* builder,
     // FCV to keep consistent behavior.
     if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
             .isEnabledAndIgnoreFCVUnsafe()) {
-        auto admissionPriority = shard_role_details::getLocker(opCtx)->getAdmissionPriority();
+        auto admissionPriority = AdmissionContext::get(opCtx).getPriority();
         if (admissionPriority < AdmissionContext::Priority::kNormal) {
             builder->append("admissionPriority", toString(admissionPriority));
         }
@@ -1134,7 +1147,7 @@ void OpDebug::report(OperationContext* opCtx,
     // FCV to keep consistent behavior.
     if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
             .isEnabledAndIgnoreFCVUnsafe()) {
-        auto admissionPriority = shard_role_details::getLocker(opCtx)->getAdmissionPriority();
+        auto admissionPriority = AdmissionContext::get(opCtx).getPriority();
         if (admissionPriority < AdmissionContext::Priority::kNormal) {
             pAttrs->add("admissionPriority", admissionPriority);
         }
@@ -1651,11 +1664,10 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     });
 
     addIfNeeded("locks", [](auto field, auto args, auto& b) {
-        if (auto lockerInfo = shard_role_details::getLocker(args.opCtx)
-                                  ->getLockerInfo(args.curop.getLockStatsBase())) {
-            BSONObjBuilder locks(b.subobjStart(field));
-            lockerInfo->stats.report(&locks);
-        }
+        auto lockerInfo =
+            shard_role_details::getLocker(args.opCtx)->getLockerInfo(args.curop.getLockStatsBase());
+        BSONObjBuilder locks(b.subobjStart(field));
+        lockerInfo.stats.report(&locks);
     });
 
     addIfNeeded("authorization", [](auto field, auto args, auto& b) {

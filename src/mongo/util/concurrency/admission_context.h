@@ -31,17 +31,20 @@
 #include <cstdint>
 #include <type_traits>
 
+#include <boost/optional.hpp>
+
 #include "mongo/base/string_data.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/tick_source.h"
 
 namespace mongo {
 
+class OperationContext;
+
 /**
  * Stores state and statistics related to admission control for a given transactional context.
  */
 class AdmissionContext {
-
 public:
     AdmissionContext() {}
 
@@ -57,53 +60,74 @@ public:
      *
      * 'kNormal': It's important that the operation be throttled under load. If this operation is
      * throttled, it will not affect system availability or observability. Most operations, both
-     * user and internal, should use this priority unless they qualify as 'kLow' or 'kImmediate'
+     * user and internal, should use this priority unless they qualify as 'kLow' or 'kExempt'
      * priority.
      *
-     * 'kImmediate': It's crucial that the operation makes forward progress - bypasses the ticketing
+     * 'kExempt': It's crucial that the operation makes forward progress - bypasses the ticketing
      * mechanism.
      *
      * Reserved for operations critical to availability (e.g. replication workers) or observability
      * (e.g. FTDC), and any operation that is releasing resources (e.g. committing or aborting
      * prepared transactions). Should be used sparingly.
      */
-    enum class Priority { kLow = 0, kNormal, kImmediate };
+    enum class Priority { kExempt = 0, kLow, kNormal };
+
+    /**
+     * Retrieve the AdmissionContext decoration the provided OperationContext
+     */
+    static AdmissionContext& get(OperationContext* opCtx);
+
+    /**
+     * Copy this AdmissionContext to another OperationContext. Optionally, provide a new priority
+     * to upgrade the copied context's priority.
+     */
+    void copyTo(OperationContext* opCtx,
+                boost::optional<AdmissionContext::Priority> newPriority = boost::none);
 
     void start(TickSource* tickSource) {
-        admissions.fetchAndAdd(1);
+        _admissions += 1;
         if (tickSource) {
-            _startProcessingTime.store(tickSource->getTicks());
+            _startProcessingTime = tickSource->getTicks();
         }
     }
 
     TickSource::Tick getStartProcessingTime() const {
-        return _startProcessingTime.loadRelaxed();
+        return _startProcessingTime;
     }
 
     /**
      * Returns the number of times this context has taken a ticket.
      */
     int getAdmissions() const {
-        return admissions.loadRelaxed();
-    }
-
-    void setPriority(Priority priority) {
-        _priority.store(priority);
+        return _admissions;
     }
 
     Priority getPriority() const {
-        return _priority.loadRelaxed();
+        return _priority;
     }
 
 private:
-    // We wrap these types in AtomicWord to avoid race conditions between reporting metrics and
-    // setting the values.
-    //
-    // Only a single writer thread will modify these variables and the readers allow relaxed memory
-    // semantics.
-    AtomicWord<TickSource::Tick> _startProcessingTime{0};
-    AtomicWord<int32_t> admissions{0};
-    AtomicWord<Priority> _priority{Priority::kNormal};
+    friend class ScopedAdmissionPriority;
+
+    TickSource::Tick _startProcessingTime{0};
+    int32_t _admissions{0};
+    Priority _priority{Priority::kNormal};
+};
+
+/**
+ * RAII-style class to set the priority for the ticket admission mechanism when acquiring a global
+ * lock.
+ */
+class ScopedAdmissionPriority {
+public:
+    explicit ScopedAdmissionPriority(OperationContext* opCtx, AdmissionContext::Priority priority);
+    ScopedAdmissionPriority(const ScopedAdmissionPriority&) = delete;
+    ScopedAdmissionPriority& operator=(const ScopedAdmissionPriority&) = delete;
+    ~ScopedAdmissionPriority();
+
+private:
+    OperationContext* const _opCtx;
+    AdmissionContext::Priority _originalPriority;
 };
 
 StringData toString(AdmissionContext::Priority priority);

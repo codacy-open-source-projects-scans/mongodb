@@ -114,6 +114,7 @@ namespace mongo {
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangInsertBeforeWrite);
+MONGO_FAIL_POINT_DEFINE(hangUpdateBeforeWrite);
 
 void redactTooLongLog(mutablebson::Document* cmdObj, StringData fieldName) {
     namespace mmb = mutablebson;
@@ -263,6 +264,7 @@ public:
     bool allowedInTransactions() const final {
         return true;
     }
+
     class Invocation final : public InvocationBaseGen {
     public:
         Invocation(OperationContext* opCtx,
@@ -273,6 +275,10 @@ public:
         }
 
         bool supportsWriteConcern() const final {
+            return true;
+        }
+
+        bool isSubjectToIngressAdmissionControl() const override {
             return true;
         }
 
@@ -317,11 +323,10 @@ public:
                 }
             }
 
-            boost::optional<ScopedAdmissionPriorityForLock> priority;
+            boost::optional<ScopedAdmissionPriority> priority;
             if (request().getNamespace() == NamespaceString::kConfigSampledQueriesNamespace ||
                 request().getNamespace() == NamespaceString::kConfigSampledQueriesDiffNamespace) {
-                priority.emplace(shard_role_details::getLocker(opCtx),
-                                 AdmissionContext::Priority::kLow);
+                priority.emplace(opCtx, AdmissionContext::Priority::kLow);
             }
 
             if (hangInsertBeforeWrite.shouldFail([&](const BSONObj& data) {
@@ -422,6 +427,10 @@ public:
             return true;
         }
 
+        bool isSubjectToIngressAdmissionControl() const override {
+            return true;
+        }
+
         NamespaceString ns() const final {
             return request().getNamespace();
         }
@@ -436,7 +445,7 @@ public:
 
         void appendMirrorableRequest(BSONObjBuilder* bob) const override {
             auto extractQueryDetails = [](const BSONObj& update, BSONObjBuilder* bob) -> void {
-                // "filter", "hint", and "collation" fields are optional.
+                // "filter", "sort", "hint", and "collation" fields are optional.
                 if (update.isEmpty())
                     return;
 
@@ -445,6 +454,8 @@ public:
 
                 if (update.hasField("q"))
                     bob->append("filter", update["q"].Obj());
+                if (update.hasField("sort") && !update["sort"].Obj().isEmpty())
+                    bob->append("sort", update["sort"].Obj());
                 if (update.hasField("hint") && !update["hint"].Obj().isEmpty())
                     bob->append("hint", update["hint"].Obj());
                 if (update.hasField("collation") && !update["collation"].Obj().isEmpty())
@@ -526,6 +537,13 @@ public:
                 write_ops_exec::runTimeseriesRetryableUpdates(
                     opCtx, bucketNs, request(), executor, &reply);
             } else {
+                if (hangUpdateBeforeWrite.shouldFail([&](const BSONObj& data) {
+                        const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"_sd);
+                        return fpNss == request().getNamespace();
+                    })) {
+                    hangUpdateBeforeWrite.pauseWhileSet();
+                }
+
                 reply = write_ops_exec::performUpdates(opCtx, request(), source);
             }
 
@@ -691,6 +709,10 @@ public:
         }
 
         bool supportsWriteConcern() const final {
+            return true;
+        }
+
+        bool isSubjectToIngressAdmissionControl() const override {
             return true;
         }
 

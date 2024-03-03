@@ -39,6 +39,8 @@
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/trial_period_utils.h"
 #include "mongo/db/exec/trial_run_tracker.h"
+#include "mongo/db/matcher/expression_visitor.h"
+#include "mongo/db/matcher/expression_where.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/optimizer/explain_interface.h"
@@ -70,6 +72,77 @@
 
 
 namespace mongo::sbe {
+namespace {
+/**
+ * This mutable MatchExpression visitor will update the JS function predicate in each $where
+ * expression by recovering it from the SBE runtime environment. The predicate was previously
+ * was put there during the input parameter binding in process, after it was extracted from the
+ * $where expression as an optimization.
+ */
+class WhereMatchExpressionVisitor final : public SelectiveMatchExpressionVisitorBase<false> {
+public:
+    explicit WhereMatchExpressionVisitor(stage_builder::PlanStageData& data) : _data(data) {}
+
+    // To avoid overloaded-virtual warnings.
+    using SelectiveMatchExpressionVisitorBase<false>::visit;
+
+    void visit(WhereMatchExpression* expr) final {
+        auto paramId = expr->getInputParamId();
+        if (!paramId) {
+            return;
+        }
+
+        auto it = _data.staticData->inputParamToSlotMap.find(*paramId);
+        if (it == _data.staticData->inputParamToSlotMap.end()) {
+            return;
+        }
+
+        auto accessor = _data.env->getAccessor(it->second);
+        auto [type, value] = accessor->copyOrMoveValue();
+        const auto valueType = type;  // a workaround for a compiler bug
+        tassert(8415201,
+                str::stream() << "Unexpected value type: " << valueType,
+                type == sbe::value::TypeTags::jsFunction);
+        expr->setPredicate(std::unique_ptr<JsFunction>(sbe::value::bitcastTo<JsFunction*>(value)));
+    }
+
+private:
+    stage_builder::PlanStageData& _data;
+};
+
+/**
+ * A match expression tree walker to visit the tree nodes with the 'WhereMatchExpressionVisitor'.
+ */
+class WhereMatchExpressionWalker {
+public:
+    explicit WhereMatchExpressionWalker(WhereMatchExpressionVisitor* visitor) : _visitor{visitor} {
+        invariant(_visitor);
+    }
+
+    void preVisit(MatchExpression* expr) {
+        expr->acceptVisitor(_visitor);
+    }
+
+    void postVisit(MatchExpression* expr) {}
+    void inVisit(long count, MatchExpression* expr) {}
+
+private:
+    WhereMatchExpressionVisitor* _visitor;
+};
+
+/**
+ * In each $where expression in the given 'filter', recover the JS function predicate which has
+ * been previously extracted from the expression into SBE runtime environment during the input
+ * parameters bind-in process. In order to be able the filter to participate in replanning, we
+ * need to perform the reverse operation and put the JS function back into the filter.
+ */
+void recoverWhereExprPredicate(MatchExpression* filter, stage_builder::PlanStageData& data) {
+    WhereMatchExpressionVisitor visitor{data};
+    WhereMatchExpressionWalker walker{&visitor};
+    tree_walker::walk<false, MatchExpression>(filter, &walker);
+}
+}  // namespace
+
 CandidatePlans CachedSolutionPlanner::plan(
     std::vector<std::unique_ptr<QuerySolution>> solutions,
     std::vector<std::pair<std::unique_ptr<PlanStage>, stage_builder::PlanStageData>> roots) {
@@ -79,7 +152,8 @@ CandidatePlans CachedSolutionPlanner::plan(
         // immediately replan without ever running a trial period.
         // TODO: SERVER-86174 Avoid unnecessary fillOutPlannerParams() and
         // fillOutSecondaryCollectionsInformation() planner param calls.
-        _queryParams.fillOutSecondaryCollectionsPlannerParams(_opCtx, _cq, _collections);
+        _queryParams.fillOutPlannerParams(
+            _opCtx, _cq, _collections, false /* ignoreQuerySettings */);
 
         const auto& secondaryCollectionsInfo = _queryParams.secondaryCollectionsInfo;
 
@@ -95,14 +169,16 @@ CandidatePlans CachedSolutionPlanner::plan(
                 return replan(/* shouldCache */ true,
                               str::stream() << "Foreign collection "
                                             << foreignCollection.toStringForErrorMsg()
-                                            << " is not eligible for hash join anymore");
+                                            << " is not eligible for hash join anymore",
+                              _remoteCursors);
             }
         }
     }
     // If the '_decisionReads' is not present then we do not run a trial period, keeping the current
     // plan.
     if (!_decisionReads) {
-        prepareExecutionPlan(roots[0].first.get(), &roots[0].second, true /* preparingFromCache */);
+        prepareExecutionPlan(
+            roots[0].first.get(), &roots[0].second, true /* preparingFromCache */, _remoteCursors);
         roots[0].first->open(false /* reOpen */);
         return {makeVector(plan_ranker::CandidatePlan{
                     std::move(solutions[0]),
@@ -137,6 +213,14 @@ CandidatePlans CachedSolutionPlanner::plan(
                                                   candidate.data.stageData.debugInfo);
 
     if (!candidate.status.isOK()) {
+        // Recover $where expression JS function predicate from the SBE runtime environemnt, if
+        // necessary, so we could successfully replan the query. The primary match expression
+        // was modified during the input parameters bind-in process while we were collecting
+        // execution stats above.
+        if (_cq.getExpCtxRaw()->hasWhereClause) {
+            recoverWhereExprPredicate(_cq.getPrimaryMatchExpression(), candidate.data.stageData);
+        }
+
         // On failure, fall back to replanning the whole query. We neither evict the existing cache
         // entry, nor cache the result of replanning.
         LOGV2_DEBUG(2057901,
@@ -159,6 +243,15 @@ CandidatePlans CachedSolutionPlanner::plan(
     auto visitor = PlanStatsNumReadsVisitor{};
     candidate.root->accumulate(kEmptyPlanNodeId, &visitor);
     const auto numReads = visitor.numReads;
+
+    // Recover $where expression JS function predicate from the SBE runtime environemnt, if
+    // necessary, so we could successfully replan the query. The primary match expression was
+    // modified during the input parameters bind-in process while we were collecting execution
+    // stats above.
+    if (_cq.getExpCtxRaw()->hasWhereClause) {
+        recoverWhereExprPredicate(_cq.getPrimaryMatchExpression(), candidate.data.stageData);
+    }
+
     LOGV2_DEBUG(
         2058001,
         1,
@@ -218,7 +311,9 @@ plan_ranker::CandidatePlan CachedSolutionPlanner::collectExecutionStatsForCached
     return candidate;
 }
 
-CandidatePlans CachedSolutionPlanner::replan(bool shouldCache, std::string reason) const {
+CandidatePlans CachedSolutionPlanner::replan(bool shouldCache,
+                                             std::string reason,
+                                             RemoteCursorMap* remoteCursors) const {
     // The plan drawn from the cache is being discarded, and should no longer be registered with the
     // yield policy.
     _yieldPolicy->clearRegisteredPlans();
@@ -255,7 +350,7 @@ CandidatePlans CachedSolutionPlanner::replan(bool shouldCache, std::string reaso
 
         // Only one possible plan. Build the stages from the solution.
         auto [root, data] = buildExecutableTree(*solutions[0]);
-        prepareExecutionPlan(root.get(), &data, false /*preparingFromCache*/);
+        prepareExecutionPlan(root.get(), &data, false /*preparingFromCache*/, remoteCursors);
         root->open(false /* reOpen */);
 
         auto explainer = plan_explainer_factory::make(root.get(), &data, solutions[0].get());

@@ -956,13 +956,15 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
                                                                                 recoverToTimestamp);
         }
 
-        stdx::lock_guard<Latch> lk(_mutex);
-        _setConfigState_inlock(kConfigReplicationDisabled);
-
-        // In standalone mode, inform the storage engine that startup recovery has completed.
+        // In standalone mode, inform the storage engine that startup recovery has completed. We
+        // should not be holding on to the replication coordinator mutex before calling this
+        // function to avoid deadlock.
         auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
         invariant(storageEngine);
         storageEngine->notifyReplStartupRecoveryComplete(opCtx);
+
+        stdx::lock_guard<Latch> lk(_mutex);
+        _setConfigState_inlock(kConfigReplicationDisabled);
         return;
     }
 
@@ -2153,7 +2155,7 @@ bool ReplicationCoordinatorImpl::_doneWaitingForReplication_inlock(
             // The following is an optimization when we are checking for opTime, but not config.
             // For majority write concern, in addition to waiting for the committed snapshot to
             // advance past the write, it also waits for a majority of nodes to have their
-            // lasDurable (j: true) or lastApplied (j: false) to advance past the write.
+            // lasDurable (j: true) or lastWritten (j: false) to advance past the write.
             // Waiting for the committed snapshot is sufficient in most cases and so the additional
             // wait is usually a no-op and only needed
             // when writeConcernMajorityJournalDefault is false and j: true.
@@ -2780,7 +2782,7 @@ ReplicationCoordinatorImpl::AutoGetRstlForStepUpStepDown::AutoGetRstlForStepUpSt
         auto lockerInfo = shard_role_details::getLocker(opCtx)->getLockerInfo(
             CurOp::get(opCtx)->getLockStatsBase());
         BSONObjBuilder lockRep;
-        lockerInfo->stats.report(&lockRep);
+        lockerInfo.stats.report(&lockRep);
 
         LOGV2_FATAL_CONTINUE(
             5675600,
@@ -3412,8 +3414,7 @@ Status ReplicationCoordinatorImpl::processReplSetGetStatus(
 
     boost::optional<Timestamp> lastStableRecoveryTimestamp = boost::none;
     try {
-        shard_role_details::getLocker(opCtx)->setAdmissionPriority(
-            AdmissionContext::Priority::kImmediate);
+        ScopedAdmissionPriority admissionPriority(opCtx, AdmissionContext::Priority::kExempt);
         // We need to hold the lock so that we don't run when storage is being shutdown.
         Lock::GlobalLock lk(opCtx,
                             MODE_IS,
@@ -5799,8 +5800,10 @@ Status ReplicationCoordinatorImpl::processReplSetRequestVotes(
             const int electionCandidateMemberId =
                 _rsConfig.getMemberAt(candidateIndex).getId().getData();
             const std::string voteReason = response->getReason();
+            const OpTime lastWrittenOpTime = _topCoord->getMyLastWrittenOpTime();
+            const OpTime maxWrittenOpTime = _topCoord->latestKnownWrittenOpTime();
             const OpTime lastAppliedOpTime = _topCoord->getMyLastAppliedOpTime();
-            const OpTime maxAppliedOpTime = _topCoord->latestKnownOpTime();
+            const OpTime maxAppliedOpTime = _topCoord->latestKnownAppliedOpTime();
             const double priorityAtElection = _rsConfig.getMemberAt(_selfIndex).getPriority();
             ReplicationMetrics::get(getServiceContext())
                 .setElectionParticipantMetrics(votedForCandidate,
@@ -5808,6 +5811,8 @@ Status ReplicationCoordinatorImpl::processReplSetRequestVotes(
                                                lastVoteDate,
                                                electionCandidateMemberId,
                                                voteReason,
+                                               lastWrittenOpTime,
+                                               maxWrittenOpTime,
                                                lastAppliedOpTime,
                                                maxAppliedOpTime,
                                                priorityAtElection);

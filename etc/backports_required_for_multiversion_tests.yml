@@ -396,7 +396,7 @@ last-continuous:
   - test_file: jstests/sharding/query/sharded_lookup_execution.js
     ticket: SERVER-77427
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-84723
+    ticket: SERVER-86583
   - test_file: jstests/sharding/fsync_lock_unlock.js
     ticket: SERVER-73685
   - test_file: jstests/sharding/fsync_lock_ddl_lock.js
@@ -577,6 +577,8 @@ last-continuous:
     ticket: SERVER-84589
   - test_file: jstests/core/clustered/clustered_collection_creation.js
     ticket: SERVER-84331
+  - test_file: jstests/core/administrative/apply_ops/apply_ops1.js
+    ticket: SERVER-82349
   suites: null
 last-lts:
   all:
@@ -1029,7 +1031,7 @@ last-lts:
   - test_file: jstests/sharding/query/sharded_lookup_execution.js
     ticket: SERVER-77427
   - test_file: jstests/sharding/multi_collection_transaction_placement_conflict_workaround.js
-    ticket: SERVER-84723
+    ticket: SERVER-86583
   - test_file: jstests/sharding/fsync_lock_unlock.js
     ticket: SERVER-73685
   - test_file: jstests/sharding/fsync_lock_ddl_lock.js
@@ -1212,4 +1214,6 @@ last-lts:
     ticket: SERVER-84589
   - test_file: jstests/core/clustered/clustered_collection_creation.js
     ticket: SERVER-84331
+  - test_file: jstests/core/administrative/apply_ops/apply_ops1.js
+    ticket: SERVER-82349
   suites: null

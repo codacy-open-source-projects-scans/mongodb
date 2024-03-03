@@ -105,12 +105,6 @@
 namespace mongo::timeseries {
 namespace {
 
-// Helper for measurement sorting.
-struct Measurement {
-    BSONElement timeField;
-    std::vector<BSONElement> dataFields;
-};
-
 // Builds the data field of a bucket document. Computes the min and max fields if necessary.
 boost::optional<std::pair<BSONObj, BSONObj>> processTimeseriesMeasurements(
     const std::vector<BSONObj>& measurements,
@@ -558,6 +552,38 @@ StatusWith<bucket_catalog::InsertResult> attemptInsertIntoBucketWithReopening(
 
 }  // namespace
 
+namespace details {
+std::vector<Measurement> sortMeasurementsOnTimeField(
+    std::shared_ptr<bucket_catalog::WriteBatch> batch) {
+    std::vector<Measurement> measurements;
+
+    // Convert measurements in batch from BSONObj to vector of data fields.
+    // Store timefield separate to allow simple sort.
+    for (auto& measurementObj : batch->measurements) {
+        Measurement measurement;
+        for (auto& dataField : measurementObj) {
+            StringData key = dataField.fieldNameStringData();
+            if (key == batch->bucketKey.metadata.getMetaField()) {
+                continue;
+            } else if (key == batch->timeField) {
+                // Add time field to both members of Measurement, fallthrough expected.
+                measurement.timeField = dataField;
+            }
+            measurement.dataFields.push_back(dataField);
+        }
+        measurements.push_back(std::move(measurement));
+    }
+
+    std::sort(measurements.begin(),
+              measurements.end(),
+              [](const Measurement& lhs, const Measurement& rhs) {
+                  return lhs.timeField.timestamp() < rhs.timeField.timestamp();
+              });
+
+    return measurements;
+}
+}  // namespace details
+
 write_ops::UpdateCommandRequest buildSingleUpdateOp(const write_ops::UpdateCommandRequest& wholeOp,
                                                     size_t opIndex) {
     write_ops::UpdateCommandRequest singleUpdateOp(wholeOp.getNamespace(),
@@ -718,7 +744,7 @@ write_ops::InsertCommandRequest makeTimeseriesInsertOp(
     if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         invariant(bucketDoc.compressedBucket);
-        batch->uncompressedBucketDoc = bucketDoc.uncompressedBucket.getOwned();
+        setUncompressedBucketDoc(*batch, bucketDoc.uncompressedBucket.getOwned());
 
         // Initialize BSONColumnBuilders which will later get transferred into the Bucket class.
         BSONObj bucketDataDoc = bucketDoc.compressedBucket->getObjectField(kBucketDataFieldName);
@@ -751,13 +777,13 @@ write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
     }
 
     auto updateMod = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU();
-    auto updated = doc_diff::applyDiff(batch->uncompressedBucketDoc,
+    auto updated = doc_diff::applyDiff(getUncompressedBucketDoc(*batch),
                                        updateMod.getDiff(),
                                        updateMod.mustCheckExistenceForInsertOperations());
 
     // Hold the uncompressed bucket document that's currently on-disk prior to this write batch
     // running.
-    auto before = std::move(batch->uncompressedBucketDoc);
+    auto before = getUncompressedBucketDoc(*batch);
 
     auto compressionResult = timeseries::compressBucket(
         updated, batch->timeField, bucketsNs, gValidateTimeseriesCompression.load());
@@ -766,7 +792,7 @@ write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
             "Failed to compress time-series bucket",
             compressionResult.compressedBucket);
 
-    batch->uncompressedBucketDoc = updated;
+    setUncompressedBucketDoc(*batch, updated);
     batch->compressedBucketDoc = *compressionResult.compressedBucket;
 
     auto after = compressionResult.compressedBucket ? *compressionResult.compressedBucket : updated;
@@ -799,40 +825,6 @@ write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
     return op;
 }
 
-
-/**
- * Returns newly allocated collection of measurements sorted on time field.
- * Filters out meta field from input and does not include it in output.
- */
-std::vector<Measurement> sortMeasurementsOnTimeField(
-    std::shared_ptr<bucket_catalog::WriteBatch> batch) {
-    std::vector<Measurement> measurements;
-
-    // Convert measurements in batch from BSONObj to vector of data fields.
-    // Store timefield separate to allow simple sort.
-    for (auto& measurementObj : batch->measurements) {
-        Measurement measurement;
-        for (auto& dataField : measurementObj) {
-            StringData key = dataField.fieldNameStringData();
-            if (key == batch->bucketKey.metadata.getMetaField()) {
-                continue;
-            } else if (key == batch->timeField) {
-                // Add time field to both members of Measurement, fallthrough expected.
-                measurement.timeField = dataField;
-            }
-            measurement.dataFields.push_back(dataField);
-        }
-        measurements.push_back(std::move(measurement));
-    }
-
-    std::sort(measurements.begin(),
-              measurements.end(),
-              [](const Measurement& lhs, const Measurement& rhs) {
-                  return lhs.timeField.timestamp() < rhs.timeField.timestamp();
-              });
-
-    return measurements;
-}
 
 /**
  * Performs lightweight compression utilizing in-memory BSONColumnBuilders from WriteBatch and
@@ -891,6 +883,7 @@ write_ops::UpdateCommandRequest makeTimeseriesCompressedDiffUpdateOp(
     std::shared_ptr<bucket_catalog::WriteBatch> batch,
     const NamespaceString& bucketsNs,
     std::vector<StmtId>&& stmtIds) {
+    using namespace details;
     invariant(feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
@@ -922,7 +915,7 @@ write_ops::UpdateCommandRequest makeTimeseriesCompressedDiffUpdateOp(
     BSONObj compressedBucketDataFieldDocAfter =
         buildCompressedBucketDataFieldDocEfficiently(batch, unused);
     batch->compressedBucketDoc = compressedBucketDataFieldDocAfter;
-    batch->uncompressedBucketDoc = {};
+    setUncompressedBucketDoc(*batch, {});
 
     // Generates a delta update request using the before and after compressed bucket documents' data
     // fields. The only other items that will be different are the min, max, and count fields in the

@@ -40,20 +40,14 @@
 namespace mongo::classic_runtime_planner_for_sbe {
 
 SingleSolutionPassthroughPlanner::SingleSolutionPassthroughPlanner(
-    OperationContext* opCtx, PlannerData plannerData, std::unique_ptr<QuerySolution> solution)
-    : PlannerBase(opCtx, std::move(plannerData)), _solution(std::move(solution)) {}
+    PlannerDataForSBE plannerData, std::unique_ptr<QuerySolution> solution)
+    : PlannerBase(std::move(plannerData)), _solution(std::move(solution)) {}
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SingleSolutionPassthroughPlanner::plan() {
     LOGV2_DEBUG(8523405, 5, "Using SBE single solution planner");
-
-    // TODO: SERVER-86174 Avoid unnecessary fillOutPlannerParams() and
-    // fillOutSecondaryCollectionsInformation() planner param calls.
-    auto& queryPlannerParams = plannerParams();
-    queryPlannerParams.fillOutSecondaryCollectionsPlannerParams(opCtx(), *cq(), collections());
-
     if (!cq()->cqPipeline().empty()) {
         _solution = QueryPlanner::extendWithAggPipeline(
-            *cq(), std::move(_solution), queryPlannerParams.secondaryCollectionsInfo);
+            *cq(), std::move(_solution), plannerParams().secondaryCollectionsInfo);
     }
 
     auto sbePlanAndData = stage_builder::buildSlotBasedExecutableTree(
@@ -66,6 +60,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> SingleSolutionPassthroughPl
     return prepareSbePlanExecutor(std::move(_solution),
                                   std::move(sbePlanAndData),
                                   false /*isFromPlanCache*/,
-                                  cachedPlanHash());
+                                  cachedPlanHash(),
+                                  nullptr /*classicRuntimePlannerStage*/);
 }
 }  // namespace mongo::classic_runtime_planner_for_sbe

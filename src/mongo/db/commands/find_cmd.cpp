@@ -203,32 +203,6 @@ bool isInternalClient(const OperationContext* opCtx) {
     return opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
 }
 
-// TODO: SERVER-73632 Remove feature flag for PM-635.
-// Remove query settings lookup as it is only done on mongos.
-query_settings::QuerySettings lookupQuerySettingsForFind(
-    boost::intrusive_ptr<ExpressionContext> expCtx,
-    const ParsedFindCommand& parsedFind,
-    const NamespaceString& nss) {
-    // No query settings lookup for IDHACK queries.
-    if (isIdHackEligibleQueryWithoutCollator(*parsedFind.findCommandRequest)) {
-        return query_settings::QuerySettings();
-    }
-
-    // If part of the sharded cluster, use the query settings passed as part of the command
-    // arguments.
-    if (isInternalClient(expCtx->opCtx)) {
-        return parsedFind.findCommandRequest->getQuerySettings().get_value_or({});
-    }
-
-    const auto& serializationContext = parsedFind.findCommandRequest->getSerializationContext();
-    auto settings = query_settings::lookupQuerySettings(expCtx, nss, serializationContext, [&]() {
-        query_shape::FindCmdShape findCmdShape(parsedFind, expCtx);
-        return findCmdShape.sha256Hash(expCtx->opCtx, serializationContext);
-    });
-    query_settings::failIfRejectedBySettings(expCtx, settings);
-    return settings;
-}
-
 /**
  * Parses the grammar elements like 'filter', 'sort', and 'projection' from the raw
  * 'FindCommandRequest', and tracks internal state like begining the operation's timer and recording
@@ -252,9 +226,7 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
          .extensionsCallback = ExtensionsCallbackReal(opCtx, &nss),
          .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}));
 
-    // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
-    // $$USER_ROLES for the find command.
-    expCtx->setUserRoles();
+    expCtx->initializeReferencedSystemVariables();
     // Register query stats collection. Exclude queries against collections with encrypted fields.
     // It is important to do this before canonicalizing and optimizing the query, each of which
     // would alter the query shape.
@@ -265,7 +237,11 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
         });
     }
 
-    expCtx->setQuerySettings(lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));
+    // TODO: SERVER-73632 Remove feature flag for PM-635.
+    // Query settings will only be looked up on mongos and therefore should be part of command body
+    // on mongod if present.
+    expCtx->setQuerySettings(
+        query_settings::lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));
     return std::make_unique<CanonicalQuery>(CanonicalQueryParams{
         .expCtx = std::move(expCtx),
         .parsedFind = std::move(parsedRequest),
@@ -408,7 +384,7 @@ public:
 
         void explain(OperationContext* opCtx,
                      ExplainOptions::Verbosity verbosity,
-                     rpc::ReplyBuilderInterface* result) override {
+                     rpc::ReplyBuilderInterface* replyBuilder) override {
             // Acquire locks. The RAII object is optional, because in the case of a view, the locks
             // need to be released.
             // TODO SERVER-79175: Make nicer. We need to instantiate the AutoStatsTracker before the
@@ -458,40 +434,19 @@ public:
                  .extensionsCallback = ExtensionsCallbackReal(opCtx, &nss),
                  .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}));
 
-            expCtx->setQuerySettings(lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));
+            expCtx->setQuerySettings(
+                query_settings::lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));
             auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
                 .expCtx = std::move(expCtx), .parsedFind = std::move(parsedRequest)});
 
-            // After parsing to detect if $$USER_ROLES is referenced in the query, set the value of
-            // $$USER_ROLES for the find command.
-            cq->getExpCtx()->setUserRoles();
+            cq->getExpCtx()->initializeReferencedSystemVariables();
 
             // If we are running a query against a view redirect this query through the aggregation
             // system.
             if (collectionOrView->isView()) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 collectionOrView.reset();
-
-                // Convert the find command into an aggregation using $match (and other stages, as
-                // necessary), if possible.
-                const auto& findCommand = cq->getFindCommandRequest();
-                auto aggRequest = query_request_conversion::asAggregateCommandRequest(findCommand);
-                aggRequest.setExplain(verbosity);
-
-                try {
-                    // An empty PrivilegeVector is acceptable because these privileges are only
-                    // checked on getMore and explain will not open a cursor.
-                    uassertStatusOK(
-                        runAggregate(opCtx, aggRequest, _request.body, PrivilegeVector(), result));
-                } catch (DBException& error) {
-                    if (error.code() == ErrorCodes::InvalidPipelineOperator) {
-                        uasserted(ErrorCodes::InvalidPipelineOperator,
-                                  str::stream()
-                                      << "Unsupported in view pipeline: " << error.what());
-                    }
-                    throw;
-                }
-                return;
+                return runFindOnView(opCtx, *cq, verbosity, replyBuilder);
             }
 
             cq->setUseCqfIfEligible(true);
@@ -503,7 +458,7 @@ public:
                                                         std::move(cq),
                                                         PlanYieldPolicy::YieldPolicy::YIELD_AUTO));
 
-            auto bodyBuilder = result->getBodyBuilder();
+            auto bodyBuilder = replyBuilder->getBodyBuilder();
             // Got the execution tree. Explain it.
             Explain::explainStages(
                 exec.get(), collection, verbosity, BSONObj(), respSc, _request.body, &bodyBuilder);
@@ -518,7 +473,7 @@ public:
          *   --Save state for getMore, transferring ownership of the executor to a ClientCursor.
          *   --Generate response to send to the client.
          */
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* replyBuilder) {
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
 
             const BSONObj& cmdObj = _request.body;
@@ -567,13 +522,13 @@ public:
 
             // The presence of a term in the request indicates that this is an internal replication
             // oplog read request.
+            boost::optional<ScopedAdmissionPriority> admissionPriority;
             if (term && isOplogNss) {
                 // We do not want to wait to take tickets for internal (replication) oplog reads.
                 // Stalling on ticket acquisition can cause complicated deadlocks. Primaries may
                 // depend on data reaching secondaries in order to proceed; and secondaries may get
                 // stalled replicating because of an inability to acquire a read ticket.
-                shard_role_details::getLocker(opCtx)->setAdmissionPriority(
-                    AdmissionContext::Priority::kImmediate);
+                admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
             }
 
             // If this read represents a reverse oplog scan, we want to bypass oplog visibility
@@ -594,8 +549,7 @@ public:
                     }
                 }
 
-                auto isInternal =
-                    opCtx->getClient()->session() && opCtx->getClient()->isInternalClient();
+                auto isInternal = isInternalClient(opCtx);
                 if (MONGO_unlikely(allowExternalReadsForReverseOplogScanRule.shouldFail())) {
                     isInternal = true;
                 }
@@ -721,24 +675,7 @@ public:
             if (collectionOrView->isView()) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 collectionOrView.reset();
-
-                // Convert the find command into an aggregation using $match (and other stages, as
-                // necessary), if possible.
-                auto aggRequest =
-                    query_request_conversion::asAggregateCommandRequest(findCommandReq);
-
-                auto privileges = uassertStatusOK(
-                    auth::getPrivilegesForAggregate(AuthorizationSession::get(opCtx->getClient()),
-                                                    aggRequest.getNamespace(),
-                                                    aggRequest,
-                                                    false));
-                auto status = runAggregate(opCtx, aggRequest, _request.body, privileges, result);
-                if (status.code() == ErrorCodes::InvalidPipelineOperator) {
-                    uasserted(ErrorCodes::InvalidPipelineOperator,
-                              str::stream() << "Unsupported in view pipeline: " << status.reason());
-                }
-                uassertStatusOK(status);
-                return;
+                return runFindOnView(opCtx, *cq, boost::none /* verbosity */, replyBuilder);
             }
 
             const auto& collection = collectionOrView->getCollection();
@@ -784,7 +721,7 @@ public:
                 endQueryOp(opCtx, collectionPtr, *exec, numResults, boost::none, cmdObj);
                 CursorResponseBuilder::Options options;
                 options.isInitialResponse = true;
-                CursorResponseBuilder builder(result, options);
+                CursorResponseBuilder builder(replyBuilder, options);
                 boost::optional<CursorMetrics> metrics = includeMetrics
                     ? boost::make_optional(CurOp::get(opCtx)->debug().getCursorMetrics())
                     : boost::none;
@@ -803,7 +740,7 @@ public:
             if (!opCtx->inMultiDocumentTransaction()) {
                 options.atClusterTime = repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime();
             }
-            CursorResponseBuilder firstBatch(result, options);
+            CursorResponseBuilder firstBatch(replyBuilder, options);
             BSONObj obj;
             PlanExecutor::ExecState state = PlanExecutor::ADVANCED;
             std::uint64_t numResults = 0;
@@ -841,7 +778,8 @@ public:
                               "stats"_attr = redact(stats),
                               "cmd"_attr = cmdObj);
 
-                exception.addContext("Executor error during find command");
+                exception.addContext(str::stream() << "Executor error during find command: "
+                                                   << nss.toStringForErrorMsg());
                 throw;
             }
 
@@ -927,10 +865,35 @@ public:
             // documents.
             auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
             metricsCollector.incrementDocUnitsReturned(toStringForLogging(nss), docUnitsReturned);
-            query_request_helper::validateCursorResponse(result->getBodyBuilder().asTempObj(),
+            query_request_helper::validateCursorResponse(replyBuilder->getBodyBuilder().asTempObj(),
                                                          auth::ValidatedTenancyScope::get(opCtx),
                                                          nss.tenantId(),
                                                          respSc);
+        }
+
+        void runFindOnView(OperationContext* opCtx,
+                           const CanonicalQuery& cq,
+                           boost::optional<ExplainOptions::Verbosity> verbosity,
+                           rpc::ReplyBuilderInterface* replyBuilder) {
+            auto aggRequest =
+                query_request_conversion::asAggregateCommandRequest(cq.getFindCommandRequest());
+            aggRequest.setExplain(verbosity);
+
+            // An empty PrivilegeVector for explain is acceptable because these privileges are only
+            // checked on getMore and explain will not open a cursor.
+            const auto privileges = verbosity ? PrivilegeVector()
+                                              : uassertStatusOK(auth::getPrivilegesForAggregate(
+                                                    AuthorizationSession::get(opCtx->getClient()),
+                                                    aggRequest.getNamespace(),
+                                                    aggRequest,
+                                                    false));
+            const auto status =
+                runAggregate(opCtx, aggRequest, _request.body, privileges, replyBuilder);
+            if (status.code() == ErrorCodes::InvalidPipelineOperator) {
+                uasserted(ErrorCodes::InvalidPipelineOperator,
+                          str::stream() << "Unsupported in view pipeline: " << status.reason());
+            }
+            uassertStatusOK(status);
         }
 
         void appendMirrorableRequest(BSONObjBuilder* bob) const override {

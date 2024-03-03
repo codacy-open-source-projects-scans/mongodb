@@ -58,10 +58,6 @@ public:
         using InvocationBase::InvocationBase;
 
         void typedRun(OperationContext* opCtx) {
-            uassert(ErrorCodes::CommandNotSupported,
-                    "AutoCompact command requires its feature flag to be enabled",
-                    gFeatureFlagAutoCompact.isEnabled(
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
             uassertStatusOK(autoCompact(opCtx,
                                         request().getCommandParameter(),
                                         request().getRunOnce(),
@@ -116,7 +112,15 @@ Status autoCompact(OperationContext* opCtx,
 
     auto* storageEngine = opCtx->getServiceContext()->getStorageEngine();
 
-    Lock::GlobalLock lk(opCtx, MODE_IX);
+    // Holding the global lock to prevent racing with storage shutdown. However, no need to hold the
+    // RSTL nor acquire a flow control ticket. This doesn't care about the replica state of the node
+    // and the operation is not replicated.
+    Lock::GlobalLock lk{
+        opCtx,
+        MODE_IS,
+        Date_t::max(),
+        Lock::InterruptBehavior::kThrow,
+        Lock::GlobalLockSkipOptions{.skipFlowControlTicket = true, .skipRSTLLock = true}};
     std::shared_ptr<const CollectionCatalog> catalog = CollectionCatalog::get(opCtx);
     std::vector<StringData> excludedIdents;
 
@@ -147,12 +151,7 @@ Status autoCompact(OperationContext* opCtx,
     Status status = storageEngine->autoCompact(opCtx, options);
     if (!status.isOK())
         return status;
-
-    if (enable)
-        LOGV2(8012100, "AutoCompact enabled");
-    else
-        LOGV2(8012101, "AutoCompact disabled");
-
+    LOGV2(8012100, "AutoCompact", "enabled"_attr = enable);
     return status;
 }
 
