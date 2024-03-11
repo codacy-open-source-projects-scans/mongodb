@@ -15,32 +15,10 @@ compiler_type = rule(
 )
 
 # ==========
-# build_mode
-# ==========
-
-build_mode_values = ["dbg", "release", "opt_on", "opt_off", "opt_size", "opt_debug"]
-
-build_mode_provider = provider(
-    doc = "Select the overall mode of the build, e.g debug/optimized or some combination/extension of those.",
-    fields = {"build_mode": "choose one of " + ".".join(build_mode_values)},
-)
-
-def build_mode_impl(ctx):
-    build_mode_value = ctx.build_setting_value
-    if build_mode_value not in build_mode_values:
-        fail(str(ctx.label) + " build_mode allowed to take values {" + ", ".join(build_mode_values) + "} but was set to unallowed value " + build_mode_value)
-    return build_mode_provider(build_mode = build_mode_value)
-
-build_mode = rule(
-    implementation = build_mode_impl,
-    build_setting = config.string(flag = True),
-)
-
-# ==========
 # linker
 # ==========
 
-linker_values = ["gold", "lld"]
+linker_values = ["auto", "gold", "lld"]
 
 linker_provider = provider(
     doc = "Specify the type of linker to use.",
@@ -50,7 +28,7 @@ linker_provider = provider(
 def linker_impl(ctx):
     linker_value = ctx.build_setting_value
     if linker_value not in linker_values:
-        fail(str(ctx.label) + " build_mode allowed to take values {" + ", ".join(linker_values) + "} but was set to unallowed value " + linker_value)
+        fail(str(ctx.label) + " linker allowed to take values {" + ", ".join(linker_values) + "} but was set to unallowed value " + linker_value)
     return linker_provider(linker = linker_value)
 
 linker = rule(
@@ -109,7 +87,7 @@ spider_monkey_dbg = rule(
 # allocator
 # =========
 
-allocator_values = ["auto", "system", "tcmalloc"]
+allocator_values = ["auto", "system", "tcmalloc-gperf", "tcmalloc-google"]
 
 allocator_provider = provider(
     doc = "Allocator to use (use \"auto\" for best choice for current platform)",
@@ -414,4 +392,64 @@ def visibility_support_impl(ctx):
 visibility_support = rule(
     implementation = visibility_support_impl,
     build_setting = config.string(flag = True),
+)
+
+# =========
+# dbg
+# =========
+dbg_provider = provider(
+    doc = """Enable runtime debugging checks.""",
+    fields = ["enabled"],
+)
+
+dbg = rule(
+    implementation = lambda ctx: dbg_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# opt
+# =========
+opt_values = ["auto", "on", "off", "size", "debug"]
+
+opt_provider = provider(
+    doc = "Enable compiler optimizations.",
+    fields = {"opt": "choose one of " + ".".join(opt_values)},
+)
+
+def opt_impl(ctx):
+    opt_value = ctx.build_setting_value
+    if opt_value not in opt_values:
+        fail(str(ctx.label) + " opt allowed to take values {" + ", ".join(opt_values) + "} but was set to unallowed value " + opt_value)
+    return opt_provider(opt = opt_value)
+
+opt = rule(
+    implementation = opt_impl,
+    build_setting = config.string(flag = True),
+)
+
+# =========
+# release
+# =========
+release_provider = provider(
+    doc = """Release build.""",
+    fields = ["enabled"],
+)
+
+release = rule(
+    implementation = lambda ctx: release_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
+# local_build
+# =========
+local_build_provider = provider(
+    doc = """Allows configurations based on local builds""",
+    fields = ["enabled"],
+)
+
+local_build = rule(
+    implementation = lambda ctx: local_build_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
 )

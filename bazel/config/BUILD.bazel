@@ -4,16 +4,19 @@ load(
     "asan",
     "build_enterprise",
     "build_grpc",
-    "build_mode",
     "compiler_type",
+    "dbg",
     "detect_odr_violations",
     "fsan",
     "http_client",
     "libunwind",
     "linker",
     "linkstatic",
+    "local_build",
     "lsan",
     "msan",
+    "opt",
+    "release",
     "separate_debug",
     "shared_archive",
     "spider_monkey_dbg",
@@ -133,143 +136,267 @@ selects.config_setting_group(
     ],
 )
 
+selects.config_setting_group(
+    name = "not_s390x",
+    match_any = [
+        "@platforms//cpu:aarch64",
+        "@platforms//cpu:x86_64",
+        "@platforms//cpu:ppc64le",
+    ],
+)
+
 # ==========
-# build_mode
+# opt
 # ==========
 
-build_mode(
-    name = "build_mode",
-    build_setting_default = "dbg",
+opt(
+    name = "opt",
+    build_setting_default = "auto",
 )
 
 config_setting(
+    name = "_opt_on",
+    flag_values = {
+        "//bazel/config:opt": "on",
+    },
+)
+
+config_setting(
+    name = "_opt_off",
+    flag_values = {
+        "//bazel/config:opt": "off",
+    },
+)
+
+config_setting(
+    name = "_opt_auto",
+    flag_values = {
+        "//bazel/config:opt": "auto",
+    },
+)
+
+selects.config_setting_group(
+    name = "_opt_on_set_by_auto",
+    match_all = [
+        ":_opt_auto",
+        ":dbg_disabled",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_opt_off_set_by_auto",
+    match_all = [
+        ":_opt_auto",
+        ":dbg_enabled",
+    ],
+)
+
+# opt=on || (opt=auto && !dbg)
+selects.config_setting_group(
     name = "opt_on",
-    flag_values = {"//bazel/config:build_mode": "opt_on"},
+    match_any = [
+        ":_opt_on_set_by_auto",
+        ":_opt_on",
+    ],
 )
 
-config_setting(
+# opt=off || (opt=auto && dbg)
+selects.config_setting_group(
     name = "opt_off",
-    flag_values = {"//bazel/config:build_mode": "opt_off"},
-)
-
-config_setting(
-    name = "opt_debug",
-    flag_values = {"//bazel/config:build_mode": "opt_debug"},
+    match_any = [
+        ":_opt_off_set_by_auto",
+        ":_opt_off",
+    ],
 )
 
 config_setting(
     name = "opt_size",
-    flag_values = {"//bazel/config:build_mode": "opt_size"},
+    flag_values = {
+        "//bazel/config:opt": "size",
+    },
 )
 
 config_setting(
+    name = "opt_debug",
+    flag_values = {
+        "//bazel/config:opt": "debug",
+    },
+)
+
+selects.config_setting_group(
+    name = "opt_any",
+    match_any = [
+        ":opt_on",
+        ":opt_size",
+        ":opt_debug",
+    ],
+)
+
+# ==========
+# dbg
+# ==========
+
+dbg(
     name = "dbg",
-    flag_values = {"//bazel/config:build_mode": "dbg"},
+    build_setting_default = True,
 )
 
 config_setting(
+    name = "dbg_enabled",
+    flag_values = {
+        "//bazel/config:dbg": "True",
+    },
+)
+
+config_setting(
+    name = "dbg_disabled",
+    flag_values = {
+        "//bazel/config:dbg": "False",
+    },
+)
+
+# ==========
+# release
+# ==========
+
+release(
     name = "release",
-    flag_values = {"//bazel/config:build_mode": "release"},
+    build_setting_default = False,
 )
 
 config_setting(
+    name = "release_enabled",
+    flag_values = {
+        "//bazel/config:release": "True",
+    },
+)
+
+config_setting(
+    name = "release_disabled",
+    flag_values = {
+        "//bazel/config:release": "False",
+    },
+)
+
+selects.config_setting_group(
     name = "linux_dbg",
-    constraint_values = [
+    match_all = [
         "@platforms//os:linux",
+        ":dbg_enabled",
     ],
-    flag_values = {"//bazel/config:build_mode": "dbg"},
 )
 
-config_setting(
-    name = "linux_opt_on",
-    constraint_values = [
-        "@platforms//os:linux",
-    ],
-    flag_values = {"//bazel/config:build_mode": "opt_on"},
-)
-
-config_setting(
+selects.config_setting_group(
     name = "linux_opt_off",
-    constraint_values = [
+    match_all = [
         "@platforms//os:linux",
+        ":opt_off",
     ],
-    flag_values = {"//bazel/config:build_mode": "opt_off"},
 )
 
-# TODO(SERVER-80614): Revisit why we need "optimized + debug" in the first place.
-# Note that we have an unusual setting of "optimized + debug"
-config_setting(
-    name = "linux_opt_debug",
-    constraint_values = [
+selects.config_setting_group(
+    name = "linux_opt_on",
+    match_all = [
         "@platforms//os:linux",
+        ":opt_on",
     ],
-    flag_values = {"//bazel/config:build_mode": "opt_debug"},
 )
 
-config_setting(
+selects.config_setting_group(
+    name = "linux_opt_any",
+    match_all = [
+        "@platforms//os:linux",
+        ":opt_any",
+    ],
+)
+
+selects.config_setting_group(
     name = "linux_opt_size",
-    constraint_values = [
+    match_all = [
         "@platforms//os:linux",
+        ":opt_size",
     ],
-    flag_values = {"//bazel/config:build_mode": "opt_size"},
 )
 
-config_setting(
+selects.config_setting_group(
+    name = "linux_opt_debug",
+    match_all = [
+        "@platforms//os:linux",
+        ":opt_debug",
+    ],
+)
+
+selects.config_setting_group(
     name = "linux_release",
-    constraint_values = [
+    match_all = [
         "@platforms//os:linux",
+        ":release_enabled",
     ],
-    flag_values = {"//bazel/config:build_mode": "release"},
 )
 
-config_setting(
-    name = "windows_dbg",
-    constraint_values = [
+selects.config_setting_group(
+    name = "windows_dbg_enabled",
+    match_all = [
         "@platforms//os:windows",
+        ":dbg_enabled",
     ],
-    flag_values = {"//bazel/config:build_mode": "dbg"},
 )
 
-config_setting(
-    name = "windows_opt_on",
-    constraint_values = [
+selects.config_setting_group(
+    name = "windows_dbg_disabled",
+    match_all = [
         "@platforms//os:windows",
+        ":dbg_disabled",
     ],
-    flag_values = {"//bazel/config:build_mode": "opt_on"},
 )
 
-config_setting(
+selects.config_setting_group(
     name = "windows_opt_off",
-    constraint_values = [
+    match_all = [
         "@platforms//os:windows",
+        ":opt_off",
     ],
-    flag_values = {"//bazel/config:build_mode": "opt_off"},
 )
 
-# TODO(SERVER-80614): Revisit why we need "optimized + debug" in the first place.
-# Note that we have an unusual setting of "optimized + debug"
-config_setting(
-    name = "windows_opt_debug",
-    constraint_values = [
+selects.config_setting_group(
+    name = "windows_opt_on",
+    match_all = [
         "@platforms//os:windows",
+        ":opt_on",
     ],
-    flag_values = {"//bazel/config:build_mode": "opt_debug"},
 )
 
-config_setting(
+selects.config_setting_group(
+    name = "windows_opt_any",
+    match_all = [
+        "@platforms//os:windows",
+        ":opt_any",
+    ],
+)
+
+selects.config_setting_group(
     name = "windows_opt_size",
-    constraint_values = [
+    match_all = [
         "@platforms//os:windows",
+        ":opt_size",
     ],
-    flag_values = {"//bazel/config:build_mode": "opt_size"},
 )
 
-config_setting(
-    name = "windows_release",
-    constraint_values = [
+selects.config_setting_group(
+    name = "windows_opt_debug",
+    match_all = [
         "@platforms//os:windows",
+        ":opt_debug",
     ],
-    flag_values = {"//bazel/config:build_mode": "release"},
+)
+
+selects.config_setting_group(
+    name = "windows_opt_off_dbg_enabled",
+    match_all = [
+        "@platforms//os:windows",
+        ":opt_off",
+        ":dbg_enabled",
+    ],
 )
 
 # --------------------------------------
@@ -278,21 +405,74 @@ config_setting(
 
 linker(
     name = "linker",
-    build_setting_default = "lld",
+    build_setting_default = "auto",
+)
+
+# Underscored settings are for flagging configuration errors and for evaluating auto.
+# Use :linker_gold & linker_lld to check the final evaluated linker.
+config_setting(
+    name = "_linker_auto",
+    flag_values = {
+        "//bazel/config:linker": "auto",
+    },
 )
 
 config_setting(
-    name = "linker_gold",
+    name = "_linker_gold",
     flag_values = {
         "//bazel/config:linker": "gold",
     },
 )
 
 config_setting(
-    name = "linker_lld",
+    name = "_linker_lld",
     flag_values = {
         "//bazel/config:linker": "lld",
     },
+)
+
+selects.config_setting_group(
+    name = "_linker_gold_set_by_auto",
+    match_all = [
+        ":_linker_auto",
+        "@platforms//cpu:s390x",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_linker_lld_set_by_auto",
+    match_all = [
+        ":_linker_auto",
+        ":not_s390x",
+    ],
+)
+
+# Final setting intended for external use.
+#   linker == gold || (linker == auto && cpu == s390x)
+selects.config_setting_group(
+    name = "linker_gold",
+    match_any = [
+        ":_linker_gold_set_by_auto",
+        ":_linker_gold",
+    ],
+)
+
+# Final setting intended for external use.
+#   linker == lld || (linker == auto && cpu == not_s390x)
+selects.config_setting_group(
+    name = "linker_lld",
+    match_any = [
+        ":_linker_lld_set_by_auto",
+        ":_linker_lld",
+    ],
+)
+
+selects.config_setting_group(
+    name = "linker_lld_valid_settings",
+    match_all = [
+        ":linker_lld",
+        ":not_s390x",
+    ],
 )
 
 # --------------------------------------
@@ -397,44 +577,122 @@ allocator(
 )
 
 config_setting(
-    name = "auto_allocator_linux",
-    constraint_values = [
-        "@platforms//os:linux",
-    ],
+    name = "_tcmalloc_google",
     flag_values = {
-        "//bazel/config:allocator": "auto",
+        "//bazel/config:allocator": "tcmalloc-google",
     },
 )
 
 config_setting(
-    name = "auto_allocator_windows",
-    constraint_values = [
-        "@platforms//os:windows",
-    ],
+    name = "_tcmalloc_gperf",
     flag_values = {
-        "//bazel/config:allocator": "auto",
+        "//bazel/config:allocator": "tcmalloc-gperf",
     },
 )
 
 config_setting(
-    name = "auto_allocator",
-    flag_values = {
-        "//bazel/config:allocator": "auto",
-    },
-)
-
-config_setting(
-    name = "system_allocator",
+    name = "_system_allocator",
     flag_values = {
         "//bazel/config:allocator": "system",
     },
 )
 
 config_setting(
-    name = "tcmalloc_allocator",
+    name = "_auto_allocator",
     flag_values = {
-        "//bazel/config:allocator": "tcmalloc",
+        "//bazel/config:allocator": "auto",
     },
+)
+
+selects.config_setting_group(
+    name = "_tcmalloc_google_supported_archs",
+    match_any = [
+        "@platforms//cpu:aarch64",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_tcmalloc_google_selected_by_auto",
+    match_all = [
+        ":_auto_allocator",
+        "@platforms//os:linux",
+        ":_tcmalloc_google_supported_archs",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_tcmalloc_gperf_auto_supported",
+    match_any = [
+        "@platforms//os:windows",
+        "@platforms//cpu:ppc64le",
+        "@platforms//cpu:s390x",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_tcmalloc_gperf_supported_os",
+    match_any = [
+        "@platforms//os:windows",
+        "@platforms//os:linux",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_tcmalloc_gperf_selected_by_auto",
+    match_all = [
+        ":_auto_allocator",
+        ":_tcmalloc_gperf_auto_supported",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_system_allocator_enabled_by_auto",
+    match_all = [
+        ":_auto_allocator",
+        "@platforms//os:macos",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_tcmalloc_google_selected",
+    match_any = [
+        ":_tcmalloc_google_selected_by_auto",
+        ":_tcmalloc_google",
+    ],
+)
+
+selects.config_setting_group(
+    name = "_tcmalloc_gperf_selected",
+    match_any = [
+        ":_tcmalloc_gperf_selected_by_auto",
+        ":_tcmalloc_gperf",
+    ],
+)
+
+selects.config_setting_group(
+    name = "system_allocator_enabled",
+    match_any = [
+        ":_system_allocator_enabled_by_auto",
+        ":_system_allocator",
+    ],
+)
+
+selects.config_setting_group(
+    name = "tcmalloc_google_enabled",
+    match_all = [
+        ":_tcmalloc_google_selected",
+        "@platforms//os:linux",
+        ":_tcmalloc_google_supported_archs",
+    ],
+)
+
+selects.config_setting_group(
+    name = "tcmalloc_gperf_enabled",
+    match_all = [
+        ":_tcmalloc_gperf_selected",
+        ":_tcmalloc_gperf_supported_os",
+    ],
 )
 
 # --------------------------------------
@@ -550,7 +808,7 @@ selects.config_setting_group(
     #TODO SERVER-84714 add check to ensure we are using the toolchain version of C++ libs
     match_all = [
         ":use_glibcxx_debug_enabled",
-        ":dbg",
+        ":dbg_enabled",
         ":use_libcxx_disabled",
     ],
 )
@@ -780,7 +1038,6 @@ selects.config_setting_group(
     match_any = [
         ":opt_on",
         ":opt_debug",
-        ":dbg",
     ],
 )
 
@@ -828,7 +1085,7 @@ selects.config_setting_group(
     name = "sanitize_address_required_settings",
     match_all = [
         ":asan_enabled",
-        ":system_allocator",
+        ":system_allocator_enabled",
     ],
 )
 
@@ -836,7 +1093,7 @@ selects.config_setting_group(
     name = "sanitize_memory_required_settings",
     match_all = [
         ":msan_enabled",
-        ":system_allocator",
+        ":system_allocator_enabled",
     ],
 )
 
@@ -1117,4 +1374,20 @@ selects.config_setting_group(
         ":visibility_support_enabled_setting",
         ":linkstatic_disabled",
     ],
+)
+
+# --------------------------------------
+# local_build
+# --------------------------------------
+
+local_build(
+    name = "local_build",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "local_build_enabled",
+    flag_values = {
+        "//bazel/config:local_build": "True",
+    },
 )

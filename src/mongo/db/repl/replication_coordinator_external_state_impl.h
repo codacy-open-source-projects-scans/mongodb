@@ -46,6 +46,7 @@
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/oplog_buffer.h"
+#include "mongo/db/repl/oplog_writer.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
@@ -101,7 +102,7 @@ public:
     virtual Status initializeReplSetStorage(OperationContext* opCtx, const BSONObj& config);
     void onDrainComplete(OperationContext* opCtx) override;
     OpTime onTransitionToPrimary(OperationContext* opCtx) override;
-    virtual void forwardSecondaryProgress();
+    virtual void forwardSecondaryProgress(bool prioritized = false);
     virtual bool isSelf(const HostAndPort& host, ServiceContext* service);
     bool isSelfFastPath(const HostAndPort& host) final;
     bool isSelfSlowPath(const HostAndPort& host,
@@ -223,10 +224,22 @@ private:
     // replication.
     SyncSourceFeedback _syncSourceFeedback;
 
-    // The OplogBuffer is used to hold operations read from the sync source. During oplog
-    // application, Backgrounds Sync adds operations to the OplogBuffer while the applier's
-    // OplogBatcher consumes these operations from the buffer in batches.
-    std::unique_ptr<OplogBuffer> _oplogBuffer;
+    // This buffer is used to hold operations read from the sync source. During steady state
+    // replication, BackgroundSync adds operations to this buffer while OplogWriter's batcher
+    // consumes these operations from this buffer in batches.
+    // Note: Only initialized and used when featureFlagReduceMajorityWriteLatency is enabled.
+    std::unique_ptr<OplogBuffer> _oplogWriteBuffer;
+
+    // When featureFlagReduceMajorityWriteLatency is enabled:
+    // This buffer is used to hold operations written by the OplogWriter. During steady state
+    // replication, the OplogWriter adds operations to this buffer while the applier's batcher
+    // consumes these operations from this buffer in batches.
+    //
+    // When featureFlagReduceMajorityWriteLatency is disabled:
+    // This buffer is used to hold operations read from the sync source. During steady state
+    // replication, BackgroundSync adds operations to this buffer while OplogApplier's batcher
+    // consumes these operations from this buffer in batches.
+    std::unique_ptr<OplogBuffer> _oplogApplyBuffer;
 
     // The BackgroundSync class is responsible for pulling ops off the network from the sync source
     // and into a BlockingQueue.
@@ -237,6 +250,12 @@ private:
 
     // Thread running SyncSourceFeedback::run().
     std::unique_ptr<stdx::thread> _syncSourceFeedbackThread;
+
+    // Thread running oplog write.
+    // Note: Only initialized and used when featureFlagReduceMajorityWriteLatency is enabled.
+    std::unique_ptr<executor::TaskExecutor> _oplogWriterTaskExecutor;
+    std::unique_ptr<OplogWriter> _oplogWriter;
+    Future<void> _oplogWriterShutdownFuture;
 
     // Thread running oplog application.
     std::unique_ptr<executor::TaskExecutor> _oplogApplierTaskExecutor;

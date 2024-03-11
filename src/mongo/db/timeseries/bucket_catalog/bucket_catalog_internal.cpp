@@ -438,7 +438,6 @@ StatusWith<unique_tracked_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
             return Status{ErrorCodes::BadValue, "Bucket could not be decompressed"};
         }
         bucket->size = decompressedBucketDoc.value().objsize();
-        bucket->compressedBucketDoc = bucketDoc;
     } else {
         bucket->size = bucketDoc.objsize();
         if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
@@ -586,7 +585,7 @@ StatusWith<std::reference_wrapper<Bucket>> reuseExistingBucket(BucketCatalog& ca
               nullptr,
               getTimeseriesBucketClearedError(nss, existingBucket.bucketId.oid));
         return {ErrorCodes::WriteConflict, "Bucket may be stale"};
-    } else if (conflictsWithReopening(state.value())) {
+    } else if (transientlyConflictsWithReopening(state.value())) {
         // Avoid reusing the bucket if it conflicts with reopening.
         return {ErrorCodes::WriteConflict, "Bucket may be stale"};
     }
@@ -838,7 +837,7 @@ boost::optional<OID> findArchivedCandidate(BucketCatalog& catalog,
     // can't use this bucket.
     if (info.time - candidateTime < Seconds(*info.options.getBucketMaxSpanSeconds())) {
         auto bucketState = getBucketState(catalog.bucketStateRegistry, candidateBucket.bucketId);
-        if (bucketState && !conflictsWithReopening(bucketState.value())) {
+        if (bucketState && !transientlyConflictsWithReopening(bucketState.value())) {
             return candidateBucket.bucketId.oid;
         } else {
             if (bucketState) {
@@ -1355,7 +1354,6 @@ void closeOpenBucket(OperationContext* opCtx,
         return;
     }
 
-    invariant(!bucket.compressedBucketDoc);
     bool error = false;
     try {
         closedBuckets.emplace_back(
@@ -1386,7 +1384,6 @@ void closeOpenBucket(OperationContext* opCtx,
         return;
     }
 
-    invariant(!bucket.compressedBucketDoc);
     bool error = false;
     try {
         closedBucket =

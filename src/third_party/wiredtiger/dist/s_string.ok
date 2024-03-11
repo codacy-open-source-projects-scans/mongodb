@@ -34,7 +34,7 @@ BBBBBBBBBBBBBBBB
 BBBBBBBBBBBBBBBBBB
 BCcLlsvz
 BLKCACHE
-BLmRrSVv
+BLmpRrSVv
 BOOL
 BSR
 BTREE
@@ -245,7 +245,6 @@ MapViewOfFile
 Marsaglia
 Marsaglia's
 Mellor
-Mewhort
 Mitzenmacher
 MongoDB
 MoveFileExW
@@ -310,7 +309,9 @@ Px
 QQQS
 QSQ
 Qsort
+RCPC
 RCS
+RCpc
 RDNOLOCK
 READONLY
 REALLOC
@@ -463,6 +464,7 @@ aaa
 abcdef
 abcdefghijklmnopqrstuvwxyz
 ackSstu
+acqrel
 addl
 addr
 addrs
@@ -504,12 +506,11 @@ bbuilddir
 bcr
 bd
 beginthreadex
-bigram
 binutils
 bitcnt
 bitfield
 bitfields
-bitpos
+bitflip
 bitstr
 bitstring
 bitwise
@@ -577,6 +578,7 @@ ciphertext
 ckpt
 ckptfrag
 ckptlist
+cksum
 cloexec
 closedir
 clsm
@@ -667,7 +669,6 @@ decrypts
 deflateEnd
 deflateInit
 del
-dequeue
 dequeued
 der
 dereference
@@ -717,8 +718,6 @@ encodings
 encryptor
 encryptors
 endian
-english
-enqueue
 enum
 env
 eof
@@ -915,6 +914,9 @@ lazyfs
 lbrace
 lbracket
 ld
+ldapr
+ldaprb
+ldaprh
 le
 len
 lengthp
@@ -935,6 +937,7 @@ llu
 llvm
 loadbool
 loadtext
+loadvbool
 loc
 localTime
 localkey
@@ -1055,7 +1058,6 @@ nset
 nul
 nullptr
 num
-numSymbols
 numbare
 nvram
 offpage
@@ -1149,6 +1151,7 @@ rc
 rdlock
 rdtsc
 rduppo
+readgen
 readlock
 readonly
 readunlock
@@ -1173,7 +1176,6 @@ repositions
 requeue
 resizable
 ret
-retp
 revint
 rf
 risc
@@ -1241,7 +1243,11 @@ stderr
 stdin
 stdout
 stepp
+stlr
+stlrb
+stlrh
 storebool
+storevbool
 str
 strace
 strcat
@@ -1333,7 +1339,6 @@ umount
 unallocated
 unbare
 unbuffered
-uncompressing
 unconfigured
 uncustomized
 undef
@@ -1428,6 +1433,7 @@ xX
 xdeadbeef
 xff
 xfff
+xxd
 xxpermdi
 xxxx
 xxxxx

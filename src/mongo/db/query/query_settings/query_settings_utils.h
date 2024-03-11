@@ -75,9 +75,15 @@ QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<Expressi
 namespace utils {
 
 /**
- * @brief Helper to check if QuerySettings are empty.
+ * Determines if 'querySettings' field is allowed to be present as part of the command request for
+ * the given 'client'.
  */
-bool isEmpty(const QuerySettings& settings);
+bool allowQuerySettingsFromClient(const Client* client);
+
+/**
+ * Returns true if a given QuerySettings instance contains only default values.
+ */
+bool isDefault(const QuerySettings& settings);
 
 /**
  * Runs all validation rules on the 'setQuerySettings' command.

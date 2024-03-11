@@ -297,8 +297,7 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
                 allowCollectionCreation;
             const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
             if (!fcvSnapshot.isVersionInitialized() ||
-                !feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(
-                    fcvSnapshot) ||
+                !feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot) ||
                 !OperationShardingState::get(opCtx).isComingFromRouter(opCtx) ||
                 (opCtx->inMultiDocumentTransaction() || opCtx->isRetryableWrite())) {
                 allowCollectionCreation.emplace(opCtx);
@@ -317,33 +316,27 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
     });
 }
 
-void insertDocumentsAtomically(OperationContext* opCtx,
-                               const CollectionAcquisition& collection,
-                               std::vector<InsertStatement>::iterator begin,
-                               std::vector<InsertStatement>::iterator end,
-                               bool fromMigrate) {
-    // Intentionally not using writeConflictRetry. That is handled by the caller so it can react to
-    // oversized batches.
-    WriteUnitOfWork wuow(opCtx);
+namespace {
+// Acquire optimes and fill them in for each item in the batch.  This must only be done for
+// doc-locking storage engines, which are allowed to insert oplog documents
+// out-of-timestamp-order.  For other storage engines, the oplog entries must be physically
+// written in timestamp order, so we defer optime assignment until the oplog is about to be
+// written. Multidocument transactions should not generate opTimes because they are
+// generated at the time of commit.
+void acquireOplogSlotsForInserts(OperationContext* opCtx,
+                                 const CollectionAcquisition& collection,
+                                 std::vector<InsertStatement>::iterator begin,
+                                 std::vector<InsertStatement>::iterator end) {
+    dassert(!opCtx->inMultiDocumentTransaction());
+    dassert(!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collection.nss()));
 
-    // Acquire optimes and fill them in for each item in the batch.
-    // This must only be done for doc-locking storage engines, which are allowed to insert oplog
-    // documents out-of-timestamp-order.  For other storage engines, the oplog entries must be
-    // physically written in timestamp order, so we defer optime assignment until the oplog is about
-    // to be written. Multidocument transactions should not generate opTimes because they are
-    // generated at the time of commit.
+    // Populate 'slots' with new optimes for each insert.
+    // This also notifies the storage engine of each new timestamp.
     auto batchSize = std::distance(begin, end);
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    auto inTransaction = opCtx->inMultiDocumentTransaction();
-
-    if (!inTransaction && !replCoord->isOplogDisabledFor(opCtx, collection.nss())) {
-        // Populate 'slots' with new optimes for each insert.
-        // This also notifies the storage engine of each new timestamp.
-        auto oplogSlots = repl::getNextOpTimes(opCtx, batchSize);
-        auto slot = oplogSlots.begin();
-        for (auto it = begin; it != end; it++) {
-            it->oplogSlot = *slot++;
-        }
+    auto oplogSlots = repl::getNextOpTimes(opCtx, batchSize);
+    auto slot = oplogSlots.begin();
+    for (auto it = begin; it != end; it++) {
+        it->oplogSlot = *slot++;
     }
 
     hangAndFailAfterDocumentInsertsReserveOpTimes.executeIf(
@@ -360,6 +353,43 @@ void insertDocumentsAtomically(OperationContext* opCtx,
             const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "collectionNS");
             return fpNss.isEmpty() || collection.nss() == fpNss;
         });
+}
+}  // namespace
+
+void insertDocumentsAtomically(OperationContext* opCtx,
+                               const CollectionAcquisition& collection,
+                               std::vector<InsertStatement>::iterator begin,
+                               std::vector<InsertStatement>::iterator end,
+                               bool fromMigrate) {
+    auto batchSize = std::distance(begin, end);
+    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+    const bool inTransaction = opCtx->inMultiDocumentTransaction();
+    const bool oplogDisabled = replCoord->isOplogDisabledFor(opCtx, collection.nss());
+    WriteUnitOfWork::OplogEntryGroupType oplogEntryGroupType = WriteUnitOfWork::kDontGroup;
+
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    const bool replicateVectoredInsertsTransactionally = fcvSnapshot.isVersionInitialized() &&
+        repl::feature_flags::gReplicateVectoredInsertsTransactionally.isEnabled(fcvSnapshot);
+    // For multiple inserts not part of a multi-document transaction, the inserts will be
+    // batched into a single applyOps oplog entry.
+    if (replicateVectoredInsertsTransactionally && !inTransaction && batchSize > 1 &&
+        !oplogDisabled) {
+        oplogEntryGroupType = WriteUnitOfWork::kGroupForPossiblyRetryableOperations;
+    }
+
+    // Intentionally not using writeConflictRetry. That is handled by the caller so it can react to
+    // oversized batches.
+    WriteUnitOfWork wuow(opCtx, oplogEntryGroupType);
+
+    // Capped collections may implicitly generate a delete in the same unit of work as an
+    // insert. In order to avoid that delete generating a second timestamp in a WUOW which
+    // has un-timestamped writes (which is a violation of multi-timestamp constraints),
+    // we must reserve the timestamp for the insert in advance.
+    if (oplogEntryGroupType != WriteUnitOfWork::kGroupForPossiblyRetryableOperations &&
+        !inTransaction && !oplogDisabled &&
+        (!replicateVectoredInsertsTransactionally || collection.getCollectionPtr()->isCapped())) {
+        acquireOplogSlotsForInserts(opCtx, collection, begin, end);
+    }
 
     uassertStatusOK(collection_internal::insertDocuments(opCtx,
                                                          collection.getCollectionPtr(),
@@ -543,9 +573,9 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
                                 const boost::optional<mongo::UUID>& collectionUUID,
                                 bool ordered,
                                 std::vector<InsertStatement>& batch,
+                                OperationSource source,
                                 LastOpFixer* lastOpFixer,
-                                WriteResult* out,
-                                OperationSource source) {
+                                WriteResult* out) {
     if (batch.empty())
         return true;
 
@@ -797,7 +827,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
             allowCollectionCreation;
         const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
         if (!fcvSnapshot.isVersionInitialized() ||
-            !feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(fcvSnapshot) ||
+            !feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot) ||
             !OperationShardingState::get(opCtx).isComingFromRouter(opCtx) ||
             (opCtx->inMultiDocumentTransaction() || opCtx->isRetryableWrite())) {
             allowCollectionCreation.emplace(opCtx);
@@ -1170,9 +1200,9 @@ WriteResult performInserts(OperationContext* opCtx,
                                                      wholeOp.getCollectionUUID(),
                                                      wholeOp.getOrdered(),
                                                      batch,
+                                                     source,
                                                      &lastOpFixer,
-                                                     &out,
-                                                     source);
+                                                     &out);
         batch.clear();  // We won't need the current batch any more.
         bytesInBatch = 0;
 
@@ -1221,10 +1251,10 @@ WriteResult performInserts(OperationContext* opCtx,
  */
 static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
                                                       OperationSource source,
-                                                      bool* containsDotsAndDollarsField,
                                                       CurOp& curOp,
                                                       CollectionAcquisition collection,
-                                                      ParsedUpdate& parsedUpdate) {
+                                                      ParsedUpdate& parsedUpdate,
+                                                      bool* containsDotsAndDollarsField) {
     auto exec = uassertStatusOK(
         getExecutorUpdate(&curOp.debug(), collection, &parsedUpdate, boost::none /* verbosity */));
 
@@ -1277,8 +1307,8 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                                                const boost::optional<mongo::UUID>& opCollectionUUID,
                                                UpdateRequest* updateRequest,
                                                OperationSource source,
-                                               bool* containsDotsAndDollarsField,
-                                               bool forgoOpCounterIncrements) {
+                                               bool forgoOpCounterIncrements,
+                                               bool* containsDotsAndDollarsField) {
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangDuringBatchUpdate,
         opCtx,
@@ -1363,11 +1393,11 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
 
     if (updateRequest->getSort().isEmpty()) {
         return performSingleUpdateOpNoRetry(
-            opCtx, source, containsDotsAndDollarsField, curOp, collection, parsedUpdate);
+            opCtx, source, curOp, collection, parsedUpdate, containsDotsAndDollarsField);
     } else {
         return writeConflictRetry(opCtx, "update", ns, [&]() -> SingleWriteResult {
             return performSingleUpdateOpNoRetry(
-                opCtx, source, containsDotsAndDollarsField, curOp, collection, parsedUpdate);
+                opCtx, source, curOp, collection, parsedUpdate, containsDotsAndDollarsField);
         });
     }
 }
@@ -1430,8 +1460,8 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
                                              opCollectionUUID,
                                              &request,
                                              source,
-                                             &containsDotsAndDollarsField,
-                                             forgoOpCounterIncrements);
+                                             forgoOpCounterIncrements,
+                                             &containsDotsAndDollarsField);
 
             if (containsDotsAndDollarsField) {
                 // If it's an upsert, increment 'inserts' metric, otherwise increment 'updates'.
@@ -1950,13 +1980,24 @@ Status performAtomicTimeseriesWrites(
 
     assertCanWrite_inlock(opCtx, ns);
 
-    WriteUnitOfWork wuow{opCtx};
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    const bool replicateVectoredInsertsTransactionally = fcvSnapshot.isVersionInitialized() &&
+        repl::feature_flags::gReplicateVectoredInsertsTransactionally.isEnabled(fcvSnapshot);
+
+    WriteUnitOfWork::OplogEntryGroupType oplogEntryGroupType = WriteUnitOfWork::kDontGroup;
+    if (replicateVectoredInsertsTransactionally && insertOps.size() > 1 && updateOps.empty() &&
+        !repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, ns)) {
+        oplogEntryGroupType = WriteUnitOfWork::kGroupForPossiblyRetryableOperations;
+    }
+    WriteUnitOfWork wuow{opCtx, oplogEntryGroupType};
 
     std::vector<repl::OpTime> oplogSlots;
     boost::optional<std::vector<repl::OpTime>::iterator> slot;
-    if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, ns)) {
-        oplogSlots = repl::getNextOpTimes(opCtx, insertOps.size() + updateOps.size());
-        slot = oplogSlots.begin();
+    if (!replicateVectoredInsertsTransactionally || !updateOps.empty()) {
+        if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, ns)) {
+            oplogSlots = repl::getNextOpTimes(opCtx, insertOps.size() + updateOps.size());
+            slot = oplogSlots.begin();
+        }
     }
 
     auto participant = TransactionParticipant::get(opCtx);
@@ -2255,10 +2296,10 @@ write_ops::UpdateCommandRequest makeTimeseriesTransformationOp(
  */
 TimeseriesSingleWriteResult performTimeseriesInsert(
     OperationContext* opCtx,
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds,
-    const write_ops::InsertCommandRequest& request) {
+    const write_ops::InsertCommandRequest& request,
+    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch) {
     if (auto status = checkFailUnorderedTimeseriesInsertFailPoint(metadata)) {
         return {status->first, status->second};
     }
@@ -2276,7 +2317,6 @@ TimeseriesSingleWriteResult performTimeseriesInsert(
  */
 TimeseriesSingleWriteResult performTimeseriesUpdate(
     OperationContext* opCtx,
-    std::shared_ptr<timeseries::bucket_catalog::WriteBatch> batch,
     const BSONObj& metadata,
     const write_ops::UpdateCommandRequest& op,
     const write_ops::InsertCommandRequest& request) {
@@ -2292,8 +2332,8 @@ TimeseriesSingleWriteResult performTimeseriesUpdate(
  * by the write and silently leave the bucket uncompressed when any type of error is encountered.
  */
 void tryPerformTimeseriesBucketCompression(OperationContext* opCtx,
-                                           timeseries::bucket_catalog::ClosedBucket& closedBucket,
-                                           const write_ops::InsertCommandRequest& request) {
+                                           const write_ops::InsertCommandRequest& request,
+                                           timeseries::bucket_catalog::ClosedBucket& closedBucket) {
     // Buckets with just a single measurement is not worth compressing.
     if (closedBucket.numMeasurements.has_value() && closedBucket.numMeasurements.value() <= 1) {
         return;
@@ -2393,7 +2433,7 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
     const bool performInsert = batch->numPreviouslyCommittedMeasurements == 0;
     if (performInsert) {
         const auto output =
-            performTimeseriesInsert(opCtx, batch, metadata, std::move(stmtIds), request);
+            performTimeseriesInsert(opCtx, metadata, std::move(stmtIds), request, batch);
         if (auto error = write_ops_exec::generateError(
                 opCtx, output.result.getStatus(), start + index, errors->size())) {
             bool canContinue = output.canContinue;
@@ -2413,7 +2453,7 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
                   str::stream() << "Expected 1 insertion of document with _id '" << docId
                                 << "', but found " << output.result.getValue().getN() << ".");
     } else {
-        auto op = batch->compressedBucketDoc
+        auto op = batch->generateCompressedDiff
             ? timeseries::makeTimeseriesCompressedDiffUpdateOp(
                   opCtx, batch, makeTimeseriesBucketsNamespace(ns(request)), std::move(stmtIds))
             : timeseries::makeTimeseriesUpdateOp(opCtx,
@@ -2421,7 +2461,7 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
                                                  makeTimeseriesBucketsNamespace(ns(request)),
                                                  metadata,
                                                  std::move(stmtIds));
-        auto const output = performTimeseriesUpdate(opCtx, batch, metadata, op, request);
+        auto const output = performTimeseriesUpdate(opCtx, metadata, op, request);
 
         if ((output.result.isOK() && output.result.getValue().getNModified() != 1) ||
             output.result.getStatus().code() == ErrorCodes::WriteConflict ||
@@ -2452,7 +2492,7 @@ bool commitTimeseriesBucket(OperationContext* opCtx,
 
     if (closedBucket) {
         // If this write closed a bucket, compress the bucket
-        tryPerformTimeseriesBucketCompression(opCtx, *closedBucket, request);
+        tryPerformTimeseriesBucketCompression(opCtx, request, *closedBucket);
     }
     return true;
 } catch (const DBException& ex) {
@@ -2467,11 +2507,11 @@ std::shared_ptr<timeseries::bucket_catalog::WriteBatch>& extractFromPair(
 }
 
 bool commitTimeseriesBucketsAtomically(OperationContext* opCtx,
+                                       const write_ops::InsertCommandRequest& request,
                                        TimeseriesBatches& batches,
                                        TimeseriesStmtIds&& stmtIds,
                                        boost::optional<repl::OpTime>* opTime,
-                                       boost::optional<OID>* electionId,
-                                       const write_ops::InsertCommandRequest& request) {
+                                       boost::optional<OID>* electionId) {
     auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
 
     auto batchesToCommit = timeseries::determineBatchesToCommit(batches, extractFromPair);
@@ -2535,7 +2575,7 @@ bool commitTimeseriesBucketsAtomically(OperationContext* opCtx,
                 continue;
             }
 
-            tryPerformTimeseriesBucketCompression(opCtx, *closedBucket, request);
+            tryPerformTimeseriesBucketCompression(opCtx, request, *closedBucket);
         }
     } catch (const ExceptionFor<ErrorCodes::TimeseriesBucketCompressionFailed>& ex) {
         abortStatus = ex.toStatus();
@@ -2554,8 +2594,8 @@ bool commitTimeseriesBucketsAtomically(OperationContext* opCtx,
 // granularity value, due to the possible inconsistency in the process of granularity
 // updates.
 void rebuildOptionsWithGranularityFromConfigServer(OperationContext* opCtx,
-                                                   TimeseriesOptions& timeSeriesOptions,
-                                                   const NamespaceString& bucketsNs) {
+                                                   const NamespaceString& bucketsNs,
+                                                   TimeseriesOptions& timeSeriesOptions) {
     AutoGetCollectionForRead coll(opCtx, bucketsNs);
     auto collDesc = CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, bucketsNs)
                         ->getCollectionDescription(opCtx);
@@ -2734,7 +2774,7 @@ insertIntoBucketCatalog(OperationContext* opCtx,
 
     boost::optional<Status> rebuildOptionsError;
     try {
-        rebuildOptionsWithGranularityFromConfigServer(opCtx, timeSeriesOptions, bucketsNs);
+        rebuildOptionsWithGranularityFromConfigServer(opCtx, bucketsNs, timeSeriesOptions);
     } catch (const ExceptionForCat<ErrorCategory::StaleShardVersionError>& ex) {
         // This could occur when the shard version attached to the request is for the time
         // series namespace (unsharded), which is compared to the shard version of the
@@ -2804,7 +2844,7 @@ insertIntoBucketCatalog(OperationContext* opCtx,
         // If this insert closed buckets, rewrite to be a compressed column. If we cannot
         // perform write operations at this point the bucket will be left uncompressed.
         for (auto& closedBucket : insertResult->closedBuckets) {
-            tryPerformTimeseriesBucketCompression(opCtx, closedBucket, request);
+            tryPerformTimeseriesBucketCompression(opCtx, request, closedBucket);
         }
 
         return true;
@@ -2854,7 +2894,7 @@ bool performOrderedTimeseriesWritesAtomically(OperationContext* opCtx,
     hangTimeseriesInsertBeforeCommit.pauseWhileSet();
 
     if (!commitTimeseriesBucketsAtomically(
-            opCtx, batches, std::move(stmtIds), opTime, electionId, request)) {
+            opCtx, request, batches, std::move(stmtIds), opTime, electionId)) {
         return false;
     }
 

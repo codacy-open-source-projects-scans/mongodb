@@ -243,17 +243,7 @@ private:
 };
 
 Status waitForSigningKeys(OperationContext* opCtx) {
-    auto const shardRegistry = Grid::get(opCtx)->shardRegistry();
-
     while (true) {
-        auto configCS = shardRegistry->getConfigServerConnectionString();
-        auto rsm = ReplicaSetMonitor::get(configCS.getSetName());
-        // mongod will set minWireVersion == maxWireVersion for hello requests from
-        // internalClient.
-        if (rsm && (rsm->getMaxWireVersion() < WireVersion::SUPPORTS_OP_MSG)) {
-            LOGV2(22841, "Waiting for signing keys not supported by config shard");
-            return Status::OK();
-        }
         auto stopStatus = opCtx->checkForInterruptNoAssert();
         if (!stopStatus.isOK()) {
             return stopStatus;
@@ -637,13 +627,13 @@ Status initializeSharding(
             catCache->invalidateEntriesThatReferenceShard(removedShard);
         }};
 
-    if (!serverGlobalParams.configdbs) {
+    if (!mongosGlobalParams.configdbs) {
         return {ErrorCodes::BadValue, "Unrecognized connection string."};
     }
 
     auto shardRegistry = std::make_unique<ShardRegistry>(opCtx->getServiceContext(),
                                                          std::move(shardFactory),
-                                                         serverGlobalParams.configdbs,
+                                                         mongosGlobalParams.configdbs,
                                                          std::move(shardRemovalHooks));
 
     {
@@ -1030,7 +1020,7 @@ ExitCode main(ServiceContext* serviceContext) {
     serviceContext->setFastClockSource(FastClockSourceFactory::create(Milliseconds{10}));
 
     // We either have a setting where all processes are in localhost or none are
-    const auto& configServers = serverGlobalParams.configdbs.getServers();
+    const auto& configServers = mongosGlobalParams.configdbs.getServers();
     invariant(!configServers.empty());
     const auto allowLocalHost = configServers.front().isLocalHost();
 

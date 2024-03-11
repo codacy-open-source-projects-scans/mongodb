@@ -2,7 +2,7 @@
  * Test that the targeting of $lookup queries and any sub-queries works correctly.
  *
  * @tags: [
- *   featureFlagTrackUnshardedCollectionsOnShardingCatalog,
+ *   featureFlagTrackUnshardedCollectionsUponCreation,
  *   featureFlagMoveCollection,
  *   featureFlagUnshardCollection,
  *   assumes_balancer_off,
@@ -1000,6 +1000,7 @@ if (checkSbeRestrictedOrFullyEnabled(db)) {
 
     const shardCollectionFn = () => {
         jsTestLog("Sharding " + kUnsplittable2CollFullName);
+        assert.commandWorked(db.getCollection(kUnsplittable2CollName).createIndex({a: 1}));
         assert.commandWorked(
             db.adminCommand({shardCollection: kUnsplittable2CollFullName, key: {a: 1}}));
         assert.commandWorked(st.splitAt(kUnsplittable2CollFullName, {a: 0}));

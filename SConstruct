@@ -701,6 +701,17 @@ add_option(
 )
 
 add_option(
+    'xray',
+    choices=["on", "off"],
+    default="off",
+    help="Build with LLVM XRay support",
+    type='choice',
+)
+
+add_option('xray-instruction-threshold', help="XRay instrumentation instruction threshold",
+           default=1, nargs='?', type=int)
+
+add_option(
     'git-decider',
     choices=["on", "off"],
     const='on',
@@ -1808,7 +1819,7 @@ env.AddMethod(conf_error, 'ConfError')
 # Normalize the VERBOSE Option, and make its value available as a
 # function.
 if env['VERBOSE'] == "auto":
-    env['VERBOSE'] = not sys.stdout.isatty()
+    env['VERBOSE'] = not sys.stdout.isatty() and env.get('__NINJA_NO') != "1"
 else:
     try:
         env['VERBOSE'] = to_boolean(env['VERBOSE'])
@@ -2138,12 +2149,7 @@ except (ValueError, IndexError):
 
 if get_option('allocator') == "auto":
     if env.TargetOSIs('linux') and env['TARGET_ARCH'] in ('x86_64', 'aarch64'):
-
-        # TODO SERVER-86472 make bazel support both tcmalloc implementations
-        if env.get("BAZEL_BUILD_ENABLED"):
-            env['MONGO_ALLOCATOR'] = "tcmalloc-gperf"
-        else:
-            env['MONGO_ALLOCATOR'] = "tcmalloc-google"
+        env['MONGO_ALLOCATOR'] = "tcmalloc-google"
 
         # googles tcmalloc uses the membarrier() system call which was added in Linux 4.3,
         # so fall back to gperf implementation for older kernels
@@ -5545,6 +5551,16 @@ def doConfigure(myenv):
                 "Running on ppc64le, but can't find a correct vec_vbpermq output index.  Compiler or platform not supported"
             )
 
+    if get_option('xray') == "on":
+        if not (myenv.ToolchainIs('clang') and env.TargetOSIs('linux')):
+            env.FatalError("LLVM Xray is only supported with clang on linux")
+
+        myenv.AppendUnique(
+            CCFLAGS=[
+                '-fxray-instrument',
+                '-fxray-instruction-threshold=' + str(get_option('xray-instruction-threshold'))
+            ], LINKFLAGS=['-fxray-instrument'])
+
     myenv = conf.Finish()
 
     conf = Configure(myenv)
@@ -5561,6 +5577,30 @@ def doConfigure(myenv):
         elif usdt_provider:
             conf.env.SetConfigHeaderDefine("MONGO_CONFIG_USDT_ENABLED")
             conf.env.SetConfigHeaderDefine("MONGO_CONFIG_USDT_PROVIDER", usdt_provider)
+    myenv = conf.Finish()
+
+    def CheckGlibcRseqPresent(context):
+        compile_test_body = textwrap.dedent("""
+        #include <sys/rseq.h>
+        #include <stdlib.h>
+        #include <stdio.h>
+
+        int main() {
+            printf("%d", __rseq_size);
+            return EXIT_SUCCESS;
+        }
+        """)
+
+        context.Message("Checking if glibc rseq implemenation is present...")
+        result = context.TryCompile(compile_test_body, ".cpp")
+        context.Result(result)
+        return result
+
+    conf = Configure(myenv)
+    conf.AddTest('CheckGlibcRseqPresent', CheckGlibcRseqPresent)
+
+    if conf.CheckGlibcRseqPresent():
+        conf.env.SetConfigHeaderDefine("MONGO_CONFIG_GLIBC_RSEQ")
     myenv = conf.Finish()
 
     return myenv
@@ -5937,6 +5977,11 @@ if gdb_index_enabled == True:
 if env.get('ENABLE_GRPC_BUILD'):
     env.SetConfigHeaderDefine("MONGO_CONFIG_GRPC")
     env.Tool('protobuf_compiler')
+
+if env['MONGO_ALLOCATOR'] == 'tcmalloc-google':
+    env.SetConfigHeaderDefine("MONGO_CONFIG_TCMALLOC_GOOGLE")
+elif env['MONGO_ALLOCATOR'] == 'tcmalloc-gperf':
+    env.SetConfigHeaderDefine("MONGO_CONFIG_TCMALLOC_GPERF")
 
 if get_option('separate-debug') == "on" or env.TargetOSIs("windows"):
 
@@ -6713,6 +6758,16 @@ names = [
 env.Alias('install-all-meta-but-not-unittests', [
     node for node in candidate_nodes if str(node) not in names
     and not str(node).startswith(tuple([prefix_name + '-' for prefix_name in names]))
+])
+
+# prove prefix only operates on real AIB_COMPONENTS, unittests is now a meta component
+# made up of all the quarter components combined. We create the prove alias for this meta
+# component for compatibility with the past and ease of use.
+env.Alias("prove-unittests", [
+    'prove-first-quarter-unittests',
+    'prove-second-quarter-unittests',
+    'prove-third-quarter-unittests',
+    'prove-fourth-quarter-unittests',
 ])
 
 # We don't want installing files to cause them to flow into the cache,

@@ -18,6 +18,7 @@ env.Library(
     target='bson_column',
     source=[
         'bsoncolumn.cpp',
+        'bsoncolumn_interleaved.cpp',
         'bsoncolumnbuilder.cpp',
         'simple8b.cpp',
         'simple8b_type_util.cpp',
@@ -89,6 +90,18 @@ env.CppLibfuzzerTest(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        'bson_column',
+    ],
+)
+
+env.CppLibfuzzerTest(
+    target='bsoncolumn_decompress_fuzzer',
+    source=[
+        'bsoncolumn_decompress_fuzzer.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/bson/bson_validate',
         'bson_column',
     ],
 )

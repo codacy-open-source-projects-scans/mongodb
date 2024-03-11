@@ -10,15 +10,13 @@ variables:
   run_on:
   - amazon2-arm64-large
   activate: true  # These compile variants run on every commit to reduce latency of the auto-reverter.
-  modules:
-    - enterprise
   stepback: false
 
 # THIS HAS COPIES IN:
 # - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
 # - etc/evergreen_yml_components/variants/amazon/test_dev.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-- &linux-arm64-dynamic-compile-expansions
+- &linux-arm64-dynamic-enterprise-compile-expansions
   scons_cache_scope: shared
   scons_cache_mode: all
   has_packages: false
@@ -67,27 +65,48 @@ variables:
 buildvariants:
 - <<: *linux-arm64-dynamic-compile-params
   name: &amazon-linux2-arm64-stitch-compile amazon-linux2-arm64-stitch-compile
-  display_name: "* Amazon Linux 2 arm64 Stitch Compile"
+  display_name: "* Amazon Linux 2 arm64 Enterprise Stitch Compile"
   expansions:
-    <<: *linux-arm64-dynamic-compile-expansions
+    <<: *linux-arm64-dynamic-enterprise-compile-expansions
     compile_variant: *amazon-linux2-arm64-stitch-compile
   tasks:
     - name: .stitch
 
 - <<: *linux-arm64-dynamic-compile-params
   name: &amazon-linux2-arm64-dev-compile amazon-linux2-arm64-dev-compile
-  display_name: "* Amazon Linux 2 arm64 Dev Compile"
+  display_name: "* Amazon Linux 2 arm64 Enterprise Dev Compile"
   expansions:
-    <<: *linux-arm64-dynamic-compile-expansions
+    <<: *linux-arm64-dynamic-enterprise-compile-expansions
     compile_variant: *amazon-linux2-arm64-dev-compile
   tasks:
     - name: scons_compile_smoke_test_TG
     - name: ninja_compile_smoke_test_TG
 
+# Caching is purposefully disabled on this variant so we can benchmark consistent build times.
+- name: &amazon-linux2-arm64-local-compile amazon-linux2-arm64-local-compile
+  display_name: "Amazon Linux 2 arm64 Local Compile"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  run_on:
+  - amazon2-arm64-large
+  expansions:
+    scons_cache_scope: none
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=amazon2
+      -j$(grep -c ^processor /proc/cpuinfo)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --link-model=dynamic
+      --use-diagnostic-latches=on
+      BAZEL_FLAGS=--config=local
+    compile_variant: *amazon-linux2-arm64-local-compile
+  tasks:
+    - name: compile_test_parallel_unittest_stream_TG
+    - name: compile_test_parallel_core_stream_TG
+
 # Note that this task is currently optional;
 # This will eventually become suggested, then required.
 - name: &amazon-linux-2023-arm64-bazel-compile amazon-linux-2023-arm64-bazel-compile
-  display_name: "Amazon Linux 2023 arm64 Bazel Compile"
+  display_name: "Amazon Linux 2023 Enterprise arm64 Bazel Compile"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
   tags: ["bazel_check"]
   run_on:
@@ -97,15 +116,53 @@ buildvariants:
     compile_variant: *amazon-linux-2023-arm64-bazel-compile
   tasks:
     - name: compile_bazel_TG
+    - name: compile_bazel_sanitize_TG
     - name: compile_bazel_ninja_TG
+
+# Note that this task is currently optional;
+# This will eventually become suggested, then required.
+- name: &rhel81-ppc64le-bazel-compile rhel81-ppc64le-bazel-compile
+  display_name: "RHEL 8.1 PPC64LE Bazel Compile"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  tags: ["bazel_check"]
+  run_on:
+  - rhel81-power8-small
+  stepback: false
+  expansions:
+    compile_variant: *rhel81-ppc64le-bazel-compile
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=rhel81
+      -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc)
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+  tasks:
+    - name: compile_bazel_TG
+
+# Note that this task is currently optional;
+# This will eventually become suggested, then required.
+- name: &rhel83-s390x-bazel-compile rhel83-s390x-bazel-compile
+  display_name: "RHEL 8.3 S390X Bazel Compile"
+  cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  tags: ["bazel_check"]
+  run_on:
+  - rhel83-zseries-small
+  stepback: false
+  expansions:
+    compile_variant: *rhel83-s390x-bazel-compile
+    compile_flags: >-
+      --ssl
+      MONGO_DISTMOD=rhel83
+      -j3
+      --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+      --linker=gold
+  tasks:
+    - name: compile_bazel_TG
 
 - &enterprise-amazon-linux2-arm64-all-feature-flags-template
   <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
   name: &enterprise-amazon-linux2-arm64-all-feature-flags enterprise-amazon-linux2-arm64-all-feature-flags
   display_name: "! Amazon Linux 2 arm64 Enterprise (all feature flags)"
   cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
-  modules:
-    - enterprise
   run_on:
     - amazon2-arm64-small
   stepback: true
@@ -236,7 +293,7 @@ buildvariants:
 - &enterprise-amazon-linux2-arm64-all-feature-flags-fuzzers
   <<: *enterprise-amazon-linux2-arm64-all-feature-flags-template
   name: enterprise-amazon-linux2-arm64-all-feature-flags-fuzzers
-  display_name: "*| Amazon Linux 2 arm64 (all feature flags) Fuzzers"
+  display_name: "*| Amazon Linux 2 arm64 Enterprise (all feature flags) Fuzzers"
   tasks:
   - name: .aggfuzzer
   - name: .change_stream_fuzzer
@@ -245,10 +302,8 @@ buildvariants:
 
 - <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
   name: &amazon-linux2-arm64-fixed-concurrent-transactions amazon-linux2-arm64-fixed-concurrent-transactions
-  display_name: "Amazon Linux 2 arm64 (Fixed Concurrent Transactions)"
+  display_name: "Amazon Linux 2 arm64 Enterprise (Fixed Concurrent Transactions)"
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
-  modules:
-    - enterprise
   run_on:
     - amazon2-arm64-small
   expansions:
@@ -349,13 +404,11 @@ buildvariants:
   - name: vector_search_auth
   - name: vector_search_ssl
 
-- name: &amazon-linux2-arm64-sep-benchmark amazon-linux2-arm64-sep-benchmark
-  display_name: "Amazon Linux 2 arm64 (SEP Benchmark)"
+- name: &al2023-arm64-sep-benchmark al2023-arm64-sep-benchmark
+  display_name: "AL2023 arm64 Enterprise (SEP Benchmark)"
   cron: "0 0,8,16 * * *" # Run this task every 8 hours
-  modules:
-  - enterprise
   run_on:
-  - amazon2-arm64-large
+  - amazon2023.0-arm64-large
   expansions:
     compile_flags: >-
       --ssl
@@ -363,7 +416,7 @@ buildvariants:
       -j$(grep -c ^processor /proc/cpuinfo)
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
     scons_cache_scope: shared
-    compile_variant: *amazon-linux2-arm64-sep-benchmark
+    compile_variant: *al2023-arm64-sep-benchmark
   tasks:
   - name: compile_upload_benchmarks_TG
   - name: .benchmarks_sep

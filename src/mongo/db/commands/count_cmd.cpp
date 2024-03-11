@@ -240,10 +240,10 @@ public:
                 return viewAggregation.getStatus();
             }
 
-            auto viewAggCmd =
-                OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                    nss.dbName(), opMsgRequest.validatedTenancyScope, viewAggregation.getValue())
-                    .body;
+            auto viewAggCmd = OpMsgRequestBuilder::create(opMsgRequest.validatedTenancyScope,
+                                                          nss.dbName(),
+                                                          viewAggregation.getValue())
+                                  .body;
             auto viewAggRequest = aggregation_request_helper::parseFromBSON(
                 opCtx,
                 nss,
@@ -254,8 +254,12 @@ public:
 
             // An empty PrivilegeVector is acceptable because these privileges are only checked on
             // getMore and explain will not open a cursor.
-            return runAggregate(
-                opCtx, viewAggRequest, viewAggregation.getValue(), PrivilegeVector(), result);
+            return runAggregate(opCtx,
+                                viewAggRequest,
+                                {viewAggRequest},
+                                viewAggregation.getValue(),
+                                PrivilegeVector(),
+                                result);
         }
 
         const auto& collection = ctx->getCollection();
@@ -350,8 +354,8 @@ public:
 
             uassertStatusOK(viewAggregation.getStatus());
 
-            auto aggRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                dbName, vts, std::move(viewAggregation.getValue()));
+            auto aggRequest =
+                OpMsgRequestBuilder::create(vts, dbName, std::move(viewAggregation.getValue()));
             BSONObj aggResult = CommandHelpers::runCommandDirectly(opCtx, aggRequest);
 
             uassertStatusOK(ViewResponseFormatter(aggResult).appendAsCountResponse(

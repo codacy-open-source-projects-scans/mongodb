@@ -120,7 +120,7 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
         WiredTigerRecordStore::Params params;
         params.nss = NamespaceString::createNamespaceString_forTest("a.b");
         params.ident = ident;
-        params.engineName = kWiredTigerEngineName;
+        params.engineName = std::string{kWiredTigerEngineName};
         params.isCapped = false;
         params.keyFormat = KeyFormat::Long;
         params.overwrite = true;
@@ -130,7 +130,7 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
         params.tracksSizeAdjustments = true;
         params.forceUpdateWithFullDocument = false;
 
-        auto ret = new StandardWiredTigerRecordStore(nullptr, opCtx.get(), params);
+        auto ret = new WiredTigerRecordStore(nullptr, opCtx.get(), params);
         ret->postConstructorInit(opCtx.get(), params.nss);
         rs.reset(ret);
     }

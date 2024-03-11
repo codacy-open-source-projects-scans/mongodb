@@ -119,6 +119,8 @@
 namespace mongo {
 namespace {
 
+constexpr size_t kMaxDatabaseCreationAttempts = 3u;
+
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOnly);
@@ -722,11 +724,33 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
     // Collect metrics.
     _updateMetrics->collectMetrics(cmdObj);
 
-    // Technically, findAndModify should only be creating database if upsert is true, but this
-    // would require that the parsing be pulled into this function.
-    cluster::createDatabase(opCtx, nss.dbName());
 
-    auto cri = getCollectionRoutingInfo(opCtx, cmdObj, nss);
+    auto cri = [&]() {
+        size_t attempts = 1u;
+        while (true) {
+            try {
+                // Technically, findAndModify should only be creating database if upsert is true,
+                // but this would require that the parsing be pulled into this function.
+                cluster::createDatabase(opCtx, nss.dbName());
+                return getCollectionRoutingInfo(opCtx, cmdObj, nss);
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                LOGV2_INFO(8584300,
+                           "Failed initialization of routing info because the database has been "
+                           "concurrently dropped",
+                           logAttrs(nss.dbName()),
+                           "attemptNumber"_attr = attempts,
+                           "maxAttempts"_attr = kMaxDatabaseCreationAttempts);
+
+                if (attempts++ >= kMaxDatabaseCreationAttempts) {
+                    // The maximum number of attempts has been reached, so the procedure fails as it
+                    // could be a logical error. At this point, it is unlikely that the error is
+                    // caused by concurrent drop database operations.
+                    throw;
+                }
+            }
+        }
+    }();
+
     const auto& cm = cri.cm;
     auto isTrackedTimeseries = cm.hasRoutingTable() && cm.getTimeseriesFields();
     auto isTimeseriesViewRequest = false;
@@ -1004,10 +1028,9 @@ void FindAndModifyCmd::_runExplainWithoutShardKey(OperationContext* opCtx,
         ClusterQueryWithoutShardKey clusterQueryWithoutShardKeyCommand(cmdObjForPassthrough);
         const auto explainClusterQueryWithoutShardKeyCmd =
             ClusterExplain::wrapAsExplain(clusterQueryWithoutShardKeyCommand.toBSON({}), verbosity);
-        auto opMsg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            nss.dbName(),
-            auth::ValidatedTenancyScope::get(opCtx),
-            explainClusterQueryWithoutShardKeyCmd);
+        auto opMsg = OpMsgRequestBuilder::create(auth::ValidatedTenancyScope::get(opCtx),
+                                                 nss.dbName(),
+                                                 explainClusterQueryWithoutShardKeyCmd);
         return CommandHelpers::runCommandDirectly(opCtx, opMsg).getOwned();
     }();
 
@@ -1021,10 +1044,9 @@ void FindAndModifyCmd::_runExplainWithoutShardKey(OperationContext* opCtx,
             write_without_shard_key::targetDocForExplain);
         const auto explainClusterWriteWithoutShardKeyCmd =
             ClusterExplain::wrapAsExplain(clusterWriteWithoutShardKeyCommand.toBSON({}), verbosity);
-        auto opMsg = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            nss.dbName(),
-            auth::ValidatedTenancyScope::get(opCtx),
-            explainClusterWriteWithoutShardKeyCmd);
+        auto opMsg = OpMsgRequestBuilder::create(auth::ValidatedTenancyScope::get(opCtx),
+                                                 nss.dbName(),
+                                                 explainClusterWriteWithoutShardKeyCmd);
         return CommandHelpers::runCommandDirectly(opCtx, opMsg).getOwned();
     }();
 

@@ -48,7 +48,7 @@
 #include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
 #include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
-#include "mongo/db/timeseries/bucket_catalog/insertion_ordered_column_map.h"
+#include "mongo/db/timeseries/bucket_catalog/measurement_map.h"
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/bucket_compression.h"
@@ -165,21 +165,16 @@ public:
      */
     TrackedBSONObj uncompressedBucketDoc;
 
-    // If set, bucket is compressed on disk, and first prepared batch will need to decompress it
-    // before updating.
-    // TODO(SERVER-79416): remove this member.
-    boost::optional<BSONObj> compressedBucketDoc;
-
     // Whether the bucket was created while the always used compressed buckets feature flag was
     // enabled.
     // TODO SERVER-70605: remove this boolean.
     const bool usingAlwaysCompressedBuckets;
 
     /**
-     * In-memory state of each committed data field, sorted by insertion order. Enables fewer
-     * complete round-trips of decompression + compression.
+     * In-memory state of each committed data field. Enables fewer complete round-trips of
+     * decompression + compression.
      */
-    InsertionOrderedColumnMap intermediateBuilders;
+    MeasurementMap intermediateBuilders;
 };
 
 /**

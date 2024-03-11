@@ -69,6 +69,7 @@
 #include "mongo/db/matcher/matcher_type_set.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_dependencies.h"
+#include "mongo/db/pipeline/window_function/window_function_top_bottom_n.h"
 #include "mongo/db/query/bson_typemask.h"
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_ast.h"
@@ -130,8 +131,7 @@ std::unique_ptr<sbe::EExpression> generateNullOrMissingExpr(const sbe::EExpressi
     return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
                         makeFunction("typeMatch",
                                      expr.clone(),
-                                     makeInt32Constant(getBSONTypeMask(BSONType::jstNULL) |
-                                                       getBSONTypeMask(BSONType::Undefined))),
+                                     makeInt32Constant(getBSONTypeMask(BSONType::jstNULL))),
                         makeBoolConstant(true));
 }
 
@@ -147,6 +147,31 @@ std::unique_ptr<sbe::EExpression> generateNullOrMissing(const sbe::FrameId frame
 
 std::unique_ptr<sbe::EExpression> generateNullOrMissing(std::unique_ptr<sbe::EExpression> arg) {
     return generateNullOrMissingExpr(*arg);
+}
+
+std::unique_ptr<sbe::EExpression> generateNullMissingOrUndefinedExpr(const sbe::EExpression& expr) {
+    return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
+                        makeFunction("typeMatch",
+                                     expr.clone(),
+                                     makeInt32Constant(getBSONTypeMask(BSONType::jstNULL) |
+                                                       getBSONTypeMask(BSONType::Undefined))),
+                        makeBoolConstant(true));
+}
+
+
+std::unique_ptr<sbe::EExpression> generateNullMissingOrUndefined(const sbe::EVariable& var) {
+    return generateNullMissingOrUndefinedExpr(var);
+}
+
+std::unique_ptr<sbe::EExpression> generateNullMissingOrUndefined(sbe::FrameId frameId,
+                                                                 sbe::value::SlotId slotId) {
+    sbe::EVariable var{frameId, slotId};
+    return generateNullMissingOrUndefined(var);
+}
+
+std::unique_ptr<sbe::EExpression> generateNullMissingOrUndefined(
+    std::unique_ptr<sbe::EExpression> arg) {
+    return generateNullMissingOrUndefinedExpr(*arg);
 }
 
 std::unique_ptr<sbe::EExpression> generateNonNumericCheck(const sbe::EVariable& var) {
@@ -200,7 +225,7 @@ std::unique_ptr<sbe::EExpression> generateNullishOrNotRepresentableInt32Check(
     auto numericConvert32 =
         sbe::makeE<sbe::ENumericConvert>(var.clone(), sbe::value::TypeTags::NumberInt32);
     return makeBinaryOp(sbe::EPrimBinary::logicOr,
-                        generateNullOrMissing(var),
+                        generateNullMissingOrUndefined(var),
                         makeNot(makeFunction("exists", std::move(numericConvert32))));
 }
 
@@ -393,11 +418,11 @@ std::unique_ptr<sbe::EExpression> makeIfNullExpr(sbe::EExpression::Vector values
         auto frameId = frameIdGenerator->generate();
         auto var = sbe::EVariable{frameId, 0};
 
-        expr = sbe::makeE<sbe::ELocalBind>(frameId,
-                                           sbe::makeEs(std::move(values[idx])),
-                                           sbe::makeE<sbe::EIf>(makeNot(generateNullOrMissing(var)),
-                                                                var.clone(),
-                                                                std::move(expr)));
+        expr = sbe::makeE<sbe::ELocalBind>(
+            frameId,
+            sbe::makeEs(std::move(values[idx])),
+            sbe::makeE<sbe::EIf>(
+                makeNot(generateNullMissingOrUndefined(var)), var.clone(), std::move(expr)));
     }
 
     return expr;
@@ -711,6 +736,94 @@ std::unique_ptr<sbe::PlanStage> makeLoopJoinForFetch(std::unique_ptr<sbe::PlanSt
                     indexKeyPatternSlot.slotId),
         nullptr /* predicate */,
         planNodeId);
+}
+
+bool isAccumulatorN(StringData name) {
+    return name == AccumulatorTop::getName() || name == AccumulatorBottom::getName() ||
+        name == AccumulatorTopN::getName() || name == AccumulatorBottomN::getName() ||
+        name == AccumulatorMinN::getName() || name == AccumulatorMaxN::getName() ||
+        name == AccumulatorFirstN::getName() || name == AccumulatorLastN::getName();
+}
+
+bool isTopBottomN(StringData name) {
+    return name == AccumulatorTop::getName() || name == AccumulatorBottom::getName() ||
+        name == AccumulatorTopN::getName() || name == AccumulatorBottomN::getName();
+}
+
+StringData getAccumulationOpName(const AccumulationStatement& accStmt) {
+    return accStmt.expr.name;
+}
+
+StringData getWindowFunctionOpName(const WindowFunctionStatement& wfStmt) {
+    return wfStmt.expr->getOpName();
+}
+
+bool isAccumulatorN(const AccumulationStatement& accStmt) {
+    return isAccumulatorN(getAccumulationOpName(accStmt));
+}
+
+bool isAccumulatorN(const WindowFunctionStatement& wfStmt) {
+    return isAccumulatorN(getWindowFunctionOpName(wfStmt));
+}
+
+bool isTopBottomN(const AccumulationStatement& accStmt) {
+    return isTopBottomN(getAccumulationOpName(accStmt));
+}
+
+bool isTopBottomN(const WindowFunctionStatement& wfStmt) {
+    return isTopBottomN(getWindowFunctionOpName(wfStmt));
+}
+
+boost::optional<SortPattern> getSortPattern(const AccumulationStatement& accStmt) {
+    if (isTopBottomN(accStmt)) {
+        auto acc = accStmt.expr.factory();
+
+        if (accStmt.expr.name == AccumulatorTop::getName()) {
+            return dynamic_cast<AccumulatorTop*>(acc.get())->getSortPattern();
+        }
+        if (accStmt.expr.name == AccumulatorBottom::getName()) {
+            return dynamic_cast<AccumulatorBottom*>(acc.get())->getSortPattern();
+        }
+        if (accStmt.expr.name == AccumulatorTopN::getName()) {
+            return dynamic_cast<AccumulatorTopN*>(acc.get())->getSortPattern();
+        }
+        if (accStmt.expr.name == AccumulatorBottomN::getName()) {
+            return dynamic_cast<AccumulatorBottomN*>(acc.get())->getSortPattern();
+        }
+    }
+    return {};
+}
+
+boost::optional<SortPattern> getSortPattern(const WindowFunctionStatement& wfStmt) {
+    using TopExpr = window_function::ExpressionN<WindowFunctionTop, AccumulatorTop>;
+    using BottomExpr = window_function::ExpressionN<WindowFunctionBottom, AccumulatorBottom>;
+    using TopNExpr = window_function::ExpressionN<WindowFunctionTopN, AccumulatorTopN>;
+    using BottomNExpr = window_function::ExpressionN<WindowFunctionBottomN, AccumulatorBottomN>;
+
+    if (wfStmt.expr->getOpName() == AccumulatorTop::getName()) {
+        return *dynamic_cast<TopExpr*>(wfStmt.expr.get())->sortPattern;
+    }
+    if (wfStmt.expr->getOpName() == AccumulatorBottom::getName()) {
+        return *dynamic_cast<BottomExpr*>(wfStmt.expr.get())->sortPattern;
+    }
+    if (wfStmt.expr->getOpName() == AccumulatorTopN::getName()) {
+        return *dynamic_cast<TopNExpr*>(wfStmt.expr.get())->sortPattern;
+    }
+    if (wfStmt.expr->getOpName() == AccumulatorBottomN::getName()) {
+        return *dynamic_cast<BottomNExpr*>(wfStmt.expr.get())->sortPattern;
+    }
+    return {};
+}
+
+std::unique_ptr<sbe::SortSpec> makeSortSpecFromSortPattern(const SortPattern& sortPattern) {
+    return std::make_unique<sbe::SortSpec>(
+        sortPattern.serialize(SortPattern::SortKeySerialization::kForExplain).toBson());
+}
+
+std::unique_ptr<sbe::SortSpec> makeSortSpecFromSortPattern(
+    const boost::optional<SortPattern>& sortPattern) {
+    return sortPattern ? makeSortSpecFromSortPattern(*sortPattern)
+                       : std::unique_ptr<sbe::SortSpec>{};
 }
 
 /**

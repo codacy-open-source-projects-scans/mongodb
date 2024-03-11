@@ -100,6 +100,7 @@ const allCommands = {
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
+    _shardsvrConvertToCapped: {skip: isAnInternalCommand},
     _shardsvrRegisterIndex: {skip: isAnInternalCommand},
     _shardsvrCommitIndexParticipant: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
@@ -152,6 +153,8 @@ const allCommands = {
     streams_getStats: {skip: isAnInternalCommand},
     streams_testOnlyInsert: {skip: isAnInternalCommand},
     streams_getMetrics: {skip: isAnInternalCommand},
+    streams_updateFeatureFlags: {skip: isAnInternalCommand},
+    streams_testOnlyGetFeatureFlags: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     _vectorClockPersist: {skip: isAnInternalCommand},
     abortMoveCollection: {
@@ -1470,7 +1473,7 @@ const allCommands = {
         doesNotRunOnStandalone: true,
         command: {
             setQuerySettings: {find: collName, $db: dbName, filter: {a: 1}},
-            settings: {indexHints: {allowedIndexes: ["a_1"]}}
+            settings: {indexHints: {ns: {db: dbName, coll: collName}, allowedIndexes: ["a_1"]}}
         }
     },
     removeQuerySettings: {
@@ -1543,6 +1546,7 @@ const allCommands = {
         // Skipping command because it requires an actual file path for recording traffic to.
         skip: "requires an actual file path to record traffic to",
     },
+    sysprofile: {skip: isAnInternalCommand},
     testDeprecation: {skip: isAnInternalCommand},
     testDeprecationInVersion2: {skip: isAnInternalCommand},
     testInternalTransactions: {skip: isAnInternalCommand},

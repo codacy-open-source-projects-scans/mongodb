@@ -318,6 +318,7 @@ public:
     boost::optional<long long> msWaitingForMongot{boost::none};
     long long mongotBatchNum = 0;
     BSONObj mongotCountVal = BSONObj();
+    BSONObj mongotSlowQueryLog = BSONObj();
 
     bool hasSortStage{false};  // true if the query plan involves an in-memory sort
 
@@ -348,6 +349,8 @@ public:
     boost::optional<uint32_t> planCacheKey;
     // The hash of the query's "stable" key. This represents the query's shape.
     boost::optional<uint32_t> queryHash;
+    // The hash of the query's shape.
+    boost::optional<query_shape::QueryShapeHash> queryShapeHash;
 
     /* The QueryStatsInfo struct was created to bundle all the queryStats related fields of CurOp &
      * OpDebug together (SERVER-83280).

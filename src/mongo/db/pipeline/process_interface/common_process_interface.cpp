@@ -95,15 +95,12 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
 #endif
 
     auto reportCurrentOpForService = [&](Service* service) {
-        for (Service::LockedClientsCursor cursor(service); Client* client = cursor.next();) {
-            invariant(client);
-
-            stdx::lock_guard<Client> lk(*client);
-
+        for (Service::LockedClientsCursor cursor(service); LockedClient lc = cursor.next();) {
+            Client* client = lc.client();
             if (ctxAuth->getAuthorizationManager().isAuthEnabled()) {
                 // If auth is disabled, ignore the allUsers parameter.
                 if (userMode == CurrentOpUserMode::kExcludeOthers &&
-                    !ctxAuth->isCoauthorizedWithClient(client, lk)) {
+                    !ctxAuth->isCoauthorizedWithClient(client, lc)) {
                     continue;
                 }
 
@@ -197,10 +194,12 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
 
 std::vector<FieldPath> CommonProcessInterface::collectDocumentKeyFieldsActingAsRouter(
     OperationContext* opCtx, const NamespaceString& nss) const {
-    const auto [cm, _] =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-    if (cm.isSharded()) {
-        return shardKeyToDocumentKeyFields(cm.getShardKeyPattern().getKeyPatternFields());
+    const auto criSW = Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss);
+    if (criSW.isOK() && criSW.getValue().cm.isSharded()) {
+        return shardKeyToDocumentKeyFields(
+            criSW.getValue().cm.getShardKeyPattern().getKeyPatternFields());
+    } else if (!criSW.isOK() && criSW.getStatus().code() != ErrorCodes::NamespaceNotFound) {
+        uassertStatusOK(criSW);
     }
 
     // We have no evidence this collection is sharded, so the document key is just _id.
@@ -280,7 +279,11 @@ boost::optional<ShardId> CommonProcessInterface::findOwningShard(OperationContex
                                                                  CatalogCache* catalogCache,
                                                                  const NamespaceString& nss) {
     tassert(7958001, "CatalogCache should be initialized", catalogCache);
-    auto [cm, _] = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
+    auto swCRI = catalogCache->getCollectionRoutingInfo(opCtx, nss);
+    if (swCRI.getStatus().code() == ErrorCodes::NamespaceNotFound) {
+        return boost::none;
+    }
+    auto [cm, _] = uassertStatusOK(swCRI);
 
     if (cm.hasRoutingTable()) {
         if (cm.isUnsplittable()) {

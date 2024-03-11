@@ -325,12 +325,25 @@ SbExpr SbExprBuilder::generateNullOrMissing(SbExpr expr) {
     }
 }
 
+SbExpr SbExprBuilder::generateNullMissingOrUndefined(SbExpr expr) {
+    if (hasABT(expr)) {
+        return abt::wrap(stage_builder::generateABTNullMissingOrUndefined(extractABT(expr)));
+    } else {
+        return stage_builder::generateNullMissingOrUndefined(extractExpr(expr));
+    }
+}
+
+
 SbExpr SbExprBuilder::generatePositiveCheck(SbExpr expr) {
     return abt::wrap(stage_builder::generateABTPositiveCheck(extractABT(expr)));
 }
 
 SbExpr SbExprBuilder::generateNullOrMissing(SbVar var) {
     return abt::wrap(stage_builder::generateABTNullOrMissing(var.getABTName()));
+}
+
+SbExpr SbExprBuilder::generateNullMissingOrUndefined(SbVar var) {
+    return abt::wrap(stage_builder::generateABTNullMissingOrUndefined(var.getABTName()));
 }
 
 SbExpr SbExprBuilder::generateNonStringCheck(SbVar var) {
@@ -485,11 +498,12 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
     const VariableTypes* varTypes,
     const SbSlotVector& gbs,
     SbAggExprVector sbAggExprs,
-    boost::optional<SbSlot> selectivityBitmapSlot,
+    SbSlot selectivityBitmapSlot,
     const SbSlotVector& blockAccArgSbSlots,
     const SbSlotVector& blockAccInternalArgSbSlots,
     SbSlot bitmapInternalSlot,
     SbSlot accInternalSlot,
+    bool allowDiskUse,
     PlanYieldPolicy* yieldPolicy) {
     using BlockAggExprPair = sbe::BlockHashAggStage::BlockRowAccumulators;
 
@@ -497,8 +511,7 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
 
     SbSlot groupBySlot = gbs[0];
 
-    const auto selectivityBitmapSlotId =
-        selectivityBitmapSlot ? boost::make_optional(selectivityBitmapSlot->getId()) : boost::none;
+    const auto selectivityBitmapSlotId = selectivityBitmapSlot.getId();
 
     sbe::BlockHashAggStage::BlockAndRowAggs aggExprsMap;
     SbSlotVector aggSlots;
@@ -527,6 +540,8 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
         blockAccInternalArgSlots.push_back(sbSlot.getId());
     }
 
+    const bool forceIncreasedSpilling = allowDiskUse &&
+        (kDebugBuild || internalQuerySlotBasedExecutionHashAggForceIncreasedSpilling.load());
     stage = sbe::makeS<sbe::BlockHashAggStage>(std::move(stage),
                                                groupBySlots,
                                                selectivityBitmapSlotId,
@@ -537,7 +552,9 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
                                                std::move(aggExprsMap),
                                                yieldPolicy,
                                                _nodeId,
-                                               true /* participateInTrialRunTracking */);
+                                               allowDiskUse,
+                                               true /* participateInTrialRunTracking */,
+                                               forceIncreasedSpilling);
 
     // For BlockHashAggStage, the group by "out" slot is the same as the incoming group by slot,
     // except that the "out" slot will always be a block even if the incoming group by slot was

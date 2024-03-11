@@ -32,6 +32,8 @@ _SUPPORTED_PLATFORM_MATRIX = [
     "linux:amd64:clang",
     "linux:ppc64le:gcc",
     "linux:ppc64le:clang",
+    "linux:s390x:gcc",
+    "linux:s390x:clang",
     "windows:amd64:msvc",
     "macos:amd64:clang",
     "macos:arm64:clang",
@@ -46,15 +48,26 @@ _SANITIZER_MAP = {
     "undefined": "ubsan",
 }
 
-_DISTRO_MAP = {
-    "Ubuntu 22.04": "ubuntu22",
+_DISTRO_PATTERN_MAP = {
+    "Ubuntu 18*": "ubuntu18",
+    "Ubuntu 20*": "ubuntu20",
+    "Ubuntu 22*": "ubuntu22",
     "Amazon Linux 2": "amazon_linux_2",
     "Amazon Linux 2023": "amazon_linux_2023",
+    "Debian GNU/Linux 10": "debian10",
+    "Debian GNU/Linux 12": "debian12",
+    "Red Hat Enterprise Linux Server 7*": "rhel7",
+    "Red Hat Enterprise Linux 7*": "rhel7",
+    "Red Hat Enterprise Linux 8*": "rhel8",
+    "Red Hat Enterprise Linux 9*": "rhel9",
+    "SLES 15*": "suse15",
 }
 
 _S3_HASH_MAPPING = {
     "https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-ppc64le":
         "dd21c75817533ff601bf797e64f0eb2f7f6b813af26c829f0bda30e328caef46",
+    "https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-s390x":
+        "6d72eabc1789b041bbe4cfc033bbac4491ec9938ef6da9899c0188ecf270a7f4",
     "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-amd64":
         "f2ba5f721a995b54bab68c6b76a340719888aa740310e634771086b6d1528ecd",
     "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-arm64":
@@ -528,6 +541,17 @@ def verify_s3_hash(s3_path: str, local_path: str) -> None:
             f"Hash mismatch for {s3_path}, expected {_S3_HASH_MAPPING[s3_path]} but got {hash}")
 
 
+def find_distro_match(distro_str: str) -> str:
+    for distro_pattern, simplified_name in _DISTRO_PATTERN_MAP.items():
+        if "*" in distro_pattern:
+            prefix_suffix = distro_pattern.split("*")
+            if distro_str.startswith(prefix_suffix[0]) and distro_str.endswith(prefix_suffix[1]):
+                return simplified_name
+        elif distro_str == distro_pattern:
+            return simplified_name
+    return None
+
+
 # Establishes logic for BazelLibrary build rule
 def generate(env: SCons.Environment.Environment) -> None:
 
@@ -563,14 +587,14 @@ def generate(env: SCons.Environment.Environment) -> None:
             os.makedirs(bazel_bin_dir)
 
         # TODO(SERVER-86050): remove the branch once bazelisk is built on s390x & ppc64le
-        bazel_executable = os.path.join(
-            bazel_bin_dir, "bazel") if normalized_arch in ["ppc64le"] else os.path.join(
-                bazel_bin_dir, "bazelisk")
+        bazel_executable = os.path.join(bazel_bin_dir, "bazel") if normalized_arch in [
+            "ppc64le", "s390x"
+        ] else os.path.join(bazel_bin_dir, "bazelisk")
 
         if not os.path.exists(bazel_executable):
             print(f"Downloading {bazel_executable}...")
             # TODO(SERVER-86050): remove the branch once bazelisk is built on s390x & ppc64le
-            if normalized_arch in ["ppc64le"]:
+            if normalized_arch in ["ppc64le", "s390x"]:
                 s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-6.4.0-{normalized_arch}"
             else:
                 ext = ".exe" if normalized_os == "windows" else ""
@@ -581,39 +605,28 @@ def generate(env: SCons.Environment.Environment) -> None:
             verify_s3_hash(s3_path, bazel_executable)
 
             print(f"Downloaded {bazel_executable}")
-            os.chmod(bazel_executable, stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            # Bazel is a self-extracting zip launcher and needs read perms on the executable to read the zip from itself.
+            os.chmod(
+                bazel_executable, stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH | stat.S_IRUSR
+                | stat.S_IRGRP | stat.S_IROTH)
         else:
             print("Skipped downloading bazelisk", bazel_executable)
 
         # === Build settings ===
 
         linkstatic = env.GetOption("link-model") in ["auto", "static"]
+        allocator = env.get('MONGO_ALLOCATOR', 'tcmalloc-google')
 
-        if env.GetOption("release") is not None:
-            build_mode = "release"
-        elif env.GetOption("dbg") == "on" and mongo_generators.get_opt_options(env) == "off":
-            build_mode = "dbg"
-        elif env.GetOption("dbg") == "on" and mongo_generators.get_opt_options(env) == "on":
-            build_mode = "opt_debug"
-        else:
-            build_mode = f"opt_{mongo_generators.get_opt_options(env)}"  # one of "on", "size", "off"
-
-        # TODO SERVER-86472 make bazel support both tcmalloc implementations
-        if env.GetOption("allocator") == "tcmalloc-google":
-            env.ConfError("Bazel build currently does not support tcmalloc-google allocator.")
-        if env.GetOption("allocator") == "tcmalloc-gperf":
-            allocator = "tcmalloc"
-        else:
-            allocator = env.GetOption("allocator")
-
-        if normalized_os == "linux" and f"{distro.name()} {distro.version()}" in _DISTRO_MAP:
-            distro_or_os = _DISTRO_MAP[f"{distro.name()} {distro.version()}"]
-        else:
-            distro_or_os = normalized_os
+        distro_or_os = normalized_os
+        if normalized_os == "linux":
+            distro_id = find_distro_match(f"{distro.name()} {distro.version()}")
+            if distro_id is not None:
+                distro_or_os = distro_id
 
         bazel_internal_flags = [
             f'--//bazel/config:compiler_type={env.ToolchainName()}',
-            f'--//bazel/config:build_mode={build_mode}',
+            f'--//bazel/config:opt={env.GetOption("opt")}',
+            f'--//bazel/config:dbg={env.GetOption("dbg") == "on"}',
             f'--//bazel/config:separate_debug={True if env.GetOption("separate-debug") == "on" else False}',
             f'--//bazel/config:libunwind={env.GetOption("use-libunwind")}',
             f'--//bazel/config:use_gdbserver={False if env.GetOption("gdbserver") is None else True}',
@@ -684,6 +697,9 @@ def generate(env: SCons.Environment.Environment) -> None:
         if normalized_arch == "ppc64le":
             Globals.bazel_env_variables[
                 "JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-11.0.4.11-2.el8.ppc64le"
+        elif normalized_arch == "s390x":
+            Globals.bazel_env_variables[
+                "JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-11.0.11.0.9-0.el8_3.s390x"
 
         # Store the bazel command line flags so scons can check if it should rerun the bazel targets
         # if the bazel command line changes.

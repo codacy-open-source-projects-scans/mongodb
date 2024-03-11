@@ -48,6 +48,7 @@ template <typename Buffer>
 struct BlockBasedSubObjectFinisher {
     BlockBasedSubObjectFinisher(const BufferVector<Buffer*>& buffers) : _buffers(buffers) {}
     void finish(const char* elemBytes, int fieldNameSize, int totalSize);
+    void finishMissing();
 
     const BufferVector<Buffer*>& _buffers;
 };
@@ -55,7 +56,6 @@ struct BlockBasedSubObjectFinisher {
 /**
  * A helper class for block-based decompression of object data.
  */
-template <class CMaterializer>
 class BlockBasedInterleavedDecompressor {
 public:
     /**
@@ -75,7 +75,84 @@ public:
     const char* decompress(std::vector<std::pair<Path, Buffer>>& paths);
 
 private:
-    struct DecodingState;
+    /**
+     * Decoding state for a stream of values corresponding to a scalar field.
+     */
+    struct DecodingState {
+        DecodingState();
+
+        /**
+         * A tagged union type representing values decompressed from BSONColumn bytes. This can a
+         * BSONElement if the value appeared uncompressed, or it can be an encoded representation
+         * that was computed from a delta.
+         */
+        using Elem =
+            std::variant<BSONElement, std::pair<BSONType, int64_t>, std::pair<BSONType, int128_t>>;
+
+        /**
+         * State when decoding deltas for 64-bit values.
+         */
+        struct Decoder64 {
+            Decoder64();
+
+            boost::optional<int64_t> lastEncodedValue;
+            Simple8b<uint64_t>::Iterator pos;
+            int64_t lastEncodedValueForDeltaOfDelta = 0;
+            uint8_t scaleIndex;
+            bool deltaOfDelta = false;
+        };
+
+        /**
+         * State when decoding deltas for 128-bit values.
+         */
+        struct Decoder128 {
+            boost::optional<int128_t> lastEncodedValue;
+            Simple8b<uint128_t>::Iterator pos;
+        };
+
+        /**
+         * Initializes a decoder given an uncompressed BSONElement in the BSONColumn bytes.
+         */
+        void loadUncompressed(const BSONElement& elem);
+
+        struct LoadControlResult {
+            Elem element;
+            int size;
+        };
+
+        /**
+         * Assuming that buffer points at the next control byte, takes the appropriate action:
+         * - If the control byte begins an uncompressed literal: initializes a decoder, and returns
+         *   the literal.
+         * - If the control byte precedes blocks of deltas, applies the first delta and returns the
+         *   new expanded element.
+         * In both cases, the "size" field will contain the number of bytes to the next control
+         * byte.
+         */
+        LoadControlResult loadControl(ElementStorage& allocator, const char* buffer);
+
+        /**
+         * Apply a delta or delta of delta to an encoded representation to get a new element value.
+         * May also apply a 0 delta to an uncompressed literal, simply returning the literal.
+         */
+        Elem loadDelta(ElementStorage& allocator, Decoder64& d64);
+
+        /**
+         * Apply a delta to an encoded representation to get a new element value. May also apply a 0
+         * delta to an uncompressed literal, simply returning the literal.
+         */
+        Elem loadDelta(ElementStorage& allocator, Decoder128& d128);
+
+        /**
+         * The last uncompressed literal from the BSONColumn bytes.
+         */
+        BSONElement _lastLiteral;
+
+        /**
+         * 64- or 128-bit specific state.
+         */
+        std::variant<Decoder64, Decoder128> decoder = Decoder64{};
+    };
 
     template <typename Buffer>
     struct FastDecodingState;
@@ -83,6 +160,8 @@ private:
     template <typename Buffer>
     const char* decompressGeneral(
         absl::flat_hash_map<const void*, BufferVector<Buffer*>>&& elemToBuffer);
+
+    static bool moreData(DecodingState& ds, const char* control);
 
     template <typename T, typename Encoding, class Buffer, typename Materialize, typename Finish>
     static void decompressAllDelta(const char* ptr,
@@ -97,15 +176,19 @@ private:
     const char* decompressFast(
         absl::flat_hash_map<const void*, BufferVector<Buffer*>>&& elemToBuffer);
 
-    BSONElement writeToElementStorage(typename DecodingState::Elem elem, StringData fieldName);
+    void writeToElementStorage(DecodingState::Elem elem,
+                               BSONElement lastLiteral,
+                               StringData fieldName);
 
     template <class Buffer>
-    static void appendToBuffers(BufferVector<Buffer*>& buffers, typename DecodingState::Elem elem);
+    static void appendToBuffers(BufferVector<Buffer*>& buffers,
+                                DecodingState::Elem elem,
+                                BSONElement lastLiteral);
 
     template <typename Buffer, typename T>
-    static void appendEncodedToBuffers(BufferVector<Buffer*>& buffers, int64_t encoded) {
+    static void appendEncodedToBuffers(BufferVector<Buffer*>& buffers, T v) {
         for (auto&& b : buffers) {
-            b->append(static_cast<T>(encoded));
+            b->append(v);
         }
     }
 
@@ -115,6 +198,10 @@ private:
     const BSONType _rootType;
     const bool _traverseArrays;
 };
+
+// Avoid GCC/Clang compiler issues
+inline BlockBasedInterleavedDecompressor::DecodingState::DecodingState() = default;
+inline BlockBasedInterleavedDecompressor::DecodingState::Decoder64::Decoder64() = default;
 
 template <typename Buffer>
 void BlockBasedSubObjectFinisher<Buffer>::finish(const char* elemBytes,
@@ -128,26 +215,19 @@ void BlockBasedSubObjectFinisher<Buffer>::finish(const char* elemBytes,
     }
 }
 
-template <class CMaterializer>
-BlockBasedInterleavedDecompressor<CMaterializer>::BlockBasedInterleavedDecompressor(
-    ElementStorage& allocator, const char* control, const char* end)
-    : _allocator(allocator),
-      _control(control),
-      _end(end),
-      _rootType(*control == bsoncolumn::kInterleavedStartArrayRootControlByte ? Array : Object),
-      _traverseArrays(*control == bsoncolumn::kInterleavedStartControlByte ||
-                      *control == bsoncolumn::kInterleavedStartArrayRootControlByte) {
-    invariant(bsoncolumn::isInterleavedStartControlByte(*control),
-              "request to do interleaved decompression on non-interleaved data");
+template <typename Buffer>
+void BlockBasedSubObjectFinisher<Buffer>::finishMissing() {
+    for (auto&& buffer : _buffers) {
+        buffer->appendMissing();
+    }
 }
 
 /**
  * Decompresses interleaved data where data at a given path is sent to the corresonding buffer.
  * Returns a pointer to the next byte after the EOO that ends the interleaved data.
  */
-template <class CMaterializer>
 template <typename Path, typename Buffer>
-const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompress(
+const char* BlockBasedInterleavedDecompressor::decompress(
     std::vector<std::pair<Path, Buffer>>& paths) {
 
     // The reference object will appear right after the control byte that starts interleaved
@@ -169,13 +249,17 @@ const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompress(
         findScalar.traverse(refObj);
     }
 
-    // For each path, we can use a fast implementation if it just decompresses a single
-    // scalar field to a buffer.
+    // For each path, we can use a fast implementation if it just decompresses a single scalar field
+    // to a buffer. Paths that don't match any elements in the reference object will just get a
+    // bunch of missing values appended, and can take the fast path as well.
     absl::flat_hash_map<const void*, BufferVector<Buffer*>> elemToBufferFast;
     absl::flat_hash_map<const void*, BufferVector<Buffer*>> elemToBufferGeneral;
     for (auto&& path : paths) {
         auto elems = path.first.elementsToMaterialize(refObj);
-        if (elems.size() == 1 && scalarElems.contains(elems[0])) {
+        if (elems.empty()) {
+            // Use nullptr as a sentinel for paths that don't map to any elements.
+            elemToBufferFast[nullptr].push_back(&path.second);
+        } else if (elems.size() == 1 && scalarElems.contains(elems[0])) {
             elemToBufferFast[elems[0]].push_back(&path.second);
         } else {
             for (const void* valueAddr : elems) {
@@ -219,9 +303,8 @@ const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompress(
  * Decompresses interleaved data that starts at "control", with data at a given path sent to the
  * corresonding buffer. Returns a pointer to the next byte after the interleaved data.
  */
-template <class CMaterializer>
 template <typename Buffer>
-const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompressGeneral(
+const char* BlockBasedInterleavedDecompressor::decompressGeneral(
     absl::flat_hash_map<const void*, BufferVector<Buffer*>>&& elemToBuffer) {
     const char* control = _control;
 
@@ -320,19 +403,20 @@ const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompressGeneral(
             auto& buffers = posToBuffers[nodeIdx];
             ++nodeIdx;
 
-            invariant((std::holds_alternative<typename DecodingState::Decoder64>(state.decoder)),
-                      "only supporting 64-bit encoding for now");
-            auto& d64 = std::get<typename DecodingState::Decoder64>(state.decoder);
-
             // Get the next element for this scalar field.
-            typename DecodingState::Elem decodingStateElem;
-            if (d64.pos.valid() && (++d64.pos).more()) {
+            DecodingState::Elem decodingStateElem;
+            if (auto d64 = get_if<DecodingState::Decoder64>(&state.decoder);
+                d64 && d64->pos.valid() && d64->pos.more()) {
                 // We have an iterator into a block of deltas
-                decodingStateElem = state.loadDelta(_allocator, d64);
-            } else if (*control == EOO) {
-                // End of interleaved mode. Stop object traversal early by returning false.
-                return false;
+                decodingStateElem = state.loadDelta(_allocator, *d64);
+                ++d64->pos;
+            } else if (auto d128 = get_if<DecodingState::Decoder128>(&state.decoder);
+                       d128 && d128->pos.valid() && d128->pos.more()) {
+                // We have an iterator into a block of deltas
+                decodingStateElem = state.loadDelta(_allocator, *d128);
+                ++d128->pos;
             } else {
+                invariant(*control != EOO, "moreData() should ensure we terminate loop at EOO");
                 // No more deltas for this scalar field. The next control byte is guaranteed
                 // to belong to this scalar field, since traversal order is fixed.
                 auto result = state.loadControl(_allocator, control);
@@ -350,40 +434,61 @@ const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompressGeneral(
 
                 // We must write a BSONElement to ElementStorage since this scalar is part
                 // of an object being materialized.
-                BSONElement elem =
-                    writeToElementStorage(decodingStateElem, referenceField.fieldNameStringData());
+                writeToElementStorage(
+                    decodingStateElem, state._lastLiteral, referenceField.fieldNameStringData());
             } else if (buffers.size() > 0) {
-                appendToBuffers(buffers, decodingStateElem);
+                appendToBuffers(buffers, decodingStateElem, state._lastLiteral);
             }
 
             return true;
         }};
 
-    bool more = true;
-    while (more || *control != EOO) {
+    while (moreData(decoderStates[0], control)) {
         scalarIdx = 0;
         nodeIdx = 0;
-        more = trDecompress.traverse(refObj);
+        trDecompress.traverse(refObj);
     }
+
+    invariant(*control == EOO, "expected EOO that ends interleaved mode");
 
     // Advance past the EOO that ends interleaved mode.
     ++control;
     return control;
 }
 
+inline bool BlockBasedInterleavedDecompressor::moreData(DecodingState& ds, const char* control) {
+    return visit(OverloadedVisitor{[&](typename DecodingState::Decoder64& d64) {
+                                       if (!d64.pos.valid() || !d64.pos.more()) {
+                                           // We need to load the next control byte. Is interleaved
+                                           // mode continuing?
+                                           return *control != EOO;
+                                       }
+
+                                       return true;
+                                   },
+                                   [&](typename DecodingState::Decoder128& d128) {
+                                       if (!d128.pos.valid() || !d128.pos.more()) {
+                                           // We need to load the next control byte. Is interleaved
+                                           // mode continuing?
+                                           return *control != EOO;
+                                       }
+
+                                       return true;
+                                   }},
+                 ds.decoder);
+}
+
 /**
  * TODO: This code cloned and modified from bsoncolumn.inl. We should be sharing this code.
  */
-template <typename CMaterializer>
 template <typename T, typename Encoding, class Buffer, typename Materialize, typename Finish>
-void BlockBasedInterleavedDecompressor<CMaterializer>::decompressAllDelta(
-    const char* ptr,
-    const char* end,
-    Buffer& buffer,
-    Encoding last,
-    const BSONElement& reference,
-    const Materialize& materialize,
-    const Finish& finish) {
+void BlockBasedInterleavedDecompressor::decompressAllDelta(const char* ptr,
+                                                           const char* end,
+                                                           Buffer& buffer,
+                                                           Encoding last,
+                                                           const BSONElement& reference,
+                                                           const Materialize& materialize,
+                                                           const Finish& finish) {
     size_t elemCount = 0;
     uint8_t size = numSimple8bBlocksForControlByte(*ptr) * sizeof(uint64_t);
     Simple8b<make_unsigned_t<Encoding>> s8b(ptr + 1, size);
@@ -427,9 +532,8 @@ void BlockBasedInterleavedDecompressor<CMaterializer>::decompressAllDelta(
  * BSONColumn data. This structure is used with a min heap to understand which bits of compressed
  * data belong to which stream.
  */
-template <typename CMaterializer>
 template <typename Buffer>
-struct BlockBasedInterleavedDecompressor<CMaterializer>::FastDecodingState {
+struct BlockBasedInterleavedDecompressor::FastDecodingState {
 
     FastDecodingState(size_t fieldPos,
                       const BSONElement& refElem,
@@ -479,9 +583,8 @@ struct BlockBasedInterleavedDecompressor<CMaterializer>::FastDecodingState {
 /**
  * The fast path for those paths that are only materializing a single scalar field.
  */
-template <class CMaterializer>
 template <typename Buffer>
-const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompressFast(
+const char* BlockBasedInterleavedDecompressor::decompressFast(
     absl::flat_hash_map<const void*, BufferVector<Buffer*>>&& elemToBuffer) {
     const char* control = _control;
 
@@ -605,62 +708,26 @@ const char* BlockBasedInterleavedDecompressor<CMaterializer>::decompressFast(
         std::push_heap(heap.begin(), heap.end(), std::greater<>());
     }
 
+    // If there were paths that don't match anything, call appendMissing().
+    if (auto it = elemToBuffer.find(nullptr); it != elemToBuffer.end()) {
+        // All the decoder states should have the same value count.
+        auto valueCount = heap[0]._valueCount;
+        for (auto&& buffer : it->second) {
+            for (size_t i = 0; i < valueCount; ++i) {
+                buffer->appendMissing();
+            }
+        }
+    }
+
     // Advance past the EOO that ends interleaved mode.
     ++control;
     return control;
 }
 
-/**
- * Given an element that is being materialized as part of a sub-object, write it to the allocator as
- * a BSONElement with the appropriate field name.
- */
-template <class CMaterializer>
-BSONElement BlockBasedInterleavedDecompressor<CMaterializer>::writeToElementStorage(
-    typename DecodingState::Elem elem, StringData fieldName) {
-    return visit(OverloadedVisitor{
-                     [&](BSONElement& bsonElem) {
-                         ElementStorage::Element esElem =
-                             _allocator.allocate(bsonElem.type(), fieldName, bsonElem.valuesize());
-                         memcpy(esElem.value(), bsonElem.value(), bsonElem.valuesize());
-                         return esElem.element();
-                     },
-                     [&](std::pair<BSONType, int64_t> elem) {
-                         switch (elem.first) {
-                             case NumberInt: {
-                                 ElementStorage::Element esElem =
-                                     _allocator.allocate(elem.first, fieldName, 4);
-                                 DataView(esElem.value()).write<LittleEndian<int32_t>>(elem.second);
-                                 return esElem.element();
-                             } break;
-                             case NumberLong: {
-                                 ElementStorage::Element esElem =
-                                     _allocator.allocate(elem.first, fieldName, 8);
-                                 DataView(esElem.value()).write<LittleEndian<int64_t>>(elem.second);
-                                 return esElem.element();
-                             } break;
-                             case Bool: {
-                                 ElementStorage::Element esElem =
-                                     _allocator.allocate(elem.first, fieldName, 1);
-                                 DataView(esElem.value()).write<LittleEndian<bool>>(elem.second);
-                                 return esElem.element();
-                             } break;
-                             default:
-                                 invariant(false, "attempt to materialize unsupported type");
-                         }
-                         return BSONElement{};
-                     },
-                     [&](std::pair<BSONType, int128_t>) {
-                         invariant(false, "tried to materialize a 128-bit type");
-                         return BSONElement{};
-                     },
-                 },
-                 elem);
-}
-
-template <class CMaterializer>
 template <class Buffer>
-void BlockBasedInterleavedDecompressor<CMaterializer>::appendToBuffers(
-    BufferVector<Buffer*>& buffers, typename DecodingState::Elem elem) {
+void BlockBasedInterleavedDecompressor::appendToBuffers(BufferVector<Buffer*>& buffers,
+                                                        DecodingState::Elem elem,
+                                                        BSONElement lastLiteral) {
     visit(OverloadedVisitor{
               [&](BSONElement& bsonElem) {
                   if (bsonElem.eoo()) {
@@ -675,6 +742,10 @@ void BlockBasedInterleavedDecompressor<CMaterializer>::appendToBuffers(
               },
               [&](std::pair<BSONType, int64_t>& encoded) {
                   switch (encoded.first) {
+                      case Date:
+                          appendEncodedToBuffers<Buffer, Date_t>(
+                              buffers, Date_t::fromMillisSinceEpoch(encoded.second));
+                          break;
                       case NumberLong:
                           appendEncodedToBuffers<Buffer, int64_t>(buffers, encoded.second);
                           break;
@@ -684,141 +755,49 @@ void BlockBasedInterleavedDecompressor<CMaterializer>::appendToBuffers(
                       case Bool:
                           appendEncodedToBuffers<Buffer, bool>(buffers, encoded.second);
                           break;
+                      case jstOID:
+                          appendEncodedToBuffers<Buffer, OID>(
+                              buffers,
+                              Simple8bTypeUtil::decodeObjectId(
+                                  encoded.second, lastLiteral.__oid().getInstanceUnique()));
+                          break;
+                      case bsonTimestamp:
+                          appendEncodedToBuffers<Buffer, Timestamp>(
+                              buffers, static_cast<Timestamp>(encoded.second));
+                          break;
                       default:
                           invariant(false, "unsupported encoded data type");
                   }
               },
               [&](std::pair<BSONType, int128_t>& encoded) {
-                  invariant(false, "128-bit encoded types not supported yet");
+                  switch (encoded.first) {
+                      case String: {
+                          auto string = Simple8bTypeUtil::decodeString(encoded.second);
+                          appendEncodedToBuffers<Buffer, StringData>(
+                              buffers, StringData((const char*)string.str.data(), string.size));
+                      } break;
+                      case Code: {
+                          auto string = Simple8bTypeUtil::decodeString(encoded.second);
+                          appendEncodedToBuffers<Buffer, BSONCode>(
+                              buffers,
+                              BSONCode(StringData((const char*)string.str.data(), string.size)));
+                      } break;
+                      case BinData: {
+                          char data[16];
+                          size_t size = lastLiteral.valuestrsize();
+                          Simple8bTypeUtil::decodeBinary(encoded.second, data, size);
+                          appendEncodedToBuffers<Buffer, BSONBinData>(
+                              buffers, BSONBinData(data, size, lastLiteral.binDataType()));
+                      } break;
+                      case NumberDecimal:
+                          appendEncodedToBuffers<Buffer, Decimal128>(
+                              buffers, Simple8bTypeUtil::decodeDecimal128(encoded.second));
+                          break;
+                      default:
+                          invariant(false, "unsupported encoded data type");
+                  }
               },
           },
           elem);
 }
-
-/**
- * Decoding state for a stream of values corresponding to a scalar field.
- */
-template <class CMaterializer>
-struct BlockBasedInterleavedDecompressor<CMaterializer>::DecodingState {
-
-    /**
-     * A tagged union type representing values decompressed from BSONColumn bytes. This can a
-     * BSONElement if the value appeared uncompressed, or it can be an encoded representation
-     * that was computed from a delta.
-     */
-    using Elem =
-        std::variant<BSONElement, std::pair<BSONType, int64_t>, std::pair<BSONType, int128_t>>;
-
-    /**
-     * State when decoding deltas for 64-bit values.
-     */
-    struct Decoder64 {
-        boost::optional<int64_t> lastEncodedValue;
-        Simple8b<uint64_t>::Iterator pos;
-    };
-
-    /**
-     * State when decoding deltas for 128-bit values. (TBD)
-     */
-    struct Decoder128 {};
-
-    /**
-     * Initializes a decoder given an uncompressed BSONElement in the BSONColumn bytes.
-     */
-    void loadUncompressed(const BSONElement& elem) {
-        BSONType type = elem.type();
-        invariant(!uses128bit(type));
-        invariant(!usesDeltaOfDelta(type));
-        auto& d64 = decoder.template emplace<Decoder64>();
-        switch (type) {
-            case Bool:
-                d64.lastEncodedValue = elem.boolean();
-                break;
-            case NumberInt:
-                d64.lastEncodedValue = elem._numberInt();
-                break;
-            case NumberLong:
-                d64.lastEncodedValue = elem._numberLong();
-                break;
-            default:
-                invariant(false, "unsupported type");
-        }
-
-        _lastLiteral = elem;
-    }
-
-    struct LoadControlResult {
-        Elem element;
-        int size;
-    };
-
-    /**
-     * Assuming that buffer points at the next control byte, takes the appropriate action:
-     * - If the control byte begins an uncompressed literal: initializes a decoder, and returns
-     *   the literal.
-     * - If the control byte precedes blocks of deltas, applies the first delta and returns the
-     *   new expanded element.
-     * In both cases, the "size" field will contain the number of bytes to the next control
-     * byte.
-     */
-    LoadControlResult loadControl(ElementStorage& allocator, const char* buffer) {
-        uint8_t control = *buffer;
-        if (isUncompressedLiteralControlByte(control)) {
-            BSONElement literalElem(buffer, 1, -1);
-            return {literalElem, literalElem.size()};
-        }
-
-        uint8_t blocks = numSimple8bBlocksForControlByte(control);
-        int size = sizeof(uint64_t) * blocks;
-
-        auto& d64 = std::get<DecodingState::Decoder64>(decoder);
-        // We can read the last known value from the decoder iterator even as it has
-        // reached end.
-        boost::optional<uint64_t> lastSimple8bValue = d64.pos.valid() ? *d64.pos : 0;
-        d64.pos = Simple8b<uint64_t>(buffer + 1, size, lastSimple8bValue).begin();
-        Elem deltaElem = loadDelta(allocator, d64);
-        return LoadControlResult{deltaElem, size + 1};
-    }
-
-    /**
-     * Apply a delta to an encoded representation to get a new element value. May also apply a 0
-     * delta to an uncompressed literal, simply returning the literal.
-     */
-    Elem loadDelta(ElementStorage& allocator, Decoder64& d64) {
-        invariant(d64.pos.valid());
-        const auto& delta = *d64.pos;
-        if (!delta) {
-            // boost::none represents skip, just return an EOO BSONElement.
-            return BSONElement{};
-        }
-
-        // Note: delta-of-delta not handled here yet.
-        if (*delta == 0) {
-            // If we have an encoded representation of the last value, return it.
-            if (d64.lastEncodedValue) {
-                return std::pair{_lastLiteral.type(), *d64.lastEncodedValue};
-            }
-            // Otherwise return the last uncompressed value we found.
-            return _lastLiteral;
-        }
-
-        uassert(8625729,
-                "attempt to expand delta for type that does not have encoded representation",
-                d64.lastEncodedValue);
-        d64.lastEncodedValue =
-            expandDelta(*d64.lastEncodedValue, Simple8bTypeUtil::decodeInt64(*delta));
-
-        return std::pair{_lastLiteral.type(), *d64.lastEncodedValue};
-    }
-
-    /**
-     * The last uncompressed literal from the BSONColumn bytes.
-     */
-    BSONElement _lastLiteral;
-
-    /**
-     * 64- or 128-bit specific state.
-     */
-    std::variant<Decoder64, Decoder128> decoder = Decoder64{};
-};
 }  // namespace mongo::bsoncolumn

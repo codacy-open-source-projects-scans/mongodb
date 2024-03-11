@@ -47,7 +47,7 @@ namespace {
 static auto const kSerializationContext =
     SerializationContext{SerializationContext::Source::Command,
                          SerializationContext::CallerType::Request,
-                         SerializationContext::Prefix::Default,
+                         SerializationContext::Prefix::ExcludePrefix,
                          true /* nonPrefixedTenantId */};
 
 NamespaceString makeNamespace(const boost::optional<TenantId>& tenantId = boost::none) {
@@ -255,8 +255,10 @@ public:
 
             QuerySettings querySettings;
             querySettings.setQueryFramework(QueryFrameworkControlEnum::kTrySbeEngine);
-            return {
-                findCmdShape.sha256Hash(opCtx.get(), kSerializationContext), querySettings, query};
+            QueryShapeConfiguration result(
+                findCmdShape.sha256Hash(opCtx.get(), kSerializationContext), querySettings);
+            result.setRepresentativeQuery(query);
+            return result;
         };
 
         for (auto i = 0; i < dummyQuerySettingsCount; i++) {
@@ -305,11 +307,11 @@ public:
                 // Create new query shape configuration with the generated request.
                 QuerySettings querySettings;
                 querySettings.setQueryFramework(QueryFrameworkControlEnum::kTrySbeEngine);
-                QueryShapeConfiguration hitQueryShapeConfiguration = {
+                QueryShapeConfiguration hitQueryShapeConfiguration{
                     query_shape::FindCmdShape(*parsedFindRequest, expCtx)
                         .sha256Hash(opCtx.get(), kSerializationContext),
-                    querySettings,
-                    bob.asTempObj().getOwned()};
+                    querySettings};
+                hitQueryShapeConfiguration.setRepresentativeQuery(bob.asTempObj().getOwned());
 
                 // Update the query shape configurations by adding a new one, which will be used for
                 // the lookup.

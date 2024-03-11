@@ -112,9 +112,7 @@ QuerySettings mergeQuerySettings(const QuerySettings& lhs, const QuerySettings& 
 
 void simplifyQuerySettings(QuerySettings& settings) {
     // If reject is present, but is false, set to an empty optional.
-    // This is not strictly necessary, as isEmpty treats OptionalBool(false)
-    // as empty.
-    if (!settings.getReject().has_value()) {
+    if (settings.getReject().has_value() && !settings.getReject()) {
         settings.setReject({});
     }
 }
@@ -208,18 +206,11 @@ public:
         using InvocationBase::InvocationBase;
 
         SetQuerySettingsCommandReply insertQuerySettings(
-            OperationContext* opCtx,
-            QueryShapeConfiguration newQueryShapeConfiguration,
-            const RepresentativeQueryInfo& representativeQueryInfo) {
-            // Assert querySettings command is valid.
-            utils::validateQuerySettings(newQueryShapeConfiguration,
-                                         representativeQueryInfo,
-                                         request().getDbName().tenantId());
+            OperationContext* opCtx, QueryShapeConfiguration newQueryShapeConfiguration) {
             simplifyQuerySettings(newQueryShapeConfiguration.getSettings());
             uassert(8587401,
-                    "QuerySettings would be empty (all default settings), nothing to store, no "
-                    "action needed",
-                    !utils::isEmpty(newQueryShapeConfiguration.getSettings()));
+                    "inserted query settings would be empty (all default settings)",
+                    !utils::isDefault(newQueryShapeConfiguration.getSettings()));
 
             // Append 'newQueryShapeConfiguration' to the list of all 'QueryShapeConfigurations' for
             // the given database / tenant.
@@ -233,30 +224,22 @@ public:
         }
 
         SetQuerySettingsCommandReply updateQuerySettings(
-            OperationContext* opCtx,
-            const QuerySettings& newQuerySettings,
-            const QueryShapeConfiguration& currentQueryShapeConfiguration) {
-            // Compute the merged query settings.
-            auto mergedQuerySettings =
-                mergeQuerySettings(currentQueryShapeConfiguration.getSettings(), newQuerySettings);
-            simplifyQuerySettings(mergedQuerySettings);
+            OperationContext* opCtx, QueryShapeConfiguration newQueryShapeConfiguration) {
+            simplifyQuerySettings(newQueryShapeConfiguration.getSettings());
             uassert(8587402,
-                    "Resulting QuerySettings would be empty (all default settings), use "
-                    "removeQuerySettings instead",
-                    !utils::isEmpty(mergedQuerySettings));
+                    "resulting query settings would be empty (all default settings), use the "
+                    "'removeQuerySettings' command instead",
+                    !utils::isDefault(newQueryShapeConfiguration.getSettings()));
 
             // Build the new 'settingsArray' by updating the existing QueryShapeConfiguration with
-            // the 'mergedQuerySettings'.
+            // the new query settings.
             readModifyWrite(opCtx, request().getDbName(), [&](auto& settingsArray) {
-                findByHash(settingsArray, currentQueryShapeConfiguration.getQueryShapeHash())
-                    ->setSettings(mergedQuerySettings);
+                findByHash(settingsArray, newQueryShapeConfiguration.getQueryShapeHash())
+                    ->setSettings(newQueryShapeConfiguration.getSettings());
             });
 
             SetQuerySettingsCommandReply reply;
-            reply.setQueryShapeConfiguration(
-                QueryShapeConfiguration(currentQueryShapeConfiguration.getQueryShapeHash(),
-                                        mergedQuerySettings,
-                                        currentQueryShapeConfiguration.getRepresentativeQuery()));
+            reply.setQueryShapeConfiguration(std::move(newQueryShapeConfiguration));
             return reply;
         }
 
@@ -265,18 +248,29 @@ public:
             auto& querySettingsManager = QuerySettingsManager::get(opCtx);
             auto tenantId = request().getDbName().tenantId();
 
-            auto querySettings = querySettingsManager.getQuerySettingsForQueryShapeHash(
-                opCtx, queryShapeHash, tenantId);
-            uassert(7746401,
-                    "New query settings can only be created with a query instance, but a query "
-                    "hash was given.",
-                    querySettings.has_value());
+            if (auto lookupResult = querySettingsManager.getQuerySettingsForQueryShapeHash(
+                    opCtx, queryShapeHash, tenantId)) {
+                // Compute the merged query settings.
+                auto mergedQuerySettings =
+                    mergeQuerySettings(lookupResult->first, request().getSettings());
 
-            return updateQuerySettings(opCtx,
-                                       request().getSettings(),
-                                       QueryShapeConfiguration(queryShapeHash,
-                                                               std::move(querySettings->first),
-                                                               std::move(querySettings->second)));
+                QueryShapeConfiguration newQueryShapeConfiguration(std::move(queryShapeHash),
+                                                                   std::move(mergedQuerySettings));
+                newQueryShapeConfiguration.setRepresentativeQuery(std::move(lookupResult->second));
+                if (const auto& queryInstance =
+                        newQueryShapeConfiguration.getRepresentativeQuery()) {
+                    auto representativeQueryInfo =
+                        createRepresentativeInfo(*queryInstance, opCtx, tenantId);
+                    // Assert 'setQuerySettings' command is valid.
+                    utils::validateQuerySettings(
+                        newQueryShapeConfiguration, representativeQueryInfo, tenantId);
+                }
+                return updateQuerySettings(opCtx, std::move(newQueryShapeConfiguration));
+            } else {
+                return insertQuerySettings(
+                    opCtx,
+                    QueryShapeConfiguration(queryShapeHash, std::move(request().getSettings())));
+            }
         }
 
         SetQuerySettingsCommandReply setQuerySettingsByQueryInstance(
@@ -289,22 +283,27 @@ public:
             // If there is already an entry for a given QueryShapeHash, then perform
             // an update, otherwise insert.
             if (auto lookupResult = querySettingsManager.getQuerySettingsForQueryShapeHash(
-                    opCtx,
-                    [&]() { return queryShapeHash; },
-                    representativeQueryInfo.namespaceString)) {
-                return updateQuerySettings(
-                    opCtx,
-                    request().getSettings(),
-                    QueryShapeConfiguration(std::move(queryShapeHash),
-                                            std::move(lookupResult->first),
-                                            std::move(lookupResult->second)));
+                    opCtx, queryShapeHash, tenantId)) {
+                // Compute the merged query settings.
+                auto mergedQuerySettings =
+                    mergeQuerySettings(lookupResult->first, request().getSettings());
+                QueryShapeConfiguration newQueryShapeConfiguration(std::move(queryShapeHash),
+                                                                   std::move(mergedQuerySettings));
+                newQueryShapeConfiguration.setRepresentativeQuery(queryInstance);
+
+                // Assert 'setQuerySettings' command is valid.
+                utils::validateQuerySettings(
+                    newQueryShapeConfiguration, representativeQueryInfo, tenantId);
+                return updateQuerySettings(opCtx, std::move(newQueryShapeConfiguration));
             } else {
-                return insertQuerySettings(
-                    opCtx,
-                    QueryShapeConfiguration(std::move(queryShapeHash),
-                                            std::move(request().getSettings()),
-                                            queryInstance),
-                    representativeQueryInfo);
+                QueryShapeConfiguration newQueryShapeConfiguration(
+                    std::move(queryShapeHash), std::move(request().getSettings()));
+                newQueryShapeConfiguration.setRepresentativeQuery(queryInstance);
+
+                // Assert 'setQuerySettings' command is valid.
+                utils::validateQuerySettings(
+                    newQueryShapeConfiguration, representativeQueryInfo, tenantId);
+                return insertQuerySettings(opCtx, std::move(newQueryShapeConfiguration));
             }
         }
 
@@ -314,6 +313,11 @@ public:
                     feature_flags::gFeatureFlagQuerySettings.isEnabled(
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
             assertNoStandalone(opCtx, definition()->getName());
+
+            // Validates that the settings field for query settings is not empty.
+            uassert(7746604,
+                    "settings field in setQuerySettings command cannot be empty",
+                    !request().getSettings().toBSON().isEmpty());
             auto response =
                 visit(OverloadedVisitor{
                           [&](const query_shape::QueryShapeHash& queryShapeHash) {

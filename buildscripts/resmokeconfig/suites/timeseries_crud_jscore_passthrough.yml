@@ -87,7 +87,8 @@ selector:
   - jstests/core/query/sort/sort_array.js
   - jstests/core/query/sort/sort_merge_collation.js
   - jstests/core/record_store_count.js
-  - jstests/core/write/batched_multi_deletes.js
+  - jstests/core/write/delete/batched_multi_deletes_a.js
+  - jstests/core/write/delete/batched_multi_deletes_id.js
   - jstests/core/write/bulk/bulk_write_profile.js
   - jstests/core/query/regex/regex_collations.js
   - jstests/core/write/delete/delete_hint.js
@@ -185,6 +186,7 @@ selector:
   - jstests/core/testminmax.js # min
   # Different field ordering.
   - jstests/core/query/basica.js
+  - jstests/core/query/group_lookup_with_canonical_query_prefix.js
   - jstests/core/query/objid/objid3.js
   - jstests/core/query/or/or1.js
   - jstests/core/query/or/or2.js
@@ -205,6 +207,7 @@ selector:
   - jstests/core/query/not/not2.js
   - jstests/core/query/or/or8.js
   - jstests/core/query/sort/sorta.js
+  - jstests/core/query/type/null_undefined.js
   - jstests/core/query/type/type_array.js
   - jstests/core/write/update/update_numeric_field_name.js
   # Time-series collections have different indexes from regular collections.

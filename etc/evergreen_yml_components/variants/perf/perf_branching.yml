@@ -78,7 +78,6 @@ variables:
     num_scons_link_jobs_available: 0.99
 
   - modules: &perf_modules
-      - enterprise
       - dsi
       - genny
       - workloads
@@ -198,7 +197,6 @@ buildvariants:
     tasks: &standalonetasks
       - *schedule_patch_auto_tasks_task
       - *schedule_variant_auto_tasks_task
-      - name: dsi_integ_test_run_command_simple
       - name: smoke_test
       - name: canaries_only
       - name: ycsb.2023-09

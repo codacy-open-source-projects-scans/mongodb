@@ -456,6 +456,7 @@ env.CppUnitTest(
         'canonical_query_test_util.cpp',
         'ce_mode_parameter_test.cpp',
         'classic_runtime_planner_for_sbe/classic_runtime_planner_for_sbe_test.cpp',
+        'classic_runtime_planner_for_sbe/classic_runtime_planner_for_sbe_test_util.cpp',
         'classic_stage_builder_test.cpp',
         'collection_query_info_test.cpp',
         'count_command_test.cpp',
@@ -586,6 +587,16 @@ env.Benchmark(
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/service_context_non_d',
         'query_test_service_context',
+    ],
+)
+
+env.Benchmark(
+    target='canonical_query_bm',
+    source=['canonical_query_bm.cpp'],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/matcher/expressions_mongod_only',
+        '$BUILD_DIR/mongo/db/query/canonical_query',
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
     ],
 )
 

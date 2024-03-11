@@ -38,27 +38,6 @@
 
 namespace mongo::stage_builder {
 namespace {
-
-// Return true iff 'accStmt' is a $topN or $bottomN operator.
-bool isTopBottomN(const AccumulationStatement& accStmt) {
-    return accStmt.expr.name == AccumulatorTopBottomN<kTop, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kTop, false>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, false>::getName();
-}
-
-// Return true iff 'accStmt' is one of $topN, $bottomN, $minN, $maxN, $firstN or $lastN.
-bool isAccumulatorN(const AccumulationStatement& accStmt) {
-    return accStmt.expr.name == AccumulatorTopBottomN<kTop, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, true>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kTop, false>::getName() ||
-        accStmt.expr.name == AccumulatorTopBottomN<kBottom, false>::getName() ||
-        accStmt.expr.name == AccumulatorMinN::getName() ||
-        accStmt.expr.name == AccumulatorMaxN::getName() ||
-        accStmt.expr.name == AccumulatorFirstN::getName() ||
-        accStmt.expr.name == AccumulatorLastN::getName();
-}
-
 template <typename F>
 struct FieldPathAndCondPreVisitor : public SelectiveConstExpressionVisitorBase {
     // To avoid overloaded-virtual warnings.
@@ -247,113 +226,85 @@ SbExpr::Vector generateGroupByKeyExprs(StageBuilderState& state,
     return exprs;
 }
 
-template <TopBottomSense sense, bool single>
-SbExpr getSortSpecFromTopBottomN(const AccumulatorTopBottomN<sense, single>* acc,
-                                 StageBuilderState& state) {
+SbExpr getTopBottomNValueExpr(StageBuilderState& state,
+                              const AccumulationStatement& accStmt,
+                              const PlanStageSlots& outputs) {
     SbExprBuilder b(state);
 
-    tassert(5807013, "Accumulator state must not be null", acc);
-    auto sortPattern =
-        acc->getSortPattern().serialize(SortPattern::SortKeySerialization::kForExplain).toBson();
-    auto sortSpec = std::make_unique<sbe::SortSpec>(sortPattern);
-    auto sortSpecExpr = b.makeConstant(sbe::value::TypeTags::sortSpec,
-                                       sbe::value::bitcastFrom<sbe::SortSpec*>(sortSpec.release()));
-    return sortSpecExpr;
-}
+    auto expObj = dynamic_cast<ExpressionObject*>(accStmt.expr.argument.get());
+    auto expConst = dynamic_cast<ExpressionConstant*>(accStmt.expr.argument.get());
 
-SbExpr getSortSpecFromTopBottomN(const AccumulationStatement& accStmt, StageBuilderState& state) {
-    auto acc = accStmt.expr.factory();
-    if (accStmt.expr.name == AccumulatorTopBottomN<kTop, true>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kTop, true>*>(acc.get()), state);
-    } else if (accStmt.expr.name == AccumulatorTopBottomN<kBottom, true>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kBottom, true>*>(acc.get()), state);
-    } else if (accStmt.expr.name == AccumulatorTopBottomN<kTop, false>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kTop, false>*>(acc.get()), state);
-    } else if (accStmt.expr.name == AccumulatorTopBottomN<kBottom, false>::getName()) {
-        return getSortSpecFromTopBottomN(
-            dynamic_cast<AccumulatorTopBottomN<kBottom, false>*>(acc.get()), state);
+    tassert(5807015,
+            str::stream() << accStmt.expr.name << " accumulator must have an object argument",
+            expObj || (expConst && expConst->getValue().isObject()));
+
+    if (expObj) {
+        for (auto& [key, value] : expObj->getChildExpressions()) {
+            if (key == AccumulatorN::kFieldNameOutput) {
+                auto rootSlot = outputs.getResultObjIfExists();
+                auto outputExpr = generateExpression(state, value.get(), rootSlot, outputs);
+                return b.makeFillEmptyNull(std::move(outputExpr));
+            }
+        }
     } else {
-        MONGO_UNREACHABLE;
+        auto objConst = expConst->getValue();
+        auto objBson = objConst.getDocument().toBson();
+        auto outputField = objBson.getField(AccumulatorN::kFieldNameOutput);
+        if (outputField.ok()) {
+            auto [outputTag, outputVal] = sbe::bson::convertFrom<false /* View */>(outputField);
+            auto outputExpr = b.makeConstant(outputTag, outputVal);
+            return b.makeFillEmptyNull(std::move(outputExpr));
+        }
     }
+
+    tasserted(5807016,
+              str::stream() << accStmt.expr.name
+                            << " accumulator must have an output field in the argument");
 }
 
-using AccumulatorArgs = std::variant<SbExpr, StringDataMap<SbExpr>>;
-
-AccumulatorArgs generateAccumulatorArgs(StageBuilderState& state,
-                                        const AccumulationStatement& accStmt,
-                                        const PlanStageSlots& outputs) {
+SbExpr getTopBottomNSortByExpr(StageBuilderState& state,
+                               const PlanStageSlots& outputs,
+                               SbExpr sortSpecExpr) {
     SbExprBuilder b(state);
 
     auto rootSlot = outputs.getResultObjIfExists();
     auto collatorSlot = state.getCollatorSlot();
 
-    // One accumulator may be translated to multiple accumulator expressions. For example, The
-    // $avg will have two accumulators expressions, a sum(..) and a count which is implemented
-    // as sum(1).
+    tassert(5807014, "Expected root slot to be set", rootSlot);
 
-    // $topN/$bottomN accumulators require multiple arguments to the accumulator builder.
+    auto key = collatorSlot
+        ? b.makeFunction("generateCheapSortKey",
+                         std::move(sortSpecExpr),
+                         SbVar{*rootSlot},
+                         SbVar{*collatorSlot})
+        : b.makeFunction("generateCheapSortKey", std::move(sortSpecExpr), SbVar{*rootSlot});
+
+    return b.makeFunction("sortKeyComponentVectorToArray", std::move(key));
+}
+
+AccumulatorArgs generateAccumulatorArgs(StageBuilderState& state,
+                                        const AccumulationStatement& accStmt,
+                                        const PlanStageSlots& outputs) {
+    auto rootSlot = outputs.getResultObjIfExists();
+    auto collatorSlot = state.getCollatorSlot();
+
+    // For $topN and $bottomN, we need to pass multiple SbExprs to buildAccumulatorArgs()
+    // (an "input" expression and a "sortBy" expression).
     if (isTopBottomN(accStmt)) {
         StringDataMap<SbExpr> accArgs;
+        auto spec = SbExpr{state.getSortSpecSlot(&accStmt)};
 
-        auto sortSpecExpr = getSortSpecFromTopBottomN(accStmt, state);
-        accArgs.emplace(AccArgs::kTopBottomNSortSpec, sortSpecExpr.clone());
+        accArgs.emplace(AccArgs::kValue, getTopBottomNValueExpr(state, accStmt, outputs));
+        accArgs.emplace(AccArgs::kSortBy, getTopBottomNSortByExpr(state, outputs, std::move(spec)));
+        accArgs.emplace(AccArgs::kSortSpec, SbExpr{state.getSortSpecSlot(&accStmt)});
 
-        // Build the key expression for the accumulator.
-        tassert(5807014,
-                str::stream() << accStmt.expr.name << " accumulator must have the root slot set",
-                rootSlot);
-        auto key = collatorSlot
-            ? b.makeFunction("generateCheapSortKey",
-                             std::move(sortSpecExpr),
-                             SbVar{*rootSlot},
-                             SbVar{*collatorSlot})
-            : b.makeFunction("generateCheapSortKey", std::move(sortSpecExpr), SbVar{*rootSlot});
-        accArgs.emplace(AccArgs::kTopBottomNKey,
-                        b.makeFunction("sortKeyComponentVectorToArray", std::move(key)));
-
-        // Build the value expression for the accumulator.
-        if (auto expObj = dynamic_cast<ExpressionObject*>(accStmt.expr.argument.get())) {
-            for (auto& [key, value] : expObj->getChildExpressions()) {
-                if (key == AccumulatorN::kFieldNameOutput) {
-                    auto outputExpr = generateExpression(state, value.get(), rootSlot, outputs);
-                    accArgs.emplace(AccArgs::kTopBottomNValue,
-                                    b.makeFillEmptyNull(std::move(outputExpr)));
-                    break;
-                }
-            }
-        } else if (auto expConst = dynamic_cast<ExpressionConstant*>(accStmt.expr.argument.get())) {
-            auto objConst = expConst->getValue();
-            tassert(7767100,
-                    str::stream() << accStmt.expr.name
-                                  << " accumulator must have an object argument",
-                    objConst.isObject());
-            auto objBson = objConst.getDocument().toBson();
-            auto outputField = objBson.getField(AccumulatorN::kFieldNameOutput);
-            if (outputField.ok()) {
-                auto [outputTag, outputVal] = sbe::bson::convertFrom<false /* View */>(outputField);
-                auto outputExpr = b.makeConstant(outputTag, outputVal);
-                accArgs.emplace(AccArgs::kTopBottomNValue,
-                                b.makeFillEmptyNull(std::move(outputExpr)));
-            }
-        } else {
-            tasserted(5807015,
-                      str::stream()
-                          << accStmt.expr.name << " accumulator must have an object argument");
-        }
-        tassert(5807016,
-                str::stream() << accStmt.expr.name
-                              << " accumulator must have an output field in the argument",
-                accArgs.find(AccArgs::kTopBottomNValue) != accArgs.end());
-
-        return AccumulatorArgs{std::move(accArgs)};
+        return buildAccumulatorArgs(state, accStmt, std::move(accArgs), collatorSlot);
     }
 
+    // For all other accumulators, we call generateExpression() on 'argument' to create an SbExpr
+    // and then we pass this SbExpr to buildAccumulatorArgs().
     auto argExpr = generateExpression(state, accStmt.expr.argument.get(), rootSlot, outputs);
-
-    return AccumulatorArgs{std::move(argExpr)};
+    return buildAccumulatorArgs(state, accStmt, std::move(argExpr), collatorSlot);
 }
 
 std::vector<AccumulatorArgs> generateAllAccumulatorArgs(StageBuilderState& state,
@@ -361,6 +312,9 @@ std::vector<AccumulatorArgs> generateAllAccumulatorArgs(StageBuilderState& state
                                                         const PlanStageSlots& outputs) {
     std::vector<AccumulatorArgs> accArgsVec;
     for (const auto& accStmt : groupNode.accumulators) {
+        // One accumulator may be translated to multiple accumulator expressions. For example, The
+        // $avg will have two accumulators expressions, a sum(..) and a count which is implemented
+        // as sum(1).
         accArgsVec.emplace_back(generateAccumulatorArgs(state, accStmt, outputs));
     }
 
@@ -394,13 +348,8 @@ size_t generateAccumulator(StageBuilderState& state,
         // Handle the case where we only want to generate "normal" aggs without blockAggs.
         SbExpr::Vector aggs;
 
-        if (holds_alternative<SbExpr>(accArgs)) {
-            SbExpr& arg = get<SbExpr>(accArgs);
-            aggs = stage_builder::buildAccumulator(accStmt, std::move(arg), collatorSlot, state);
-        } else {
-            StringDataMap<SbExpr>& args = get<StringDataMap<SbExpr>>(accArgs);
-            aggs = stage_builder::buildAccumulator(accStmt, std::move(args), collatorSlot, state);
-        }
+        aggs = stage_builder::buildAccumulator(
+            accStmt, std::move(accArgs.first), std::move(accArgs.second), collatorSlot, state);
 
         for (size_t i = 0; i < aggs.size(); ++i) {
             blockAggsAndRowAggs.emplace_back(BlockAggAndRowAgg{SbExpr{}, std::move(aggs[i])});
@@ -411,15 +360,13 @@ size_t generateAccumulator(StageBuilderState& state,
             8448600, "Expected 'bitmapInternalSlot' to be defined", bitmapInternalSlot.has_value());
         tassert(8448601, "Expected 'accInternalSlot' to be defined", accInternalSlot.has_value());
 
-        if (holds_alternative<SbExpr>(accArgs)) {
-            SbExpr& arg = get<SbExpr>(accArgs);
-            blockAggsAndRowAggs = stage_builder::buildBlockAccumulator(accStmt,
-                                                                       std::move(arg),
-                                                                       *bitmapInternalSlot,
-                                                                       *accInternalSlot,
-                                                                       collatorSlot,
-                                                                       state);
-        }
+        blockAggsAndRowAggs = stage_builder::buildBlockAccumulator(accStmt,
+                                                                   std::move(accArgs.first),
+                                                                   std::move(accArgs.second),
+                                                                   *bitmapInternalSlot,
+                                                                   *accInternalSlot,
+                                                                   collatorSlot,
+                                                                   state);
 
         // If 'genBlockAggs' is true and we weren't able to generate block aggs for 'accStmt',
         // then we return 0 to indicate failure.
@@ -554,8 +501,7 @@ SbExprSbSlotVector generateMergingExpressions(StageBuilderState& state,
     auto mergingExprs = [&]() {
         if (isTopBottomN(accStmt)) {
             StringDataMap<SbExpr> mergeArgs;
-            mergeArgs.emplace(AccArgs::kTopBottomNSortSpec,
-                              getSortSpecFromTopBottomN(accStmt, state));
+            mergeArgs.emplace(AccArgs::kSortSpec, SbExpr{state.getSortSpecSlot(&accStmt)});
             return buildCombinePartialAggregates(
                 accStmt, spillSlots, std::move(mergeArgs), collatorSlot, state);
         } else {
@@ -681,8 +627,7 @@ std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots> gene
 
         if (isTopBottomN(accStmt)) {
             StringDataMap<SbExpr> finalArgs;
-            finalArgs.emplace(AccArgs::kTopBottomNSortSpec,
-                              getSortSpecFromTopBottomN(accStmt, state));
+            finalArgs.emplace(AccArgs::kSortSpec, SbExpr{state.getSortSpecSlot(&accStmt)});
             finalExpr = buildFinalize(
                 state, accStmts[idxAcc], aggSlotsVec[idxAcc], std::move(finalArgs), collatorSlot);
         } else {
@@ -778,17 +723,16 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> buildGroupAggregation(
             tassert(
                 8448604, "Expected 'accInternalSlot' to be defined", accInternalSlot.has_value());
 
-            auto bitmapInSlot = childOutputs.getIfExists(kBlockSelectivityBitmap);
-
             return b.makeBlockHashAgg(std::move(stage),
                                       buildVariableTypes(childOutputs, individualSlots),
                                       groupBySlots,
                                       std::move(sbAggExprs),
-                                      bitmapInSlot,
+                                      childOutputs.get(kBlockSelectivityBitmap),
                                       blockAccArgSlots,
                                       blockAccInternalArgSlots,
                                       *bitmapInternalSlot,
                                       *accInternalSlot,
+                                      allowDiskUse,
                                       yieldPolicy);
         } else {
             return b.makeHashAgg(std::move(stage),
@@ -1021,10 +965,6 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
                                       const PlanStageReqs& reqs,
                                       PlanStageSlots childOutputs,
                                       const GroupNode* groupNode) {
-    const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled(
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-
-    auto collatorSlot = _state.getCollatorSlot();
     const auto& idExpr = groupNode->groupByExpression;
     const auto nodeId = groupNode->nodeId();
     SbBuilder b(_state, nodeId);
@@ -1104,9 +1044,8 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
     std::vector<AccumulatorArgs> blockAccArgsVec;
     bool vectorizedAccumulatorArgs = false;
 
-    // These are the conditions for attempting to vectorize the expressions in 'accArgsVec'.
-    bool tryToVectorizeAccumulatorArgs = sbeFullEnabled && childOutputs.hasBlockOutput() &&
-        !_cq.getExpCtx()->allowDiskUse && idIsSingleKey && !hasVariableGroupInit && !collatorSlot;
+    // TODO SERVER-87560 re-enable block hashagg end-to-end.
+    bool tryToVectorizeAccumulatorArgs = false;
 
     // If the necessary conditions are met, try to vectorize 'accArgsVec'.
     if (tryToVectorizeAccumulatorArgs) {
@@ -1118,8 +1057,8 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
             boost::optional<TypeSignature> typeSig;
             bool isBlockType = false;
 
-            if (holds_alternative<SbExpr>(accArgs)) {
-                const SbExpr& accArgExpr = get<SbExpr>(accArgs);
+            if (accArgs.first.size() == 1) {
+                const SbExpr& accArgExpr = accArgs.first[0];
 
                 blockAccArgExpr =
                     buildVectorizedExpr(_state, accArgExpr.clone(), childOutputs, false);
@@ -1128,7 +1067,10 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
             }
 
             if (blockAccArgExpr && isBlockType) {
-                blockAccArgsVec.emplace_back(std::move(blockAccArgExpr));
+                const std::vector<std::string>& accArgNames = accArgs.second;
+
+                blockAccArgsVec.emplace_back(
+                    AccumulatorArgs{SbExpr::makeSeq(std::move(blockAccArgExpr)), accArgNames});
             } else {
                 // If we couldn't vectorize one of the accumulator args, then we give up entirely
                 // on any further vectorization and fallback to using scalar values with the
@@ -1162,13 +1104,17 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
 
     if (genBlockAggs) {
         for (auto& blockAccArgs : blockAccArgsVec) {
-            tassert(8448605, "Expected single expression", holds_alternative<SbExpr>(blockAccArgs));
+            tassert(8448605, "Expected single expression", blockAccArgs.first.size() == 1);
 
-            blockAccArgExprs.emplace_back(std::move(get<SbExpr>(blockAccArgs)));
+            blockAccArgExprs.emplace_back(std::move(blockAccArgs.first[0]));
 
             auto internalSlot = SbSlot{_state.slotId()};
             blockAccInternalArgSlots.emplace_back(internalSlot);
-            blockAccArgs = SbExpr{internalSlot};
+
+            auto updatedArgsVector = SbExpr::makeSeq(SbExpr{internalSlot});
+            std::vector<std::string> accArgNames = std::move(blockAccArgs.second);
+
+            blockAccArgs = AccumulatorArgs{std::move(updatedArgsVector), std::move(accArgNames)};
         }
     }
 
@@ -1224,6 +1170,10 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
         }
 
         individualSlots = outSlots;
+
+        // Remove the block projections that have been prepared, we are going to build the scalar
+        // version now.
+        blockAccArgExprs.clear();
 
         // buildBlockToRow() just made a bunch of changes to 'childOutputs', so we need
         // to re-generate 'accArgsVec', 'sbAggExprs', and 'accNumSbAggExprs'.
@@ -1310,7 +1260,9 @@ SlotBasedStageBuilder::buildGroupImpl(SbStage stage,
                 "Expected at least one group by slot or agg out slot",
                 !groupBySlots.empty() || !groupOutSlots.empty());
 
-        outputs.setBlockSlot(!groupBySlots.empty() ? groupBySlots[0] : groupOutSlots[0]);
+        // This stage re-maps the selectivity bitset slot.
+        outputs.set(PlanStageSlots::kBlockSelectivityBitmap,
+                    childOutputs.get(PlanStageSlots::kBlockSelectivityBitmap));
     }
 
     // For now we unconditionally end the block processing pipeline here.

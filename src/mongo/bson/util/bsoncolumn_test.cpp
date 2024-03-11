@@ -453,6 +453,14 @@ public:
         _appendSimple8bBlocks<uint128_t>(builder, vals, expectedNum);
     }
 
+    static void appendSimple8bRLE(BufBuilder& builder, int elemCount) {
+        ASSERT(elemCount % 120 == 0);
+        ASSERT(elemCount / 120 <= 16);
+
+        uint64_t block = (elemCount / 120) - 1;
+        builder.appendNum(block << 4 | simple8b_internal::kRleSelector);
+    }
+
     static void appendEOO(BufBuilder& builder) {
         builder.appendChar(EOO);
     }
@@ -696,9 +704,9 @@ public:
             // combinations of dividing the ranges so this test has quadratic complexity. Limit it
             // to binaries with a limited number of elements.
             size_t num = BSONColumn(columnBinary).size();
-            if (num > 0 && num < 100) {
+            if (num > 0 && num < 1000) {
                 // Iterate over all elements and validate intermediate in all combinations
-                for (size_t i = 1; i < num; ++i) {
+                for (size_t i = 1; i <= num; ++i) {
                     BufBuilder buffer;
                     BSONColumnBuilder cb;
                     BSONColumnBuilder reference;
@@ -746,7 +754,7 @@ public:
             // Validate the BSONColumnBuilder constructor that initializes from a compressed binary.
             // Its state should be identical to a builder that never called finalize() for these
             // elements.
-            for (size_t i = 0; i < num; ++i) {
+            for (size_t i = 0; i <= num; ++i) {
                 BSONColumnBuilder before;
                 auto it = c.begin();
                 for (size_t j = 0; j < i; ++j, ++it) {
@@ -1579,6 +1587,76 @@ TEST_F(BSONColumnTest, BasicDouble) {
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
     verifyDecompression(binData, {d1, d2}, true);
+}
+
+TEST_F(BSONColumnTest, DoubleIdenticalDeltas) {
+    BSONColumnBuilder cb;
+
+    // This test is using identical deltas for the double type. During binary reopen it will lead to
+    // a belief we can pack all these into an RLE block due to how overflow detection works (no
+    // overflow in this case). However, as the value is non-zero a simple8b block will be flushed
+    // when appending values and the end of the reopen process while leaving one value in pending.
+    // We make sure that special double state such as the last double value in previous block is
+    // stored and calculated correctly.
+    std::vector<BSONElement> elems = {createElementDouble(0.0),
+                                      createElementDouble(40.0),
+                                      createElementDouble(80.0),
+                                      createElementDouble(120.0),
+                                      createElementDouble(160.0),
+                                      createElementDouble(200.0),
+                                      createElementDouble(240.0),
+                                      createElementDouble(280.0),
+                                      createElementDouble(320.0),
+                                      createElementDouble(360.0)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1001, 0b0001);
+    appendSimple8bBlocks64(
+        expected, deltaDouble(elems.begin() + 1, elems.end(), elems.front(), 1.0), 2);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems, true);
+}
+
+TEST_F(BSONColumnTest, DoubleOverflowEndsWithSkip) {
+    BSONColumnBuilder cb;
+
+    // Simple8b block that cause overflow when running the binary reopen constructor ends with a
+    // skip
+    std::vector<BSONElement> elems = {createElementDouble(41.0),
+                                      BSONElement(),
+                                      BSONElement(),
+                                      createElementDouble(77.0),
+                                      createElementDouble(51.0),
+                                      createElementDouble(53.0),
+                                      BSONElement(),
+                                      createElementDouble(83.0),
+                                      BSONElement(),
+                                      BSONElement()};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1001, 0b0001);
+    appendSimple8bBlocks64(
+        expected, deltaDouble(elems.begin() + 1, elems.end(), elems.front(), 1.0), 2);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems, true);
 }
 
 TEST_F(BSONColumnTest, DoubleSameScale) {
@@ -3225,6 +3303,92 @@ TEST_F(BSONColumnTest, StringMultiType) {
                         true);
 }
 
+TEST_F(BSONColumnTest, Int64FullControlWithPendingAtFinalize) {
+    BSONColumnBuilder cb;
+
+    // This test completely fills up a control byte with 16 simple8b blocks with the append calls
+    // while leaving the last element in pending. Finalizing will create a new control byte for this
+    // last element. For bucket reopen, we will overflow in the last control byte and but fill it
+    // completely again when appending the pending values. While the overflow code is triggered the
+    // end result should be identical to as-if we just looked at the current control and never
+    // overflowed.
+    std::vector<BSONElement> elems = {
+        createElementInt64(0x3230373139),   createElementInt64(0x3234373139),
+        createElementInt64(0x3236373138),   createElementInt64(0x3238393138),
+        createElementInt64(0x323c393137),   createElementInt64(0x323e393137),
+        createElementInt64(0x323e3b3137),   createElementInt64(0x32403b3136),
+        createElementInt64(0x32443b3136),   createElementInt64(0x642e42293136),
+        createElementInt64(0x643242293136), createElementInt64(0x643442293135),
+        createElementInt64(0x6434422b3135), createElementInt64(0x6436422b3134),
+        createElementInt64(0x643a422b3134), createElementInt64(0x643e42293133),
+        createElementInt64(0x644242293133), createElementInt64(0x644442293132),
+        createElementInt64(0x644642273131), createElementInt64(0x644842273131),
+        createElementInt64(0x644a42273131), createElementInt64(0x644a42293131),
+        createElementInt64(0x644c42293130), createElementInt64(0x644e4229312f)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b1111);
+    appendSimple8bBlocks64(
+        expected,
+        deltaInt64(elems.begin() + 1, elems.begin() + elems.size() - 1, elems.front()),
+        16);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock64(expected, deltaInt64(elems.back(), elems.at(22)));
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems, true);
+}
+
+TEST_F(BSONColumnTest, StringFullControlWithPendingAtFinalize) {
+    BSONColumnBuilder cb;
+
+    // This test completely fills up a control byte with 16 simple8b blocks with the append calls
+    // while leaving the last element in pending. Finalizing will create a new control byte for this
+    // last element. For bucket reopen, we will overflow in the last control byte and but fill it
+    // completely again when appending the pending values. While the overflow code is triggered the
+    // end result should be identical to as-if we just looked at the current control and never
+    // overflowed.
+    std::vector<BSONElement> elems = {
+        createElementString("20719"_sd),  createElementString("22719"_sd),
+        createElementString("21719"_sd),  createElementString("22819"_sd),
+        createElementString("20819"_sd),  createElementString("21819"_sd),
+        createElementString("21919"_sd),  createElementString("20919"_sd),
+        createElementString("22919"_sd),  createElementString("201019"_sd),
+        createElementString("221019"_sd), createElementString("211019"_sd),
+        createElementString("211119"_sd), createElementString("201119"_sd),
+        createElementString("221119"_sd), createElementString("201219"_sd),
+        createElementString("221219"_sd), createElementString("211219"_sd),
+        createElementString("201319"_sd), createElementString("211319"_sd),
+        createElementString("221319"_sd), createElementString("221419"_sd),
+        createElementString("211419"_sd), createElementString("201419"_sd)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b1111);
+    appendSimple8bBlocks128(
+        expected,
+        deltaString(elems.begin() + 1, elems.begin() + elems.size() - 1, elems.front()),
+        16);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock128(expected, deltaString(elems.back(), elems.at(22)));
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems, true);
+}
+
 TEST_F(BSONColumnTest, CodeBase) {
     BSONColumnBuilder cb;
     auto elem = createElementCode("test");
@@ -3414,6 +3578,180 @@ TEST_F(BSONColumnTest, NonZeroRLETwoControlBlocks) {
     auto binData = cb.finalize();
     verifyBinary(binData, expected, false);
     verifyColumnReopenFromBinary(reinterpret_cast<const char*>(binData.data), binData.length);
+}
+
+TEST_F(BSONColumnTest, RLEAfterMixedValueBlock) {
+    // This test produces an RLE block after a simple8b block with different values. We test that we
+    // can properly handle when the value to use for RLE is at the end of this block and not the
+    // beginning.
+    BSONColumnBuilder cb;
+    std::vector<BSONElement> elems = {createElementInt64(64), createElementInt64(128)};
+
+    for (size_t i = 0; i < 128; ++i) {
+        elems.push_back(createElementInt64(256));
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0001);
+    appendSimple8bBlocks64(
+        expected, deltaInt64(elems.begin() + 1, elems.begin() + 10, elems.front()), 1);
+    appendSimple8bRLE(expected, 120);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, RLEAfterMixedValueBlock128) {
+    // This test produces an RLE block after a simple8b block with different values. We test that we
+    // can properly handle when the value to use for RLE is at the end of this block and not the
+    // beginning.
+    BSONColumnBuilder cb;
+
+    // Generate strings from integer to make it easier to control the delta values
+    auto createStringFromInt = [&](int64_t val) {
+        auto str = Simple8bTypeUtil::decodeString(val);
+        return createElementString(StringData(str.str.data(), str.size));
+    };
+
+    std::vector<BSONElement> elems = {createStringFromInt(64), createStringFromInt(128)};
+
+    for (size_t i = 0; i < 128; ++i) {
+        elems.push_back(createStringFromInt(256));
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0001);
+    appendSimple8bBlocks128(
+        expected, deltaString(elems.begin() + 1, elems.begin() + 10, elems.front()), 1);
+    appendSimple8bRLE(expected, 120);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock) {
+    // This test produces an RLE block after a simple8b block with different values. The RLE block
+    // is located as the first block after a control byte. We test that we can properly handle when
+    // the value to use for RLE is at the end of the last block in the previous control byte and not
+    // at the beginning of this block.
+    BSONColumnBuilder cb;
+    std::vector<BSONElement> elems = {createElementInt64(0),
+                                      createElementInt64(0xFFFFFFFFFFFFFF),
+                                      createElementInt64(0),
+                                      createElementInt64(0xFFFFFFFFFFFFFF),
+                                      createElementInt64(0),
+                                      createElementInt64(0xFFFFFFFFFFFFFF),
+                                      createElementInt64(0),
+                                      createElementInt64(0xFFFFFFFFFFFFFF),
+                                      createElementInt64(0),
+                                      createElementInt64(0xFFFFFFFFFFFFFF),
+                                      createElementInt64(0),
+                                      createElementInt64(0xFFFFFFFFFFFFFF),
+                                      createElementInt64(0),
+                                      createElementInt64(0xFFFFFFFFFFFFFF),
+                                      createElementInt64(0),
+                                      createElementInt64(0xFFFF),
+                                      createElementInt64(64),
+                                      createElementInt64(128)};
+
+    for (size_t i = 0; i < 129; ++i) {
+        elems.push_back(createElementInt64(256));
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b1111);
+    appendSimple8bBlocks64(
+        expected,
+        deltaInt64(elems.begin() + 1, elems.begin() + elems.size() - 120, elems.front()),
+        16);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bRLE(expected, 120);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock128) {
+    // This test produces an RLE block after a simple8b block with different values. The RLE block
+    // is located as the first block after a control byte. We test that we can properly handle when
+    // the value to use for RLE is at the end of the last block in the previous control byte and not
+    // at the beginning of this block.
+    BSONColumnBuilder cb;
+
+    // Generate strings from integer to make it easier to control the delta values
+    auto createStringFromInt = [&](int64_t val) {
+        auto str = Simple8bTypeUtil::decodeString(val);
+        return createElementString(StringData(str.str.data(), str.size));
+    };
+
+    std::vector<BSONElement> elems = {createStringFromInt(0),
+                                      createStringFromInt(0xFFFFFFFFFFFFFF),
+                                      createStringFromInt(0),
+                                      createStringFromInt(0xFFFFFFFFFFFFFF),
+                                      createStringFromInt(0),
+                                      createStringFromInt(0xFFFFFFFFFFFFFF),
+                                      createStringFromInt(0),
+                                      createStringFromInt(0xFFFFFFFFFFFFFF),
+                                      createStringFromInt(0),
+                                      createStringFromInt(0xFFFFFFFFFFFFFF),
+                                      createStringFromInt(0),
+                                      createStringFromInt(0xFFFFFFFFFFFFFF),
+                                      createStringFromInt(0),
+                                      createStringFromInt(0xFFFFFFFFFFFFFF),
+                                      createStringFromInt(0),
+                                      createStringFromInt(0xFFFF),
+                                      createStringFromInt(64),
+                                      createStringFromInt(128)};
+
+    for (size_t i = 0; i < 129; ++i) {
+        elems.push_back(createStringFromInt(256));
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b1111);
+    appendSimple8bBlocks128(
+        expected,
+        deltaString(elems.begin() + 1, elems.begin() + elems.size() - 120, elems.front()),
+        16);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bRLE(expected, 120);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected, true);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, Interleaved) {
@@ -6970,22 +7308,28 @@ TEST_F(BSONColumnTest, InvalidDelta) {
 
 TEST_F(BSONColumnTest, AppendMinKey) {
     BSONColumnBuilder cb;
-    ASSERT_THROWS_CODE(cb.append(createElementMinKey()), DBException, ErrorCodes::InvalidBSONType);
+    cb.append(createElementMinKey());
 
     BufBuilder expected;
+    appendLiteral(expected, createElementMinKey());
     appendEOO(expected);
 
-    verifyBinary(cb.finalize(), expected);
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {createElementMinKey()});
 }
 
 TEST_F(BSONColumnTest, AppendMaxKey) {
     BSONColumnBuilder cb;
-    ASSERT_THROWS_CODE(cb.append(createElementMaxKey()), DBException, ErrorCodes::InvalidBSONType);
+    cb.append(createElementMaxKey());
 
     BufBuilder expected;
+    appendLiteral(expected, createElementMaxKey());
     appendEOO(expected);
 
-    verifyBinary(cb.finalize(), expected);
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {createElementMaxKey()});
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObj) {
@@ -6997,13 +7341,43 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObj) {
         builder.append(createElementMinKey());
     }
 
-    ASSERT_THROWS_CODE(
-        cb.append(createElementObj(obj.obj())), DBException, ErrorCodes::InvalidBSONType);
+    BSONObj ref = obj.obj();
+    cb.append(createElementObj(ref));
 
     BufBuilder expected;
+    appendInterleavedStart(expected, ref);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected, {kDeltaForBinaryEqualValues}, 1);
+    appendEOO(expected);
     appendEOO(expected);
 
-    verifyBinary(cb.finalize(), expected);
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {createElementObj(ref)});
+}
+
+TEST_F(BSONColumnTest, AppendMaxKeyInSubObj) {
+    BSONColumnBuilder cb;
+
+    BSONObjBuilder obj;
+    {
+        BSONObjBuilder builder = obj.subobjStart("root");
+        builder.append(createElementMaxKey());
+    }
+
+    BSONObj ref = obj.obj();
+    cb.append(createElementObj(ref));
+
+    BufBuilder expected;
+    appendInterleavedStart(expected, ref);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected, {kDeltaForBinaryEqualValues}, 1);
+    appendEOO(expected);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {createElementObj(ref)});
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStart) {
@@ -7015,9 +7389,24 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStart) {
         builder.append(createElementMinKey());
     }
 
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    ASSERT_THROWS_CODE(
-        cb.append(createElementObj(obj.obj())), DBException, ErrorCodes::InvalidBSONType);
+    std::vector<BSONElement> elems = {createElementObj(BSON("root" << BSON("0" << 1))),
+                                      createElementObj(obj.obj())};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendInterleavedStart(expected, elems[0].Obj());
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected, {kDeltaForBinaryEqualValues}, 1);
+    appendLiteral(expected, createElementMinKey());
+    appendEOO(expected);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStartInAppendMode) {
@@ -7029,15 +7418,32 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStartInAppendMode) {
         builder.append(createElementMinKey());
     }
 
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    ASSERT_THROWS_CODE(
-        cb.append(createElementObj(obj.obj())), DBException, ErrorCodes::InvalidBSONType);
+    std::vector<BSONElement> elems(7, createElementObj(BSON("root" << BSON("0" << 1))));
+    elems.push_back(createElementObj(obj.obj()));
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendInterleavedStart(expected, elems[0].Obj());
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected,
+                           {kDeltaForBinaryEqualValues,
+                            kDeltaForBinaryEqualValues,
+                            kDeltaForBinaryEqualValues,
+                            kDeltaForBinaryEqualValues,
+                            kDeltaForBinaryEqualValues,
+                            kDeltaForBinaryEqualValues,
+                            kDeltaForBinaryEqualValues},
+                           1);
+    appendLiteral(expected, createElementMinKey());
+    appendEOO(expected);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterMerge) {
@@ -7050,11 +7456,40 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterMerge) {
         builder.append(createElementMinKey());
     }
 
-    cb.append(createElementObj(BSON("root" << BSON("0" << 1))));
-    // Make sure we throw InvalidBSONType even if we would detect that "a" needs to be merged before
+    // Make sure we handle MinKey even if we would detect that "a" needs to be merged before
     // observing the MinKey.
-    ASSERT_THROWS_CODE(
-        cb.append(createElementObj(obj.obj())), DBException, ErrorCodes::InvalidBSONType);
+    std::vector<BSONElement> elems = {createElementObj(BSON("root" << BSON("0" << 1))),
+                                      createElementObj(obj.obj())};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendInterleavedStart(expected,
+                           BSON("root" << BSON("a"
+                                               << "asd"
+                                               << "0" << 1)));
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected,
+                           {
+                               boost::none,
+                               kDeltaForBinaryEqualValues,
+                           },
+                           1);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected,
+                           {
+                               kDeltaForBinaryEqualValues,
+                           },
+                           1);
+    appendLiteral(expected, createElementMinKey());
+    appendEOO(expected);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, DecompressMinKey) {

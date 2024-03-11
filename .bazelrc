@@ -22,6 +22,10 @@ build:linux --crosstool_top=@mongo_toolchain//:toolchain_suite
 # Dynamic linking on Windows (DLL generation) is currently not supported.
 build:windows --//bazel/config:linkstatic=True
 
+# Windows and MacOS do not use the custom toolchain config, so the compiler flags need to be set here.
+build:macos --cxxopt=-std=c++20
+build:windows --cxxopt=/std:c++20
+
 # remote execution is the default, but only mongodb employees will be able to access
 # the engflow cluster. External builders should use the local option below
 # remote execution configs
@@ -33,6 +37,7 @@ build --experimental_remote_cache_compression=true
 build --grpc_keepalive_time=30s
 build --nolegacy_important_outputs
 build --bes_keywords=repo:mongo
+build --jobs=200
 common --remote_upload_local_results=False
 
 # if you don't have access to the remote execution cluster above, use the local config
@@ -50,6 +55,8 @@ build:local --tls_client_key=
 build:local --experimental_remote_cache_compression=false
 build:local --grpc_keepalive_time=0s
 build:local --legacy_important_outputs
+build:local --//bazel/config:local_build=True
+build:local --jobs=auto
 
 # Disable remote execution and caching for public releases
 --config=public-release
@@ -63,6 +70,8 @@ build:public-release --experimental_remote_cache_compression=false
 build:public-release --grpc_keepalive_time=0s
 build:public-release --legacy_important_outputs
 
+# Avoid failing builds when BES metadata fails to upload.
+common --bes_upload_mode=fully_async
 
 # try to import the bazelrc files if available
 try-import %workspace%/.bazelrc.local

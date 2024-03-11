@@ -16,7 +16,7 @@
 //   requires_fcv_62,
 //   # Plan cache state is node-local and will not get migrated alongside tenant data.
 //   tenant_migration_incompatible,
-//   # TODO SERVER-67607: Test plan cache with CQF enabled.
+//   # TODO SERVER-85728: Enable Bonsai plan cache tests involving indices.
 //   cqf_experimental_incompatible,
 //   references_foreign_collection,
 //   # This tests perform queries and expect a particular number of candidate plans to be evaluated,
@@ -226,7 +226,10 @@ if (FeatureFlagUtil.isPresentAndEnabled(db, "QuerySettings") && !FixtureHelpers.
 
     // Specify 'allowedIndexes' with more than one index, otherwise it will result in single
     // solution plan, that won't be cached in classic.
-    const settings = {indexHints: {allowedIndexes: ["a_1", "a_1_b_1"]}};
+    const settings = {
+        indexHints:
+            {ns: {db: db.getName(), coll: coll.getName()}, allowedIndexes: ["a_1", "a_1_b_1"]}
+    };
     const filter = {a: 1};
     const query = qsutils.makeFindQueryInstance({filter});
     assert.commandWorked(db.adminCommand({setQuerySettings: query, settings: settings}));

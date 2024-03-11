@@ -126,7 +126,7 @@ private:
         // Use a small journal for testing to account for the unlikely event that the underlying
         // filesystem does not support fast allocation of a file of zeros.
         std::string extraStrings = "log=(file_max=1m,prealloc=false)";
-        auto kv = std::make_unique<WiredTigerKVEngine>(kWiredTigerEngineName,
+        auto kv = std::make_unique<WiredTigerKVEngine>(std::string{kWiredTigerEngineName},
                                                        _dbpath.path(),
                                                        _cs.get(),
                                                        extraStrings,
@@ -677,5 +677,114 @@ MONGO_INITIALIZER(RegisterKVHarnessFactory)(InitializerContext*) {
     KVHarnessHelper::registerFactory(makeHelper);
 }
 
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdown) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerSingleActivityBeforeShutdown) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT(engine->getSectionActivityPermit_UNSAFE());
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT_EQ(engine->getActiveSections(), 1);
+    engine->releaseSectionActivityPermit_UNSAFE();
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerSingleActivityBeforeShutdownRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    {
+        auto permit = engine->tryGetSectionActivityPermit();
+        ASSERT(permit);
+        ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+        ASSERT_EQ(engine->getActiveSections(), 1);
+    }
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerMultipleActivitiesBeforeShutdownRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    {
+        auto permit1 = engine->tryGetSectionActivityPermit();
+        ASSERT(permit1);
+        ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+        ASSERT_EQ(engine->getActiveSections(), 1);
+        {
+            auto permit2 = engine->tryGetSectionActivityPermit();
+            ASSERT(permit2);
+            ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+            ASSERT_EQ(engine->getActiveSections(), 2);
+        }
+        ASSERT_EQ(engine->getActiveSections(), 1);
+    }
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivity) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->tryGetSectionActivityPermit());
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    engine->cleanShutdown();
+    ASSERT(!engine->getSectionActivityPermit_UNSAFE());
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityRelease) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT(engine->getSectionActivityPermit_UNSAFE());
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    ASSERT_EQ(engine->getActiveSections(), 1);
+    stdx::thread shudownThread([&]() { engine->cleanShutdown(); });
+    ASSERT_EQ(engine->getActiveSections(), 1);
+    while (engine->getWtConnReadyStatus_UNSAFE()) {
+        stdx::this_thread::yield();
+    }
+    engine->releaseSectionActivityPermit_UNSAFE();
+    shudownThread.join();
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityReleaseRAII) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+    {
+        auto permit = engine->tryGetSectionActivityPermit();
+        ASSERT(engine->getWtConnReadyStatus_UNSAFE());
+        ASSERT_EQ(engine->getActiveSections(), 1);
+        stdx::thread shudownThread([&]() { engine->cleanShutdown(); });
+        ASSERT_EQ(engine->getActiveSections(), 1);
+        while (engine->getWtConnReadyStatus_UNSAFE()) {
+            stdx::this_thread::yield();
+        }
+        shudownThread.join();
+    }
+    ASSERT_EQ(engine->getActiveSections(), 0);
+    ASSERT(!engine->getWtConnReadyStatus_UNSAFE());
+}
 }  // namespace
 }  // namespace mongo

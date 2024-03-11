@@ -923,8 +923,7 @@ public:
 
         if (exprIsParameterized || expr->getRegexes().size() == 0) {
             auto makePredicate = [&, hasNull = hasNull](SbExpr inputExpr) {
-                // We have to match nulls and undefined if a 'null' is present in
-                // equalities.
+                // We have to match nulls and missing if a 'null' is present in equalities.
                 auto valueExpr = !hasNull ? std::move(inputExpr)
                                           : b.makeIf(b.generateNullOrMissing(inputExpr.clone()),
                                                      b.makeNullConstant(),
@@ -981,7 +980,7 @@ public:
                     "regexMatch", std::move(pcreRegexesConstant), inputExpr.clone())));
 
             if (expr->getEqualities().size() > 0) {
-                // We have to match nulls and undefined if a 'null' is present in equalities.
+                // We have to match nulls and missing if a 'null' is present in equalities.
                 if (hasNull) {
                     inputExpr = b.makeIf(b.generateNullOrMissing(inputExpr.clone()),
                                          b.makeNullConstant(),
@@ -1435,17 +1434,6 @@ SbExpr generateBitTestExpr(StageBuilderState& state,
         MONGO_UNREACHABLE_TASSERT(5610200);
     }();
 
-    // We round NumberDecimal values to the nearest integer to match the classic execution engine's
-    // behavior for now. Note that this behavior is _not_ consistent with MongoDB's documentation.
-    // At some point, we should consider removing this call to round() to make SBE's behavior
-    // consistent with MongoDB's documentation.
-    auto numericBitTestInputExpr = b.makeIf(
-        b.makeFunction("typeMatch",
-                       inputExpr.clone(),
-                       b.makeInt32Constant(getBSONTypeMask(sbe::value::TypeTags::NumberDecimal))),
-        b.makeFunction("round"_sd, inputExpr.clone()),
-        inputExpr.clone());
-
     SbExpr bitMaskExpr = [&]() -> SbExpr {
         if (auto bitMaskParamId = expr->getBitMaskParamId()) {
             auto bitMaskSlotId = state.registerInputParamSlot(*bitMaskParamId);
@@ -1460,8 +1448,7 @@ SbExpr generateBitTestExpr(StageBuilderState& state,
     auto numericBitTestExpr =
         b.makeFunction(numericBitTestFnName,
                        std::move(bitMaskExpr),
-                       b.makeNumericConvert(std::move(numericBitTestInputExpr),
-                                            sbe::value::TypeTags::NumberInt64));
+                       b.makeNumericConvert(inputExpr.clone(), sbe::value::TypeTags::NumberInt64));
 
     // For the AnyClear and AnySet cases, negate the output of the bit-test function.
     if (bitOp == sbe::BitTestBehavior::AnyClear || bitOp == sbe::BitTestBehavior::AnySet) {

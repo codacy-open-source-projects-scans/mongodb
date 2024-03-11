@@ -23,9 +23,11 @@ env.Library(
         'server_status.cpp',
         'server_status_metric.cpp',
     ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/server_base',
+    ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/server_base',
     ],
 )
 
@@ -159,6 +161,14 @@ env.Library(
     ])
 
 # Commands available in all mongodb server processes (mongod, mongos, etc.)
+xray_files = []
+
+if get_option("xray") == "on":
+    xray_files = [
+        'xray_commands.cpp',
+        'xray_commands.idl',
+    ]
+
 env.Library(
     target='servers',
     source=[
@@ -183,7 +193,7 @@ env.Library(
         'traffic_recording_cmds.cpp',
         'user_management_commands_common.cpp',
         'user_management_commands.idl',
-    ],
+    ] + xray_files,
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/client/clientdriver_minimal',
         '$BUILD_DIR/mongo/db/auth/address_restriction',
@@ -580,6 +590,7 @@ env.Library(
 env.Library(
     target='test_commands',
     source=[
+        'sysprofile.idl',
         'test_commands.cpp',
         'whats_my_uri_cmd.cpp',
     ],
@@ -593,6 +604,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/ops/write_ops_exec',
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/shard_role',
+        '$BUILD_DIR/mongo/util/system_perf',
         'test_commands_enabled',
     ],
 )

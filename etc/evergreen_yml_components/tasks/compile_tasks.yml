@@ -35,6 +35,7 @@ variables:
   setup_task:
   - func: "f_expansions_write"
   - func: "apply compile expansions"
+  - func: "f_expansions_write"
   - func: "set task expansion macros"
   - func: "f_expansions_write"
   - func: "get engflow creds"
@@ -91,7 +92,9 @@ variables:
   - func: "f_expansions_write"
   - func: "set up credentials"
   - func: "use WiredTiger develop" # noop if ${use_wt_develop} is not "true"
+  - func: "f_expansions_write"
   - func: "set up win mount script"
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   - func: "f_expansions_write"
   teardown_group:
@@ -102,32 +105,6 @@ variables:
   - func: "f_expansions_write"
   - func: "run hang analyzer"
   - func: "wait for resmoke to shutdown"
-
-- &stitch_support_task_group_template
-  name: stitch_support_task_group_template
-  setup_task:
-  - func: "apply compile expansions"
-  - func: "set task expansion macros"
-  - func: "f_expansions_write"
-  - func: "get engflow creds"
-  teardown_task:
-  - func: "attach scons logs"
-  setup_group_can_fail_task: true
-  setup_group:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "set task expansion macros"
-  - func: "f_expansions_write"
-  - func: "kill processes"
-  - func: "cleanup environment"
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "get buildnumber"
-  - func: "f_expansions_write"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"
-  teardown_group:
-  - func: "umount shared scons directory"
 
 # TODO: split this up into the user files.
 # List of all variants that make mongocryptd
@@ -413,11 +390,8 @@ tasks:
       target: >-
         //src/mongo/platform:visibility_test1
       # TODO DEVPROD-2508 remove dbg flags when compilation_mode is synced with build_mode automatically
-      # TODO DEVPROD-2513 remove "--copt /std:c++20" flag when toolchain sets this automatically
       args: >-
         --compilation_mode=dbg
-        --//bazel/config:build_mode=dbg
-        --copt /std:c++20
   teardown_task:
   - func: "attach bazel invocation"
 
@@ -1193,11 +1167,12 @@ tasks:
       display_name: Binaries
 
 - name: stitch_support_create_lib
-  tags: ["assigned_to_jira_team_devprod_build"]
+  tags: ["assigned_to_jira_team_devprod_build", "release_critical", "incompatible_mac", "stitch"]
   depends_on:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
+  - func: "do scons setup"
   - func: "f_expansions_write"
   - func: "scons compile"
     vars:
@@ -1224,12 +1199,15 @@ tasks:
       permissions: public-read
       content_type: application/tar
       display_name: "Stitch Support Library"
+  - func: "do scons teardown"
 
-- name: stitch_support_install_tests
-  tags: ["assigned_to_jira_team_devprod_build"]
+- name: stitch_support_install_and_run_tests
+  tags: ["assigned_to_jira_team_devprod_build", "release_critical", "incompatible_mac", "stitch"]
   depends_on:
   - name: stitch_support_create_lib
   commands:
+  - func: "do scons setup"
+  - func: "f_expansions_write"
   - func: "scons compile"
     vars:
       targets: install-stitch-support-test
@@ -1239,12 +1217,6 @@ tasks:
         --enable-http-client=off
         --modules=
         DESTDIR='$BUILD_ROOT/stitch-support-lib-$MONGO_VERSION'
-
-- name: stitch_support_run_tests
-  tags: ["assigned_to_jira_team_devprod_build"]
-  depends_on:
-  - name: stitch_support_install_tests
-  commands:
   - func: "get and apply version expansions"
   - func: "f_expansions_write"
   - command: subprocess.exec
@@ -1253,13 +1225,15 @@ tasks:
       binary: bash
       args:
       - "src/evergreen/stitch_support_run_tests.sh"
+  - func: "do scons teardown"
 
 - name: crypt_create_lib
-  tags: ["assigned_to_jira_team_server_security"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "crypt"]
   depends_on:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
+  - func: "do scons setup"
   - func: "f_expansions_write"
   - func: "scons compile"
     vars:
@@ -1288,6 +1262,7 @@ tasks:
       permissions: public-read
       content_type: ${content_type|application/tar}
       display_name: "Mongo crypt Library"
+  - func: "do scons teardown"
 
 - name: crypt_create_debug_lib
   tags: ["assigned_to_jira_team_server_security"]
@@ -1515,7 +1490,7 @@ tasks:
 
 - name: publish_packages
   run_on: rhel8.7-small
-  tags: ["assigned_to_jira_team_devprod_build", "publish"]
+  tags: ["assigned_to_jira_team_devprod_build", "release_critical", "publish"]
   # This should prevent this task from running in patch builds, where we
   # don't want to publish packages.
   patchable: false
@@ -1535,8 +1510,10 @@ tasks:
   - func: "cleanup environment"
   - func: "set up venv"
   - func: "fetch packages"
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   - func: "apply compile expansions"
+  - func: "f_expansions_write"
   - func: "set up remote credentials"
     vars:
       aws_key_remote: ${repo_aws_key}
@@ -1565,7 +1542,7 @@ tasks:
 
 - name: push
   run_on: rhel8.7-small
-  tags: ["assigned_to_jira_team_devprod_build", "publish"]
+  tags: ["assigned_to_jira_team_devprod_build", "release_critical", "publish"]
   patchable: false
   depends_on:
   - name: package
@@ -1604,8 +1581,10 @@ tasks:
       # because it should be the same everywhere, so just use rhel79/rhel80/windows.
       # TODO(SERVER-80479): remove rhel79 when support for it has been dropped.
       build_variants: [rhel79, rhel80, windows]
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   - func: "apply compile expansions"
+  - func: "f_expansions_write"
   - func: "fetch dist debugsymbols"
   - func: "set up remote credentials"
     vars:
@@ -2116,7 +2095,7 @@ tasks:
 
 - name: crypt_push
   run_on: rhel8.7-small
-  tags: ["assigned_to_jira_team_server_security", "publish_crypt"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "publish_crypt"]
   patchable: false
   stepback: false
   depends_on:
@@ -2145,8 +2124,10 @@ tasks:
       remote_file: ${project}/mongo_crypt/${build_variant}/${revision}/mongo_crypt_shared_v1-${version}.${ext|tgz}
       bucket: mciuploads
       local_file: src/mongo_crypt_shared_v1.${ext|tgz}
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   - func: "apply compile expansions"
+  - func: "f_expansions_write"
   - func: "set up remote credentials"
     vars:
       aws_key_remote: ${repo_aws_key}
@@ -2258,6 +2239,7 @@ tasks:
   - func: "kill processes"
   - func: "cleanup environment"
   - func: "set up venv"
+  - func: "f_expansions_write"
   - func: "set up win mount script"
   - func: "shared scons cache pruning"
 
@@ -2331,7 +2313,6 @@ task_groups:
   - compile_bazel_libunwind
   - compile_bazel_program
   - run_bazel_scons_unittest
-  - run_bazel_scons_unittest_sanitize
   - run_bazel_program
 
 - <<: *compile_task_group_template
@@ -2339,6 +2320,11 @@ task_groups:
   tags: []
   tasks:
   - bazel_workstation_unittests
+
+- <<: *compile_bazel_task_group_template
+  name: compile_bazel_sanitize_TG
+  tasks:
+  - run_bazel_scons_unittest_sanitize
 
 - <<: *compile_bazel_task_group_template
   name: compile_bazel_ninja_TG
@@ -2649,13 +2635,16 @@ task_groups:
   - func: "get buildnumber"
   - func: "f_expansions_write"
   - func: "set up credentials"
+  - func: "f_expansions_write"
   - func: "set up win mount script"
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   - func: "get engflow creds"
   teardown_group:
   - func: "f_expansions_write"
   - func: "attach report"
   - func: "upload clang tidy results"
+  - func: "f_expansions_write"
   - func: "umount shared scons directory"
   - func: "cleanup environment"
   setup_task:
@@ -2680,9 +2669,12 @@ task_groups:
   - func: "set up venv"
   - func: "upload pip requirements"
   - func: "set up credentials"
+  - func: "f_expansions_write"
   - func: "set up win mount script"
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   teardown_group:
+  - func: "f_expansions_write"
   - func: "umount shared scons directory"
   setup_task:
   - func: "set task expansion macros"
@@ -2694,55 +2686,12 @@ task_groups:
   tasks:
   - compile_visibility_test
 
-- <<: *stitch_support_task_group_template
-  name: stitch_support_lib_build_and_archive
-  tags: ["release_critical", "stitch"]
-  tasks:
-  - "stitch_support_create_lib"
-
-- <<: *stitch_support_task_group_template
-  name: stitch_support_lib_build_and_test
-  tags: ["release_critical", "stitch"]
-  max_hosts: 1
-  tasks:
-  - "stitch_support_install_tests"
-  - "stitch_support_run_tests"
-
-- name: crypt_build
-  tags: ["release_critical", "incompatible_community", "crypt"]
-  setup_task:
-  - func: "f_expansions_write"
-  - func: "apply compile expansions"
-  - func: "set task expansion macros"
-  - func: "f_expansions_write"
-  - func: "get engflow creds"
-  teardown_task:
-  - func: "attach scons logs"
-  setup_group_can_fail_task: true
-  setup_group:
-  - command: manifest.load
-  - func: "git get project and add git tag"
-  - func: "set task expansion macros"
-  - func: "f_expansions_write"
-  - func: "kill processes"
-  - func: "cleanup environment"
-  - func: "set up venv"
-  - func: "upload pip requirements"
-  - func: "get buildnumber"
-  - func: "f_expansions_write"
-  - func: "set up win mount script"
-  - func: "generate compile expansions"
-  teardown_group:
-  - func: "umount shared scons directory"
-  max_hosts: 1
-  tasks:
-  - "crypt_create_lib"
-
 - name: crypt_build_debug_and_test
   tags: ["default"]
   setup_task:
   - func: "f_expansions_write"
   - func: "apply compile expansions"
+  - func: "f_expansions_write"
   - func: "set task expansion macros"
   - func: "f_expansions_write"
   - func: "get engflow creds"
@@ -2761,8 +2710,10 @@ task_groups:
   - func: "get buildnumber"
   - func: "f_expansions_write"
   - func: "set up win mount script"
+  - func: "f_expansions_write"
   - func: "generate compile expansions"
   teardown_group:
+  - func: "f_expansions_write"
   - func: "umount shared scons directory"
   max_hosts: 1
   tasks:

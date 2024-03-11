@@ -147,11 +147,18 @@ selector:
   # TODO(SERVER-71510): Un-denylist this test.
   - jstests/concurrency/fsm_workloads/snapshot_read_catalog_operations.js
 
+  # TODO(SERVER-87403): requestResumeToken is not supported without Resharding
+  - jstests/concurrency/fsm_workloads/internal_transactions_resharding.js
+
   # These tests run large commands which can sometimes trigger IncompleteTransactionHistory
   # if the initial sync node stepup happens at a specific timing.
   - jstests/concurrency/fsm_workloads/create_capped_collection.js
   - jstests/concurrency/fsm_workloads/rename_capped_collection_droptarget.js
   - jstests/concurrency/fsm_workloads/agg_graph_lookup.js
+
+  # Applying operation on feature compatibility version document not supported in initial sync
+  - jstests/concurrency/fsm_workloads/drop_database_sharded_setFCV.js
+  - jstests/concurrency/fsm_workloads/random_DDL_setFCV_operations.js
 
   exclude_with_any_tags:
   - requires_non_retryable_writes
@@ -165,8 +172,7 @@ selector:
   - assumes_unsharded_collection
   - assumes_standalone_mongod
   - assumes_read_preference_unchanged
-  # The following tests start their own ShardingTest or ReplSetTest, respectively.
-  - requires_sharding
+  # The tests start their own ReplSetTest
   - requires_replication
   - does_not_support_causal_consistency
 

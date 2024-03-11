@@ -42,12 +42,12 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
-#include "mongo/db/timeseries/timeseries_tracked_types.h"
-#include "mongo/db/timeseries/timeseries_tracking_context.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/tracked_types.h"
+#include "mongo/util/tracking_context.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo::timeseries::bucket_catalog {
@@ -191,9 +191,9 @@ bool isBucketStateFrozen(std::variant<BucketState, DirectWriteCounter>& state);
 bool isBucketStatePrepared(std::variant<BucketState, DirectWriteCounter>& state);
 
 /**
- * Returns true if the state conflicts with reopening (aka a direct write).
+ * Returns true if the state transiently conflicts with reopening (aka a direct write).
  */
-bool conflictsWithReopening(std::variant<BucketState, DirectWriteCounter>& state);
+bool transientlyConflictsWithReopening(std::variant<BucketState, DirectWriteCounter>& state);
 
 /**
  * Returns true if the state conflicts with reopening or is cleared.

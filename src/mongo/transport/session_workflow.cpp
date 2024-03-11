@@ -364,9 +364,9 @@ bool killExhaust(const Message& in, ServiceEntryPoint* sep, Client* client) {
             return false;
         auto opCtx = client->makeOperationContext();
         sep->handleRequest(opCtx.get(),
-                           OpMsgRequestBuilder::createWithValidatedTenancyScope(
-                               inRequest.getDbName(),
+                           OpMsgRequestBuilder::create(
                                auth::ValidatedTenancyScope::get(opCtx.get()),
+                               inRequest.getDbName(),
                                KillCursorsCommandRequest(
                                    NamespaceStringUtil::deserialize(inRequest.getDbName(),
                                                                     body["collection"].String()),
@@ -734,7 +734,10 @@ void SessionWorkflow::Impl::_acceptResponse(DbResponse response) {
     Message& toSink = response.response;
     if (toSink.empty())
         return;
-    invariant(!OpMsg::isFlagSet(work.in(), OpMsg::kMoreToCome));
+
+    tassert(ErrorCodes::InternalError,
+            "Attempted to respond to fire-and-forget request",
+            !OpMsg::isFlagSet(work.in(), OpMsg::kMoreToCome));
     invariant(!OpMsg::isFlagSet(toSink, OpMsg::kChecksumPresent));
 
     // Update the header for the response message.

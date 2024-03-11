@@ -6,6 +6,8 @@
  * See the file LICENSE for redistribution information.
  */
 
+#pragma once
+
 /*
  * __wt_ref_is_root --
  *     Return if the page reference is for the root page.
@@ -92,6 +94,22 @@ __wt_page_is_empty(WT_PAGE *page)
 }
 
 /*
+ * __wt_readgen_evict_soon --
+ *     Return whether a page's read generation makes it eligible for immediate eviction. Read
+ *     generations reserve a range of low numbers for special meanings and currently - with the
+ *     exception of the generation not being set - these indicate the page may be evicted
+ *     immediately.
+ */
+static WT_INLINE bool
+__wt_readgen_evict_soon(uint64_t *readgen)
+{
+    uint64_t gen;
+
+    WT_READ_ONCE(gen, *readgen);
+    return (gen != WT_READGEN_NOTSET && gen < WT_READGEN_START_VALUE);
+}
+
+/*
  * __wt_page_evict_soon_check --
  *     Check whether the page should be evicted urgently.
  */
@@ -114,7 +132,7 @@ __wt_page_evict_soon_check(WT_SESSION_IMPL *session, WT_REF *ref, bool *inmem_sp
      * checkpointed, and no other thread can help with that. Checkpoints don't rely on this code for
      * dirty eviction: that is handled explicitly in __wt_sync_file.
      */
-    if (WT_READGEN_EVICT_SOON(page->read_gen) && btree->evict_disabled == 0 &&
+    if (__wt_readgen_evict_soon(&page->read_gen) && btree->evict_disabled == 0 &&
       __wt_page_can_evict(session, ref, inmem_split) &&
       (!WT_SESSION_IS_CHECKPOINT(session) || __wt_page_evict_clean(page)))
         return (true);
@@ -706,7 +724,7 @@ __wt_page_only_modify_set(WT_SESSION_IMPL *session, WT_PAGE *page)
 
     last_running = 0;
     if (page->modify->page_state == WT_PAGE_CLEAN)
-        last_running = S2C(session)->txn_global.last_running;
+        last_running = __wt_atomic_loadv64(&S2C(session)->txn_global.last_running);
 
     /*
      * We depend on the atomic operation being a release barrier, that is, a barrier to ensure all
@@ -726,7 +744,7 @@ __wt_page_only_modify_set(WT_SESSION_IMPL *session, WT_PAGE *page)
          * In the event we dirty a page which is flagged for eviction soon, we update its read
          * generation to avoid evicting a dirty page prematurely.
          */
-        if (page->read_gen == WT_READGEN_WONT_NEED)
+        if (__wt_atomic_load64(&page->read_gen) == WT_READGEN_WONT_NEED)
             __wt_cache_read_gen_new(session, page);
 
         /*
@@ -1545,7 +1563,8 @@ __wt_ref_addr_copy(WT_SESSION_IMPL *session, WT_REF *ref, WT_ADDR_COPY *copy)
      * WT_ADDRs and swapped into place. The content of the two WT_ADDRs are identical, and we don't
      * care which version we get as long as we don't mix-and-match the two.
      */
-    WT_ACQUIRE_READ_WITH_BARRIER(addr, (WT_ADDR *)ref->addr);
+    addr = (WT_ADDR *)ref->addr;
+    WT_ACQUIRE_BARRIER();
 
     /* If NULL, there is no information. */
     if (addr == NULL)
@@ -1874,11 +1893,11 @@ __wt_page_evict_retry(WT_SESSION_IMPL *session, WT_PAGE *page)
      * a reasonable amount of time is currently pretty arbitrary.
      */
     if (__wt_cache_aggressive(session) ||
-      mod->last_evict_pass_gen + 5 < S2C(session)->cache->evict_pass_gen)
+      mod->last_evict_pass_gen + 5 < __wt_atomic_load64(&S2C(session)->cache->evict_pass_gen))
         return (true);
 
     /* Retry if the global transaction state has moved forward. */
-    if (txn_global->current == txn_global->oldest_id ||
+    if (__wt_atomic_loadv64(&txn_global->current) == __wt_atomic_loadv64(&txn_global->oldest_id) ||
       mod->last_eviction_id != __wt_txn_oldest_id(session))
         return (true);
 

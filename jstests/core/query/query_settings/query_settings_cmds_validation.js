@@ -14,15 +14,12 @@ const collName = jsTestName();
 const qsutils = new QuerySettingsUtils(db, collName)
 
 const querySettingsA = {
-    indexHints: {allowedIndexes: ["a_1", {$natural: 1}]}
+    indexHints: {ns: {db: db.getName(), coll: collName}, allowedIndexes: ["a_1", {$natural: 1}]}
 };
 const nonExistentQueryShapeHash = "0".repeat(64);
 
 {
     // Ensure that setQuerySettings command fails for invalid input.
-    assert.commandFailedWithCode(
-        db.adminCommand({setQuerySettings: nonExistentQueryShapeHash, settings: querySettingsA}),
-        7746401);
     assert.commandFailedWithCode(
         db.adminCommand({setQuerySettings: {notAValid: "query"}, settings: querySettingsA}),
         7746402);
@@ -94,44 +91,6 @@ const nonExistentQueryShapeHash = "0".repeat(64);
 }
 
 {
-    // Ensure that index hint may not refer to a collection which is not involved in the query.
-    assertDropAndRecreateCollection(db, "order");
-    assert.commandFailedWithCode(db.adminCommand({
-        setQuerySettings: {
-            aggregate: "order",
-            $db: "testDB",
-            pipeline: [{
-            $lookup: {
-                from: "inventory",
-                localField: "item",
-                foreignField: "sku",
-                as: "inventory_docs"
-            }
-            }]
-        },
-        settings:
-            {"indexHints": {"ns": {"db": "testDB", "coll": "someOtherColl"}, "allowedIndexes": []}}
-    }),
-                                 7746603);
-
-    const queryInstance = {
-        aggregate: "order",
-        $db: db.getName(),
-        pipeline: [{
-            $lookup:
-                {from: "inventory", localField: "item", foreignField: "sku", as: "inventory_docs"}
-        }]
-    };
-    const settings = {
-        "indexHints": {"ns": {"db": db.getName(), "coll": "order"}, "allowedIndexes": []}
-    };
-    assert.commandWorked(db.adminCommand({setQuerySettings: queryInstance, settings: settings}));
-    qsutils.assertQueryShapeConfiguration(
-        [qsutils.makeQueryShapeConfiguration(settings, queryInstance)]);
-    qsutils.removeAllQuerySettings();
-}
-
-{
     // Ensure that setQuerySettings command fails when multiple index hints refer to the same coll.
     assert.commandFailedWithCode(db.adminCommand({
         setQuerySettings: {find: collName, filter: {a: 123}, $db: db.getName()},
@@ -178,4 +137,19 @@ const nonExistentQueryShapeHash = "0".repeat(64);
         }
     }),
                                  8584901);
+}
+
+{
+    // Ensure that inserting empty settings fails.
+    let query = qsutils.makeFindQueryInstance({filter: {a: 15}});
+    assert.commandFailedWithCode(db.adminCommand({setQuerySettings: query, settings: {}}), 7746604);
+
+    // Insert some settings.
+    assert.commandWorked(db.adminCommand({setQuerySettings: query, settings: {reject: true}}));
+
+    // Ensure that updating with empty settings fails.
+    assert.commandFailedWithCode(db.adminCommand({setQuerySettings: query, settings: {}}), 7746604);
+
+    // Clean-up after the end of the test.
+    qsutils.removeAllQuerySettings();
 }

@@ -5,13 +5,10 @@ buildvariants:
 - &enterprise-rhel-81-ppc64le-template
   name: enterprise-rhel-81-ppc64le
   display_name: Enterprise RHEL 8.1 PPC64LE
-  modules:
-  - enterprise
   run_on:
   - rhel81-power8-small
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
   stepback: false
-  tags: ["bazel_check"]
   expansions: &enterprise-rhel-81-ppc64le-expansions-template
     additional_package_targets: >-
       archive-mongocryptd
@@ -66,7 +63,6 @@ buildvariants:
   - name: .publish
   - name: generate_buildid_to_debug_symbols_mapping
   - name: .timeseries_crud
-  - name: compile_bazel_TG
 
 - <<: *enterprise-rhel-81-ppc64le-template
   name: enterprise-rhel-81-ppc64le-dynamic
@@ -92,8 +88,6 @@ buildvariants:
 - &enterprise-rhel-83-s390x-template
   name: enterprise-rhel-83-s390x
   display_name: Enterprise RHEL 8.3 s390x
-  modules:
-  - enterprise
   run_on:
   - rhel83-zseries-small
   cron: "0 4 * * 0"

@@ -140,16 +140,49 @@ MONGO_FAIL_POINT_DEFINE(hangOnStepUpAsyncTaskBeforeCheckingCommitQuorum);
 
 extern FailPoint skipWriteConflictRetries;
 
-IndexBuildsCoordinator::IndexBuildsSSS::IndexBuildsSSS()
-    : ServerStatusSection("indexBuilds"),
-      registered(0),
-      scanCollection(0),
-      drainSideWritesTable(0),
-      drainSideWritesTablePreCommit(0),
-      waitForCommitQuorum(0),
-      drainSideWritesTableOnCommit(0),
-      processConstraintsViolatonTableOnCommit(0),
-      commit(0) {}
+class IndexBuildsSSS : public ServerStatusSection {
+public:
+    using ServerStatusSection::ServerStatusSection;
+
+    bool includeByDefault() const final {
+        return true;
+    }
+
+    BSONObj generateSection(OperationContext* opCtx, const BSONElement& configElement) const final {
+        BSONObjBuilder indexBuilds;
+
+        indexBuilds.append("total", registered.loadRelaxed());
+        indexBuilds.append("killedDueToInsufficientDiskSpace",
+                           killedDueToInsufficientDiskSpace.loadRelaxed());
+        indexBuilds.append("failedDueToDataCorruption", failedDueToDataCorruption.loadRelaxed());
+
+        BSONObjBuilder phases{indexBuilds.subobjStart("phases")};
+        phases.append("scanCollection", scanCollection.loadRelaxed());
+        phases.append("drainSideWritesTable", drainSideWritesTable.loadRelaxed());
+        phases.append("drainSideWritesTablePreCommit", drainSideWritesTablePreCommit.loadRelaxed());
+        phases.append("waitForCommitQuorum", waitForCommitQuorum.loadRelaxed());
+        phases.append("drainSideWritesTableOnCommit", drainSideWritesTableOnCommit.loadRelaxed());
+        phases.append("processConstraintsViolatonTableOnCommit",
+                      processConstraintsViolatonTableOnCommit.loadRelaxed());
+        phases.append("commit", commit.loadRelaxed());
+        phases.done();
+
+        return indexBuilds.obj();
+    }
+
+    AtomicWord<int> registered{0};
+    AtomicWord<int> killedDueToInsufficientDiskSpace{0};
+    AtomicWord<int> failedDueToDataCorruption{0};
+    AtomicWord<int> scanCollection{0};
+    AtomicWord<int> drainSideWritesTable{0};
+    AtomicWord<int> drainSideWritesTablePreCommit{0};
+    AtomicWord<int> waitForCommitQuorum{0};
+    AtomicWord<int> drainSideWritesTableOnCommit{0};
+    AtomicWord<int> processConstraintsViolatonTableOnCommit{0};
+    AtomicWord<int> commit{0};
+};
+
+auto& indexBuildsSSS = *ServerStatusSectionBuilder<IndexBuildsSSS>("indexBuilds").forShard();
 
 namespace {
 
@@ -2649,7 +2682,8 @@ void IndexBuildsCoordinator::_runIndexBuild(
         if (!oldLockerDebugInfo.empty()) {
             ss << "; " << oldLockerDebugInfo;
         }
-        locker->setDebugInfo(ss);
+        std::string debugStr = ss;
+        locker->setDebugInfo(std::move(debugStr));
     }
 
     auto status = [&]() {
@@ -2661,7 +2695,7 @@ void IndexBuildsCoordinator::_runIndexBuild(
         return Status::OK();
     }();
 
-    locker->setDebugInfo(oldLockerDebugInfo);
+    locker->setDebugInfo(std::move(oldLockerDebugInfo));
 
     // Ensure the index build is unregistered from the Coordinator and the Promise is set with
     // the build's result so that callers are notified of the outcome.
@@ -3642,6 +3676,10 @@ std::vector<BSONObj> IndexBuildsCoordinator::prepareSpecListForCreate(
     }
 
     return resultSpecs;
+}
+
+void IndexBuildsCoordinator::_incWaitForCommitQuorum() {
+    indexBuildsSSS.waitForCommitQuorum.addAndFetch(1);
 }
 
 }  // namespace mongo

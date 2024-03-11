@@ -165,7 +165,7 @@ __wt_session_copy_values(WT_SESSION_IMPL *session)
              */
             WT_TXN_SHARED *txn_shared = WT_SESSION_TXN_SHARED(session);
             WT_ASSERT(session,
-              txn_shared->pinned_id != WT_TXN_NONE ||
+              __wt_atomic_loadv64(&txn_shared->pinned_id) != WT_TXN_NONE ||
                 (WT_BTREE_PREFIX(cursor->uri) &&
                   WT_DHANDLE_IS_CHECKPOINT(((WT_CURSOR_BTREE *)cursor)->dhandle)));
 #endif
@@ -859,7 +859,8 @@ __session_blocking_checkpoint(WT_SESSION_IMPL *session)
          * This loop only checks objects that are declared volatile, therefore no barriers are
          * needed.
          */
-        if (!txn_global->checkpoint_running || txn_gen != __wt_gen(session, WT_GEN_CHECKPOINT))
+        if (!__wt_atomic_loadvbool(&txn_global->checkpoint_running) ||
+          txn_gen != __wt_gen(session, WT_GEN_CHECKPOINT))
             break;
     }
 
@@ -2354,15 +2355,17 @@ __session_transaction_pinned_range(WT_SESSION *wt_session, uint64_t *prange)
     txn_shared = WT_SESSION_TXN_SHARED(session);
 
     /* Assign pinned to the lesser of id or snap_min */
-    if (txn_shared->id != WT_TXN_NONE && WT_TXNID_LT(txn_shared->id, txn_shared->pinned_id))
-        pinned = txn_shared->id;
+    if (__wt_atomic_loadv64(&txn_shared->id) != WT_TXN_NONE &&
+      WT_TXNID_LT(
+        __wt_atomic_loadv64(&txn_shared->id), __wt_atomic_loadv64(&txn_shared->pinned_id)))
+        pinned = __wt_atomic_loadv64(&txn_shared->id);
     else
-        pinned = txn_shared->pinned_id;
+        pinned = __wt_atomic_loadv64(&txn_shared->pinned_id);
 
     if (pinned == WT_TXN_NONE)
         *prange = 0;
     else
-        *prange = S2C(session)->txn_global.current - pinned;
+        *prange = __wt_atomic_loadv64(&S2C(session)->txn_global.current) - pinned;
 
 err:
     API_END_RET(session, ret);

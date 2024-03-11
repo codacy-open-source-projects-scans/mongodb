@@ -40,6 +40,8 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/serialization_context.h"
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
+
 namespace mongo::query_settings {
 
 using namespace query_shape;
@@ -50,13 +52,8 @@ namespace {
 // infer the `tenantId`.
 auto const kSerializationContext = SerializationContext{SerializationContext::Source::Command,
                                                         SerializationContext::CallerType::Request,
-                                                        SerializationContext::Prefix::Default,
+                                                        SerializationContext::Prefix::ExcludePrefix,
                                                         true /* nonPrefixedTenantId */};
-
-bool isInternalClient(OperationContext* opCtx) {
-    return opCtx->getClient()->session() &&
-        (opCtx->getClient()->isInternalClient() || opCtx->getClient()->isInDirectClient());
-}
 
 void failIfRejectedBySettings(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                               const QuerySettings& settings) {
@@ -65,9 +62,24 @@ void failIfRejectedBySettings(const boost::intrusive_ptr<ExpressionContext>& exp
         // do not fail here.
         return;
     }
-    uassert(ErrorCodes::QueryRejectedBySettings,
-            "Query rejected by admin query settings",
-            !settings.getReject());
+    if (settings.getReject()) {
+        auto* opCtx = expCtx->opCtx;
+        const Command* curCommand = CommandInvocation::get(opCtx)->definition();
+        auto* curOp = CurOp::get(opCtx);
+        auto& opDebug = curOp->debug();
+        auto query = curOp->opDescription();
+
+        mutablebson::Document cmdToLog(query, mutablebson::Document::kInPlaceDisabled);
+        curCommand->snipForLogging(&cmdToLog);
+        LOGV2_DEBUG_OPTIONS(8687100,
+                            2,
+                            {logv2::LogComponent::kQueryRejected},
+                            "Query rejected by QuerySettings",
+                            "queryShapeHash"_attr = opDebug.queryShapeHash->toHexString(),
+                            "ns"_attr = CurOp::get(expCtx->opCtx)->getNS(),
+                            "command"_attr = redact(cmdToLog.getObject()));
+        uasserted(ErrorCodes::QueryRejectedBySettings, "Query rejected by admin query settings");
+    }
 }
 }  // namespace
 
@@ -258,13 +270,10 @@ QuerySettings lookupQuerySettingsForFind(const boost::intrusive_ptr<ExpressionCo
         return query_settings::QuerySettings();
     }
 
-    // If the client is internal the query settings are:
-    // - either looked up on the mongos and attached to the request
-    // - or a command is issued internally while processing the original request.
-    // Do not perform the query settings lookup and retrieve the settings from the request. In this
-    // case query settings rejection flag will not be checked.
-    if (isInternalClient(expCtx->opCtx)) {
-        return parsedFind.findCommandRequest->getQuerySettings().get_value_or({});
+    // If query settings are present as part of the request, use them as opposed to performing the
+    // query settings lookup. In this case, no check for 'reject' setting will be made.
+    if (auto querySettings = parsedFind.findCommandRequest->getQuerySettings()) {
+        return *querySettings;
     }
 
     // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
@@ -276,19 +285,28 @@ QuerySettings lookupQuerySettingsForFind(const boost::intrusive_ptr<ExpressionCo
 
     auto* opCtx = expCtx->opCtx;
     const auto& serializationContext = parsedFind.findCommandRequest->getSerializationContext();
-    auto queryShapeHashFn = [&]() {
-        auto& opDebug = CurOp::get(opCtx)->debug();
+    auto& opDebug = CurOp::get(opCtx)->debug();
+    opDebug.queryShapeHash = [&]() -> boost::optional<QueryShapeHash> {
         if (opDebug.queryStatsInfo.key) {
             return opDebug.queryStatsInfo.key->getQueryShapeHash(opCtx, serializationContext);
         }
-
-        query_shape::FindCmdShape findCmdShape(parsedFind, expCtx);
-        return findCmdShape.sha256Hash(expCtx->opCtx, serializationContext);
-    };
+        boost::optional<query_shape::FindCmdShape> shape;
+        try {
+            shape.emplace(parsedFind, expCtx);
+        } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+            return boost::none;
+        }
+        return shape->sha256Hash(expCtx->opCtx, serializationContext);
+    }();
+    if (!opDebug.queryShapeHash) {
+        return query_settings::QuerySettings();
+    }
 
     // Return the found query settings or an empty one.
     auto& manager = QuerySettingsManager::get(opCtx);
-    auto settings = manager.getQuerySettingsForQueryShapeHash(opCtx, queryShapeHashFn, nss)
+    auto settings = manager
+                        .getQuerySettingsForQueryShapeHash(
+                            opCtx, *opDebug.queryShapeHash, nss.dbName().tenantId())
                         .get_value_or({})
                         .first;
 
@@ -309,13 +327,10 @@ QuerySettings lookupQuerySettingsForAgg(
         return query_settings::QuerySettings();
     }
 
-    // If the client is internal the query settings are:
-    // - either looked up on the mongos and attached to the request
-    // - or a command is issued internally while processing the original request.
-    // Do not perform the query settings lookup and retrieve the settings from the request. In this
-    // case query settings rejection flag will not be checked.
-    if (isInternalClient(expCtx->opCtx)) {
-        return aggregateCommandRequest.getQuerySettings().get_value_or({});
+    // If query settings are present as part of the request, use them as opposed to performing the
+    // query settings lookup. In this case, no check for 'reject' setting will be made.
+    if (auto querySettings = aggregateCommandRequest.getQuerySettings()) {
+        return *querySettings;
     }
 
     // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
@@ -327,20 +342,28 @@ QuerySettings lookupQuerySettingsForAgg(
 
     auto* opCtx = expCtx->opCtx;
     const auto& serializationContext = aggregateCommandRequest.getSerializationContext();
-    auto queryShapeHashFn = [&]() {
-        auto& opDebug = CurOp::get(opCtx)->debug();
+    auto& opDebug = CurOp::get(opCtx)->debug();
+    opDebug.queryShapeHash = [&]() -> boost::optional<QueryShapeHash> {
         if (opDebug.queryStatsInfo.key) {
             return opDebug.queryStatsInfo.key->getQueryShapeHash(opCtx, serializationContext);
         }
-
-        query_shape::AggCmdShape shape(
-            aggregateCommandRequest, nss, involvedNamespaces, pipeline, expCtx);
-        return shape.sha256Hash(opCtx, serializationContext);
-    };
+        boost::optional<query_shape::AggCmdShape> shape;
+        try {
+            shape.emplace(aggregateCommandRequest, nss, involvedNamespaces, pipeline, expCtx);
+        } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+            return boost::none;
+        }
+        return shape->sha256Hash(opCtx, serializationContext);
+    }();
+    if (!opDebug.queryShapeHash) {
+        return query_settings::QuerySettings();
+    }
 
     // Return the found query settings or an empty one.
     auto& manager = QuerySettingsManager::get(opCtx);
-    auto settings = manager.getQuerySettingsForQueryShapeHash(opCtx, queryShapeHashFn, nss)
+    auto settings = manager
+                        .getQuerySettingsForQueryShapeHash(
+                            opCtx, *opDebug.queryShapeHash, nss.dbName().tenantId())
                         .get_value_or({})
                         .first;
 
@@ -358,13 +381,10 @@ QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<Expressi
         return query_settings::QuerySettings();
     }
 
-    // If the client is internal the query settings are:
-    // - either looked up on the mongos and attached to the request
-    // - or a command is issued internally while processing the original request.
-    // Do not perform the query settings lookup and retrieve the settings from the request. In this
-    // case query settings rejection flag will not be checked.
-    if (isInternalClient(expCtx->opCtx)) {
-        return parsedDistinct.distinctCommandRequest->getQuerySettings().get_value_or({});
+    // If query settings are present as part of the request, use them as opposed to performing the
+    // query settings lookup. In this case, no check for 'reject' setting will be made.
+    if (auto querySettings = parsedDistinct.distinctCommandRequest->getQuerySettings()) {
+        return *querySettings;
     }
 
     // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
@@ -377,19 +397,28 @@ QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<Expressi
     auto* opCtx = expCtx->opCtx;
     const auto& serializationContext =
         parsedDistinct.distinctCommandRequest->getSerializationContext();
-    auto queryShapeHashFn = [&]() {
-        auto& opDebug = CurOp::get(opCtx)->debug();
+    auto& opDebug = CurOp::get(opCtx)->debug();
+    opDebug.queryShapeHash = [&]() -> boost::optional<QueryShapeHash> {
         if (opDebug.queryStatsInfo.key) {
             return opDebug.queryStatsInfo.key->getQueryShapeHash(opCtx, serializationContext);
         }
-
-        query_shape::DistinctCmdShape shape(parsedDistinct, expCtx);
-        return shape.sha256Hash(expCtx->opCtx, serializationContext);
-    };
+        boost::optional<query_shape::DistinctCmdShape> shape;
+        try {
+            shape.emplace(parsedDistinct, expCtx);
+        } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+            return boost::none;
+        }
+        return shape->sha256Hash(expCtx->opCtx, serializationContext);
+    }();
+    if (!opDebug.queryShapeHash) {
+        return query_settings::QuerySettings();
+    }
 
     // Return the found query settings or an empty one.
     auto& manager = QuerySettingsManager::get(opCtx);
-    auto settings = manager.getQuerySettingsForQueryShapeHash(opCtx, queryShapeHashFn, nss)
+    auto settings = manager
+                        .getQuerySettingsForQueryShapeHash(
+                            opCtx, *opDebug.queryShapeHash, nss.dbName().tenantId())
                         .get_value_or({})
                         .first;
 
@@ -401,11 +430,22 @@ QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<Expressi
 
 namespace utils {
 
-bool isEmpty(const QuerySettings& settings) {
-    // The `serialization_context` field is not significant.
-    static_assert(
-        QuerySettings::fieldNames.size() == 4,
-        "A new field has been added to QuerySettings, isEmpty should be updated appropriately.");
+bool allowQuerySettingsFromClient(const Client* client) {
+    // Query settings are allowed to be part of the request only in cases when request:
+    // - comes from mongos (internal client), which has already performed the query settings lookup
+    // or
+    // - has been created interally and is executed via DBDirectClient.
+    return client->isInternalClient() || client->isInDirectClient();
+}
+
+bool isDefault(const QuerySettings& settings) {
+    // The 'serialization_context' field is not significant.
+    static_assert(QuerySettings::fieldNames.size() == 4,
+                  "A new field has been added to the QuerySettings structure, isDefault should be "
+                  "updated appropriately.");
+
+    // For the 'reject' field of type OptionalBool, consider both 'false' and missing value as
+    // default.
     return !(settings.getQueryFramework() || settings.getIndexHints() || settings.getReject());
 }
 
@@ -481,7 +521,7 @@ void validateQuerySettingsNamespacesNotAmbiguous(
  * Validates that QueryShapeConfiguration is not specified for queries with queryable encryption.
  */
 void validateQuerySettingsEncryptionInformation(
-    const QueryShapeConfiguration& config, const RepresentativeQueryInfo& representativeQueryInfo) {
+    const RepresentativeQueryInfo& representativeQueryInfo) {
     uassert(7746600,
             "Queries with encryption information are not allowed on setQuerySettings commands",
             !representativeQueryInfo.encryptionInformation);
@@ -507,12 +547,7 @@ void validateQuerySettings(const QueryShapeConfiguration& config,
             "setQuerySettings command cannot be used on system collections",
             !representativeQueryInfo.namespaceString.isSystem());
 
-    // Validates that the settings field for query settings is not empty.
-    uassert(7746604,
-            "settings field in setQuerySettings command cannot be empty",
-            !config.getSettings().toBSON().isEmpty());
-
-    validateQuerySettingsEncryptionInformation(config, representativeQueryInfo);
+    validateQuerySettingsEncryptionInformation(representativeQueryInfo);
 
     // Validates that the query settings' representative is not eligible for IDHACK.
     uassert(7746606,

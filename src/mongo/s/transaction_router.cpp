@@ -764,11 +764,15 @@ TransactionRouter::Router::getAdditionalParticipantsForResponse(
     // (Ignore FCV check): This feature doesn't have any upgrade/downgrade concerns.
     if (gFeatureFlagAllowAdditionalParticipants.isEnabledAndIgnoreFCVUnsafe()) {
         std::vector<BSONElement> shardIdsFromFpData;
+        boost::optional<bool> readOnly = boost::none;
         if (MONGO_unlikely(
                 includeAdditionalParticipantInResponse.shouldFail([&](const BSONObj& data) {
                     if (data.hasField("cmdName") && data.hasField("ns") &&
                         data.hasField("shardId")) {
                         shardIdsFromFpData = data.getField("shardId").Array();
+                        if (data.getField("readOnly")) {
+                            readOnly = boost::make_optional<bool>(data.getField("readOnly").Bool());
+                        }
                         const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns");
                         return ((data.getStringField("cmdName") == *commandName) &&
                                 (fpNss == *nss));
@@ -777,7 +781,7 @@ TransactionRouter::Router::getAdditionalParticipantsForResponse(
                 }))) {
             participants.emplace();
             for (auto& element : shardIdsFromFpData) {
-                participants->try_emplace(element.valueStringData().toString(), false);
+                participants->try_emplace(element.valueStringData().toString(), readOnly);
             }
 
             return participants;
@@ -804,9 +808,33 @@ TransactionRouter::Router::getAdditionalParticipantsForResponse(
     return participants;
 }
 
+bool TransactionRouter::Router::_isRetryableStmtInARetryableInternalTxn(
+    const BSONObj& cmdObj) const {
+    if (!isInternalSessionForRetryableWrite(_sessionId())) {
+        return false;
+    } else if (cmdObj.hasField("stmtId") &&
+               (cmdObj.getIntField("stmtId") != kUninitializedStmtId)) {
+        return true;
+    } else if (cmdObj.hasField("stmtIds")) {
+        BSONObj stmtIdsObj = cmdObj.getField("stmtIds").Obj();
+        return std::any_of(stmtIdsObj.begin(), stmtIdsObj.end(), [](const BSONElement& stmtIdElem) {
+            return stmtIdElem.numberInt() != kUninitializedStmtId;
+        });
+    }
+    return false;
+}
+
 BSONObj TransactionRouter::Router::attachTxnFieldsIfNeeded(OperationContext* opCtx,
                                                            const ShardId& shardId,
                                                            const BSONObj& cmdObj) {
+    if (opCtx->isActiveTransactionParticipant()) {
+        uassert(ErrorCodes::IllegalOperation,
+                "The participant cannot add a participant shard while executing a "
+                "retryable statement in a retryable internal "
+                "transaction.",
+                !_isRetryableStmtInARetryableInternalTxn(cmdObj));
+    }
+
     RouterTransactionsMetrics::get(opCtx)->incrementTotalRequestsTargeted();
     const bool hasTxnCreatedAnyDatabase = !p().createdDatabases.empty();
     if (auto txnPart = getParticipant(shardId)) {

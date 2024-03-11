@@ -200,8 +200,10 @@ BackgroundSync::BackgroundSync(
     ReplicationCoordinator* replicationCoordinator,
     ReplicationCoordinatorExternalState* replicationCoordinatorExternalState,
     ReplicationProcess* replicationProcess,
+    OplogWriter* oplogWriter,
     OplogApplier* oplogApplier)
-    : _oplogApplier(oplogApplier),
+    : _oplogWriter(oplogWriter),
+      _oplogApplier(oplogApplier),
       _replCoord(replicationCoordinator),
       _replicationCoordinatorExternalState(replicationCoordinatorExternalState),
       _replicationProcess(replicationProcess) {}
@@ -642,6 +644,10 @@ Status BackgroundSync::_enqueueDocuments(OplogFetcher::Documents::const_iterator
 
     auto opCtx = cc().makeOperationContext();
 
+    // Wait for enough space.
+    // This should be called outside of the mutex to avoid deadlocks.
+    _oplogApplier->waitForSpace(opCtx.get(), info.toApplyDocumentBytes);
+
     {
         // Don't add more to the buffer if we are in shutdown. Continue holding the lock until we
         // are done to prevent going into shutdown.
@@ -651,7 +657,12 @@ Status BackgroundSync::_enqueueDocuments(OplogFetcher::Documents::const_iterator
         }
 
         // Buffer docs for later application.
-        _oplogApplier->enqueue(opCtx.get(), begin, end, info.toApplyDocumentBytes);
+        // When _oplogWriter is not null, featureFlagReduceMajorityWriteLatency is enabled.
+        if (_oplogWriter) {
+            _oplogWriter->enqueue(opCtx.get(), begin, end, info.toApplyDocumentBytes);
+        } else {
+            _oplogApplier->enqueue(opCtx.get(), begin, end, info.toApplyDocumentBytes);
+        }
 
         // Update last fetched info.
         _lastOpTimeFetched = info.lastDocument;
@@ -797,10 +808,9 @@ void BackgroundSync::_runRollbackViaRecoverToCheckpoint(
         if (_state != ProducerState::Running) {
             return;
         }
+        _rollback = std::make_unique<RollbackImpl>(
+            localOplog, &remoteOplog, storageInterface, _replicationProcess, _replCoord);
     }
-
-    _rollback = std::make_unique<RollbackImpl>(
-        localOplog, &remoteOplog, storageInterface, _replicationProcess, _replCoord);
 
     LOGV2(21104, "Scheduling rollback", "syncSource"_attr = source);
     auto status = _rollback->runRollback(opCtx);
@@ -876,7 +886,12 @@ void BackgroundSync::_stop(WithLock lock, bool resetLastFetchedOptime) {
 
     _syncSourceHost = HostAndPort();
     if (resetLastFetchedOptime) {
-        invariant(_oplogApplier->getBuffer()->isEmpty());
+        // When _oplogWriter is not null, featureFlagReduceMajorityWriteLatency is enabled.
+        if (_oplogWriter) {
+            invariant(_oplogWriter->getBuffer()->isEmpty());
+        } else {
+            invariant(_oplogApplier->getBuffer()->isEmpty());
+        }
         _lastOpTimeFetched = OpTime();
         LOGV2(21108, "Resetting last fetched optimes in bgsync");
     }
@@ -909,9 +924,11 @@ void BackgroundSync::start(OperationContext* opCtx) {
         if (_state != ProducerState::Starting) {
             return;
         }
-        // If a node steps down during drain mode, then the buffer may not be empty at the beginning
-        // of secondary state.
-        if (!_oplogApplier->getBuffer()->isEmpty()) {
+        // If a node steps down during drain mode, then the buffer may not be empty at the
+        // beginning of secondary state.
+        // When _oplogWriter is not null, featureFlagReduceMajorityWriteLatency is enabled.
+        auto buffer = _oplogWriter ? _oplogWriter->getBuffer() : _oplogApplier->getBuffer();
+        if (!buffer->isEmpty()) {
             LOGV2(21109, "Going to start syncing, but buffer is not empty");
         }
         setState(lk, ProducerState::Running);

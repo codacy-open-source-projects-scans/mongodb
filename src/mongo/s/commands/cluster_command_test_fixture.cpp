@@ -136,10 +136,6 @@ void ClusterCommandTestFixture::expectReturnsError(ErrorCodes::Error code) {
 }
 
 DbResponse ClusterCommandTestFixture::runCommand(BSONObj cmd) {
-    // TODO SERVER-48142 should remove the following fail-point usage.
-    // Skip appending required fields in unit-tests
-    FailPointEnableBlock skipAppendingReqFields("allowSkippingAppendRequiredFieldsToResponse");
-
     // Create a new client/operation context per command
     auto client = getServiceContext()->getService()->makeClient("ClusterCmdClient");
     auto opCtx = client->makeOperationContext();
@@ -157,11 +153,11 @@ DbResponse ClusterCommandTestFixture::runCommand(BSONObj cmd) {
 
     // If bulkWrite then append adminDB.
     if (cmd.firstElementFieldNameStringData() == "bulkWrite") {
-        opMsgRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            DatabaseName::kAdmin, auth::ValidatedTenancyScope::kNotRequired, cmd);
+        opMsgRequest = OpMsgRequestBuilder::create(
+            auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, cmd);
     } else {
-        opMsgRequest = OpMsgRequestBuilder::createWithValidatedTenancyScope(
-            kNss.dbName(), auth::ValidatedTenancyScope::get(opCtx.get()), cmd);
+        opMsgRequest = OpMsgRequestBuilder::create(
+            auth::ValidatedTenancyScope::get(opCtx.get()), kNss.dbName(), cmd);
     }
 
     AlternativeClientRegion acr(client);

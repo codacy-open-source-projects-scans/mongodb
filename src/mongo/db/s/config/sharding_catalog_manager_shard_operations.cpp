@@ -100,6 +100,7 @@
 #include "mongo/db/s/add_shard_util.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/s/replica_set_endpoint_feature_flag_gen.h"
 #include "mongo/db/s/sharding_cluster_parameters_gen.h"
 #include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/db/s/sharding_ddl_util.h"
@@ -822,6 +823,16 @@ Status ShardingCatalogManager::_updateClusterCardinalityParameterAfterRemoveShar
         return Status::OK();
     }
 
+    // If the replica set endpoint is not active, then it isn't safe to allow direct connections
+    // again after a second shard has been added. Unsharded collections are allowed to be tracked
+    // and moved as soon as a second shard is added to the cluster, and these collections will not
+    // handle direct connections properly.
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (fcvSnapshot.isVersionInitialized() &&
+        !feature_flags::gFeatureFlagRSEndpointClusterCardinalityParameter.isEnabled(fcvSnapshot)) {
+        return Status::OK();
+    }
+
     auto numShards = Grid::get(opCtx)->shardRegistry()->getNumShards(opCtx);
     if (numShards == 1) {
         // Only need to update the parameter when removing the second shard.
@@ -996,7 +1007,7 @@ StatusWith<std::string> ShardingCatalogManager::addShard(
         const auto fcvSnapshot = (*fcvRegion).acquireFCVSnapshot();
 
         std::vector<CollectionType> collList;
-        if (feature_flags::gTrackUnshardedCollectionsOnShardingCatalog.isEnabled(fcvSnapshot)) {
+        if (feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot)) {
             // TODO SERVER-80532: the sharding catalog might lose some collections.
             auto listStatus = _getCollListFromShard(opCtx, dbNamesStatus.getValue(), targeter);
             if (!listStatus.isOK()) {

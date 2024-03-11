@@ -156,8 +156,10 @@ public:
 
     SbExpr generateNullOrMissing(SbExpr expr);
     SbExpr generatePositiveCheck(SbExpr expr);
+    SbExpr generateNullMissingOrUndefined(SbExpr expr);
 
     SbExpr generateNullOrMissing(SbVar var);
+    SbExpr generateNullMissingOrUndefined(SbVar var);
     SbExpr generateNonStringCheck(SbVar var);
     SbExpr generateNonTimestampCheck(SbVar var);
     SbExpr generateNegativeCheck(SbVar var);
@@ -330,11 +332,12 @@ public:
         SbStage stage,
         const SbSlotVector& groupBySlots,
         SbAggExprVector sbAggExprs,
-        boost::optional<SbSlot> selectivityBitmapSlot,
+        SbSlot selectivityBitmapSlot,
         const SbSlotVector& blockAccArgSlots,
         const SbSlotVector& blockAccInternalArgSlots,
         SbSlot bitmapInternalSlot,
         SbSlot accInternalSlot,
+        bool allowDiskUse,
         PlanYieldPolicy* yieldPolicy) {
         return makeBlockHashAgg(std::move(stage),
                                 nullptr,
@@ -345,6 +348,7 @@ public:
                                 blockAccInternalArgSlots,
                                 bitmapInternalSlot,
                                 accInternalSlot,
+                                allowDiskUse,
                                 yieldPolicy);
     }
 
@@ -353,11 +357,12 @@ public:
         const VariableTypes& varTypes,
         const SbSlotVector& groupBySlots,
         SbAggExprVector sbAggExprs,
-        boost::optional<SbSlot> selectivityBitmapSlot,
+        SbSlot selectivityBitmapSlot,
         const SbSlotVector& blockAccArgSlots,
         const SbSlotVector& blockAccInternalArgSlots,
         SbSlot bitmapInternalSlot,
         SbSlot accInternalSlot,
+        bool allowDiskUse,
         PlanYieldPolicy* yieldPolicy) {
         return makeBlockHashAgg(std::move(stage),
                                 &varTypes,
@@ -368,6 +373,7 @@ public:
                                 blockAccInternalArgSlots,
                                 bitmapInternalSlot,
                                 accInternalSlot,
+                                allowDiskUse,
                                 yieldPolicy);
     }
 
@@ -376,11 +382,12 @@ public:
         const VariableTypes* varTypes,
         const SbSlotVector& groupBySlots,
         SbAggExprVector sbAggExprs,
-        boost::optional<SbSlot> selectivityBitmapSlot,
+        SbSlot selectivityBitmapSlot,
         const SbSlotVector& blockAccArgSlots,
         const SbSlotVector& blockAccInternalArgSlots,
         SbSlot bitmapInternalSlot,
         SbSlot accInternalSlot,
+        bool allowDiskUse,
         PlanYieldPolicy* yieldPolicy);
 
     PlanNodeId _nodeId;

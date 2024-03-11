@@ -2,4 +2,6 @@
 
 FROM redhat/ubi8:8.9
 
+RUN yum install -y glibc-devel
+
 CMD ["/bin/bash"]

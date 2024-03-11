@@ -129,21 +129,9 @@ bool objectIdDeltaPossible(const OID& elem, const OID& prev) {
         prev.getInstanceUnique().bytes, elem.getInstanceUnique().bytes, OID::kInstanceUniqueSize);
 }
 
-// Traverses object and calls 'ElementFunc' on every scalar subfield encountered.
-template <typename ElementFunc>
-void _traverse(const BSONObj& reference, const ElementFunc& elemFunc) {
-    for (const auto& elem : reference) {
-        if (elem.type() == Object || elem.type() == Array) {
-            _traverse(elem.Obj(), elemFunc);
-        } else {
-            elemFunc(elem, BSONElement());
-        }
-    }
-}
-
-// Internal recursion function for traverseLockStep() when we just need to traverse reference
-// object. Like '_traverse' above but exits when an empty sub object is encountered. Returns 'true'
-// if empty subobject found.
+// Internal recursion function for traverseLockStep() when we need to traverse the reference
+// object. Exits and returns 'true' when an empty sub object is encountered. Returns 'false'
+// otherwise.
 template <typename ElementFunc>
 bool _traverseUntilEmptyObj(const BSONObj& obj, const ElementFunc& elemFunc) {
     for (const auto& elem : obj) {
@@ -162,6 +150,20 @@ bool _traverseUntilEmptyObj(const BSONObj& obj, const ElementFunc& elemFunc) {
 // Helper function for mergeObj() to detect if Object contain subfields of empty Objects
 bool _hasEmptyObj(const BSONObj& obj) {
     return _traverseUntilEmptyObj(obj, [](const BSONElement&, const BSONElement&) {});
+}
+
+// Helper function to determine if provided Object contains any scalar subfields
+bool _containsScalars(const BSONObj& reference) {
+    for (const auto& elem : reference) {
+        if (elem.type() == Object || elem.type() == Array) {
+            if (_containsScalars(elem.Obj())) {
+                return true;
+            }
+        } else {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Internal recursion function for traverseLockStep(). See documentation for traverseLockStep.
@@ -413,6 +415,15 @@ private:
                                     const char* s8bBlock,
                                     int index);
 
+    /*
+     * Special case of _appendUntilOverflow when we know that the last simple8b block is RLE. It is
+     * trivial to calculate the overflow point as it will be inside the first discovered non-RLE
+     * block and the last value for RLE will be the actual value used for RLE.
+     */
+    template <typename T>
+    static std::pair<boost::optional<T>, int> _appendUntilOverflowForRLE(
+        Simple8bBuilder<T>& mainBuilder, bool& overflow, const char* s8bBlock, int index);
+
     struct ControlBlock {
         const char* control = nullptr;
         double lastAtEndOfBlock = 0.0;
@@ -594,16 +605,31 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
     // Calculate how many simple8b blocks this control byte contains
     auto currNumBlocks = numSimple8bBlocksForControlByte(*control);
 
-    // First setup RLE state, we can do this by assuming that the last value in Simple8b
-    // blocks is the same as the one before the first. This assumption will hold if all
-    // values are equal and RLE is eligible. If it turns out to be incorrect the
-    // Simple8bBuilder will internally reset and disregard RLE.
-    boost::optional<uint64_t> lastForS8b =
-        _setupRLEForOverflowDetector(s8bBuilder, control, currNumBlocks - 1);
+    // First setup RLE state, the implementation for doing this differ if the last block actually
+    // ends with RLE or not.
+    const char* lastBlock = control + (sizeof(uint64_t) * (currNumBlocks - 1)) + 1;
+    bool rle = (ConstDataView(lastBlock).read<LittleEndian<uint64_t>>() &
+                simple8b_internal::kBaseSelectorMask) == simple8b_internal::kRleSelector;
 
-    // When RLE is setup we append as many values as we can to detect when we overflow
-    int currIndex = _appendUntilOverflow(
-        s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
+    boost::optional<uint64_t> lastForS8b;
+    int currIndex;
+    if (rle) {
+        // If the last block ends with RLE we just need to look for the last non-RLE block to
+        // discover the overflow point. The last value for RLE will be the actual last in this block
+        // as we know the RLE will follow.
+        std::tie(lastForS8b, currIndex) = _appendUntilOverflowForRLE(
+            encoder.simple8bBuilder, overflow, control, currNumBlocks - 2);
+
+    } else {
+        // Assume that the last value in Simple8b blocks is the same as the one before the first.
+        // This assumption will hold if all values are equal and RLE is eligible. If it turns out to
+        // be incorrect the Simple8bBuilder will internally reset and disregard RLE.
+        lastForS8b = _setupRLEForOverflowDetector(s8bBuilder, control, currNumBlocks - 1);
+
+        // When RLE is setup we append as many values as we can to detect when we overflow
+        currIndex = _appendUntilOverflow(
+            s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
+    }
 
     // If we have not yet overflowed then continue the same operation from the previous
     // simple8b block
@@ -615,12 +641,17 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
         // here.
         int overflowIndex;
         if (current.scaleIndex == last.scaleIndex) {
-            overflowIndex = _appendUntilOverflow(s8bBuilder,
-                                                 encoder.simple8bBuilder,
-                                                 overflow,
-                                                 lastForS8b,
-                                                 last.control,
-                                                 blocks - 1);
+            if (rle) {
+                std::tie(lastForS8b, overflowIndex) = _appendUntilOverflowForRLE(
+                    encoder.simple8bBuilder, overflow, last.control, blocks - 1);
+            } else {
+                overflowIndex = _appendUntilOverflow(s8bBuilder,
+                                                     encoder.simple8bBuilder,
+                                                     overflow,
+                                                     lastForS8b,
+                                                     last.control,
+                                                     blocks - 1);
+            }
         } else {
             overflowIndex = blocks - 1;
             // Because we did not yet overflow we need to set last value in our simple8b
@@ -678,11 +709,6 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
         // then add everything in this control as pending which might write a control block again
         // because the values are now added in the correct order.
         offset += control - scannedBinary;
-
-        if (type == NumberDouble) {
-            // Set last value from last in block before previous
-            encoder.lastValueInPrevBlock = last.lastAtEndOfBlock;
-        }
     } else {
         // Overflow, copy everything from the control byte up to the overflow point
         buffer.appendBuf(control, 1 + (currIndex + 1) * sizeof(uint64_t));
@@ -696,29 +722,6 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
         char* lastControlToUpdate = buffer.buf() + regular._controlByteOffset;
         *lastControlToUpdate =
             kControlByteForScaleIndex[encoder.scaleIndex] | (currIndex & kCountMask);
-
-        // Set last value from last in previous control block
-        encoder.lastValueInPrevBlock = current.lastAtEndOfBlock;
-
-        // Calculate correct last in previous control, we need to account for our pending
-        // values.
-        if (type == NumberDouble) {
-            Simple8b<uint64_t> s8b(control + sizeof(uint64_t) * (currIndex + 1) + 1,
-                                   (currNumBlocks - currIndex - 1) * sizeof(uint64_t));
-
-            int64_t delta = 0;
-            for (auto&& elem : s8b) {
-                if (elem) {
-                    delta = expandDelta(delta, Simple8bTypeUtil::decodeInt64(*elem));
-                }
-            }
-
-            auto encoded =
-                Simple8bTypeUtil::encodeDouble(encoder.lastValueInPrevBlock, encoder.scaleIndex);
-            uassert(8288105, "Invalid double encoding in BSON Column", encoded);
-            encoder.lastValueInPrevBlock =
-                Simple8bTypeUtil::decodeDouble(calcDelta(*encoded, delta), encoder.scaleIndex);
-        }
     }
 
     // Append remaining values from our current control block and add all from the next
@@ -793,7 +796,36 @@ void BSONColumnBuilder::BinaryReopen::_reopen64BitTypes(EncodingState& regular,
     } else {
         if (type == NumberDouble) {
             encoder.prevEncoded64 = d64.lastEncodedValue;
+
+            // Calculate last double in previous block by reversing the final pending state and
+            // final delta.
+            auto current = encoder.prevEncoded64;
+            for (auto it = encoder.simple8bBuilder.rbegin(), end = encoder.simple8bBuilder.rend();
+                 it != end;
+                 ++it) {
+                if (const boost::optional<uint64_t>& encoded = *it) {
+                    // As we're going backwards we need to 'expandDelta' backwards which is the same
+                    // as 'calcDelta'.
+                    current = calcDelta(current, Simple8bTypeUtil::decodeInt64(*encoded));
+                }
+            }
+
+            encoder.lastValueInPrevBlock =
+                Simple8bTypeUtil::decodeDouble(current, encoder.scaleIndex);
         }
+    }
+
+    if (regular._controlByteOffset == kNoSimple8bControl) {
+        // Appending pending values can flush out the control byte and leave all remaining values as
+        // pending. We can discard our buffer in this case as this is equivalent to overflowing in
+        // the last simple8b of the 'last' control block.
+        offset += buffer.len();
+        buffer.setlen(0);
+        lastControl = kInvalidControlByte;
+    } else if (lastControl == bsoncolumn::kInvalidControlByte) {
+        // Set last control to current if still unset. This can happen if we never overflowed but
+        // created a control byte when appending the pending values.
+        lastControl = *control;
     }
 }
 
@@ -817,16 +849,31 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
     // Calculate how many simple8b blocks this control byte contains
     auto currNumBlocks = numSimple8bBlocksForControlByte(*control);
 
-    // First setup RLE state, we can do this by assuming that the last value in Simple8b
-    // blocks is the same as the one before the first. This assumption will hold if all
-    // values are equal and RLE is eligible. If it turns out to be incorrect the
-    // Simple8bBuilder will internally reset and disregard RLE.
-    boost::optional<uint128_t> lastForS8b =
-        _setupRLEForOverflowDetector(s8bBuilder, control, currNumBlocks - 1);
+    // First setup RLE state, the implementation for doing this differ if the last block actually
+    // ends with RLE or not.
+    const char* lastBlock = control + (sizeof(uint64_t) * (currNumBlocks - 1)) + 1;
+    bool rle = (ConstDataView(lastBlock).read<LittleEndian<uint64_t>>() &
+                simple8b_internal::kBaseSelectorMask) == simple8b_internal::kRleSelector;
 
-    // When RLE is setup we append as many values as we can to detect when we overflow
-    int currIndex = _appendUntilOverflow(
-        s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
+    boost::optional<uint128_t> lastForS8b;
+    int currIndex;
+    if (rle) {
+        // If the last block ends with RLE we just need to look for the last non-RLE block to
+        // discover the overflow point. The last value for RLE will be the actual last in this block
+        // as we know the RLE will follow.
+        std::tie(lastForS8b, currIndex) = _appendUntilOverflowForRLE(
+            encoder.simple8bBuilder, overflow, control, currNumBlocks - 2);
+
+    } else {
+        // Assume that the last value in Simple8b blocks is the same as the one before the first.
+        // This assumption will hold if all values are equal and RLE is eligible. If it turns out to
+        // be incorrect the Simple8bBuilder will internally reset and disregard RLE.
+        lastForS8b = _setupRLEForOverflowDetector(s8bBuilder, control, currNumBlocks - 1);
+
+        // When RLE is setup we append as many values as we can to detect when we overflow
+        currIndex = _appendUntilOverflow(
+            s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
+    }
 
     // If we have not yet overflowed then continue the same operation from the previous
     // simple8b block
@@ -834,8 +881,18 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
 
         auto blocks = numSimple8bBlocksForControlByte(*last.control);
         // Append values from control block to detect overflow.
-        auto overflowIndex = _appendUntilOverflow(
-            s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, last.control, blocks - 1);
+        int overflowIndex;
+        if (rle) {
+            std::tie(lastForS8b, overflowIndex) = _appendUntilOverflowForRLE(
+                encoder.simple8bBuilder, overflow, last.control, blocks - 1);
+        } else {
+            overflowIndex = _appendUntilOverflow(s8bBuilder,
+                                                 encoder.simple8bBuilder,
+                                                 overflow,
+                                                 lastForS8b,
+                                                 last.control,
+                                                 blocks - 1);
+        }
 
         // Check if we overflowed in the first simple8b in this second control block. We can
         // then disregard this control block and proceed as-if we didn't overflow in the
@@ -911,12 +968,6 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
                                 lastForS8b));
     }
 
-    // If we did not overflow earlier we might have written a control byte when appending all
-    // pending values, if this was the case make sure it is recorded.
-    if (regular._controlByteOffset != kNoSimple8bControl) {
-        lastControl = *control;
-    }
-
     // Reset last value if RLE is not possible due to the values appended above
     encoder.simple8bBuilder.resetLastForRLEIfNeeded();
 
@@ -935,6 +986,17 @@ void BSONColumnBuilder::BinaryReopen::_reopen128BitTypes(EncodingState& regular,
         return d128.materialize(*allocator, lastUncompressed, ""_sd);
     }());
     encoder.initialize(regular._previous());
+
+    if (regular._controlByteOffset == kNoSimple8bControl) {
+        // Appending pending values can flush out the control byte and leave all remaining values as
+        // pending. We can discard our buffer in this case as this is equivalent to overflowing in
+        // the last simple8b of the 'last' control block.
+        offset += buffer.len();
+        buffer.setlen(0);
+    } else {
+        // Set last control to current if still unset.
+        lastControl = *control;
+    }
 }
 
 template <typename T>
@@ -988,8 +1050,8 @@ int BSONColumnBuilder::BinaryReopen::_appendUntilOverflow(Simple8bBuilder<T>& ov
                         lastValForRLE);
         boost::optional<T> last;
         for (auto&& elem : s8b) {
+            last = elem;
             if (elem) {
-                last = elem;
                 overflowDetector.append(*last, writeFn);
             } else {
                 overflowDetector.skip(writeFn);
@@ -1005,6 +1067,40 @@ int BSONColumnBuilder::BinaryReopen::_appendUntilOverflow(Simple8bBuilder<T>& ov
         }
     }
     return index;
+}
+
+template <typename T>
+std::pair<boost::optional<T>, int> BSONColumnBuilder::BinaryReopen::_appendUntilOverflowForRLE(
+    Simple8bBuilder<T>& mainBuilder, bool& overflow, const char* s8bBlock, int index) {
+    for (; index >= 0; --index) {
+        const char* block = s8bBlock +
+            /* offset to block at index */ index * sizeof(uint64_t) +
+            /* control byte*/ 1;
+        bool rle = (ConstDataView(block).read<LittleEndian<uint64_t>>() &
+                    simple8b_internal::kBaseSelectorMask) == simple8b_internal::kRleSelector;
+
+        if (rle) {
+            continue;
+        }
+
+        Simple8b<T> s8b(block, sizeof(uint64_t), boost::none);
+
+        boost::optional<T> last;
+        for (auto&& elem : s8b) {
+            if (elem) {
+                last = elem;
+            }
+        }
+
+        // Overflow point detected, record the last value in last Simple8b block
+        // before our pending values. This is necessary to be able to resume with
+        // RLE.
+        mainBuilder.setLastForRLE(last);
+        overflow = true;
+        return std::make_pair(last, index);
+    }
+
+    return std::make_pair(boost::none, index);
 }
 
 BSONColumnBuilder::InternalState::InternalState() : lastControl(bsoncolumn::kInvalidControlByte) {}
@@ -1048,10 +1144,6 @@ BSONColumnBuilder::BSONColumnBuilder(const char* binary, int size)
 
 BSONColumnBuilder& BSONColumnBuilder::append(BSONElement elem) {
     auto type = elem.type();
-    uassert(ErrorCodes::InvalidBSONType,
-            "MinKey or MaxKey is not valid for storage",
-            type != MinKey && type != MaxKey);
-
     if (elem.eoo()) {
         return skip();
     }
@@ -1078,19 +1170,10 @@ BSONColumnBuilder& BSONColumnBuilder::append(const BSONArray& arr) {
 BSONColumnBuilder& BSONColumnBuilder::_appendObj(Element elem) {
     auto type = elem.type;
     auto obj = elem.value.Obj();
-    // First validate that we don't store MinKey or MaxKey anywhere in the Object. If this is the
-    // case, throw exception before we modify any state.
-    uint32_t numElements = 0;
-    auto perElement = [&numElements](const BSONElement& elem, const BSONElement&) {
-        ++numElements;
-        uassert(ErrorCodes::InvalidBSONType,
-                "MinKey or MaxKey is not valid for storage",
-                elem.type() != MinKey && elem.type() != MaxKey);
-    };
-    _traverse(obj, perElement);
+    bool containsScalars = _containsScalars(obj);
 
     if (_is.mode == Mode::kRegular) {
-        if (numElements == 0) {
+        if (!containsScalars) {
             _is.regular.append(elem, _bufBuilder, EncodingState::NoopControlBlockWriter{});
         } else {
             _startDetermineSubObjReference(obj, type);
@@ -1124,7 +1207,7 @@ BSONColumnBuilder& BSONColumnBuilder::_appendObj(Element elem) {
 
                 // If we only contain empty subobj (no value elements) then append in regular mode
                 // instead of re-starting subobj compression.
-                if (numElements == 0) {
+                if (!containsScalars) {
                     _is.regular.append(elem, _bufBuilder, EncodingState::NoopControlBlockWriter{});
                     return *this;
                 }
@@ -1151,7 +1234,7 @@ BSONColumnBuilder& BSONColumnBuilder::_appendObj(Element elem) {
     if (!_appendSubElements(obj)) {
         // If we were not compatible restart subobj compression unless our object contain no value
         // fields (just empty subobjects)
-        if (numElements == 0) {
+        if (!containsScalars) {
             _is.regular.append(elem, _bufBuilder, EncodingState::NoopControlBlockWriter{});
         } else {
             _startDetermineSubObjReference(obj, type);
@@ -1236,10 +1319,11 @@ BSONColumnBuilder::BinaryDiff BSONColumnBuilder::intermediate() {
             // When lastControl has been set, the control byte we're working on is always at the
             // beginning of the binary.
             uint8_t controlByteThisBinary = *_bufBuilder.buf();
+            /* TODO (SERVER-87383): Determine a safe optimization to minimize diffs
             if (prevOffset != 0 && _is.lastControl == controlByteThisBinary &&
                 _is.lastBufLength > controlOffset) {
                 identicalBytes = _is.lastBufLength - controlOffset;
-            }
+            }*/
             newState.lastControl = controlByteThisBinary;
         } else {
             newState.lastControl = *(_bufBuilder.buf() + controlOffset);
@@ -1733,6 +1817,7 @@ bool EncodingState::Encoder64::_appendDouble(double value,
 
     // Create a new Simple8bBuilder.
     Simple8bBuilder<uint64_t> builder;
+    builder.initializeRLEFrom(simple8bBuilder);
     std::swap(simple8bBuilder, builder);
 
     // Iterate over previous pending values and re-add them recursively. That will increase the
@@ -1755,8 +1840,9 @@ bool EncodingState::Encoder64::_appendDouble(double value,
 
 Element EncodingState::_previous() const {
     // The first two bytes are type and field name null terminator
-    return {
-        BSONType(*_prev.buffer.get()), BSONElementValue(_prev.buffer.get() + 2), _prev.size - 2};
+    return {static_cast<BSONType>(static_cast<signed char>(*_prev.buffer.get())),
+            BSONElementValue(_prev.buffer.get() + 2),
+            _prev.size - 2};
 }
 
 void EncodingState::_storePrevious(Element elem) {

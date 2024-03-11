@@ -53,7 +53,6 @@
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
-#include "mongo/db/timeseries/timeseries_tracking_context.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
@@ -61,6 +60,7 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/string_map.h"
+#include "mongo/util/tracking_context.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -120,11 +120,8 @@ void prepareWriteBatchForCommit(TrackingContext& trackingContext,
     batch.intermediateBuilders = std::move(bucket.intermediateBuilders);
     batch.uncompressedBucketDoc = std::move(bucket.uncompressedBucketDoc);
     batch.bucketIsSortedByTime = bucket.bucketIsSortedByTime;
-
-    if (bucket.compressedBucketDoc) {
-        batch.compressedBucketDoc = std::move(bucket.compressedBucketDoc);
-        bucket.compressedBucketDoc.reset();
-    }
+    batch.generateCompressedDiff =
+        bucket.usingAlwaysCompressedBuckets && batch.uncompressedBucketDoc.get().get().isEmpty();
 }
 
 /**
@@ -583,16 +580,6 @@ boost::optional<ClosedBucket> finish(OperationContext* opCtx,
         bucket->bucketIsSortedByTime = batch->bucketIsSortedByTime;
         bucket->intermediateBuilders = std::move(batch->intermediateBuilders);
         bucket->preparedBatch.reset();
-
-        // The uncompressed and compressed images should have already been moved to the batch by
-        // this point.
-        invariant(!bucket->compressedBucketDoc);
-
-        // Take ownership of the committed batch's uncompressed and compressed images.
-        bucket->uncompressedBucketDoc = std::move(batch->uncompressedBucketDoc);
-        if (batch->compressedBucketDoc) {
-            bucket->compressedBucketDoc = std::move(batch->compressedBucketDoc);
-        }
     }
 
     auto& stats = batch->stats;

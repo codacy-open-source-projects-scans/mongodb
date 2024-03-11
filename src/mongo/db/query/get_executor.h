@@ -241,9 +241,4 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getCollectionScanExecutor(
     CollectionScanDirection scanDirection,
     const boost::optional<RecordId>& resumeAfterRecordId = boost::none);
 
-
-bool isExpressEligible(OperationContext* opCtx,
-                       const CollectionPtr& coll,
-                       const CanonicalQuery& cq);
-
 }  // namespace mongo

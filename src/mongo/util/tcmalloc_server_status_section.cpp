@@ -36,15 +36,18 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/config.h"
 #include "mongo/db/commands/server_status.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/util/itoa.h"
 
-#ifdef MONGO_HAVE_GOOGLE_TCMALLOC
+#ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
+#include <tcmalloc/cpu_cache.h>
 #include <tcmalloc/malloc_extension.h>
-#elif defined(MONGO_HAVE_GPERF_TCMALLOC)
+#include <tcmalloc/static_vars.h>
+#elif defined(MONGO_CONFIG_TCMALLOC_GPERF)
 #include <gperftools/malloc_extension.h>
 #endif
-
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -75,24 +78,42 @@ public:
         return {};
     }
 
-    virtual boost::optional<size_t> getNumericProperty(StringData propertyName) const {
+    virtual boost::optional<long long> getNumericProperty(StringData propertyName) const {
         return boost::none;
     }
 
     virtual void appendPerCPUMetrics(BSONObjBuilder& bob) const {}
 
+    /**
+     * The tcmalloc names for some metrics are misleading, and so we rename them in order to more
+     * effectively communicate what they represent.
+     */
+    virtual void appendRenamedMetrics(BSONObjBuilder& bob) const {}
+
     virtual long long getReleaseRate() const {
         return 0;
     }
 
-    virtual void appendHighVerbosityMetrics(BSONObjBuilder& bob) const {}
-
-    virtual void appendFormattedString(BSONObjBuilder& bob) const {}
+    /**
+     * tcmalloc metrics have three verbosity settings.
+     *
+     * Verbosity is set through serverStatus calls as db.serverStatus({tcmalloc: <verbosity>}).
+     * We can configure FTDC to use verbosity: 2 using the diagnosticDataCollectionVerboseTCMalloc
+     * server parameter.
+     *
+     * 1 is the default, and nothing will be appended in this function.
+     * 2 will append any additional metrics that we have deemed too large to include by default, but
+     * are useful for further diagnostics. This is often numerical data that is useful to view over
+     * time.
+     * 3 will dump the entire formatted stats string that tcmalloc provides. This should never
+     * be included in FTDC, as its size will harm retention.
+     */
+    virtual void appendHighVerbosityMetrics(BSONObjBuilder& bob, int verbosity) const {}
 
     virtual void appendCustomDerivedMetrics(BSONObjBuilder& bob) const {}
 };
 
-#ifdef MONGO_HAVE_GOOGLE_TCMALLOC
+#ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
 class GoogleTCMallocMetrics : public TCMallocMetrics {
 public:
     std::vector<StringData> getGenericStatNames() const override {
@@ -102,7 +123,6 @@ public:
             "heap_size"_sd,
             "peak_memory_usage"_sd,
             "physical_memory_used"_sd,
-            "realized_fragmentation"_sd,
             "virtual_memory_used"_sd,
         };
     }
@@ -113,7 +133,6 @@ public:
             "cpu_free"_sd,
             "current_total_thread_cache_bytes"_sd,
             "desired_usage_limit_bytes"_sd,
-            "external_fragmentation_bytes"_sd,
             "hard_usage_limit_bytes"_sd,
             "local_bytes"_sd,
             "max_total_thread_cache_bytes"_sd,
@@ -122,7 +141,6 @@ public:
             "pageheap_free_bytes"_sd,
             "pageheap_unmapped_bytes"_sd,
             "required_bytes"_sd,
-            "sampled_internal_fragmentation"_sd,
             "sharded_transfer_cache_free"_sd,
             "thread_cache_count"_sd,
             "thread_cache_free"_sd,
@@ -130,10 +148,10 @@ public:
         };
     }
 
-    boost::optional<size_t> getNumericProperty(StringData propertyName) const override {
+    boost::optional<long long> getNumericProperty(StringData propertyName) const override {
         if (auto res = tcmalloc::MallocExtension::GetNumericProperty(std::string{propertyName});
             res.has_value()) {
-            return res.value();
+            return static_cast<long long>(res.value());
         }
 
         return boost::none;
@@ -143,11 +161,50 @@ public:
         _perCPUCachesActive =
             _perCPUCachesActive || tcmalloc::MallocExtension::PerCpuCachesActive();
         bob.appendBool("usingPerCPUCaches", _perCPUCachesActive);
-        bob.append("maxPerCPUCacheSize", tcmalloc::MallocExtension::GetMaxPerCpuCacheSize());
+        bob.append("maxPerCPUCacheSizeBytes", tcmalloc::MallocExtension::GetMaxPerCpuCacheSize());
+    }
+
+    void appendRenamedMetrics(BSONObjBuilder& bob) const override {
+        auto tryAppendRename = [&](StringData statName, StringData newName) {
+            if (auto val = getNumericProperty(statName); !!val) {
+                bob.appendNumber(newName, *val);
+            }
+        };
+        tryAppendRename("generic.realized_fragmentation", "memory_used_to_memory_held_pct_at_peak");
+        tryAppendRename("tcmalloc.external_fragmentation_bytes", "total_bytes_held");
+        tryAppendRename("tcmalloc.sampled_internal_fragmentation",
+                        "estimated_size_class_overhead_bytes");
     }
 
     long long getReleaseRate() const override {
         return getUnderlyingType(tcmalloc::MallocExtension::GetBackgroundReleaseRate());
+    }
+
+    void appendHighVerbosityMetrics(BSONObjBuilder& bob, int verbosity) const override {
+        if (verbosity >= 2 && _perCPUCachesActive) {
+            BSONObjBuilder sub(bob.subobjStart("cpuCache"));
+
+            size_t num_cpus = absl::base_internal::NumCPUs();
+            auto& cache = tcmalloc::tcmalloc_internal::tc_globals.cpu_cache();
+
+            for (size_t i = 0; i < num_cpus; i++) {
+                BSONObjBuilder sub2(sub.subobjStart(ItoA(i)));
+
+                sub2.appendNumber("used_bytes", static_cast<long long>(cache.UsedBytes(i)));
+                sub2.appendNumber("allocated", static_cast<long long>(cache.Allocated(i)));
+                sub2.appendNumber("unallocated", static_cast<long long>(cache.Unallocated(i)));
+                sub2.appendNumber("capacity", static_cast<long long>(cache.Capacity(i)));
+                sub2.appendNumber("reclaims", static_cast<long long>(cache.GetNumReclaims(i)));
+
+                auto ms = cache.GetTotalCacheMissStats(i);
+                sub2.appendNumber("overflows", static_cast<long long>(ms.overflows));
+                sub2.appendNumber("underflows", static_cast<long long>(ms.underflows));
+            }
+        }
+
+        if (verbosity >= 3) {
+            bob.append("formattedString", tcmalloc::MallocExtension::GetStats());
+        }
     }
 
     void appendCustomDerivedMetrics(BSONObjBuilder& bob) const override {
@@ -167,7 +224,7 @@ private:
     // need to.
     static inline bool _perCPUCachesActive = false;
 };
-#elif defined(MONGO_HAVE_GPERF_TCMALLOC)
+#elif defined(MONGO_CONFIG_TCMALLOC_GPERF)
 class GperfTCMallocMetrics : public TCMallocMetrics {
 public:
     std::vector<StringData> getGenericStatNames() const override {
@@ -199,10 +256,10 @@ public:
         };
     }
 
-    boost::optional<size_t> getNumericProperty(StringData propertyName) const override {
+    boost::optional<long long> getNumericProperty(StringData propertyName) const override {
         size_t value;
         if (MallocExtension::instance()->GetNumericProperty(propertyName.rawData(), &value)) {
-            return {value};
+            return static_cast<long long>(value);
         }
 
         return boost::none;
@@ -212,26 +269,28 @@ public:
         return MallocExtension::instance()->GetMemoryReleaseRate();
     }
 
-    void appendHighVerbosityMetrics(BSONObjBuilder& bob) const override {
+    void appendHighVerbosityMetrics(BSONObjBuilder& bob, int verbosity) const override {
+        if (verbosity >= 2) {
 #if MONGO_HAVE_GPERFTOOLS_SIZE_CLASS_STATS
-        // Size class information
-        std::pair<BSONArrayBuilder, BSONArrayBuilder> builders(bob.subarrayStart("size_classes"),
-                                                               BSONArrayBuilder());
+            // Size class information
+            std::pair<BSONArrayBuilder, BSONArrayBuilder> builders(
+                bob.subarrayStart("size_classes"), BSONArrayBuilder());
 
-        // Size classes and page heap info is dumped in 1 call so that the performance
-        // sensitive tcmalloc page heap lock is only taken once
-        MallocExtension::instance()->SizeClasses(
-            &builders, appendSizeClassInfo, appendPageHeapInfo);
+            // Size classes and page heap info is dumped in 1 call so that the performance
+            // sensitive tcmalloc page heap lock is only taken once
+            MallocExtension::instance()->SizeClasses(
+                &builders, appendSizeClassInfo, appendPageHeapInfo);
 
-        builders.first.done();
-        bob.append("page_heap", builders.second.arr());
+            builders.first.done();
+            bob.append("page_heap", builders.second.arr());
 #endif  // MONGO_HAVE_GPERFTOOLS_SIZE_CLASS_STATS
-    }
+        }
 
-    void appendFormattedString(BSONObjBuilder& bob) const override {
-        char buffer[4096];
-        MallocExtension::instance()->GetStats(buffer, sizeof buffer);
-        bob.append("formattedString", buffer);
+        if (verbosity >= 3) {
+            char buffer[4096];
+            MallocExtension::instance()->GetStats(buffer, sizeof buffer);
+            bob.append("formattedString", buffer);
+        }
     }
 
 private:
@@ -270,11 +329,11 @@ private:
     }
 #endif  // MONGO_HAVE_GPERFTOOLS_SIZE_CLASS_STATS
 };
-#endif  // MONGO_HAVE_GPERF_TCMALLOC
+#endif  // MONGO_CONFIG_TCMALLOC_GPERF
 
 class TCMallocServerStatusSection : public ServerStatusSection {
 public:
-    TCMallocServerStatusSection() : ServerStatusSection("tcmalloc") {}
+    using ServerStatusSection::ServerStatusSection;
 
     bool includeByDefault() const override {
         return true;
@@ -282,10 +341,10 @@ public:
 
     BSONObj generateSection(OperationContext* opCtx,
                             const BSONElement& configElement) const override {
-        long long verbosity = 1;
+        int verbosity = 1;
         if (configElement) {
-            // Relies on the fact that safeNumberLong turns non-numbers into 0.
-            long long configValue = configElement.safeNumberLong();
+            // Relies on the fact that safeNumberInt turns non-numbers into 0.
+            int configValue = configElement.safeNumberInt();
             if (configValue) {
                 verbosity = configValue;
             }
@@ -295,7 +354,7 @@ public:
 
         auto tryAppend = [&](BSONObjBuilder& builder, StringData bsonName, StringData property) {
             if (auto value = _metrics.getNumericProperty(property); !!value) {
-                builder.appendNumber(bsonName, static_cast<long long>(*value));
+                builder.appendNumber(bsonName, *value);
             }
         };
 
@@ -318,12 +377,8 @@ public:
             }
 
             sub.appendNumber("release_rate", _metrics.getReleaseRate());
-
-            if (verbosity >= 2) {
-                _metrics.appendHighVerbosityMetrics(builder);
-            }
-
-            _metrics.appendFormattedString(builder);
+            _metrics.appendRenamedMetrics(builder);
+            _metrics.appendHighVerbosityMetrics(builder, verbosity);
         }
 
         {
@@ -350,9 +405,9 @@ public:
     }
 
 private:
-#ifdef MONGO_HAVE_GOOGLE_TCMALLOC
+#ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
     using MyMetrics = GoogleTCMallocMetrics;
-#elif defined(MONGO_HAVE_GPERF_TCMALLOC)
+#elif defined(MONGO_CONFIG_TCMALLOC_GPERF)
     using MyMetrics = GperfTCMallocMetrics;
 #else
     using MyMetrics = TCMallocMetrics;
@@ -360,6 +415,7 @@ private:
 
     MyMetrics _metrics;
 };
-TCMallocServerStatusSection tcmallocServerStatusSection;
+auto& tcmallocServerStatusSection =
+    *ServerStatusSectionBuilder<TCMallocServerStatusSection>("tcmalloc");
 }  // namespace
 }  // namespace mongo
