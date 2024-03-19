@@ -33,6 +33,7 @@
 #include "mongo/db/index/columns_access_method.h"
 #include "mongo/db/index/multikey_metadata_access_stats.h"
 #include "mongo/db/index/wildcard_access_method.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
@@ -348,20 +349,14 @@ void QueryPlannerParams::applyQuerySettingsForCollection(
                        mongo::query_settings::IndexHintSpec>& indexHintSpecs,
     std::vector<IndexEntry>& indexes) {
     // Retrieving the allowed indexes for the given collection.
-    auto hintToNs = [&collection](const auto& hint) -> boost::optional<NamespaceString> {
-        if (!hint.getNs()) {
-            return boost::none;
-        }
-        return NamespaceStringUtil::deserialize(collection->ns().tenantId(),
-                                                hint.getNs()->getDb(),
-                                                hint.getNs()->getColl(),
-                                                SerializationContext::stateDefault());
+    auto getHintNamespace = [](const auto& hint) {
+        return NamespaceStringUtil::deserialize(*hint.getNs().getDb(), *hint.getNs().getColl());
     };
     auto allowedIndexes = visit(
         OverloadedVisitor{
             [&](const std::vector<mongo::query_settings::IndexHintSpec>& hints) {
-                auto isHintForCollection = [&](const mongo::query_settings::IndexHintSpec& hint) {
-                    return *hintToNs(hint) == collection->ns();
+                auto isHintForCollection = [&](const auto& hint) {
+                    return getHintNamespace(hint) == collection->ns();
                 };
 
                 if (auto hintIt = std::find_if(hints.begin(), hints.end(), isHintForCollection);
@@ -371,11 +366,9 @@ void QueryPlannerParams::applyQuerySettingsForCollection(
                 return std::vector<mongo::IndexHint>();
             },
             [&](const mongo::query_settings::IndexHintSpec& hint) {
-                auto hintNs = hintToNs(hint);
-                if (!hintNs || *hintNs == collection->ns()) {
+                if (getHintNamespace(hint) == collection->ns()) {
                     return hint.getAllowedIndexes();
                 }
-
                 return std::vector<mongo::IndexHint>();
             },
         },
@@ -392,28 +385,6 @@ void QueryPlannerParams::applyQuerySettingsForCollection(
         canonicalQuery, collection, allowedIndexes, indexes);
 
     querySettingsApplied = true;
-}
-
-void QueryPlannerParams::applyQuerySettings(const CanonicalQuery& canonicalQuery,
-                                            const MultipleCollectionAccessor& collections) {
-    // If 'querySettings' has no index hints specified, then there are no settings to be applied
-    // to this query.
-    auto indexHintSpecs = canonicalQuery.getExpCtx()->getQuerySettings().getIndexHints();
-    if (!indexHintSpecs) {
-        return;
-    }
-
-    if (collections.hasMainCollection()) {
-        applyQuerySettingsForCollection(
-            canonicalQuery, collections.getMainCollection(), *indexHintSpecs, indices);
-    }
-
-    for (const auto& [name, coll] : collections.getSecondaryCollections()) {
-        if (coll) {
-            applyQuerySettingsForCollection(
-                canonicalQuery, coll, *indexHintSpecs, secondaryCollectionsInfo[name].indexes);
-        }
-    }
 }
 
 void QueryPlannerParams::applyIndexFilters(const CanonicalQuery& canonicalQuery,
@@ -439,23 +410,26 @@ void QueryPlannerParams::applyIndexFilters(const CanonicalQuery& canonicalQuery,
     };
 
     const auto& querySettings = *QuerySettingsDecoration::get(collection->getSharedDecorations());
-    const auto key = canonicalQuery.encodeKeyForPlanCacheCommand();
 
     // Filter index catalog if index filters are specified for query.
     // Also, signal to planner that application hint should be ignored.
     if (boost::optional<AllowedIndicesFilter> allowedIndicesFilter =
-            querySettings.getAllowedIndicesFilter(key)) {
+            querySettings.getAllowedIndicesFilter(canonicalQuery)) {
         filterAllowedIndexEntries(*allowedIndicesFilter, indices);
         indexFiltersApplied = true;
     }
 }
 
-void QueryPlannerParams::applyQuerySettingsOrIndexFilters(
+void QueryPlannerParams::applyQuerySettingsOrIndexFiltersForMainCollection(
     const CanonicalQuery& canonicalQuery,
     const MultipleCollectionAccessor& collections,
     bool shouldIgnoreQuerySettings) {
-    if (!shouldIgnoreQuerySettings) {
-        applyQuerySettings(canonicalQuery, collections);
+    // If 'querySettings' has no index hints specified, then there are no settings to be applied
+    // to this query.
+    auto indexHintSpecs = canonicalQuery.getExpCtx()->getQuerySettings().getIndexHints();
+    if (indexHintSpecs && !shouldIgnoreQuerySettings) {
+        applyQuerySettingsForCollection(
+            canonicalQuery, collections.getMainCollection(), *indexHintSpecs, indices);
     }
 
     // Try to apply index filters only if query settings were not applied.
@@ -464,28 +438,14 @@ void QueryPlannerParams::applyQuerySettingsOrIndexFilters(
     }
 }
 
-void QueryPlannerParams::fillOutPlannerParams(OperationContext* opCtx,
-                                              const CanonicalQuery& canonicalQuery,
-                                              const MultipleCollectionAccessor& collections,
-                                              bool ignoreQuerySettings) {
-    const auto& mainCollection = collections.getMainCollection();
-    if (!mainCollection) {
-        return;
-    }
-
-    fillOutMainCollectionPlannerParams(opCtx, canonicalQuery, mainCollection);
-    if (!canonicalQuery.cqPipeline().empty()) {
-        fillOutSecondaryCollectionsPlannerParams(opCtx, canonicalQuery, collections);
-    }
-
-    // If query supports query settings or index filters, filter params.indices.
-    applyQuerySettingsOrIndexFilters(canonicalQuery, collections, ignoreQuerySettings);
-}
-
 void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
     OperationContext* opCtx,
     const CanonicalQuery& canonicalQuery,
-    const MultipleCollectionAccessor& collections) {
+    const MultipleCollectionAccessor& collections,
+    bool shouldIgnoreQuerySettings) {
+    if (canonicalQuery.cqPipeline().empty()) {
+        return;
+    }
     auto fillOutSecondaryInfo = [&](const NamespaceString& nss,
                                     const CollectionPtr& secondaryColl) {
         auto secondaryInfo = SecondaryCollectionInfo();
@@ -512,14 +472,26 @@ void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
         const auto& mainColl = collections.getMainCollection();
         fillOutSecondaryInfo(mainColl->ns(), mainColl);
     }
+
+    auto indexHintSpecs = canonicalQuery.getExpCtx()->getQuerySettings().getIndexHints();
+    if (!indexHintSpecs || shouldIgnoreQuerySettings) {
+        return;
+    }
+
+    for (const auto& [name, coll] : collections.getSecondaryCollections()) {
+        if (coll) {
+            applyQuerySettingsForCollection(
+                canonicalQuery, coll, *indexHintSpecs, secondaryCollectionsInfo[name].indexes);
+        }
+    }
 }
 
-void QueryPlannerParams::fillOutMainCollectionPlannerParams(OperationContext* opCtx,
-                                                            const CanonicalQuery& canonicalQuery,
-                                                            const CollectionPtr& collection) {
-
-    fillOutPlannerParamsForExpressQuery(opCtx, canonicalQuery, collection);
-
+void QueryPlannerParams::fillOutMainCollectionPlannerParams(
+    OperationContext* opCtx,
+    const CanonicalQuery& canonicalQuery,
+    const MultipleCollectionAccessor& collections,
+    bool shouldIgnoreQuerySettings) {
+    const auto& mainColl = collections.getMainCollection();
     // We will not output collection scans unless there are no indexed solutions. NO_TABLE_SCAN
     // overrides this behavior by not outputting a collscan even if there are no indexed
     // solutions.
@@ -546,22 +518,24 @@ void QueryPlannerParams::fillOutMainCollectionPlannerParams(OperationContext* op
     }
 
     if (shouldWaitForOplogVisibility(
-            opCtx, collection, canonicalQuery.getFindCommandRequest().getTailable())) {
+            opCtx, mainColl, canonicalQuery.getFindCommandRequest().getTailable())) {
         options |= QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
     }
 
     // _id queries can skip checking the catalog for indices since they will always use the _id
     // index.
     if (isIdHackEligibleQuery(
-            collection, canonicalQuery.getFindCommandRequest(), canonicalQuery.getCollator())) {
+            mainColl, canonicalQuery.getFindCommandRequest(), canonicalQuery.getCollator())) {
         return;
     }
 
     // If it's not NULL, we may have indices. Access the catalog and fill out IndexEntry(s)
-    fillOutIndexEntries(opCtx, canonicalQuery, collection, indices, columnStoreIndexes);
+    fillOutIndexEntries(opCtx, canonicalQuery, mainColl, indices, columnStoreIndexes);
+    applyQuerySettingsOrIndexFiltersForMainCollection(
+        canonicalQuery, collections, shouldIgnoreQuerySettings);
 
     fillOutPlannerCollectionInfo(opCtx,
-                                 collection,
+                                 mainColl,
                                  &collectionStats,
                                  // Only include the full size stats when there's a CSI.
                                  !columnStoreIndexes.empty());
@@ -653,12 +627,16 @@ std::vector<IndexEntry> getIndexEntriesForDistinct(
 }
 }  // namespace
 
-QueryPlannerParams::QueryPlannerParams(const QueryPlannerParams::ArgsForDistinct& distinctArgs) {
+QueryPlannerParams::QueryPlannerParams(QueryPlannerParams::ArgsForDistinct&& distinctArgs) {
     options = QueryPlannerParams::NO_TABLE_SCAN | distinctArgs.plannerOptions;
-    indices = getIndexEntriesForDistinct(distinctArgs);
 
+    if (!distinctArgs.collections.hasMainCollection()) {
+        return;
+    }
+
+    indices = getIndexEntriesForDistinct(distinctArgs);
     const auto& canonicalQuery = *distinctArgs.canonicalDistinct.getQuery();
-    applyQuerySettingsOrIndexFilters(
+    applyQuerySettingsOrIndexFiltersForMainCollection(
         canonicalQuery, distinctArgs.collections, distinctArgs.ignoreQuerySettings);
 
     // If there exists an index filter, we ignore all hints. Else, we only keep the index specified

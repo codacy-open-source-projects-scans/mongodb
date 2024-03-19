@@ -1239,10 +1239,6 @@ class RunPlugin(PluginInterface):
         internal_options.add_argument("--internalParam", action="append", dest="internal_params",
                                       help=argparse.SUPPRESS)
 
-        internal_options.add_argument("--perfReportFile", dest="perf_report_file",
-                                      metavar="PERF_REPORT",
-                                      help="Writes a JSON file with performance test results.")
-
         internal_options.add_argument("--cedarReportFile", dest="cedar_report_file",
                                       metavar="CEDAR_REPORT",
                                       help="Writes a JSON file with performance test results.")
@@ -1340,6 +1336,9 @@ class RunPlugin(PluginInterface):
 
         evergreen_options.add_argument("--versionId", dest="version_id", metavar="VERSION_ID",
                                        help="Sets the version ID of the task.")
+
+        evergreen_options.add_argument("--taskWorkDir", dest="work_dir", metavar="TASK_WORK_DIR",
+                                       help="Sets the working directory of the task.")
 
         evergreen_options.add_argument(
             "--projectConfigPath", dest="evg_project_config_path",

@@ -117,11 +117,10 @@ void prepareWriteBatchForCommit(TrackingContext& trackingContext,
 
     // Move BSONColumnBuilders from Bucket to WriteBatch.
     // See corollary in finish().
-    batch.intermediateBuilders = std::move(bucket.intermediateBuilders);
-    batch.uncompressedBucketDoc = std::move(bucket.uncompressedBucketDoc);
+    batch.measurementMap = std::move(bucket.measurementMap);
     batch.bucketIsSortedByTime = bucket.bucketIsSortedByTime;
-    batch.generateCompressedDiff =
-        bucket.usingAlwaysCompressedBuckets && batch.uncompressedBucketDoc.get().get().isEmpty();
+    batch.size = bucket.size;
+    batch.generateCompressedDiff = bucket.usingAlwaysCompressedBuckets;
 }
 
 /**
@@ -216,7 +215,7 @@ BSONObj getMetadata(BucketCatalog& catalog, const BucketHandle& handle) {
 }
 
 uint64_t getMemoryUsage(const BucketCatalog& catalog) {
-    return catalog.memoryUsage.load() + catalog.trackingContext.allocated();
+    return catalog.trackingContext.allocated();
 }
 
 StatusWith<InsertResult> tryInsert(OperationContext* opCtx,
@@ -578,7 +577,15 @@ boost::optional<ClosedBucket> finish(OperationContext* opCtx,
         // Move BSONColumnBuilders from WriteBatch to Bucket.
         // See corollary in prepareWriteBatchForCommit().
         bucket->bucketIsSortedByTime = batch->bucketIsSortedByTime;
-        bucket->intermediateBuilders = std::move(batch->intermediateBuilders);
+
+        // When this threshold is crossed, we use the uncompressed size towards the bucket size
+        // limit for all incoming measurements. So there's no need to update the bucket size with
+        // the compressed measurement sizes.
+        if (!bucket->crossedLargeMeasurementThreshold) {
+            bucket->size = batch->size;
+        }
+
+        bucket->measurementMap = std::move(batch->measurementMap);
         bucket->preparedBatch.reset();
     }
 

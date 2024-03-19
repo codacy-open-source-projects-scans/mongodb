@@ -1,5 +1,8 @@
-# Windows build variants for testing release environments that should run on master,
-# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
+# Windows build variants for testing release environments
+#
+# After the branching variants in this file
+# should continue to run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 buildvariants:
 - name: windows
@@ -74,6 +77,7 @@ buildvariants:
     push_arch: x86_64-enterprise
     test_flags: --excludeWithAnyTags=incompatible_with_windows_tls,requires_external_data_source,requires_latch_analyzer
     exec_timeout_secs: 14400 # 3 hour timeout
+    external_auth_jobs_max: 1
     compile_variant: enterprise-windows
   tasks:
   - name: compile_test_and_package_serial_TG

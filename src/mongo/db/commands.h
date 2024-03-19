@@ -669,7 +669,7 @@ public:
     /**
      * Checks if the command is also known by the provided alias.
      */
-    bool hasAlias(const StringData& alias) const;
+    bool hasAlias(StringData alias) const;
 
     /**
      * Audit when this command fails authz check.
@@ -1249,7 +1249,8 @@ private:
             IDLParserContext(RequestType::kCommandName,
                              APIParameters::get(opCtx).getAPIStrict().value_or(false),
                              auth::ValidatedTenancyScope::get(opCtx),
-                             dbName.tenantId()),
+                             dbName.tenantId(),
+                             SerializationContext::stateDefault()),
             cmdObj);
     }
 

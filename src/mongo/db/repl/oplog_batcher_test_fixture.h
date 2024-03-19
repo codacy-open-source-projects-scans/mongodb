@@ -113,7 +113,7 @@ OplogEntry makeUpdateOplogEntry(int t,
                                 boost::optional<OpTime> preImageOpTime = boost::none,
                                 boost::optional<OpTime> postImageOpTime = boost::none);
 
-OplogEntry makeNoopOplogEntry(int t, const StringData& msg);
+OplogEntry makeNoopOplogEntry(int t, StringData msg);
 
 OplogEntry makeApplyOpsOplogEntry(int t,
                                   bool prepare,
@@ -135,6 +135,11 @@ std::vector<OplogEntry> makeMultiEntryTransactionOplogEntries(
     int t,
     const DatabaseName& dbName,
     bool prepared,
+    std::vector<std::vector<OplogEntry>> innerOps);
+std::vector<OplogEntry> makeRetryableApplyOpsOplogEntries(
+    int t,
+    const DatabaseName& dbName,
+    const OperationSessionInfo& sessionInfo,
     std::vector<std::vector<OplogEntry>> innerOps);
 std::string toString(const std::vector<OplogEntry>& ops);
 }  // namespace repl

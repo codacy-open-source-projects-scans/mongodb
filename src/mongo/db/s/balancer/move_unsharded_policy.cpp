@@ -29,9 +29,13 @@
 
 #include "mongo/db/s/balancer/move_unsharded_policy.h"
 
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/s/client/shard_registry.h"
+#include "mongo/s/grid.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -40,15 +44,71 @@ namespace mongo {
 namespace {
 
 template <class T>
-const T& getRandomElement(const std::vector<T>& items) {
+int64_t getRandomIndex(const std::vector<T>& items) {
     static std::default_random_engine gen(time(nullptr));
     size_t max = items.size();
     std::uniform_int_distribution<int64_t> dist(0, max - 1);
-    return items[dist(gen)];
+    return dist(gen);
 }
 
+boost::optional<std::pair<NamespaceString, ChunkType>> getRandomUnshardedUntrackedCollection(
+    OperationContext* opCtx, const DatabaseName& dbName, const ShardId& shardId) {
 
-boost::optional<std::pair<CollectionType, ChunkType>> getRandomUnsplittableCollection(
+    // Query the Catalog for a list of tracked collections.
+    const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
+    BSONObj noSort;
+    const auto collsNsCatalogResp = catalogClient->getCollectionNamespacesForDb(
+        opCtx, dbName, repl::ReadConcernLevel::kMajorityReadConcern, noSort);
+    std::set<NamespaceString> trackedColls(collsNsCatalogResp.begin(), collsNsCatalogResp.end());
+
+    // Obtain collections (tracked + untracked) that are placed on a given shard.
+    const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+    const auto toShard = uassertStatusOK(shardRegistry->getShard(opCtx, shardId));
+    const auto listCommand = [&] {
+        BSONObjBuilder commandBuilder;
+        commandBuilder.append("listCollections", 1);
+        return commandBuilder.obj();
+    }();
+    const auto listResponse = uassertStatusOK(
+        toShard->runExhaustiveCursorCommand(opCtx,
+                                            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                            dbName,
+                                            listCommand,
+                                            Milliseconds(-1)));
+
+    // Compute a list of unsharded and untracked collections. Those are collections that
+    // are listed by a shard, but not tracked in the catalog.
+    std::vector<std::pair<NamespaceString, UUID>> unshardedColls;
+    for (const auto& bsonColl : listResponse.docs) {
+        std::string collName;
+        uassertStatusOK(bsonExtractStringField(bsonColl, "name", &collName));
+        const auto ns = NamespaceStringUtil::deserialize(dbName, collName);
+        if (ns.isNamespaceAlwaysUntracked()) {
+            continue;
+        }
+        const auto uid = uassertStatusOK(UUID::parse(bsonColl["info"]["uuid"]));
+        if (trackedColls.find(ns) == trackedColls.end()) {
+            unshardedColls.emplace_back(std::make_pair(ns, uid));
+        }
+    }
+
+    if (unshardedColls.empty())
+        return {};
+
+    auto selectedIndex = getRandomIndex(unshardedColls);
+    auto selectedCollection = unshardedColls[selectedIndex];
+
+    // Unsharded untracked collections don't have chunks associated with them.
+    // Create a dummy representation, to be compatible with balancer migration interface.
+    ChunkType dummyChunk(selectedCollection.second,
+                         ChunkRange(BSON("_id" << MINKEY), BSON("_id" << MAXKEY)),
+                         ChunkVersion::UNSHARDED(),
+                         shardId);
+
+    return std::make_pair(selectedCollection.first, dummyChunk);
+}
+
+boost::optional<std::pair<NamespaceString, ChunkType>> getRandomUnsplittableCollection(
     OperationContext* opCtx, const DatabaseName& dbName) {
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
     BSONObj noSort;
@@ -61,32 +121,39 @@ boost::optional<std::pair<CollectionType, ChunkType>> getRandomUnsplittableColle
         }
     }
 
-    if (unsplittableCollections.empty())
-        return {};
-
-    auto selectedCollection = getRandomElement(unsplittableCollections);
-    auto swChunks = catalogClient->getChunks(
-        opCtx,
-        BSON(ChunkType::collectionUUID() << selectedCollection->getUuid()) /*query*/,
-        noSort,
-        boost::none /*limit*/,
-        nullptr /*opTime*/,
-        selectedCollection->getEpoch(),
-        selectedCollection->getTimestamp(),
-        repl::ReadConcernLevel::kMajorityReadConcern,
-        boost::none);
-    if (!swChunks.isOK()) {
-        LOGV2_WARNING(
-            8544101,
-            "Could not find the corresponding chunks in the catalog for the selected unsplitable "
-            "collection",
-            logAttrs(selectedCollection->getNss()));
-        return {};
+    while (!unsplittableCollections.empty()) {
+        auto selectedIndex = getRandomIndex(unsplittableCollections);
+        auto selectedCollection = unsplittableCollections[selectedIndex];
+        auto swChunks = catalogClient->getChunks(
+            opCtx,
+            BSON(ChunkType::collectionUUID() << selectedCollection->getUuid()) /*query*/,
+            noSort,
+            boost::none /*limit*/,
+            nullptr /*opTime*/,
+            selectedCollection->getEpoch(),
+            selectedCollection->getTimestamp(),
+            repl::ReadConcernLevel::kMajorityReadConcern,
+            boost::none);
+        if (!swChunks.isOK()) {
+            LOGV2_WARNING(8544101,
+                          "Could not find the corresponding chunks in the catalog for the selected "
+                          "unsplitable collection",
+                          logAttrs(selectedCollection->getNss()));
+            return {};
+        }
+        auto& chunks = swChunks.getValue();
+        if (chunks.size() == 1) {
+            // Successfully selected a collection
+            return std::make_pair(selectedCollection->getNss(), chunks[0]);
+        } else {
+            // The collection was deleted or changed to sharded while we were fetching additional
+            // chunk information. We simply look for another one
+            std::swap(unsplittableCollections[selectedIndex], unsplittableCollections.back());
+            unsplittableCollections.pop_back();
+        }
     }
-    auto& chunks = swChunks.getValue();
-    tassert(8245243, "Unsplittable collection has more than one chunk", chunks.size() == 1);
-
-    return std::make_pair(*selectedCollection, chunks[0]);
+    // There are no unsplittable collections
+    return {};
 }
 }  // namespace
 
@@ -124,14 +191,32 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
             return candidateShards;
         }();
 
-        auto collectionAndChunks = [&]() -> boost::optional<std::pair<CollectionType, ChunkType>> {
+        auto collectionAndChunks = [&]() -> boost::optional<std::pair<NamespaceString, ChunkType>> {
+            auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+
             for (auto& availableShard : randomizedAvailableShards) {
                 auto databases = catalogClient->getDatabasesForShard(opCtx, *availableShard);
                 if (!databases.isOK()) {
                     continue;
                 }
                 for (auto& database : databases.getValue()) {
-                    auto collectionAndChunks = getRandomUnsplittableCollection(opCtx, database);
+
+                    boost::optional<std::pair<NamespaceString, ChunkType>> collectionAndChunks;
+
+                    if (feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(
+                            fcvSnapshot)) {
+                        collectionAndChunks = getRandomUnsplittableCollection(opCtx, database);
+                    } else if (feature_flags::gTrackUnshardedCollectionsUponMoveCollection
+                                   .isEnabled(fcvSnapshot)) {
+                        collectionAndChunks =
+                            getRandomUnshardedUntrackedCollection(opCtx, database, *availableShard);
+                        // If no unsharded, untracked collection found, try finding an unsharded
+                        // collection that is already tracked.
+                        if (!collectionAndChunks) {
+                            collectionAndChunks = getRandomUnsplittableCollection(opCtx, database);
+                        }
+                    }
+
                     if (collectionAndChunks) {
                         return collectionAndChunks;
                     }
@@ -143,7 +228,7 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
             return result;
         }
 
-        CollectionType& collectionToMove = collectionAndChunks->first;
+        NamespaceString& collectionToMove = collectionAndChunks->first;
         ChunkType& chunkToMove = collectionAndChunks->second;
         const ShardId& sourceShardId = collectionAndChunks->second.getShard();
 
@@ -160,7 +245,7 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
         }();
 
         result.emplace_back(MigrateInfo(*destinationShardId,
-                                        collectionToMove.getNss(),
+                                        collectionToMove,
                                         chunkToMove,
                                         ForceJumbo::kDoNotForce,
                                         boost::none));

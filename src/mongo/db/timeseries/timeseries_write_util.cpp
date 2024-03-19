@@ -98,6 +98,7 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+#include "mongo/util/testing_proctor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -218,7 +219,8 @@ write_ops::WriteCommandRequestBase makeTimeseriesWriteOpBase(std::vector<StmtId>
 write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
     OperationContext* opCtx,
     std::shared_ptr<bucket_catalog::WriteBatch> batch,
-    bool changedToUnsorted) {
+    bool changedToUnsorted,
+    const std::vector<details::Measurement>& sortedMeasurements) {
     BSONObjBuilder updateBuilder;
     {
         // Control builder.
@@ -243,6 +245,88 @@ write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
         }
     }
 
+    // Verifier function that will be called when we apply the diff to our bucket and verify that
+    // the measurements we inserted appear correctly in the resulting bucket's BSONColumns.
+    doc_diff::VerifierFunc verifierFunction = nullptr;
+
+    if (TestingProctor::instance().isEnabled()) {
+        verifierFunction = [sortedMeasurements = std::move(sortedMeasurements),
+                            numPreviouslyCommittedMeasurements =
+                                batch->numPreviouslyCommittedMeasurements](
+                               const BSONObj& docToWrite) {
+            // Get the data
+            auto data = docToWrite.getObjectField(kBucketDataFieldName);
+            // Iterate through each key-value pair in the data. This is a mapping
+            // from String keys representing data field names to a tuple of an iterator
+            // on a BSONColumn, the column itself, and a size_t type counter.
+            // The iterator allows us to iterate across the BSONColumn as we inspect
+            // each element and compare it to the expected value in the actual measurement
+            // we inserted. The column is stored to prevent the iterator on it from going out
+            // of scope. The size_t counter represents how many times the iterator has been
+            // advanced - this allows us to detect when we didn't have a value set for a field
+            // in a particular measurement, so that we can check the corresponding BSONColumn
+            // for a skip value.
+            StringMap<std::tuple<BSONColumn::Iterator, BSONColumn, size_t>>
+                fieldsToDataAndNextCountMap;
+            // First, populate our map.
+            for (auto&& [key, columnValue] : data) {
+                int binLength = 0;
+                const char* binData = columnValue.binData(binLength);
+                // Decompress the binary data for this field.
+                try {
+                    BSONColumn c(binData, binLength);
+                    auto it = c.begin();
+                    std::advance(it, numPreviouslyCommittedMeasurements);
+                    fieldsToDataAndNextCountMap.emplace(key, std::make_tuple(it, std::move(c), 0));
+                } catch (const DBException& e) {
+                    invariant(false,
+                              str::stream() << "Encountered exception " << e.toString()
+                                            << " when iterating over BSONColumn binary "
+                                            << StringData(binData, binLength));
+                };
+            }
+            // Now, iterate through each measurement, and check if the value
+            // for each field of the measurement matches with what was compressed.
+            // numIterations will keep track of how many measurements we've gone through
+            // so far - this is useful because not every measurement necessarily has a value
+            // for each field, as this counter allows us to identify when a measurement skipped
+            // a value for a field.
+            size_t numIterations = 0;
+            for (const auto& measurement : sortedMeasurements) {
+                for (const BSONElement& elem : measurement.dataFields) {
+                    auto measurementKey = elem.fieldNameStringData();
+                    invariant(fieldsToDataAndNextCountMap.contains(measurementKey),
+                              str::stream() << "BSONColumn was missing key " << measurementKey);
+                    auto& [iterator, column, nextCount] =
+                        fieldsToDataAndNextCountMap.at(measurementKey);
+                    BSONElement columnValue = *iterator;
+                    invariant(columnValue.binaryEqualValues(elem),
+                              str::stream() << "BSONColumn value " << columnValue
+                                            << "was not equal to expected measurement value "
+                                            << elem << "for key " << measurementKey);
+                    ++nextCount;
+                    ++iterator;
+                }
+                ++numIterations;
+                // Advance the iterators for fields not present in this measurement. Check
+                // that the iterator sees a skip value.
+                for (auto& [key, value] : fieldsToDataAndNextCountMap) {
+                    auto& [iterator, column, nextCount] = value;
+                    if (nextCount < numIterations) {
+                        invariant(numIterations - 1 == nextCount);
+                        // If there was no value for a field in a measurement,
+                        // the column should have a skip value.
+                        BSONElement val = *iterator;
+                        invariant(val.eoo(),
+                                  str::stream() << "Column value" << val << "was not equal to EOO");
+                        ++iterator;
+                        ++nextCount;
+                    }
+                }
+            }
+        };
+    }
+
     {
         // Data builder.
 
@@ -250,19 +334,17 @@ write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
         BSONObjBuilder newDataFieldsBuilder;
         BSONObjBuilder updatedDataFieldsBuilder;
 
-        for (auto& entry : batch->intermediateBuilders.getBuilders()) {
-            auto& cBuilder = std::get<1>(entry.second);
-            auto cDiff = cBuilder.intermediate();
-
-            if (batch->newFieldNamesToBeInserted.count(entry.first.c_str())) {
+        auto intermediates = batch->measurementMap.intermediate(batch->size);
+        for (const auto& [fieldName, diff] : intermediates) {
+            if (batch->newFieldNamesToBeInserted.count(fieldName)) {
                 // Insert new column.
-                invariant(cDiff.offset() == 0);
-                auto binary = BSONBinData(cDiff.data(), cDiff.size(), BinDataType::Column);
-                newDataFieldsBuilder.append(entry.first.c_str(), binary);
+                invariant(diff.offset() == 0);
+                auto binary = BSONBinData(diff.data(), diff.size(), BinDataType::Column);
+                newDataFieldsBuilder.append(fieldName, binary);
             } else {
                 // Update existing column.
-                BSONObj binaryObj = makeBSONColumnDocDiff(cDiff);
-                updatedDataFieldsBuilder.append(entry.first.c_str(), binaryObj);
+                BSONObj binaryObj = makeBSONColumnDocDiff(diff);
+                updatedDataFieldsBuilder.append(fieldName, binaryObj);
             }
         }
 
@@ -282,6 +364,7 @@ write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
         static_cast<bool>(repl::tenantMigrationInfo(opCtx));
     write_ops::UpdateModification u(
         updateBuilder.obj(), write_ops::UpdateModification::DeltaTag{}, options);
+    u.verifierFunction = std::move(verifierFunction);
     auto oid = batch->bucketHandle.bucketId.oid;
     write_ops::UpdateOpEntry update(BSON("_id" << oid), std::move(u));
     invariant(!update.getMulti(), oid.toString());
@@ -384,8 +467,10 @@ void updateTimeseriesDocument(OperationContext* opCtx,
         collection_internal::kUpdateAllIndexes;  // Assume all indexes are affected.
     if (update.getU().type() == write_ops::UpdateModification::Type::kDelta) {
         diffFromUpdate = update.getU().getDiff();
-        updated = doc_diff::applyDiff(
-            original.value(), diffFromUpdate, static_cast<bool>(repl::tenantMigrationInfo(opCtx)));
+        updated = doc_diff::applyDiff(original.value(),
+                                      diffFromUpdate,
+                                      static_cast<bool>(repl::tenantMigrationInfo(opCtx)),
+                                      update.getU().verifierFunction);
         diffOnIndexes = &diffFromUpdate;
         args.update = update_oplog_entry::makeDeltaOplogEntry(diffFromUpdate);
     } else if (update.getU().type() == write_ops::UpdateModification::Type::kTransform) {
@@ -467,54 +552,103 @@ StatusWith<bucket_catalog::InsertResult> attemptInsertIntoBucketWithReopening(
     const Collection* bucketsColl,
     const TimeseriesOptions& options,
     const BSONObj& measurementDoc,
-    bucket_catalog::CombineWithInsertsFromOtherClients combine) {
-    auto swResult = bucket_catalog::tryInsert(opCtx,
-                                              bucketCatalog,
-                                              bucketsColl->ns().getTimeseriesViewNamespace(),
-                                              bucketsColl->uuid(),
-                                              bucketsColl->getDefaultCollator(),
-                                              options,
-                                              measurementDoc,
-                                              combine);
-    if (!swResult.isOK()) {
-        return swResult;
+    bucket_catalog::CombineWithInsertsFromOtherClients combine,
+    const CompressAndWriteBucketFunc& compressAndWriteBucketFunc) {
+    boost::optional<OID> uncompressedBucketId{boost::none};
+    // The purpose of this scope is to destroy the ReopeningContext for the
+    // compress-and-write-uncompressed-bucket scenario.
+    {
+        auto swResult = bucket_catalog::tryInsert(opCtx,
+                                                  bucketCatalog,
+                                                  bucketsColl->ns().getTimeseriesViewNamespace(),
+                                                  bucketsColl->uuid(),
+                                                  bucketsColl->getDefaultCollator(),
+                                                  options,
+                                                  measurementDoc,
+                                                  combine);
+        if (!swResult.isOK()) {
+            return swResult;
+        }
+
+        auto visitResult = visit(
+            OverloadedVisitor{
+                [&](const bucket_catalog::SuccessfulInsertion&)
+                    -> StatusWith<bucket_catalog::InsertResult> { return std::move(swResult); },
+                [&](bucket_catalog::ReopeningContext& reopeningContext)
+                    -> StatusWith<bucket_catalog::InsertResult> {
+                    auto suitableBucket = getSuitableBucketForReopening(
+                        opCtx, bucketsColl, options, reopeningContext);
+
+                    if (!suitableBucket.isEmpty()) {
+                        reopeningContext.bucketToReopen = bucket_catalog::BucketToReopen{
+                            suitableBucket, [&](OperationContext* opCtx, const BSONObj& bucketDoc) {
+                                return bucketsColl->checkValidation(opCtx, bucketDoc);
+                            }};
+                    }
+
+                    if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+                        !suitableBucket.isEmpty() &&
+                        !timeseries::isCompressedBucket(suitableBucket)) {
+                        uncompressedBucketId = {suitableBucket.getField(kBucketIdFieldName).OID()};
+                        return StatusWith<bucket_catalog::InsertResult>{
+                            bucket_catalog::InsertResult{
+                                std::in_place_type<bucket_catalog::ReopeningContext>,
+                                std::move(reopeningContext)}};
+                    }
+
+                    return bucket_catalog::insertWithReopeningContext(
+                        opCtx,
+                        bucketCatalog,
+                        bucketsColl->ns().getTimeseriesViewNamespace(),
+                        bucketsColl->uuid(),
+                        bucketsColl->getDefaultCollator(),
+                        options,
+                        measurementDoc,
+                        combine,
+                        reopeningContext);
+                },
+                [](bucket_catalog::InsertWaiter& waiter)
+                    -> StatusWith<bucket_catalog::InsertResult> {
+                    // Need to wait for another operation to finish, then retry. This could be
+                    // another reopening request or a previously prepared write batch for the same
+                    // series (metaField value). The easiest way to retry here is to return a write
+                    // conflict.
+                    bucket_catalog::waitToInsert(&waiter);
+                    return Status{ErrorCodes::WriteConflict, "waited to retry"};
+                },
+            },
+            swResult.getValue());
+
+        if (!uncompressedBucketId.has_value()) {
+            return visitResult;
+        }
     }
 
-    return visit(
-        OverloadedVisitor{
-            [&](const bucket_catalog::SuccessfulInsertion&)
-                -> StatusWith<bucket_catalog::InsertResult> { return std::move(swResult); },
-            [&](bucket_catalog::ReopeningContext& reopeningContext) {
-                auto suitableBucket =
-                    getSuitableBucketForReopening(opCtx, bucketsColl, options, reopeningContext);
-
-                if (!suitableBucket.isEmpty()) {
-                    reopeningContext.bucketToReopen = bucket_catalog::BucketToReopen{
-                        suitableBucket, [&](OperationContext* opCtx, const BSONObj& bucketDoc) {
-                            return bucketsColl->checkValidation(opCtx, bucketDoc);
-                        }};
-                }
-
-                return bucket_catalog::insertWithReopeningContext(
-                    opCtx,
-                    bucketCatalog,
-                    bucketsColl->ns().getTimeseriesViewNamespace(),
-                    bucketsColl->uuid(),
-                    bucketsColl->getDefaultCollator(),
-                    options,
-                    measurementDoc,
-                    combine,
-                    reopeningContext);
-            },
-            [](bucket_catalog::InsertWaiter& waiter) -> StatusWith<bucket_catalog::InsertResult> {
-                // Need to wait for another operation to finish, then retry. This could be another
-                // reopening request or a previously prepared write batch for the same series
-                // (metaField value). The easiest way to retry here is to return a write conflict.
-                bucket_catalog::waitToInsert(&waiter);
-                return Status{ErrorCodes::WriteConflict, "waited to retry"};
-            },
-        },
-        swResult.getValue());
+    try {
+        LOGV2(8654200,
+              "Compressing uncompressed bucket upon bucket reopen",
+              "bucketId"_attr = uncompressedBucketId.get());
+        // Compress the uncompressed bucket and write to disk.
+        if (compressAndWriteBucketFunc) {
+            compressAndWriteBucketFunc(opCtx,
+                                       uncompressedBucketId.get(),
+                                       bucketsColl->ns(),
+                                       bucketsColl->uuid(),
+                                       options.getTimeField());
+        }
+    } catch (...) {
+        bucket_catalog::freeze(bucketCatalog, bucketsColl->uuid(), uncompressedBucketId.get());
+        LOGV2_WARNING(8654201,
+                      "Failed to compress bucket for time-series insert upon reopening, will retry "
+                      "insert on a new bucket",
+                      "bucketId"_attr = uncompressedBucketId.get());
+        return Status{
+            timeseries::BucketCompressionFailure(bucketsColl->uuid(), uncompressedBucketId.get()),
+            "Failed to compress bucket for time-series insert upon reopening"};
+    }
+    return Status{ErrorCodes::WriteConflict,
+                  "existing uncompressed bucket was compressed, retry insert on compressed bucket"};
 }
 
 }  // namespace
@@ -572,7 +706,7 @@ void assertTimeseriesBucketsCollection(const Collection* bucketsColl) {
             bucketsColl->getTimeseriesOptions());
 }
 
-BSONObj makeBSONColumnDocDiff(const BSONColumnBuilder::BinaryDiff& binaryDiff) {
+BSONObj makeBSONColumnDocDiff(const TrackedBSONColumnBuilder::BinaryDiff& binaryDiff) {
     return BSON(
         "o" << binaryDiff.offset() << "d"
             << BSONBinData(binaryDiff.data(), binaryDiff.size(), BinDataType::BinDataGeneral));
@@ -717,11 +851,10 @@ write_ops::InsertCommandRequest makeTimeseriesInsertOp(
     if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         invariant(bucketDoc.compressedBucket);
-        setUncompressedBucketDoc(*batch, bucketDoc.uncompressedBucket.getOwned());
 
         // Initialize BSONColumnBuilders which will later get transferred into the Bucket class.
         BSONObj bucketDataDoc = bucketDoc.compressedBucket->getObjectField(kBucketDataFieldName);
-        batch->intermediateBuilders.initBuilders(
+        batch->measurementMap.initBuilders(
             bucketDataDoc,
             batch->measurements.size());  // i.e. number of to-insert measurements in bucketDataDoc
     }
@@ -740,60 +873,10 @@ write_ops::UpdateCommandRequest makeTimeseriesUpdateOp(
     const NamespaceString& bucketsNs,
     const BSONObj& metadata,
     std::vector<StmtId>&& stmtIds) {
-    if (!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        write_ops::UpdateCommandRequest op(bucketsNs,
-                                           {makeTimeseriesUpdateOpEntry(opCtx, batch, metadata)});
-        op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
-        return op;
-    }
-
-    auto updateMod = makeTimeseriesUpdateOpEntry(opCtx, batch, metadata).getU();
-    auto updated = doc_diff::applyDiff(getUncompressedBucketDoc(*batch),
-                                       updateMod.getDiff(),
-                                       updateMod.mustCheckExistenceForInsertOperations());
-
-    // Hold the uncompressed bucket document that's currently on-disk prior to this write batch
-    // running.
-    auto before = getUncompressedBucketDoc(*batch);
-
-    auto compressionResult = timeseries::compressBucket(
-        updated, batch->timeField, bucketsNs, gValidateTimeseriesCompression.load());
-    uassert(BucketCompressionFailure(batch->bucketHandle.bucketId.collectionUUID,
-                                     batch->bucketHandle.bucketId.oid),
-            "Failed to compress time-series bucket",
-            compressionResult.compressedBucket);
-
-    setUncompressedBucketDoc(*batch, updated);
-
-    auto after = compressionResult.compressedBucket ? *compressionResult.compressedBucket : updated;
-    if (compressionResult.compressedBucket) {
-        // Initialize BSONColumnBuilders which will later get transferred into the Bucket class.
-        BSONObj bucketDataDoc =
-            compressionResult.compressedBucket->getObjectField(kBucketDataFieldName);
-        BSONObj bucketControlDoc =
-            compressionResult.compressedBucket->getObjectField(kBucketControlFieldName);
-        int bucketCount = bucketControlDoc.getIntField(kBucketControlCountFieldName);
-        batch->intermediateBuilders.initBuilders(bucketDataDoc, bucketCount);
-    }
-
-    auto bucketTransformationFunc = [before = std::move(before), after = std::move(after)](
-                                        const BSONObj& bucketDoc) -> boost::optional<BSONObj> {
-        // Make sure the document hasn't changed since we read it into the BucketCatalog.
-        // This should not happen, but since we can double-check it here, we can guard
-        // against the missed update that would result from simply replacing with 'after'.
-        if (!timeseries::decompressBucket(bucketDoc).value_or(bucketDoc).binaryEqual(before)) {
-            throwWriteConflictException("Bucket document changed between initial read and update");
-        }
-        return after;
-    };
-
-    auto updates = makeTimeseriesTransformationOpEntry(
-        opCtx,
-        /*bucketId=*/batch->bucketHandle.bucketId.oid,
-        /*transformationFunc=*/std::move(bucketTransformationFunc));
-
-    write_ops::UpdateCommandRequest op(bucketsNs, {updates});
+    invariant(!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+    write_ops::UpdateCommandRequest op(bucketsNs,
+                                       {makeTimeseriesUpdateOpEntry(opCtx, batch, metadata)});
     op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
     return op;
 }
@@ -812,28 +895,27 @@ write_ops::UpdateCommandRequest makeTimeseriesCompressedDiffUpdateOp(
     invariant(feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
-    auto& batchBuilders = batch->intermediateBuilders;
 
     bool changedToUnsorted = false;
-    Timestamp maxCommittedTime =
-        batch->intermediateBuilders.getBuilder(batch->timeField).last().timestamp();
     std::vector<Measurement> sortedMeasurements = sortMeasurementsOnTimeField(batch);
     if (batch->bucketIsSortedByTime &&
-        sortedMeasurements.begin()->timeField.timestamp() < maxCommittedTime) {
+        sortedMeasurements.begin()->timeField.timestamp() <
+            batch->measurementMap.timeOfLastMeasurement(batch->timeField)) {
         batch->bucketIsSortedByTime = false;
         changedToUnsorted = true;
-        batch->stats.incNumBucketsPromoted();
+        batch->stats.incNumCompressedBucketsConvertedToUnsorted();
     }
 
     // Insert new measurements, and appropriate skips, into all column builders.
     for (const auto& sortedMeasurementDoc : sortedMeasurements) {
-        batchBuilders.insertOne(sortedMeasurementDoc.dataFields);
+        batch->measurementMap.insertOne(sortedMeasurementDoc.dataFields);
     }
 
     // Generates a delta update request using the before and after compressed bucket documents' data
     // fields. The only other items that will be different are the min, max, and count fields in the
     // control block, and the version field if it was promoted to a v3 bucket.
-    const auto updateEntry = makeTimeseriesCompressedDiffEntry(opCtx, batch, changedToUnsorted);
+    const auto updateEntry =
+        makeTimeseriesCompressedDiffEntry(opCtx, batch, changedToUnsorted, sortedMeasurements);
     write_ops::UpdateCommandRequest op(bucketsNs, {updateEntry});
     op.setWriteCommandRequestBase(makeTimeseriesWriteOpBase(std::move(stmtIds)));
     return op;
@@ -846,17 +928,41 @@ StatusWith<bucket_catalog::InsertResult> attemptInsertIntoBucket(
     TimeseriesOptions& timeSeriesOptions,
     const BSONObj& measurementDoc,
     BucketReopeningPermittance reopening,
-    bucket_catalog::CombineWithInsertsFromOtherClients combine) {
+    bucket_catalog::CombineWithInsertsFromOtherClients combine,
+    const CompressAndWriteBucketFunc& compressAndWriteBucketFunc) {
     switch (reopening) {
         case BucketReopeningPermittance::kAllowed:
             while (true) {
-                auto result = attemptInsertIntoBucketWithReopening(
-                    opCtx, bucketCatalog, bucketsColl, timeSeriesOptions, measurementDoc, combine);
-                if (!result.isOK() && result.getStatus().code() == ErrorCodes::WriteConflict) {
-                    // If there is an era offset (between the bucket we want to reopen and the
-                    // catalog's current era), we could hit a WriteConflict error indicating we will
-                    // need to refetch a bucket document as it is potentially stale.
-                    continue;
+                auto result = attemptInsertIntoBucketWithReopening(opCtx,
+                                                                   bucketCatalog,
+                                                                   bucketsColl,
+                                                                   timeSeriesOptions,
+                                                                   measurementDoc,
+                                                                   combine,
+                                                                   compressAndWriteBucketFunc);
+                if (!result.isOK()) {
+                    if (result.getStatus().code() == ErrorCodes::WriteConflict) {
+                        // If there is an era offset (between the bucket we want to reopen and the
+                        // catalog's current era), we could hit a WriteConflict error indicating we
+                        // will need to refetch a bucket document as it is potentially stale. The
+                        // other scenario this will happen is when an uncompressed bucket is
+                        // encountered and must be compressed before reattempting a write to the
+                        // compressed bucket.
+                        continue;
+                    } else if (result.getStatus().code() ==
+                               ErrorCodes::TimeseriesBucketCompressionFailed) {
+                        // This is the case where the reopened bucket was corrupted. Retry the
+                        // insert directly on a new bucket.
+                        return bucket_catalog::insert(
+                            opCtx,
+                            bucketCatalog,
+                            bucketsColl->ns().getTimeseriesViewNamespace(),
+                            bucketsColl->uuid(),
+                            bucketsColl->getDefaultCollator(),
+                            timeSeriesOptions,
+                            measurementDoc,
+                            combine);
+                    }
                 }
                 return result;
             }
@@ -898,12 +1004,14 @@ void makeWriteRequest(OperationContext* opCtx,
     }
 }
 
-TimeseriesBatches insertIntoBucketCatalogForUpdate(OperationContext* opCtx,
-                                                   bucket_catalog::BucketCatalog& bucketCatalog,
-                                                   const CollectionPtr& bucketsColl,
-                                                   const std::vector<BSONObj>& measurements,
-                                                   const NamespaceString& bucketsNs,
-                                                   TimeseriesOptions& timeSeriesOptions) {
+TimeseriesBatches insertIntoBucketCatalogForUpdate(
+    OperationContext* opCtx,
+    bucket_catalog::BucketCatalog& bucketCatalog,
+    const CollectionPtr& bucketsColl,
+    const std::vector<BSONObj>& measurements,
+    const NamespaceString& bucketsNs,
+    TimeseriesOptions& timeSeriesOptions,
+    const CompressAndWriteBucketFunc& compressAndWriteBucketFunc) {
     TimeseriesBatches batches;
 
     for (const auto& measurement : measurements) {
@@ -914,7 +1022,8 @@ TimeseriesBatches insertIntoBucketCatalogForUpdate(OperationContext* opCtx,
                                     timeSeriesOptions,
                                     measurement,
                                     BucketReopeningPermittance::kDisallowed,
-                                    bucket_catalog::CombineWithInsertsFromOtherClients::kDisallow));
+                                    bucket_catalog::CombineWithInsertsFromOtherClients::kDisallow,
+                                    compressAndWriteBucketFunc));
         auto* insertResult = get_if<bucket_catalog::SuccessfulInsertion>(&result);
         invariant(insertResult);
         batches.emplace_back(std::move(insertResult->batch));
@@ -1092,10 +1201,16 @@ void performAtomicWritesForUpdate(
     bucket_catalog::BucketCatalog& sideBucketCatalog,
     bool fromMigrate,
     StmtId stmtId,
-    std::set<OID>* bucketIds) {
+    std::set<OID>* bucketIds,
+    const CompressAndWriteBucketFunc& compressAndWriteBucketFunc) {
     auto timeSeriesOptions = *coll->getTimeseriesOptions();
-    auto batches = insertIntoBucketCatalogForUpdate(
-        opCtx, sideBucketCatalog, coll, modifiedMeasurements, coll->ns(), timeSeriesOptions);
+    auto batches = insertIntoBucketCatalogForUpdate(opCtx,
+                                                    sideBucketCatalog,
+                                                    coll,
+                                                    modifiedMeasurements,
+                                                    coll->ns(),
+                                                    timeSeriesOptions,
+                                                    compressAndWriteBucketFunc);
 
     auto modificationRequest = unchangedMeasurements
         ? boost::make_optional(

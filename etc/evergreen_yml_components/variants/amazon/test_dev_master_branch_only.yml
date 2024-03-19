@@ -1,5 +1,8 @@
 # Amazon build variants for testing development environments
-# that should run only on master branch projects
+#
+# After the branching variants in this file
+# should NOT run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -28,6 +31,10 @@ variables:
     --link-model=dynamic
     --use-diagnostic-latches=on
 
+# THIS HAS COPIES IN:
+# - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
+# - etc/evergreen_yml_components/variants/amazon/test_dev.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &amazon_linux2_arm64_dynamic_compile_variant_dependency
   depends_on:
   - name: archive_dist_test_debug
@@ -57,6 +64,10 @@ variables:
   core_analyzer_distro_name: amazon2-arm64-xlarge
   num_scons_link_jobs_available: 0.99
 
+# THIS HAS COPIES IN:
+# - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
+# - etc/evergreen_yml_components/variants/amazon/test_dev.yml
+# ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &amazon_linux2_arm64_dynamic_expansions
   <<: *linux_arm64_generic_expansions
   compile_variant: *amazon_linux2_arm64_dynamic_compile_variant_name
@@ -214,6 +225,12 @@ buildvariants:
   - name: disk_wiredtiger
   - name: aggregation_embedded_router_jscore_passthrough_gen
   - name: aggregation_sharded_collections_embedded_router_jscore_passthrough_gen
+  - name: concurrency_embedded_router_causal_consistency_gen
+  - name: concurrency_embedded_router_clusterwide_ops_add_remove_shards_gen
+  - name: concurrency_embedded_router_local_read_write_multi_stmt_txn_gen
+  - name: concurrency_embedded_router_multi_stmt_txn_gen
+  - name: concurrency_embedded_router_replication_gen
+  - name: concurrency_embedded_router_replication_bulk_write_gen
   - name: embedded_router_jscore_passthrough_gen
   - name: embedded_router_jscore_passthrough_with_config_shard_gen
   - name: embedded_router_jscore_txns_gen
@@ -275,7 +292,7 @@ buildvariants:
   - name: .sharding .common
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
   - name: sharded_collections_single_writes_without_shard_key_jscore_passthrough_gen
-  - name: sharded_multi_stmt_txn_jscore_passthrough
+  - name: sharded_multi_stmt_txn_jscore_passthrough_gen
   - name: streams
   - name: .unsplittable_collections
   - name: vector_search
@@ -397,7 +414,7 @@ buildvariants:
   - name: .sharding .common !.feature_flag_guarded
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
   - name: sharded_collections_single_writes_without_shard_key_jscore_passthrough_gen
-  - name: sharded_multi_stmt_txn_jscore_passthrough
+  - name: sharded_multi_stmt_txn_jscore_passthrough_gen
   - name: streams
   - name: .updatefuzzer
   - name: vector_search

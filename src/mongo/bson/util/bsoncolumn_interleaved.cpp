@@ -88,6 +88,13 @@ void BlockBasedInterleavedDecompressor::writeToElementStorage(DecodingState::Ele
                               _allocator.allocate(elem.first, fieldName, 8);
                           DataView(esElem.value()).write<LittleEndian<long long>>(elem.second);
                       } break;
+                      case NumberDouble: {
+                          ElementStorage::Element esElem =
+                              _allocator.allocate(elem.first, fieldName, 8);
+                          DataView(esElem.value())
+                              .write<LittleEndian<double>>(Simple8bTypeUtil::decodeDouble(
+                                  elem.second, Simple8bTypeUtil::kMemoryAsInteger));
+                      } break;
                       default:
                           invariant(false, "attempt to materialize unsupported type");
                   }
@@ -166,7 +173,7 @@ void BlockBasedInterleavedDecompressor::DecodingState::loadUncompressed(const BS
                 d128.lastEncodedValue = Simple8bTypeUtil::encodeDecimal128(elem._numberDecimal());
                 break;
             default:
-                invariant(false, "unsupported type");
+                MONGO_UNREACHABLE;
         }
     } else {
         auto& d64 = decoder.template emplace<Decoder64>();
@@ -187,11 +194,17 @@ void BlockBasedInterleavedDecompressor::DecodingState::loadUncompressed(const BS
             case NumberLong:
                 d64.lastEncodedValue = elem._numberLong();
                 break;
+            case NumberDouble:
+                // We don't have an encoding for doubles until we get the scale index from the next
+                // delta control byte.
+                d64.lastEncodedValue = boost::none;
+                break;
             case bsonTimestamp:
                 d64.lastEncodedValue = elem.timestampValue();
                 break;
             default:
-                invariant(false, "unsupported type");
+                // Not all types have an encoded version.
+                break;
         }
         if (d64.deltaOfDelta) {
             d64.lastEncodedValueForDeltaOfDelta = d64.lastEncodedValue.get();
@@ -216,6 +229,7 @@ BlockBasedInterleavedDecompressor::DecodingState::loadControl(ElementStorage& al
     uint8_t control = *buffer;
     if (isUncompressedLiteralControlByte(control)) {
         BSONElement literalElem(buffer, 1, -1);
+        loadUncompressed(literalElem);
         return {literalElem, literalElem.size()};
     }
 
@@ -226,18 +240,26 @@ BlockBasedInterleavedDecompressor::DecodingState::loadControl(ElementStorage& al
     visit(OverloadedVisitor{
               [&](DecodingState::Decoder64& d64) {
                   // Simple-8b delta block, load its scale factor and validate for sanity
-                  d64.scaleIndex = bsoncolumn::scaleIndexForControlByte(control);
+                  uint8_t newScaleIndex = bsoncolumn::scaleIndexForControlByte(control);
                   uassert(8690002,
                           "Invalid control byte in BSON Column",
-                          d64.scaleIndex != bsoncolumn::kInvalidScaleIndex);
+                          newScaleIndex != bsoncolumn::kInvalidScaleIndex);
+
                   // If Double, scale last value according to this scale factor
                   auto type = _lastLiteral.type();
                   if (type == NumberDouble) {
-                      auto encoded = Simple8bTypeUtil::encodeDouble(_lastLiteral._numberDouble(),
-                                                                    d64.scaleIndex);
+                      // Get the current double value, decoding with the old scale index if needed
+                      double val = d64.lastEncodedValue
+                          ? Simple8bTypeUtil::decodeDouble(*d64.lastEncodedValue, d64.scaleIndex)
+                          : _lastLiteral.Double();
+
+                      auto encoded = Simple8bTypeUtil::encodeDouble(val, newScaleIndex);
                       uassert(8690001, "Invalid double encoding in BSON Column", encoded);
                       d64.lastEncodedValue = *encoded;
                   }
+
+                  d64.scaleIndex = newScaleIndex;
+
                   // We can read the last known value from the decoder iterator even as it has
                   // reached end.
                   boost::optional<uint64_t> lastSimple8bValue = d64.pos.valid() ? *d64.pos : 0;
@@ -275,6 +297,13 @@ BlockBasedInterleavedDecompressor::DecodingState::loadDelta(ElementStorage& allo
     if (!d64.deltaOfDelta && *delta == 0) {
         // If we have an encoded representation of the last value, return it.
         if (d64.lastEncodedValue) {
+            if (_lastLiteral.type() == NumberDouble) {
+                auto scaledDouble =
+                    Simple8bTypeUtil::decodeDouble(*d64.lastEncodedValue, d64.scaleIndex);
+                boost::optional<int64_t> encodedScaled = Simple8bTypeUtil::encodeDouble(
+                    scaledDouble, Simple8bTypeUtil::kMemoryAsInteger);
+                return std::pair{_lastLiteral.type(), *encodedScaled};
+            }
             return std::pair{_lastLiteral.type(), *d64.lastEncodedValue};
         }
         // Otherwise return the last uncompressed value we found.
@@ -294,7 +323,15 @@ BlockBasedInterleavedDecompressor::DecodingState::loadDelta(ElementStorage& allo
         return std::pair{_lastLiteral.type(), d64.lastEncodedValueForDeltaOfDelta};
     }
 
-    return std::pair{_lastLiteral.type(), *d64.lastEncodedValue};
+    auto type = _lastLiteral.type();
+    if (type == NumberDouble) {
+        auto scaledDouble = Simple8bTypeUtil::decodeDouble(*d64.lastEncodedValue, d64.scaleIndex);
+        boost::optional<int64_t> encodedScaled =
+            Simple8bTypeUtil::encodeDouble(scaledDouble, Simple8bTypeUtil::kMemoryAsInteger);
+        return std::pair{type, *encodedScaled};
+    }
+
+    return std::pair{type, *d64.lastEncodedValue};
 }
 
 BlockBasedInterleavedDecompressor::DecodingState::Elem

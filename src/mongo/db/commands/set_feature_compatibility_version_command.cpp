@@ -52,6 +52,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
+#include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -100,7 +101,6 @@
 #include "mongo/db/s/config/configsvr_coordinator_service.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
-#include "mongo/db/s/replica_set_endpoint_feature_flag_gen.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_coordinator_service.h"
 #include "mongo/db/s/shard_authoritative_catalog_gen.h"
@@ -629,14 +629,9 @@ private:
         }
 
         // TODO SERVER-77915: Remove once v8.0 branches out
-        if ((isUpgrading &&
-             feature_flags::gTrackUnshardedCollectionsUponCreation
-                 .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion)) ||
-            (isDowngrading &&
-             feature_flags::gTrackUnshardedCollectionsUponCreation
-                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion))) {
+        if (isDowngrading &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection
+                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
@@ -682,15 +677,10 @@ private:
                     opCtx, DDLCoordinatorTypeEnum::kConvertToCapped);
         }
 
-        // TODO SERVER-77915: Remove once trackUnshardedCollections becomes lastLTS.
-        if ((isUpgrading &&
-             feature_flags::gTrackUnshardedCollectionsUponCreation
-                 .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion)) ||
-            (isDowngrading &&
-             feature_flags::gTrackUnshardedCollectionsUponCreation
-                 .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion,
-                                                               originalVersion))) {
+        // TODO SERVER-77915: Remove once v8.0 branches out.
+        if (isDowngrading &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection
+                .isDisabledOnTargetFCVButEnabledOnOriginalFCV(requestedVersion, originalVersion)) {
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(opCtx, DDLCoordinatorTypeEnum::kCollMod);
         }
@@ -743,8 +733,33 @@ private:
     // to happen during the upgrade. It is required that the code in this helper function is
     // idempotent and could be done after _runDowngrade even if it failed at any point in the middle
     // of _userCollectionsUassertsForDowngrade or _internalServerCleanupForDowngrade.
-    void _userCollectionsWorkForUpgrade() {
-        return;
+    void _userCollectionsWorkForUpgrade(
+        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+        const auto& [originalVersion, _] = getTransitionFCVFromAndTo(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion());
+        if (gFeatureFlagQERangeV2.isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
+                                                                               originalVersion)) {
+            auto checkForDeprecatedQueryType = [](const Collection* collection) {
+                const auto& encryptedFields =
+                    collection->getCollectionOptions().encryptedFieldConfig;
+                if (encryptedFields) {
+                    uassert(ErrorCodes::CannotUpgrade,
+                            str::stream()
+                                << "Collection " << collection->ns().toStringForErrorMsg()
+                                << " has an encrypted field with query type rangePreview, "
+                                   "which is deprecated. Please drop this collection "
+                                   "before trying to upgrade FCV.",
+                            !hasQueryType(encryptedFields.get(),
+                                          QueryTypeEnum::RangePreviewDeprecated));
+                }
+                return true;
+            };
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+                catalog::forEachCollectionFromDb(
+                    opCtx, dbName, MODE_IS, checkForDeprecatedQueryType);
+            }
+        }
     }
 
     void _maybeRemoveOldAuditConfig(
@@ -1042,7 +1057,7 @@ private:
         // is idempotent and could be done after _runDowngrade even if it failed at any point in the
         // middle of _userCollectionsUassertsForDowngrade or _internalServerCleanupForDowngrade.
         if (!role || role->has(ClusterRole::None) || role->has(ClusterRole::ShardServer)) {
-            _userCollectionsWorkForUpgrade();
+            _userCollectionsWorkForUpgrade(opCtx, requestedVersion);
         }
 
         uassert(ErrorCodes::Error(549180),
@@ -1216,6 +1231,26 @@ private:
                     [&](const Collection* collection) {
                         return collection->areRecordIdsReplicated();
                     });
+            }
+        }
+
+        if (!gFeatureFlagQERangeV2.isEnabledOnVersion(requestedVersion)) {
+            auto checkForNewRangeQueryType = [](const Collection* collection) {
+                const auto& encryptedFields =
+                    collection->getCollectionOptions().encryptedFieldConfig;
+                if (encryptedFields) {
+                    uassert(ErrorCodes::CannotDowngrade,
+                            str::stream() << "Collection " << collection->ns().toStringForErrorMsg()
+                                          << " has an encrypted field with query type range, "
+                                             "which is new in 8.0. Please drop this collection "
+                                             "before trying to downgrade FCV.",
+                            !hasQueryType(encryptedFields.get(), QueryTypeEnum::Range));
+                }
+                return true;
+            };
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+                catalog::forEachCollectionFromDb(opCtx, dbName, MODE_IS, checkForNewRangeQueryType);
             }
         }
     }
@@ -1760,6 +1795,23 @@ private:
             ShardingDDLCoordinatorService::getService(opCtx)
                 ->waitForCoordinatorsOfGivenTypeToComplete(
                     opCtx, DDLCoordinatorTypeEnum::kCreateCollection);
+        }
+
+        // TODO SERVER-77915: Remove once v8.0 branches out.
+        if (role && role->has(ClusterRole::ShardServer) &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(
+                    opCtx, DDLCoordinatorTypeEnum::kRenameCollection);
+        }
+
+        // TODO SERVER-77915: Remove once v8.0 branches out.
+        if (role && role->has(ClusterRole::ShardServer) &&
+            feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabledOnVersion(
+                requestedVersion)) {
+            ShardingDDLCoordinatorService::getService(opCtx)
+                ->waitForCoordinatorsOfGivenTypeToComplete(opCtx, DDLCoordinatorTypeEnum::kCollMod);
         }
 
         _maybeRemoveOldAuditConfig(opCtx, requestedVersion);

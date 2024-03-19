@@ -1,5 +1,8 @@
 # RHEL build variants for testing development environments
-# that should run only on master branch projects
+#
+# After the branching variants in this file
+# should NOT run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -247,10 +250,10 @@ buildvariants:
     # and processes to be used with TLS on a single host.
     - name: .jscore .common !sharding_uninitialized_fcv_jscore_passthrough_gen !.auth !.sharding !.txns
     - name: .lint
-    - name: libdeps_graph_linting_TG
+    - name: libdeps_graph_linting
       distros:
       - rhel80-large
-    - name: clang_tidy_TG
+    - name: clang_tidy
       distros:
       - rhel80-xxlarge
 
@@ -395,7 +398,7 @@ buildvariants:
   - name: .sharding .txns
   - name: .sharding .common
   - name: sharded_collections_single_writes_without_shard_key_jscore_passthrough_gen
-  - name: sharded_multi_stmt_txn_jscore_passthrough
+  - name: sharded_multi_stmt_txn_jscore_passthrough_gen
   - name: .serverless
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
   - name: .unsplittable_collections
@@ -550,7 +553,7 @@ buildvariants:
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
   - name: sharding_csrs_continuous_config_stepdown_gen
-  - name: sharded_multi_stmt_txn_jscore_passthrough
+  - name: sharded_multi_stmt_txn_jscore_passthrough_gen
     distros:
     - rhel80-medium
 
@@ -1133,7 +1136,7 @@ buildvariants:
   - name: .sharding .txns
   - name: .sharding .common
   - name: sharded_collections_single_writes_without_shard_key_jscore_passthrough_gen
-  - name: sharded_multi_stmt_txn_jscore_passthrough
+  - name: sharded_multi_stmt_txn_jscore_passthrough_gen
   - name: .serverless
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
   - name: secondary_reads_passthrough_gen

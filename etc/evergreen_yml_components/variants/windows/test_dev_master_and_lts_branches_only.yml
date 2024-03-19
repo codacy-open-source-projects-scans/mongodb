@@ -1,5 +1,8 @@
-# Windows build variants for testing development environments that should run
-# only on master and LTS release (7.0, 6.0 etc.) branch projects
+# Windows build variants for testing development environments
+#
+# After the branching variants in this file
+# should continue to run ONLY on a new LTS release (v7.0, v6.0 etc.) branch projects
+# and should NOT run on a new rapid release (v7.1, v7.2 etc.) branch projects
 
 buildvariants:
 - name: enterprise-windows-inmem
@@ -51,7 +54,7 @@ buildvariants:
   - name: .read_write_concern .linearize !.durable_history
   - name: replica_sets_auth_gen
   - name: replica_sets_jscore_passthrough_gen
-  - name: replica_sets_multi_stmt_txn_jscore_passthrough
+  - name: replica_sets_multi_stmt_txn_jscore_passthrough_gen
   - name: sasl
   - name: .sharding .txns
   - name: sharding_auth_audit_gen

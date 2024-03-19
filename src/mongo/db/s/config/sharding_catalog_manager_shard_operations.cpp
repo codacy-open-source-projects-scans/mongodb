@@ -100,7 +100,6 @@
 #include "mongo/db/s/add_shard_util.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
-#include "mongo/db/s/replica_set_endpoint_feature_flag_gen.h"
 #include "mongo/db/s/sharding_cluster_parameters_gen.h"
 #include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/db/s/sharding_ddl_util.h"
@@ -1582,8 +1581,7 @@ Status ShardingCatalogManager::_pullClusterTimeKeys(
 
     auto opTime = keys_collection_util::storeExternalClusterTimeKeyDocs(opCtx, std::move(keyDocs));
     auto waitStatus = WaitForMajorityService::get(opCtx->getServiceContext())
-                          .waitUntilMajorityForWrite(
-                              opCtx->getServiceContext(), opTime, opCtx->getCancellationToken())
+                          .waitUntilMajorityForWrite(opTime, opCtx->getCancellationToken())
                           .getNoThrow();
     if (!waitStatus.isOK()) {
         return waitStatus;

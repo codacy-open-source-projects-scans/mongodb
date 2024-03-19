@@ -109,7 +109,6 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
-#include "mongo/db/storage/ticketholder_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_column_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
@@ -348,7 +347,9 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
       _oplogManager(std::make_unique<WiredTigerOplogManager>()),
       _canonicalName(canonicalName),
       _path(path),
-      _sizeStorerSyncTracker(cs, 100000, Seconds(60)),
+      _sizeStorerSyncTracker(cs,
+                             gWiredTigerSizeStorerPeriodicSyncHits,
+                             Milliseconds{gWiredTigerSizeStorerPeriodicSyncPeriodMillis}),
       _ephemeral(ephemeral),
       _inRepairMode(repair),
       _cacheSizeMB(cacheSizeMB) {
@@ -643,14 +644,12 @@ void WiredTigerKVEngine::notifyReplStartupRecoveryComplete(OperationContext* opC
     // value. In this case, we expect the oldest timestamp to be advanced in lockstep with the
     // stable timestamp during any recovery process, and so the oldest timestamp should never exceed
     // the stable timestamp.
-    // TODO (SERVER-85688): Re-enable this invariant once the stable timestamp is correctly handled
-    // during startup recovery for restore.
-    // const Timestamp oldest = getOldestTimestamp();
-    // const Timestamp stable = getStableTimestamp();
-    // uassert(8470600,
-    //         str::stream() << "Oldest timestamp " << oldest
-    //                       << " is ahead of non-zero stable timestamp " << stable,
-    //         (stable.isNull() || oldest.isNull() || oldest <= stable));
+    const Timestamp oldest = getOldestTimestamp();
+    const Timestamp stable = getStableTimestamp();
+    uassert(8470600,
+            str::stream() << "Oldest timestamp " << oldest
+                          << " is ahead of non-zero stable timestamp " << stable,
+            (stable.isNull() || oldest.isNull() || oldest <= stable));
 
     if (!gEnableAutoCompaction)
         return;
@@ -660,10 +659,10 @@ void WiredTigerKVEngine::notifyReplStartupRecoveryComplete(OperationContext* opC
     }
 
     // TODO SERVER-84357: exclude the oplog table.
-    StorageEngine::AutoCompactOptions options{/*enable=*/true,
-                                              /*runOnce=*/false,
-                                              /*freeSpaceTargetMB=*/boost::none,
-                                              /*excludedIdents*/ std::vector<StringData>()};
+    AutoCompactOptions options{/*enable=*/true,
+                               /*runOnce=*/false,
+                               /*freeSpaceTargetMB=*/boost::none,
+                               /*excludedIdents*/ std::vector<StringData>()};
 
     // Holding the global lock to prevent racing with storage shutdown. However, no need to hold the
     // RSTL nor acquire a flow control ticket. This doesn't care about the replica state of the node
@@ -687,13 +686,6 @@ void WiredTigerKVEngine::notifyReplStartupRecoveryComplete(OperationContext* opC
         invariantStatusOK(
             status.withContext("Background compaction failed to start due to an unexpected error"));
     }
-}
-
-void WiredTigerKVEngine::appendGlobalStats(OperationContext* opCtx, BSONObjBuilder& b) {
-    BSONObjBuilder bb(b.subobjStart("concurrentTransactions"));
-    auto ticketHolderManager = TicketHolderManager::get(opCtx->getServiceContext());
-    ticketHolderManager->appendStats(bb);
-    bb.done();
 }
 
 void WiredTigerKVEngine::_openWiredTiger(const std::string& path, const std::string& wtOpenConfig) {
@@ -2816,8 +2808,7 @@ void WiredTigerKVEngine::sizeStorerPeriodicFlush() {
     }
 }
 
-Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx,
-                                       const StorageEngine::AutoCompactOptions& options) {
+Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) {
     dassert(shard_role_details::getLocker(opCtx)->isLocked());
 
     auto status = WiredTigerUtil::canRunAutoCompact(opCtx, isEphemeral());
@@ -2834,7 +2825,7 @@ Status WiredTigerKVEngine::autoCompact(OperationContext* opCtx,
             // Create WiredTiger URIs from the idents.
             config << ",exclude=[";
             for (const auto& ident : options.excludedIdents) {
-                config << "\"" << _uri(ident) + ".wt\",";
+                config << "\"" << _uri(ident) << ".wt\",";
             }
             config << "]";
         }

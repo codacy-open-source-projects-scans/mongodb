@@ -42,6 +42,7 @@
 #include "mongo/base/data_view.h"
 #include "mongo/bson/util/simple8b_helpers.h"
 #include "mongo/platform/int128.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -195,6 +196,7 @@ void Simple8b<T>::Iterator::_loadBlock() {
     _current = ConstDataView(_pos).read<LittleEndian<uint64_t>>();
 
     _selector = _current & kBaseSelectorMask;
+    uassert(8787300, "invalid selector 0", _selector);
     uint8_t selectorExtension = ((_current >> kSelectorBits) & kBaseSelectorMask);
 
     // If RLE selector, just load remaining count. Keep value from previous.
@@ -212,6 +214,7 @@ void Simple8b<T>::Iterator::_loadBlock() {
     // If Selectors 7 or 8 check if we are using extended selectors
     if (_selector == 7 || _selector == 8) {
         _extensionType = kSelectorToExtension[_selector - 7][selectorExtension];
+        uassert(8787301, "invalid extended selector", _extensionType != kInvalidSelector);
         // Use the extended selector if extension is != 0
         if (_extensionType != kBaseSelector) {
             _selector = selectorExtension;
@@ -346,6 +349,22 @@ namespace simple8b {
 // Constant for a simple8b block containing a single 'missing' value.
 static constexpr uint64_t kSingleSkip = 0xFFFFFFFFFFFFFFFE;
 
+// Constant for a simple8b block containing a single zero value.
+static constexpr uint64_t kSingleZero = 0xE;
+
+/**
+ * Visits all values in sequence with provided callbacks
+ * visit - a callback for receiving values, it is expected to accept
+ *         a newly decoded value and a last value
+ * visitMissing - a callback for receiving missing
+ */
+template <typename T, typename Visit, typename VisitMissing>
+inline void visitAll(const char* buffer,
+                     size_t size,
+                     uint64_t& prevNonRLE,
+                     const Visit& visit,
+                     const VisitMissing& visitMissing);
+
 /**
  * Calculates the sum for multiple simple8b blocks in a buffer. 'prevNonRLE' should be initialized
  * to 'kSingleSkip' when calculating sum for the first buffer. If the caller needs sum from multiple
@@ -366,3 +385,5 @@ T prefixSum(const char* buffer, size_t size, T& prefix, uint64_t& prevNonRLE);
 }  // namespace simple8b
 
 }  // namespace mongo
+
+#include "simple8b.inl"

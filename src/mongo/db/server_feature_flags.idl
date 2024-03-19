@@ -140,7 +140,7 @@ feature_flags:
     featureFlagCompactOptions:
         description: "Feature flag to execute compaction with more options"
         cpp_varname: gFeatureFlagCompactOptions
-        default: false
+        default: true
         shouldBeFCVGated: false
     featureFlagLogSlowOpsBasedOnTimeWorking:
         description: "Feature flag to enable slow operation logging based on time working rather
@@ -163,13 +163,19 @@ feature_flags:
         cpp_varname: gFeatureFlagIngressAdmissionControl
         default: false
         shouldBeFCVGated: false
-    featureFlagOIDCMultipurposeIDP:
-        description: "Feature flag for OIDC multi-purpose IdPs"
-        cpp_varname: gFeatureFlagOIDCMultipurposeIDP
-        default: false
-        shouldBeFCVGated: false
     featureFlagPrefetch:
         description: "Feature flag to make pre-fetching available"
         cpp_varname: gFeatureFlagPrefetch
+        default: true
+        shouldBeFCVGated: false
+    featureFlagDefaultReadMaxTimeMS:
+        description: "Feature flag to allow setting a server-wide default maxTimeMS used for all
+        read operations"
+        cpp_varname: gFeatureFlagDefaultReadMaxTimeMS
+        default: false
+        shouldBeFCVGated: true
+    featureFlagPeriodicServerParameterSampling:
+        description: "Feature flag to enable periodic FTDC sampling of server parameters"
+        cpp_varname: gFeatureFlagPeriodicServerParameterSampling
         default: false
         shouldBeFCVGated: false

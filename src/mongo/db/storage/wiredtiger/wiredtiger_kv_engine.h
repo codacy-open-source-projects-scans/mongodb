@@ -431,8 +431,6 @@ public:
         return _oplogManager.get();
     }
 
-    static void appendGlobalStats(OperationContext* opCtx, BSONObjBuilder& b);
-
     Timestamp getStableTimestamp() const override;
     Timestamp getOldestTimestamp() const override;
     Timestamp getCheckpointTimestamp() const override;
@@ -481,8 +479,7 @@ public:
                                              Timestamp requestedTimestamp,
                                              bool roundUpIfTooOld) override;
 
-    Status autoCompact(OperationContext* opCtx,
-                       const StorageEngine::AutoCompactOptions& options) override;
+    Status autoCompact(OperationContext* opCtx, const AutoCompactOptions& options) override;
 
 private:
     StatusWith<Timestamp> _pinOldestTimestamp(WithLock,

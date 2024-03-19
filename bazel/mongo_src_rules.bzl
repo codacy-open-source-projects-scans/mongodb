@@ -4,7 +4,7 @@ load("@poetry//:dependencies.bzl", "dependency")
 # config selection
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
-load("//bazel:separate_debug.bzl", "CC_SHARED_LIBRARY_SUFFIX", "WITH_DEBUG_SUFFIX", "extract_debuginfo", "extract_debuginfo_binary")
+load("//bazel:separate_debug.bzl", "CC_SHARED_LIBRARY_SUFFIX", "SHARED_ARCHIVE_SUFFIX", "WITH_DEBUG_SUFFIX", "extract_debuginfo", "extract_debuginfo_binary")
 
 # https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library?view=msvc-170
 #   /MD defines _MT and _DLL and links in MSVCRT.lib into each .obj file
@@ -185,7 +185,37 @@ WINDOWS_WARNINGS_AS_ERRORS_COPTS = select({
     "//conditions:default": [],
 })
 
-WINDOWS_COPTS = WINDOWS_GENERAL_COPTS + WINDOWS_OPT_COPTS + WINDOWS_MULTITHREAD_RUNTIME_COPTS + WINDOWS_RUNTIME_ERROR_CHECK_COPTS + WINDOWS_SUPRESSED_WARNINGS_COPTS + WINDOWS_WARNINGS_AS_ERRORS_COPTS
+MSVC_OPT_COPTS = select({
+    "//bazel/config:msvc_opt": [
+        # https://devblogs.microsoft.com/cppblog/introducing-gw-compiler-switch/
+        "/Gw",
+        "/Gy",
+
+        # https://devblogs.microsoft.com/cppblog/linker-enhancements-in-visual-studio-2013-update-2-ctp2/
+        "/Zc:inline",
+    ],
+    "//conditions:default": [],
+})
+
+WINDOWS_COPTS = WINDOWS_GENERAL_COPTS + WINDOWS_OPT_COPTS + WINDOWS_MULTITHREAD_RUNTIME_COPTS + WINDOWS_RUNTIME_ERROR_CHECK_COPTS + \
+                WINDOWS_SUPRESSED_WARNINGS_COPTS + WINDOWS_WARNINGS_AS_ERRORS_COPTS + MSVC_OPT_COPTS
+
+WINDOWS_DEFAULT_LINKFLAGS = select({
+    "@platforms//os:windows": [
+        # /DEBUG will tell the linker to create a .pdb file
+        # which WinDbg and Visual Studio will use to resolve
+        # symbols if you want to debug a release-mode image.
+        # Note that this means we can't do parallel links in the build.
+        #
+        # Please also note that this has nothing to do with _DEBUG or optimization.
+
+        # If the user set a /DEBUG flag explicitly, don't add
+        # another. Otherwise use the standard /DEBUG flag, since we always
+        # want PDBs.
+        "/DEBUG",
+    ],
+    "//conditions:default": [],
+})
 
 # Windows non optimized builds will cause the PDB to blow up in size,
 # this allows a larger PDB. The flag is undocumented at the time of writing
@@ -216,7 +246,16 @@ WINDOWS_LARGE_ADDRESS_AWARE_LINKFLAG = select({
     "//conditions:default": [],
 })
 
-WINDOWS_LINKFLAGS = WINDOWS_PDB_PAGE_SIZE_LINKOPT + WINDOWS_INCREMENTAL_LINKOPT + WINDOWS_LARGE_ADDRESS_AWARE_LINKFLAG
+MSVC_OPT_LINKFLAGS = select({
+    "//bazel/config:msvc_opt": [
+        # https://devblogs.microsoft.com/cppblog/introducing-gw-compiler-switch/
+        "/OPT:REF",
+    ],
+    "//conditions:default": [],
+})
+
+WINDOWS_LINKFLAGS = WINDOWS_DEFAULT_LINKFLAGS + WINDOWS_PDB_PAGE_SIZE_LINKOPT + WINDOWS_INCREMENTAL_LINKOPT + \
+                    WINDOWS_LARGE_ADDRESS_AWARE_LINKFLAG + MSVC_OPT_LINKFLAGS
 
 WINDOWS_DEFINES = select({
     "@platforms//os:windows": [
@@ -244,6 +283,61 @@ WINDOWS_DEFINES = select({
     "//conditions:default": [],
 })
 
+LINUX_DEFINES = select({
+    "@platforms//os:linux": [
+        # On linux, C code compiled with gcc/clang -std=c11 causes
+        # __STRICT_ANSI__ to be set, and that drops out all of the feature
+        # test definitions, resulting in confusing errors when we run C
+        # language configure checks and expect to be able to find newer
+        # POSIX things. Explicitly enabling _XOPEN_SOURCE fixes that, and
+        # should be mostly harmless as on Linux, these macros are
+        # cumulative. The C++ compiler already sets _XOPEN_SOURCE, and,
+        # notably, setting it again does not disable any other feature
+        # test macros, so this is safe to do. Other platforms like macOS
+        # and BSD have crazy rules, so don't try this there.
+        #
+        # Furthermore, as both C++ compilers appear to define _GNU_SOURCE
+        # unconditionally (because libstdc++ requires it), it seems
+        # prudent to explicitly add that too, so that C language checks
+        # see a consistent set of definitions.
+        "_XOPEN_SOURCE=700",
+        "_GNU_SOURCE",
+    ],
+    "//conditions:default": [],
+})
+
+ABSEIL_DEFINES = [
+    "ABSL_FORCE_ALIGNED_ACCESS",
+]
+
+BOOST_DEFINES = [
+    "BOOST_ENABLE_ASSERT_DEBUG_HANDLER",
+    # TODO: Ideally, we could not set this define in C++20
+    # builds, but at least our current Xcode 12 doesn't offer
+    # std::atomic_ref, so we cannot.
+    "BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF",
+    "BOOST_LOG_NO_SHORTHAND_NAMES",
+    "BOOST_LOG_USE_NATIVE_SYSLOG",
+    "BOOST_LOG_WITHOUT_THREAD_ATTR",
+    "BOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS",
+    "BOOST_SYSTEM_NO_DEPRECATED",
+    "BOOST_THREAD_USES_DATETIME",
+    "BOOST_THREAD_VERSION=5",
+] + select({
+    "//bazel/config:linkdynamic_not_shared_archive": ["BOOST_LOG_DYN_LINK"],
+    "//conditions:default": [],
+}) + select({
+    "@platforms//os:windows": ["BOOST_ALL_NO_LIB"],
+    "//conditions:default": [],
+})
+
+# Fortify only possibly makes sense on POSIX systems, and we know that clang is not a valid
+# combination: http://lists.llvm.org/pipermail/cfe-dev/2015-November/045852.html
+GCC_OPT_DEFINES = select({
+    "//bazel/config:gcc_opt": ["_FORTIFY_SOURCE=2"],
+    "//conditions:default": [],
+})
+
 LINUX_OPT_COPTS = select({
     "//bazel/config:linux_opt_off": [
         "-O0",
@@ -257,6 +351,222 @@ LINUX_OPT_COPTS = select({
     # This is opt=debug, not to be confused with (opt=on && dbg=on)
     "//bazel/config:linux_opt_debug": [
         "-Og",
+    ],
+    "//conditions:default": [],
+})
+
+GCC_OR_CLANG_WARNINGS_COPTS = select({
+    "//bazel/config:gcc_or_clang": [
+        # Enable all warnings by default.
+        "-Wall",
+
+        # Warn on comparison between signed and unsigned integer expressions.
+        "-Wsign-compare",
+
+        # Do not warn on unknown pragmas.
+        "-Wno-unknown-pragmas",
+
+        # Warn if a precompiled header (see Precompiled Headers) is found in the search path but can't be used.
+        "-Winvalid-pch",
+
+        # Warn when hiding a virtual function.
+        "-Woverloaded-virtual",
+
+        # This warning was added in g++-4.8.
+        "-Wno-unused-local-typedefs",
+
+        # Clang likes to warn about unused functions, which seems a tad aggressive and breaks
+        # -Werror, which we want to be able to use.
+        "-Wno-unused-function",
+
+        # TODO: Note that the following two flags are added to CCFLAGS even though they are
+        # really C++ specific. We need to do this because SCons passes CXXFLAGS *before*
+        # CCFLAGS, but CCFLAGS contains -Wall, which re-enables the warnings we are trying to
+        # suppress. In the future, we should move all warning flags to CCWARNFLAGS and
+        # CXXWARNFLAGS and add these to CCOM and CXXCOM as appropriate.
+        #
+        # Clang likes to warn about unused private fields, but some of our third_party
+        # libraries have such things.
+        "-Wno-unused-private-field",
+
+        # Prevents warning about using deprecated features (such as auto_ptr in c++11)
+        # Using -Wno-error=deprecated-declarations does not seem to work on some compilers,
+        # including at least g++-4.6.
+        "-Wno-deprecated-declarations",
+
+        # As of clang-3.4, this warning appears in v8, and gets escalated to an error.
+        "-Wno-tautological-constant-out-of-range-compare",
+
+        # As of clang in Android NDK 17, these warnings appears in boost and/or ICU, and get escalated to errors
+        "-Wno-tautological-constant-compare",
+        "-Wno-tautological-unsigned-zero-compare",
+        "-Wno-tautological-unsigned-enum-zero-compare",
+
+        # New in clang-3.4, trips up things mostly in third_party, but in a few places in the
+        # primary mongo sources as well.
+        "-Wno-unused-const-variable",
+
+        # This has been suppressed in gcc 4.8, due to false positives, but not in clang.  So
+        # we explicitly disable it here.
+        "-Wno-missing-braces",
+
+        # Suppress warnings about not consistently using override everywhere in a class. It seems
+        # very pedantic, and we have a fair number of instances.
+        "-Wno-inconsistent-missing-override",
+
+        # Don't issue warnings about potentially evaluated expressions
+        "-Wno-potentially-evaluated-expression",
+
+        # SERVER-76472 we don't try to maintain ABI so disable warnings about possible ABI issues.
+        "-Wno-psabi",
+
+        # Warn about moves of prvalues, which can inhibit copy elision.
+        "-Wpessimizing-move",
+
+        # Disable warning about templates that can't be implicitly instantiated. It is an attempt to
+        # make a link error into an easier-to-debug compiler failure, but it triggers false
+        # positives if explicit instantiation is used in a TU that can see the full definition. This
+        # is a problem at least for the S2 headers.
+        "-Wno-undefined-var-template",
+
+        # This warning was added in clang-4.0, but it warns about code that is required on some
+        # platforms. Since the warning just states that 'explicit instantiation of [a template] that
+        # occurs after an explicit specialization has no effect', it is harmless on platforms where
+        # it isn't required
+        "-Wno-instantiation-after-specialization",
+
+        # This warning was added in clang-5 and flags many of our lambdas. Since it isn't actively
+        # harmful to capture unused variables we are suppressing for now with a plan to fix later.
+        "-Wno-unused-lambda-capture",
+
+        # Enable sized deallocation support.
+        "-fsized-deallocation",
+
+        # This warning was added in Apple clang version 11 and flags many explicitly defaulted move
+        # constructors and assignment operators for being implicitly deleted, which is not useful.
+        "-Wno-defaulted-function-deleted",
+
+        # This may have compatibility issues since it was disabled conditionally on a compile check in
+        # the SCons implementation. Disable if this is causing issues.
+        "-Wnon-virtual-dtor",
+    ],
+    "//conditions:default": [],
+})
+
+CLANG_WARNINGS_COPTS = select({
+    "//bazel/config:compiler_type_clang": [
+        # SERVER-44856: Our windows builds complain about unused
+        # exception parameters, but GCC and clang don't seem to do
+        # that for us automatically. In the interest of making it more
+        # likely to catch these errors early, add the (currently clang
+        # only) flag that turns it on.
+        "-Wunused-exception-parameter",
+    ],
+    "//conditions:default": [],
+})
+
+CLANG_FNO_LIMIT_DEBUG_INFO = select({
+    "//bazel/config:compiler_type_clang": [
+        # We add this flag to make clang emit debug info for c++ stl types so that our pretty
+        # printers will work with newer clang's which omit this debug info. This does increase
+        # the overall debug info size.
+        "-fno-limit-debug-info",
+    ],
+    "//conditions:default": [],
+})
+
+MACOS_WARNINGS_COPTS = select({
+    "@platforms//os:macos": [
+        # As of XCode 9, this flag must be present (it is not enabled
+        # by -Wall), in order to enforce that -mXXX-version-min=YYY
+        # will enforce that you don't use APIs from ZZZ.
+        "-Wunguarded-availability",
+    ],
+    "//conditions:default": [],
+})
+
+GCC_OR_CLANG_GENERAL_COPTS = select({
+    "//bazel/config:gcc_or_clang": [
+        # Generate unwind table in DWARF format, if supported by target machine.
+        # The table is exact at each instruction boundary, so it can be used for stack unwinding
+        # from asynchronous events (such as debugger or garbage collector).
+        "-fasynchronous-unwind-tables",
+
+        # For debug builds with tcmalloc, we need the frame pointer so it can
+        # record the stack of allocations.
+        # We also need the stack pointer for stack traces unless libunwind is enabled.
+        # Enable frame pointers by default.
+        "-fno-omit-frame-pointer",
+
+        # Enable strong by default, this may need to be softened to -fstack-protector-all if
+        # we run into compatibility issues.
+        "-fstack-protector-strong",
+    ],
+    "//conditions:default": [],
+})
+
+LINUX_PTHREAD_LINKFLAG = select({
+    "@platforms//os:linux": [
+        # Adds support for multithreading with the pthreads library.
+        # This option sets flags for both the preprocessor and linker.
+        "-pthread",
+    ],
+    "//conditions:default": [],
+})
+
+RDYNAMIC_LINKFLAG = select({
+    # We need to use rdynamic for backtraces with glibc unless we have libunwind.
+    "@platforms//os:linux": [
+        # Pass the flag -export-dynamic to the ELF linker, on targets that support it.
+        # This instructs the linker to add all symbols, not only used ones, to the dynamic symbol table.
+        # This option is needed for some uses of dlopen or to allow obtaining backtraces from within a program.
+        "-rdynamic",
+    ],
+    "//conditions:default": [],
+})
+
+# These are added to both copts and linker flags.
+DWARF_VERSION_FEATURES = select({
+    "//bazel/config:dwarf_version_4_linux": [
+        "dwarf-4",
+    ],
+    "//bazel/config:dwarf_version_5_linux": [
+        "dwarf-5",
+    ],
+    "//conditions:default": [],
+})
+
+# SERVER-9761: Ensure early detection of missing symbols in dependent
+# libraries at program startup. For non-release dynamic builds we disable
+# this behavior in the interest of improved mongod startup times.
+BIND_AT_LOAD_LINKFLAGS = select({
+    "//bazel/config:linkstatic_enabled_macos": [
+        "-Wl,-bind_at_load",
+    ],
+    "//bazel/config:linkstatic_enabled_linux": [
+        "-Wl,-z,now",
+    ],
+    "//conditions:default": [],
+})
+
+# Disable floating-point contractions such as forming of fused multiply-add operations.
+FLOATING_POINT_COPTS = select({
+    "//bazel/config:compiler_type_clang": ["-ffp-contract=off"],
+    "//bazel/config:compiler_type_gcc": ["-ffp-contract=off"],
+
+    # msvc defaults to /fp:precise. Visual Studio 2022 does not emit floating-point contractions
+    # with /fp:precise, but previous versions can. Disable contractions altogether by using
+    # /fp:strict.
+    "//bazel/config:compiler_type_msvc": ["/fp:strict"],
+})
+
+EXTRA_GLOBAL_LIBS_LINKFLAGS = select({
+    "@platforms//os:linux": [
+        "-lm",
+        "-lresolv",
+    ],
+    "@platforms//os:macos": [
+        "-lresolv",
     ],
     "//conditions:default": [],
 })
@@ -333,6 +643,22 @@ ANY_SANITIZER_AVAILABLE_COPTS = select(
     },
     no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE,
 )
+
+ANY_SANITIZER_AVAILABLE_LINKFLAGS = select(
+    {
+        # Sanitizer libs may inject undefined refs (for hooks) at link time, but
+        # the symbols will be available at runtime via the compiler runtime lib.
+        "//bazel/config:any_sanitizer_required_setting": ["-Wl,--allow-shlib-undefined"],
+        "//bazel/config:no_enabled_sanitizer": [],
+    },
+    no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE,
+)
+
+ANY_SANITIZER_GCC_LINKFLAGS = select({
+    # GCC's implementation of ASAN depends on libdl.
+    "//bazel/config:any_sanitizer_gcc": ["-ldl"],
+    "//conditions:default": [],
+})
 
 SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE = (
     "\nError:\n" +
@@ -537,17 +863,88 @@ DETECT_ODR_VIOLATIONS_LINKFLAGS = select({
     ("//bazel/config:detect_odr_violations_disabled"): [],
 }, no_match_error = DETECT_ODR_VIOLATIONS_ERROR_MESSAGE)
 
+# These are added as both copts and linker flags.
+GDWARF_FEATURES = select({
+    # SCons implementation originally used a compiler check to verify that -gdwarf64 was supported.
+    # If this creates incompatibility issues, we may need to fallback to -gdwarf32 in certain cases.
+    "//bazel/config:linux_gcc": ["dwarf64"],
+    "//bazel/config:linux_clang": ["dwarf32"],
+    "//conditions:default": [],
+})
+
+DEBUG_TYPES_SECTION_FLAGS = select({
+    "//bazel/config:linux_clang_linkstatic": [
+        "-fdebug-types-section",
+    ],
+    "//conditions:default": [],
+})
+
+GCC_OR_CLANG_LINKFLAGS = select({
+    "//bazel/config:gcc_or_clang": [
+        # Explicitly enable GNU build id's if the linker supports it.
+        "-Wl,--build-id",
+
+        # Explicitly use the new gnu hash section if the linker offers it.
+        "-Wl,--hash-style=gnu",
+
+        # Disallow an executable stack. Also, issue a warning if any files are found that would
+        # cause the stack to become executable if the noexecstack flag was not in play, so that we
+        # can find them and fix them. We do this here after we check for ld.gold because the
+        # --warn-execstack is currently only offered with gold.
+        "-Wl,-z,noexecstack",
+        "-Wl,--warn-execstack",
+
+        # If possible with the current linker, mark relocations as read-only.
+        "-Wl,-z,relro",
+    ],
+    "//conditions:default": [],
+})
+
+COMPRESS_DEBUG_COPTS = select({
+    # Disable debug compression in both the assembler and linker
+    # by default.
+    "//bazel/config:linux_gcc": [
+        "-Wa,--nocompress-debug-sections",
+    ],
+    "//conditions:default": [],
+})
+
+COMPRESS_DEBUG_LINKFLAGS = select({
+    # Disable debug compression in both the assembler and linker
+    # by default.
+    "@platforms//os:linux": [
+        "-Wl,--compress-debug-sections=none",
+    ],
+    "//conditions:default": [],
+})
+
+# Avoid deduping symbols on OS X debug builds, as it takes a long time.
+DEDUPE_SYMBOL_LINKFLAGS = select({
+    "//bazel/config:macos_opt_off": ["-Wl,-no_deduplicate"],
+    "//conditions:default": [],
+})
+
 MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES + \
                        THREAD_SANITIZER_DEFINES + UNDEFINED_SANITIZER_DEFINES + GLIBCXX_DEBUG_DEFINES + \
-                       WINDOWS_DEFINES + TCMALLOC_DEFINES
+                       WINDOWS_DEFINES + TCMALLOC_DEFINES + LINUX_DEFINES + GCC_OPT_DEFINES + BOOST_DEFINES + \
+                       ABSEIL_DEFINES
 
 MONGO_GLOBAL_COPTS = ["-Isrc"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS + \
                      MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + UNDEFINED_SANITIZER_COPTS + \
-                     THREAD_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS + LINUX_OPT_COPTS
+                     THREAD_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS + LINUX_OPT_COPTS + \
+                     GCC_OR_CLANG_WARNINGS_COPTS + GCC_OR_CLANG_GENERAL_COPTS + \
+                     FLOATING_POINT_COPTS + MACOS_WARNINGS_COPTS + CLANG_WARNINGS_COPTS + \
+                     CLANG_FNO_LIMIT_DEBUG_INFO + COMPRESS_DEBUG_COPTS + DEBUG_TYPES_SECTION_FLAGS
 
 MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS + \
                          UNDEFINED_SANITIZER_LINKFLAGS + THREAD_SANITIZER_LINKFLAGS + \
-                         LIBCXX_LINKFLAGS + LINKER_LINKFLAGS + DETECT_ODR_VIOLATIONS_LINKFLAGS + WINDOWS_LINKFLAGS
+                         LIBCXX_LINKFLAGS + LINKER_LINKFLAGS + DETECT_ODR_VIOLATIONS_LINKFLAGS + WINDOWS_LINKFLAGS + \
+                         BIND_AT_LOAD_LINKFLAGS + RDYNAMIC_LINKFLAG + LINUX_PTHREAD_LINKFLAG + \
+                         EXTRA_GLOBAL_LIBS_LINKFLAGS + ANY_SANITIZER_AVAILABLE_LINKFLAGS + ANY_SANITIZER_GCC_LINKFLAGS + \
+                         GCC_OR_CLANG_LINKFLAGS + COMPRESS_DEBUG_LINKFLAGS + DEDUPE_SYMBOL_LINKFLAGS + \
+                         DEBUG_TYPES_SECTION_FLAGS
+
+MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES
 
 def force_includes_copt(package_name, name):
     if package_name.startswith("src/mongo"):
@@ -695,9 +1092,9 @@ def mongo_cc_library(
         "//bazel/config:macos_aarch64": macos_rpath_flags,
     })
 
-    # Create a cc_library entry to generate a shared archive of the target (linux).
+    # Create a cc_library entry to generate a shared archive of the target.
     native.cc_library(
-        name = name + ".so",
+        name = name + SHARED_ARCHIVE_SUFFIX,
         srcs = srcs,
         hdrs = hdrs + fincludes_hdr,
         deps = deps,
@@ -710,46 +1107,18 @@ def mongo_cc_library(
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + visibility_support_defines + local_defines,
         includes = includes,
-        features = ["supports_pic", "pic"],
+        features = MONGO_GLOBAL_FEATURES + ["supports_pic", "pic"],
         target_compatible_with = select({
-            "//bazel/config:shared_archive_enabled_linux": [],
+            "//bazel/config:shared_archive_enabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
         }),
     )
-
-    # Create a cc_library entry to generate a shared archive of the target (windows).
-    native.cc_library(
-        name = name + ".dll",
-        srcs = srcs,
-        hdrs = hdrs + fincludes_hdr,
-        deps = deps,
-        visibility = visibility,
-        testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
-        data = data,
-        tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
-        linkstatic = True,
-        local_defines = MONGO_GLOBAL_DEFINES + visibility_support_defines + local_defines,
-        includes = includes,
-        features = ["supports_pic", "pic"],
-        target_compatible_with = select({
-            "//bazel/config:shared_archive_enabled_windows": [],
-            "//conditions:default": ["@platforms//:incompatible"],
-        }),
-    )
-
-    deps_with_shared_archive = deps + select({
-        "//bazel/config:shared_archive_enabled_linux": [":" + name + ".so"],
-        "//bazel/config:shared_archive_enabled_windows": [":" + name + ".dll"],
-        "//conditions:default": [],
-    })
 
     native.cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs,
         hdrs = hdrs + fincludes_hdr,
-        deps = deps_with_shared_archive,
+        deps = deps,
         visibility = visibility,
         testonly = testonly,
         copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
@@ -759,7 +1128,7 @@ def mongo_cc_library(
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + local_defines,
         includes = includes,
-        features = select({
+        features = MONGO_GLOBAL_FEATURES + select({
             "//bazel/config:linkstatic_disabled": ["supports_pic", "pic"],
             "//bazel/config:shared_archive_enabled": ["supports_pic", "pic"],
             "//conditions:default": ["pie"],
@@ -790,6 +1159,10 @@ def mongo_cc_library(
         enabled = SEPARATE_DEBUG_ENABLED,
         cc_shared_library = select({
             "//bazel/config:linkstatic_disabled": ":" + name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX,
+            "//conditions:default": None,
+        }),
+        shared_archive = select({
+            "//bazel/config:shared_archive_enabled": ":" + name + SHARED_ARCHIVE_SUFFIX,
             "//conditions:default": None,
         }),
         deps = deps,
@@ -864,7 +1237,7 @@ def mongo_cc_binary(
         linkstatic = LINKSTATIC_ENABLED,
         local_defines = MONGO_GLOBAL_DEFINES + LIBUNWIND_DEFINES + local_defines,
         includes = includes,
-        features = ["pie"],
+        features = MONGO_GLOBAL_FEATURES + ["pie"],
         dynamic_deps = select({
             "//bazel/config:linkstatic_disabled": deps,
             "//conditions:default": [],

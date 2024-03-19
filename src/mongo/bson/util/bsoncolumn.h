@@ -145,6 +145,7 @@ public:
         }
 
     private:
+        template <class BufBuilderType, class BSONObjType, class Allocator>
         friend class BSONColumnBuilder;
 
         // Initialize sub-object interleaving from current control byte position. Must be on a
@@ -359,8 +360,8 @@ namespace bsoncolumn {
  * BSONColumn decompression.
  */
 template <class T>
-concept Appendable =
-    requires(T& t, StringData strVal, BSONBinData binVal, BSONCode codeVal, BSONElement bsonVal) {
+concept Appendable = requires(
+    T& t, StringData strVal, BSONBinData binVal, BSONCode codeVal, BSONElement bsonVal, int32_t n) {
     t.append(true);
     t.append((int32_t)1);
     t.append((int64_t)1);
@@ -391,6 +392,8 @@ concept Appendable =
     t.template append<BSONElement>(bsonVal);
 
     t.appendPreallocated(bsonVal);
+
+    t.appendPositionInfo(n);
 
     t.appendMissing();
 
@@ -459,6 +462,15 @@ concept Materializer = requires(T& t,
 };
 
 /**
+ * Interface to indicate to the 'Collector' at compile time if the user requested the decompressor
+ * to collect the position information of values within documents.
+ */
+template <typename T>
+concept PositionInfoAppender = requires(T& t, int32_t n) {
+    { t.appendPositionInfo(n) } -> std::same_as<void>;
+};
+
+/**
  * Implements Appendable and utilizes a user-defined Materializer to receive output of
  * BSONColumn decoding and fill a container of user-defined elements.  Container can
  * be user-defined or any STL container can be used.
@@ -472,70 +484,99 @@ public:
     Collector(Container& collection, boost::intrusive_ptr<ElementStorage> allocator)
         : _collection(collection), _allocator(std::move(allocator)) {}
 
+    static constexpr bool kCollectsPositionInfo = PositionInfoAppender<Container>;
+
     void append(bool val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(int32_t val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(int64_t val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(Decimal128 val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(double val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(Timestamp val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(Date_t val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(OID val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(const StringData& val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(const BSONBinData& val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void append(const BSONCode& val) {
-        _collection.push_back(CMaterializer::materialize(*_allocator, val));
+        _last = CMaterializer::materialize(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     template <typename T>
     void append(const BSONElement& val) {
-        _collection.push_back(CMaterializer::template materialize<T>(*_allocator, val));
+        _last = CMaterializer::template materialize<T>(*_allocator, val);
+        _collection.push_back(_last);
     }
 
     void appendPreallocated(const BSONElement& val) {
-        _collection.push_back(CMaterializer::materializePreallocated(val));
+        _last = CMaterializer::materializePreallocated(val);
+        _collection.push_back(_last);
     }
 
+    // Does not update _last, should not be repeated by appendLast()
     void appendMissing() {
         _collection.push_back(CMaterializer::materializeMissing(*_allocator));
     }
 
+    // Appends last value that was not Missing
     void appendLast() {
-        _collection.push_back(_collection.back());
+        _collection.push_back(_last);
+    }
+
+    void appendPositionInfo(int32_t n) {
+        // If the 'Container' doesn't request position information, this will be a no-op.
+        if constexpr (kCollectsPositionInfo) {
+            _collection.appendPositionInfo(n);
+        }
+    }
+
+    ElementStorage& getAllocator() {
+        return *_allocator;
     }
 
 private:
     Container& _collection;
     boost::intrusive_ptr<ElementStorage> _allocator;
+    Element _last = CMaterializer::materializeMissing(*_allocator);
 };
 
 class BSONColumnBlockBased {
@@ -569,7 +610,7 @@ public:
     template <class CMaterializer, class Container, typename Path>
     requires Materializer<CMaterializer>
     void decompress(boost::intrusive_ptr<ElementStorage> allocator,
-                    std::span<std::pair<Path, Container>> paths) const;
+                    std::span<std::pair<Path, Container&>> paths) const;
 
     /*
      * Decompress entire BSONColumn using the iteration-based implementation. This is used for
@@ -713,11 +754,19 @@ private:
 template <class CMaterializer, class Container, typename Path>
 requires Materializer<CMaterializer>
 void BSONColumnBlockBased::decompress(boost::intrusive_ptr<ElementStorage> allocator,
-                                      std::span<std::pair<Path, Container>> paths) const {
-    std::vector<std::pair<Path, Collector<CMaterializer, Container>>> pathCollectors;
+                                      std::span<std::pair<Path, Container&>> paths) const {
+    // The Collector class wraps a reference to a buffer passed in by the caller.
+    // BlockBasedInterleavedDecompressor expects references to collectors, so create a vector where
+    // we allocate them.
+    std::vector<Collector<CMaterializer, Container>> ownedCollectors;
+    // Create a vector of pairs of paths and references to collectors, to be passed to the
+    // decompressor.
+    std::vector<std::pair<Path, Collector<CMaterializer, Container>&>> pathCollectors;
+    ownedCollectors.reserve(paths.size());
+    pathCollectors.reserve(paths.size());
     for (auto&& p : paths) {
-        pathCollectors.push_back(
-            {p.first, Collector<CMaterializer, Container>{p.second, allocator}});
+        ownedCollectors.emplace_back(p.second, allocator);
+        pathCollectors.push_back({p.first, ownedCollectors.back()});
     }
 
     const char* control = _binary;
@@ -726,7 +775,7 @@ void BSONColumnBlockBased::decompress(boost::intrusive_ptr<ElementStorage> alloc
         BlockBasedInterleavedDecompressor decompressor{*allocator, control, end};
         invariant(bsoncolumn::isInterleavedStartControlByte(*control),
                   "non-interleaved data is not yet handled via this API");
-        control = decompressor.decompress(pathCollectors);
+        control = decompressor.decompress(std::span{pathCollectors});
         invariant(control < end);
     }
 }

@@ -108,7 +108,6 @@ variables:
 # THIS HAS COPIES IN
 # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
 # - etc/evergreen_yml_components/tasks/compile_tasks.yml
-# - etc/evergreen_yml_components/tasks/misc_tasks.yml
 # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
 - &compile_task_group_template
   name: compile_task_group_template
@@ -173,6 +172,7 @@ variables:
   - func: "get buildnumber"
   - func: "f_expansions_write"
   - func: "set up credentials"
+  - func: "f_expansions_write"
   - func: "use WiredTiger develop" # noop if ${use_wt_develop} is not "true"
   - func: "f_expansions_write"
   - func: "set up win mount script"
@@ -199,7 +199,7 @@ tasks:
 
 - <<: *benchmark_template
   name: benchmarks_namespace
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "benchmarks"]
+  tags: ["assigned_to_jira_team_server_servicearch", "experimental", "benchmarks"]
   commands:
   - func: "do benchmark setup"
   - func: "run tests"
@@ -210,7 +210,7 @@ tasks:
 
 - <<: *benchmark_template
   name: benchmarks_orphaned_first_half
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "benchmarks"]
+  tags: ["assigned_to_jira_team_server_servicearch", "experimental", "benchmarks"]
   commands:
   - func: "do benchmark setup"
   - func: "run tests"
@@ -224,7 +224,7 @@ tasks:
 
 - <<: *benchmark_template
   name: benchmarks_orphaned_second_half
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "benchmarks"]
+  tags: ["assigned_to_jira_team_server_servicearch", "experimental", "benchmarks"]
   commands:
   - func: "do benchmark setup"
   - func: "run tests"
@@ -238,7 +238,7 @@ tasks:
 
 - <<: *benchmark_template
   name: benchmarks_sep
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "benchmarks_sep"]
+  tags: ["assigned_to_jira_team_server_servicearch", "experimental", "benchmarks_sep"]
   commands:
   - func: "do benchmark setup"
   - func: "run tests"
@@ -265,6 +265,60 @@ tasks:
       use_large_distro: "true"
       suite: multitenancy_with_atlas_proxy_jscore_passthrough
       resmoke_args: "--numClientsPerFixture=2 --useTenantClient --excludeWithAnyTags=multi_clients_incompatible"
+
+- <<: *gen_task_template
+  name: concurrency_embedded_router_causal_consistency_gen
+  tags: ["assigned_to_jira_team_server_servicearch", "default", "concurrency", "non_live_record", "sharded", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: concurrency_embedded_router_clusterwide_ops_add_remove_shards_gen
+  tags: ["assigned_to_jira_team_server_servicearch", "requires_large_host", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: concurrency_embedded_router_local_read_write_multi_stmt_txn_gen
+  tags: ["assigned_to_jira_team_server_servicearch", "default", "concurrency", "large", "sharded", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: concurrency_embedded_router_multi_stmt_txn_gen
+  tags: ["assigned_to_jira_team_server_servicearch", "default", "concurrency", "large", "sharded", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: concurrency_embedded_router_replication_gen
+  tags: ["assigned_to_jira_team_server_servicearch", "requires_large_host", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
+
+- <<: *gen_task_template
+  name: concurrency_embedded_router_replication_bulk_write_gen
+  tags: ["assigned_to_jira_team_server_servicearch", "default", "bulk_write"]
+  commands:
+  - func: "generate resmoke tasks"
+    vars:
+      use_large_distro: "true"
+      resmoke_jobs_max: 1
 
 - <<: *gen_task_template
   name: embedded_router_jscore_passthrough_gen
@@ -391,7 +445,7 @@ tasks:
 
 - <<: *task_template
   name: libunwind_tests
-  tags: ["assigned_to_jira_team_server_servicearch", "release_critical", "incompatible_mac", "incompatible_windows"]
+  tags: ["assigned_to_jira_team_server_servicearch", "release_critical", "incompatible_mac", "incompatible_windows", "incompatible_ppc", "incompatible_s390x"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -424,7 +478,7 @@ tasks:
 
 - <<: *task_template
   name: search_pinned_connections_auth
-  tags: ["assigned_to_jira_team_server_servicearch", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_windows"]
+  tags: ["assigned_to_jira_team_server_servicearch", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_windows", "incompatible_ppc", "incompatible_s390x"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -432,11 +486,12 @@ tasks:
       resmoke_jobs_max: 1
 
 - name: server_discovery_and_monitoring_json_test
-  tags: ["assigned_to_jira_team_server_servicearch"]
+  tags: ["assigned_to_jira_team_server_servicearch", "default"]
   depends_on:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
+  - func: "do scons setup"
   - func: "scons compile"
     vars:
       targets: install-sdam-json-test
@@ -447,11 +502,12 @@ tasks:
       suite: sdam_json_test
 
 - name: server_selection_json_test
-  tags: ["assigned_to_jira_team_server_servicearch"]
+  tags: ["assigned_to_jira_team_server_servicearch", "default"]
   depends_on:
   - name: version_expansions_gen
     variant: generate-tasks-for-version
   commands:
+  - func: "do scons setup"
   - func: "scons compile"
     vars:
       targets: install-server-selection-json-test
@@ -604,26 +660,10 @@ tasks:
       use_large_distro: "true"
       fallback_num_sub_suites: 10
 
-- <<: *gen_task_template
-  name: talk_directly_to_shardsvrs_jscore_passthrough_gen
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "serverless"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
-- <<: *gen_task_template
-  name: talk_directly_to_shardsvrs_kill_primary_jscore_passthrough_gen
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "serverless"]
-  commands:
-  - func: "generate resmoke tasks"
-    vars:
-      use_large_distro: "true"
-
 # This is a separate task because it is only supported on Ubuntu 16.04+ which are not inmemory builders
 - <<: *task_template
   name: watchdog_inmemory
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "watchdog"]
+  tags: ["assigned_to_jira_team_server_servicearch", "experimental", "watchdog"]
   commands:
   - func: "do setup"
   - func: "do watchdog setup"
@@ -635,7 +675,7 @@ tasks:
 
 - <<: *task_template
   name: watchdog_wiredtiger
-  tags: ["assigned_to_jira_team_server_servicearch", "default", "watchdog"]
+  tags: ["assigned_to_jira_team_server_servicearch", "experimental", "watchdog"]
   commands:
   - func: "do setup"
   - func: "do watchdog setup"
@@ -668,14 +708,14 @@ tasks:
 
 - <<: *task_template
   name: audit
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "audit", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "audit", "patch_build"]
   commands:
   - func: "do setup"
   - func: "run tests"
 
 - <<: *gen_task_template
   name: auth_audit_gen
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "auth", "audit", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "auth", "audit", "patch_build"]
   commands:
   - func: "generate resmoke tasks"
 
@@ -696,14 +736,14 @@ tasks:
 
 - <<: *task_template
   name: ese
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "encrypt", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "encrypt", "patch_build"]
   commands:
   - func: "do setup"
   - func: "run tests"
 
 - <<: *task_template
   name: external_auth
-  tags: ["assigned_to_jira_team_server_security", "default"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_ppc", "incompatible_s390x"]
   commands:
   - func: "f_expansions_write"
   - func: "do setup"
@@ -715,7 +755,7 @@ tasks:
 
 - <<: *task_template
   name: external_auth_aws
-  tags: ["assigned_to_jira_team_server_security", "default"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_ppc", "incompatible_s390x"]
   commands:
   - func: "f_expansions_write"
   - func: "do setup"
@@ -730,7 +770,7 @@ tasks:
 
 - <<: *task_template
   name: external_auth_oidc
-  tags: ["assigned_to_jira_team_server_security", "default"]
+  tags: ["assigned_to_jira_team_server_security", "experimental"]
   commands:
   - func: "f_expansions_write"
   - func: "do setup"
@@ -746,7 +786,7 @@ tasks:
 
 - <<: *task_template
   name: external_auth_oidc_azure
-  tags: ["assigned_to_jira_team_server_security", "default"]
+  tags: ["assigned_to_jira_team_server_security", "experimental"]
   commands:
   - func: "f_expansions_write"
   - func: "do setup"
@@ -757,15 +797,10 @@ tasks:
       args:
       - "src/evergreen/external_auth_azure_setup.sh"
   - func: "run tests"
-  - command: subprocess.exec
-    params:
-      binary: bash
-      args:
-      - "src/evergreen/external_auth_azure_teardown.sh"
 
 - <<: *task_template
   name: external_auth_oidc_gcp
-  tags: ["assigned_to_jira_team_server_security", "default"]
+  tags: ["assigned_to_jira_team_server_security", "experimental"]
   commands:
   - func: "f_expansions_write"
   - func: "do setup"
@@ -779,7 +814,7 @@ tasks:
 
 - <<: *task_template
   name: external_auth_windows
-  tags: ["assigned_to_jira_team_server_security", "default"]
+  tags: ["assigned_to_jira_team_server_security", "experimental"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -798,7 +833,7 @@ tasks:
 
 - <<: *task_template
   name: fle
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "encrypt", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "encrypt", "patch_build"]
   commands:
     - func: "do setup"
     - func: "run tests"
@@ -807,42 +842,42 @@ tasks:
 
 - <<: *task_template
   name: fle2
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "encrypt", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "encrypt", "patch_build"]
   commands:
     - func: "do setup"
     - func: "run tests"
 
 - <<: *task_template
   name: fle2_high_cardinality
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "encrypt"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "encrypt"]
   commands:
     - func: "do setup"
     - func: "run tests"
 
 - <<: *task_template
   name: fle2_query_analysis
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "encrypt", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "encrypt", "patch_build"]
   commands:
     - func: "do setup"
     - func: "run tests"
 
 - <<: *task_template
   name: fle2_sharding
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "encrypt", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "encrypt", "patch_build"]
   commands:
     - func: "do setup"
     - func: "run tests"
 
 - <<: *task_template
   name: fle2_sharding_high_cardinality
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "encrypt"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "encrypt"]
   commands:
     - func: "do setup"
     - func: "run tests"
 
 - <<: *task_template
   name: jsCore_auth
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_windows", "jscore", "auth", "common"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_ppc", "incompatible_s390x", "jscore", "auth", "common"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -851,7 +886,7 @@ tasks:
 
 - <<: *task_template
   name: jsCore_ese
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_windows", "jscore", "encrypt"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "jscore", "encrypt"]
   commands:
   - func: "do setup"
   - func: "run tests"
@@ -869,7 +904,7 @@ tasks:
 
 - <<: *gen_task_template
   name: multiversion_auth_future_git_tag_gen
-  tags: ["assigned_to_jira_team_server_security", "default", "auth", "multiversion", "no_multiversion_generate_tasks", "multiversion_future_git_tag"]
+  tags: ["assigned_to_jira_team_server_security", "experimental", "auth", "multiversion", "no_multiversion_generate_tasks", "multiversion_future_git_tag"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -900,7 +935,7 @@ tasks:
 
 - <<: *gen_task_template
   name: replica_sets_max_mirroring_large_txns_format_ese_gen
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_windows", "replica_sets", "encrypt", "san", "no_debug_mode", "multi_oplog"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "replica_sets", "encrypt", "san", "no_debug_mode", "multi_oplog"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -908,14 +943,14 @@ tasks:
 
 - <<: *task_template
   name: sasl
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_windows", "sasl", "patch_build"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "sasl", "patch_build"]
   commands:
   - func: "do setup"
   - func: "run tests"
 
 - <<: *gen_task_template
   name: sharding_auth_audit_gen
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_windows", "sharding", "auth", "audit", "non_live_record", "no_debug_mode"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "sharding", "auth", "audit", "non_live_record", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -923,7 +958,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_auth_gen
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_mac", "incompatible_windows"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_mac", "incompatible_windows", "incompatible_ppc", "incompatible_s390x"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -939,7 +974,7 @@ tasks:
 
 - <<: *gen_task_template
   name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen
-  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "incompatible_windows", "sharding", "common", "encrypt", "no_debug_mode"]
+  tags: ["assigned_to_jira_team_server_security", "release_critical", "incompatible_community", "incompatible_mac", "sharding", "common", "encrypt", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -990,7 +1025,7 @@ tasks:
 
 - <<: *benchmark_template
   name: benchmarks_sharding
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "benchmarks"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "experimental", "benchmarks"]
   commands:
   - func: "do benchmark setup"
   - func: "run tests"
@@ -1001,7 +1036,7 @@ tasks:
 
 - <<: *benchmark_template
   name: benchmarks_bsoncolumn
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "benchmarks"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "experimental", "benchmarks"]
   commands:
   - func: "do benchmark setup"
   - func: "run tests"
@@ -1250,12 +1285,11 @@ tasks:
       suite: sharded_jscore_txns
       resmoke_args: --excludeWithAnyTags=uses_snapshot_read_concern
 
-- <<: *task_template
-  name: sharded_multi_stmt_txn_jscore_passthrough
+- <<: *gen_task_template
+  name: sharded_multi_stmt_txn_jscore_passthrough_gen
   tags: ["assigned_to_jira_team_server_cluster_scalability", "default", "sharding", "jscore", "multi_stmt"]
   commands:
-  - func: "do setup"
-  - func: "run tests"
+  - func: "generate resmoke tasks"
 
 - <<: *gen_task_template
   name: sharded_retryable_writes_downgrade_gen
@@ -1338,7 +1372,7 @@ tasks:
 # in the same varient as them
 - <<: *gen_task_template
   name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
-  tags: ["assigned_to_jira_team_server_cluster_scalability", "release_critical", "incompatible_mac", "incompatible_windows"]
+  tags: ["assigned_to_jira_team_server_cluster_scalability", "release_critical", "incompatible_mac", "incompatible_windows", "incompatible_ppc", "incompatible_s390x"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -1463,7 +1497,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_clusterwide_ops_add_remove_shards_gen
-  tags: ["assigned_to_jira_team_server_catalog_and_routing", "release_critical", "incompatible_mac", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
+  tags: ["assigned_to_jira_team_server_catalog_and_routing", "release_critical", "incompatible_mac", "incompatible_ppc", "incompatible_s390x", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -1499,7 +1533,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_with_auto_bootstrap_gen
-  tags: ["assigned_to_jira_team_server_catalog_and_routing", "release_critical", "incompatible_mac", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
+  tags: ["assigned_to_jira_team_server_catalog_and_routing", "release_critical", "incompatible_mac", "incompatible_ppc", "incompatible_s390x", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -1514,7 +1548,7 @@ tasks:
 
 - <<: *gen_task_template
   name: concurrency_sharded_with_balancer_and_auto_bootstrap_gen
-  tags: ["assigned_to_jira_team_server_catalog_and_routing", "release_critical", "incompatible_mac", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
+  tags: ["assigned_to_jira_team_server_catalog_and_routing", "release_critical", "incompatible_mac", "incompatible_ppc", "incompatible_s390x", "concurrency", "common", "read_concern_maj", "large", "sharded", "no_debug_mode"]
   commands:
   - func: "generate resmoke tasks"
     vars:
@@ -1790,14 +1824,12 @@ tasks:
 task_groups:
 - <<: *compile_task_group_template
   name: compile_archive_and_run_libfuzzertests_TG
-  tags: []
   tasks:
   - compile_and_archive_libfuzzertests
   - fetch_and_run_libfuzzertests
 
 - <<: *compile_task_group_template
   name: compile_integration_and_test_no_audit_parallel_stream_TG
-  tags: []
   tasks:
   - compile_integration_test
   - integration_tests_standalone
@@ -1807,7 +1839,6 @@ task_groups:
 
 - <<: *compile_task_group_template
   name: compile_integration_and_test_parallel_stream_TG
-  tags: []
   tasks:
   - compile_integration_test
   - integration_tests_standalone
@@ -1822,7 +1853,6 @@ task_groups:
 # across different tasks.
 - <<: *compile_task_group_template
   name: small_compile_test_and_package_serial_no_unittests_TG
-  tags: []
   tasks:
   - compile_dist_test_half
   - compile_dist_test
@@ -1839,16 +1869,3 @@ task_groups:
   - run_dbtest
   - archive_dbtest
   - compile_all_but_not_unittests
-
-
-- <<: *compile_task_group_template
-  name: server_discovery_and_monitoring_json_test_TG
-  tags: ["default"]
-  tasks:
-  - server_discovery_and_monitoring_json_test
-
-- <<: *compile_task_group_template
-  name: server_selection_json_test_TG
-  tags: ["default"]
-  tasks:
-  - server_selection_json_test

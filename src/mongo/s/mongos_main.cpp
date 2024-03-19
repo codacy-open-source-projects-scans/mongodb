@@ -81,6 +81,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions.h"
+#include "mongo/db/session/kill_sessions_remote.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_impl.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -114,7 +115,6 @@
 #include "mongo/s/client/shard_remote.h"
 #include "mongo/s/client/sharding_connection_hook.h"
 #include "mongo/s/client_transport_observer_mongos.h"
-#include "mongo/s/commands/kill_sessions_remote.h"
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/load_balancer_support.h"
@@ -126,12 +126,12 @@
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/read_write_concern_defaults_cache_lookup_mongos.h"
 #include "mongo/s/resource_yielders.h"
+#include "mongo/s/router_uptime_reporter.h"
 #include "mongo/s/service_entry_point_mongos.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/sessions_collection_sharded.h"
 #include "mongo/s/sharding_initialization.h"
 #include "mongo/s/sharding_state.h"
-#include "mongo/s/sharding_uptime_reporter.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/version_mongos.h"
 #include "mongo/scripting/engine.h"
@@ -191,8 +191,6 @@ const ntservice::NtServiceDefaultStrings defaultServiceStrings = {
 #endif
 
 constexpr auto kSignKeysRetryInterval = Seconds{1};
-
-boost::optional<ShardingUptimeReporter> shardingUptimeReporter;
 
 class ShardingReplicaSetChangeListener final
     : public ReplicaSetChangeNotifier::Listener,
@@ -563,7 +561,7 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                                       "Shut down full-time data capture",
                                                       &shutdownTimeElapsedBuilder);
-            stopMongoSFTDC(serviceContext);
+            stopMongoSFTDC();
         }
     }
 
@@ -916,10 +914,9 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         }
     }
 
-    // Construct the sharding uptime reporter after the startup parameters have been parsed in order
+    // Construct the router uptime reporter after the startup parameters have been parsed in order
     // to ensure that it picks up the server port instead of reporting the default value.
-    shardingUptimeReporter.emplace();
-    shardingUptimeReporter->startPeriodicThread();
+    RouterUptimeReporter::get(serviceContext).startPeriodicThread(serviceContext);
 
     clusterCursorCleanupJob.go();
 
@@ -946,8 +943,10 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
 
     srand((unsigned)(curTimeMicros64()) ^ (unsigned(uintptr_t(&opCtx))));  // NOLINT
 
-    SessionKiller::set(serviceContext,
-                       std::make_shared<SessionKiller>(serviceContext, killSessionsRemote));
+    SessionKiller::set(
+        serviceContext->getService(ClusterRole::RouterServer),
+        std::make_shared<SessionKiller>(serviceContext->getService(ClusterRole::RouterServer),
+                                        killSessionsRemote));
 
     LogicalSessionCache::set(
         serviceContext,

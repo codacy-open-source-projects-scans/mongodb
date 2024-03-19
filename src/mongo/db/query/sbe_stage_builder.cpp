@@ -1778,148 +1778,8 @@ std::unique_ptr<sbe::EExpression> SlotBasedStageBuilder::buildLimitSkipSumExpres
         std::move(sumExpr));
 }
 
-namespace {
-/**
- * Given a field path, this function will return an expression that will be true if evaluating the
- * field path involves array traversal at any level of the path (including the leaf field).
- */
-SbExpr generateArrayCheckForSort(StageBuilderState& state,
-                                 SbExpr inputExpr,
-                                 const FieldPath& fp,
-                                 FieldIndex level,
-                                 sbe::value::FrameIdGenerator* frameIdGenerator,
-                                 boost::optional<TypedSlot> fieldSlot = boost::none) {
-    invariant(level < fp.getPathLength());
-
-    tassert(8102000,
-            "Expected either 'inputExpr' or 'fieldSlot' to be defined",
-            !inputExpr.isNull() || fieldSlot.has_value());
-
-    SbExprBuilder b(state);
-    auto resultExpr = [&] {
-        auto fieldExpr = fieldSlot ? SbExpr{*fieldSlot}
-                                   : b.makeFunction("getField"_sd,
-                                                    std::move(inputExpr),
-                                                    b.makeStrConstant(fp.getFieldName(level)));
-        if (level == fp.getPathLength() - 1u) {
-            return b.makeFunction("isArray"_sd, std::move(fieldExpr));
-        }
-        sbe::FrameId frameId = frameIdGenerator->generate();
-        return b.makeLet(
-            frameId,
-            SbExpr::makeSeq(std::move(fieldExpr)),
-            b.makeBinaryOp(
-                sbe::EPrimBinary::logicOr,
-                b.makeFunction("isArray"_sd, b.makeVariable(frameId, 0)),
-                generateArrayCheckForSort(
-                    state, b.makeVariable(frameId, 0), fp, level + 1, frameIdGenerator)));
-    }();
-
-    if (level == 0) {
-        resultExpr = b.makeFillEmptyFalse(std::move(resultExpr));
-    }
-
-    return resultExpr;
-}
-
-/**
- * Given a field path, this function recursively builds an expression tree that will produce the
- * corresponding sort key for that path.
- */
-std::unique_ptr<sbe::EExpression> generateSortTraverse(
-    std::unique_ptr<sbe::EVariable> inputVar,
-    bool isAscending,
-    boost::optional<sbe::value::SlotId> collatorSlot,
-    const FieldPath& fp,
-    size_t level,
-    sbe::value::FrameIdGenerator* frameIdGenerator,
-    boost::optional<TypedSlot> fieldSlot = boost::none) {
-    using namespace std::literals;
-
-    invariant(level < fp.getPathLength());
-
-    tassert(8102001,
-            "Expected either 'inputVar' or 'fieldSlot' to be defined",
-            inputVar || fieldSlot.has_value());
-
-    StringData helperFn = isAscending ? "_internalLeast"_sd : "_internalGreatest"_sd;
-
-    // Generate an expression to read a sub-field at the current nested level.
-    auto fieldExpr = fieldSlot
-        ? makeVariable(*fieldSlot)
-        : makeFunction("getField"_sd, std::move(inputVar), makeStrConstant(fp.getFieldName(level)));
-
-    if (level == fp.getPathLength() - 1) {
-        // For the last level, we can just return the field slot without the need for a
-        // traverse expression.
-        auto frameId = fieldSlot ? boost::optional<sbe::FrameId>{}
-                                 : boost::make_optional(frameIdGenerator->generate());
-        auto var = fieldSlot ? fieldExpr->clone() : makeVariable(*frameId, 0);
-        auto moveVar = fieldSlot ? std::move(fieldExpr) : makeMoveVariable(*frameId, 0);
-
-        auto helperArgs = sbe::makeEs(moveVar->clone());
-        if (collatorSlot) {
-            helperArgs.emplace_back(makeVariable(*collatorSlot));
-        }
-
-        // According to MQL's sorting semantics, when a leaf field is an empty array we
-        // should use Undefined as the sort key.
-        auto resultExpr = sbe::makeE<sbe::EIf>(
-            makeFillEmptyFalse(makeFunction("isArray"_sd, std::move(var))),
-            makeFillEmptyUndefined(sbe::makeE<sbe::EFunction>(helperFn, std::move(helperArgs))),
-            makeFillEmptyNull(std::move(moveVar)));
-
-        if (!fieldSlot) {
-            resultExpr = sbe::makeE<sbe::ELocalBind>(
-                *frameId, sbe::makeEs(std::move(fieldExpr)), std::move(resultExpr));
-        }
-        return resultExpr;
-    }
-
-    // Prepare a lambda expression that will navigate to the next component of the field path.
-    auto lambdaFrameId = frameIdGenerator->generate();
-    auto lambdaExpr = sbe::makeE<sbe::ELocalLambda>(
-        lambdaFrameId,
-        generateSortTraverse(std::make_unique<sbe::EVariable>(lambdaFrameId, 0),
-                             isAscending,
-                             collatorSlot,
-                             fp,
-                             level + 1,
-                             frameIdGenerator));
-
-    // Generate the traverse expression for the current nested level.
-    // Be sure to invoke the least/greatest fold expression only if the current nested level is an
-    // array.
-    auto frameId = frameIdGenerator->generate();
-    auto var = fieldSlot ? makeVariable(*fieldSlot) : makeVariable(frameId, 0);
-    auto resultVar = makeMoveVariable(frameId, fieldSlot ? 0 : 1);
-
-    auto binds = sbe::makeEs();
-    if (!fieldSlot) {
-        binds.emplace_back(std::move(fieldExpr));
-    }
-    binds.emplace_back(makeFunction(
-        "traverseP", var->clone(), std::move(lambdaExpr), makeInt32Constant(1) /* maxDepth */));
-
-    auto helperArgs = sbe::makeEs(resultVar->clone());
-    if (collatorSlot) {
-        helperArgs.emplace_back(makeVariable(*collatorSlot));
-    }
-
-    return sbe::makeE<sbe::ELocalBind>(
-        frameId,
-        std::move(binds),
-        // According to MQL's sorting semantics, when a non-leaf field is an empty array or
-        // doesn't exist we should use Null as the sort key.
-        makeFillEmptyNull(
-            sbe::makeE<sbe::EIf>(makeFillEmptyFalse(makeFunction("isArray"_sd, var->clone())),
-                                 sbe::makeE<sbe::EFunction>(helperFn, std::move(helperArgs)),
-                                 resultVar->clone())));
-}
-}  // namespace
-
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildSort(
-    const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+    const QuerySolutionNode* root, const PlanStageReqs& reqsIn) {
     const auto sn = static_cast<const SortNode*>(root);
     auto sortPattern = SortPattern{sn->pattern, _cq.getExpCtx()};
 
@@ -1927,12 +1787,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             "QueryPlannerAnalysis should not produce a SortNode with an empty sort pattern",
             sortPattern.size() > 0);
 
-    auto child = sn->children[0].get();
-
-    if (auto [ixn, ct] = root->getFirstNodeByType(STAGE_IXSCAN);
-        !sn->fetched() && !reqs.hasResult() && ixn && ct >= 1) {
-        return buildSortCovered(root, reqs);
-    }
+    SbExprBuilder b(_state);
 
     // getExecutor() should never call into buildSlotBasedExecutableTree() when the query
     // contains $meta, so this assertion should always be true.
@@ -1940,176 +1795,95 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         tassert(5037002, "Sort with $meta is not supported in SBE", part.fieldPath);
     }
 
-    const bool hasPartsWithCommonPrefix = sortPatternHasPartsWithCommonPrefix(sortPattern);
-    std::vector<std::string> fields;
+    auto child = sn->children[0].get();
 
-    if (!hasPartsWithCommonPrefix) {
-        DepsTracker deps;
-        sortPattern.addDependencies(&deps);
-        // If the sort pattern doesn't need the whole document, then we take all the top-level
-        // fields referenced by the filter predicate and we add them to 'fields'.
-        if (!deps.needWholeDocument) {
-            fields = getTopLevelFields(deps.fields);
-        }
+    if (auto [ixn, ct] = root->getFirstNodeByType(STAGE_IXSCAN);
+        !sn->fetched() && !reqsIn.hasResult() && ixn && ct >= 1) {
+        return buildSortCovered(root, reqsIn);
     }
+
+    // When sort is followed by a limit the overhead of tracking the kField slots during sorting is
+    // greater compared to the overhead of retrieving the necessary kFields from the materialized
+    // result object after the sorting is done.
+    boost::optional<PlanStageReqs> updatedReqs;
+    if (reqsIn.getHasLimit()) {
+        updatedReqs.emplace(reqsIn);
+        updatedReqs->setResultObj().clearAllFields();
+    }
+
+    const auto& reqs = updatedReqs ? *updatedReqs : reqsIn;
 
     auto forwardingReqs = reqs.copyForChild();
-    if (reqs.getHasLimit()) {
-        // When sort is followed by a limit the overhead of tracking the kField slots during
-        // sorting is greater compared to the overhead of retrieving the necessary kFields from
-        // the materialized result object after the sorting is done.
-        forwardingReqs.clearAllFields().setResultObj();
-    }
+    auto childReqs = reqs.copyForChild();
 
-    if (hasPartsWithCommonPrefix) {
-        forwardingReqs.setResultObj();
-    }
+    // When there's no limit on the sort, the dominating factor is number of comparisons
+    // (nlogn). A sort with a limit of k requires only nlogk comparisons. When k is small, the
+    // number of key generations (n) can actually dominate the runtime. So for all top-k sorts
+    // we use a "cheap" sort key: it's cheaper to construct but more expensive to compare. The
+    // assumption here is that k << n.
+    bool allowCallGenCheapSortKey = sn->limit != 0;
 
-    auto childReqs = forwardingReqs.copyForChild().setFields(fields);
+    BuildSortKeysPlan plan = makeSortKeysPlan(sortPattern, allowCallGenCheapSortKey);
+
+    if (plan.type == BuildSortKeysPlan::kTraverseFields) {
+        childReqs.setFields(std::move(plan.fieldsForSortKeys));
+    } else if (plan.type == BuildSortKeysPlan::kCallGenSortKey ||
+               plan.type == BuildSortKeysPlan::kCallGenCheapSortKey) {
+        childReqs.setResultObj();
+    } else {
+        MONGO_UNREACHABLE;
+    }
 
     auto [stage, childOutputs] = build(child, childReqs);
     auto outputs = std::move(childOutputs);
 
-    auto collatorSlot = _state.getCollatorSlot();
+    auto sortKeys = buildSortKeys(_state, plan, sortPattern, outputs);
 
     sbe::value::SlotVector orderBy;
     std::vector<sbe::value::SortDirection> direction;
 
-    if (!hasPartsWithCommonPrefix) {
+    if (plan.type == BuildSortKeysPlan::kTraverseFields) {
         // Handle the case where we are using a materialized result object and there are no common
         // prefixes.
         orderBy.reserve(sortPattern.size());
 
-        // Sorting has a limitation where only one of the sort patterns can involve arrays.
-        // If there are at least two sort patterns, check the data for this possibility.
-        auto failOnParallelArrays = [&]() -> SbExpr {
-            SbExprBuilder b(_state);
+        sbe::SlotExprPairVector projects;
+
+        if (sortKeys.parallelArraysCheckExpr) {
             auto parallelArraysError =
                 b.makeFail(ErrorCodes::BadValue, "cannot sort with keys that are parallel arrays");
 
-            if (sortPattern.size() < 2) {
-                // If the sort pattern only has one part, we don't need to generate a "parallel
-                // arrays" check.
-                return {};
-            } else if (sortPattern.size() == 2) {
-                // If the sort pattern has two parts, we can generate a simpler expression to
-                // perform the "parallel arrays" check.
-                auto makeIsNotArrayCheck = [&](const FieldPath& fp) {
-                    return b.makeNot(generateArrayCheckForSort(
-                        _state,
-                        SbExpr{},
-                        fp,
-                        0 /* level */,
-                        &_frameIdGenerator,
-                        outputs.getIfExists(
-                            std::make_pair(PlanStageSlots::kField, fp.getFieldName(0)))));
-                };
+            auto failOnParallelArraysExpr =
+                b.makeBinaryOp(sbe::EPrimBinary::logicOr,
+                               std::move(sortKeys.parallelArraysCheckExpr),
+                               std::move(parallelArraysError));
 
-                return b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                                      makeIsNotArrayCheck(*sortPattern[0].fieldPath),
-                                      b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                                                     makeIsNotArrayCheck(*sortPattern[1].fieldPath),
-                                                     std::move(parallelArraysError)));
-            } else {
-                // If the sort pattern has three or more parts, we generate an expression to
-                // perform the "parallel arrays" check that works (and scales well) for an
-                // arbitrary number of sort pattern parts.
-                auto makeIsArrayCheck = [&](const FieldPath& fp) {
-                    return b.makeBinaryOp(
-                        sbe::EPrimBinary::cmp3w,
-                        generateArrayCheckForSort(_state,
-                                                  SbExpr{},
-                                                  fp,
-                                                  0,
-                                                  &_frameIdGenerator,
-                                                  outputs.getIfExists(std::make_pair(
-                                                      PlanStageSlots::kField, fp.getFieldName(0)))),
-                        b.makeBoolConstant(false));
-                };
-
-                auto numArraysExpr = makeIsArrayCheck(*sortPattern[0].fieldPath);
-                for (size_t idx = 1; idx < sortPattern.size(); ++idx) {
-                    numArraysExpr = b.makeBinaryOp(sbe::EPrimBinary::add,
-                                                   std::move(numArraysExpr),
-                                                   makeIsArrayCheck(*sortPattern[idx].fieldPath));
-                }
-
-                return b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                                      b.makeBinaryOp(sbe::EPrimBinary::lessEq,
-                                                     std::move(numArraysExpr),
-                                                     b.makeInt32Constant(1)),
-                                      std::move(parallelArraysError));
-            }
-        }();
-
-        if (!failOnParallelArrays.isNull()) {
-            stage = sbe::makeProjectStage(std::move(stage),
-                                          root->nodeId(),
-                                          _slotIdGenerator.generate(),
-                                          failOnParallelArrays.extractExpr(_state));
+            projects.emplace_back(_state.slotId(), failOnParallelArraysExpr.extractExpr(_state));
         }
 
-        sbe::SlotExprPairVector sortExpressions;
+        for (size_t i = 0; i < sortPattern.size(); ++i) {
+            const auto& part = sortPattern[i];
+            SbExpr& sortKeyExpr = sortKeys.keyExprs[i];
 
-        for (const auto& part : sortPattern) {
-            auto topLevelFieldSlot = outputs.get(
-                std::make_pair(PlanStageSlots::kField, part.fieldPath->getFieldName(0)));
-
-            std::unique_ptr<sbe::EExpression> sortExpr = generateSortTraverse(nullptr,
-                                                                              part.isAscending,
-                                                                              collatorSlot,
-                                                                              *part.fieldPath,
-                                                                              0,
-                                                                              &_frameIdGenerator,
-                                                                              topLevelFieldSlot);
-
-            // Apply the transformation required by the collation, if specified.
-            if (collatorSlot) {
-                sortExpr = makeFunction(
-                    "collComparisonKey"_sd, std::move(sortExpr), makeVariable(*collatorSlot));
-            }
-            sbe::value::SlotId sortKeySlot = _slotIdGenerator.generate();
-            sortExpressions.emplace_back(sortKeySlot, std::move(sortExpr));
+            sbe::value::SlotId sortKeySlot = _state.slotId();
+            projects.emplace_back(sortKeySlot, sortKeyExpr.extractExpr(_state));
 
             orderBy.push_back(sortKeySlot);
             direction.push_back(part.isAscending ? sbe::value::SortDirection::Ascending
                                                  : sbe::value::SortDirection::Descending);
         }
-        stage = sbe::makeS<sbe::ProjectStage>(
-            std::move(stage), std::move(sortExpressions), root->nodeId());
 
-    } else {
-        // When there's no limit on the sort, the dominating factor is number of comparisons
-        // (nlogn). A sort with a limit of k requires only nlogk comparisons. When k is small, the
-        // number of key generations (n) can actually dominate the runtime. So for all top-k sorts
-        // we use a "cheap" sort key: it's cheaper to construct but more expensive to compare. The
-        // assumption here is that k << n.
-
-        const TypedSlot childResultSlotId = outputs.getResultObj();
-
-        StringData sortKeyGenerator = sn->limit ? "generateCheapSortKey" : "generateSortKey";
-
-        auto sortSpec = std::make_unique<sbe::SortSpec>(sn->pattern);
-        auto sortSpecExpr =
-            makeConstant(sbe::value::TypeTags::sortSpec,
-                         sbe::value::bitcastFrom<sbe::SortSpec*>(sortSpec.release()));
+        stage =
+            sbe::makeS<sbe::ProjectStage>(std::move(stage), std::move(projects), root->nodeId());
+    } else if (plan.type == BuildSortKeysPlan::kCallGenSortKey ||
+               plan.type == BuildSortKeysPlan::kCallGenCheapSortKey) {
+        auto& sortKeyExpr = sortKeys.fullKeyExpr;
 
         const auto fullSortKeySlot = _slotIdGenerator.generate();
+        stage = sbe::makeProjectStage(
+            std::move(stage), root->nodeId(), fullSortKeySlot, sortKeyExpr.extractExpr(_state));
 
-        // generateSortKey() will handle the parallel arrays check and sort key traversal for us,
-        // so we don't need to generate our own sort key traversal logic in the SBE plan.
-        stage = sbe::makeProjectStage(std::move(stage),
-                                      root->nodeId(),
-                                      fullSortKeySlot,
-                                      collatorSlot ? makeFunction(sortKeyGenerator,
-                                                                  std::move(sortSpecExpr),
-                                                                  makeVariable(childResultSlotId),
-                                                                  makeVariable(*collatorSlot))
-                                                   : makeFunction(sortKeyGenerator,
-                                                                  std::move(sortSpecExpr),
-                                                                  makeVariable(childResultSlotId)));
-
-        if (sortKeyGenerator == "generateSortKey") {
+        if (plan.type == BuildSortKeysPlan::kCallGenSortKey) {
             // In this case generateSortKey() produces a mem-comparable KeyString so we use for
             // the comparison. We always sort in ascending order because the KeyString takes the
             // ordering into account.
@@ -2141,6 +1915,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             stage = sbe::makeS<sbe::ProjectStage>(
                 std::move(stage), std::move(projects), root->nodeId());
         }
+    } else {
+        MONGO_UNREACHABLE;
     }
 
     // Slots for sort stage to forward to parent stage. Values in these slots are not used during
@@ -4880,21 +4656,19 @@ public:
                         return emaExpr->getAlpha().get();
                     }
                 }();
-                initExprArgs.emplace("", makeDecimalConstant(alpha));
+                initExprArgs.emplace(Accum::kInput, makeDecimalConstant(alpha));
             } else if (outputField.expr->getOpName() == AccumulatorIntegral::kName) {
-                initExprArgs.emplace("",
+                initExprArgs.emplace(Accum::kInput,
                                      getUnitArg(dynamic_cast<window_function::ExpressionWithUnit*>(
                                          outputField.expr.get())));
             } else if (isAccumulatorN(outputField)) {
                 auto nExprPtr = getNExprFromAccumulatorN(outputField);
                 initExprArgs.emplace(
-                    AccArgs::kMaxSize,
+                    Accum::kMaxSize,
                     generateExpression(_state, nExprPtr, rootSlotOpt, outputs).extractExpr(_state));
-                initExprArgs.emplace(AccArgs::kIsGroupAccum,
+                initExprArgs.emplace(Accum::kIsGroupAccum,
                                      makeConstant(sbe::value::TypeTags::Boolean,
                                                   sbe::value::bitcastFrom<bool>(false)));
-            } else {
-                initExprArgs.emplace("", std::unique_ptr<mongo::sbe::EExpression>(nullptr));
             }
             return initExprArgs;
         }();
@@ -4925,8 +4699,8 @@ public:
                 expr && expr->getChildren().size() == 2) {
                 auto argX = expr->getChildren()[0].get();
                 auto argY = expr->getChildren()[1].get();
-                argExprs.emplace(AccArgs::kCovarianceX, getArgExpr(argX));
-                argExprs.emplace(AccArgs::kCovarianceY, getArgExpr(argY));
+                argExprs.emplace(Accum::kCovarianceX, getArgExpr(argX));
+                argExprs.emplace(Accum::kCovarianceY, getArgExpr(argY));
             } else if (auto expr =
                            dynamic_cast<ExpressionConstant*>(outputField.expr->input().get());
                        expr && expr->getValue().isArray() &&
@@ -4935,26 +4709,24 @@ public:
                 auto bson = BSON("x" << array[0] << "y" << array[1]);
                 auto [argXTag, argXVal] =
                     sbe::bson::convertFrom<false /* View */>(bson.getField("x"));
-                argExprs.emplace(AccArgs::kCovarianceX, makeConstant(argXTag, argXVal));
+                argExprs.emplace(Accum::kCovarianceX, makeConstant(argXTag, argXVal));
                 auto [argYTag, argYVal] =
                     sbe::bson::convertFrom<false /* View */>(bson.getField("y"));
-                argExprs.emplace(AccArgs::kCovarianceY, makeConstant(argYTag, argYVal));
+                argExprs.emplace(Accum::kCovarianceY, makeConstant(argYTag, argYVal));
             } else {
-                argExprs.emplace(AccArgs::kCovarianceX,
-                                 makeConstant(sbe::value::TypeTags::Null, 0));
-                argExprs.emplace(AccArgs::kCovarianceY,
-                                 makeConstant(sbe::value::TypeTags::Null, 0));
+                argExprs.emplace(Accum::kCovarianceX, makeConstant(sbe::value::TypeTags::Null, 0));
+                argExprs.emplace(Accum::kCovarianceY, makeConstant(sbe::value::TypeTags::Null, 0));
             }
         } else if (accName == "$integral" || accName == "$derivative" || accName == "$linearFill") {
             auto [outStage, sortBySlot, _] = getSortBySlot(std::move(stage));
             stage = std::move(outStage);
 
-            argExprs.emplace(AccArgs::kInput, getArgExpr(outputField.expr->input().get()));
-            argExprs.emplace(AccArgs::kSortBy, makeVariable(sortBySlot));
+            argExprs.emplace(Accum::kInput, getArgExpr(outputField.expr->input().get()));
+            argExprs.emplace(Accum::kSortBy, makeVariable(sortBySlot));
         } else if (accName == "$rank" || accName == "$denseRank") {
             auto isAscending = windowNode->sortBy->front().isAscending;
-            argExprs.emplace(AccArgs::kInput, getArgExpr(outputField.expr->input().get()));
-            argExprs.emplace(AccArgs::kIsAscending,
+            argExprs.emplace(Accum::kInput, getArgExpr(outputField.expr->input().get()));
+            argExprs.emplace(Accum::kIsAscending,
                              makeConstant(sbe::value::TypeTags::Boolean,
                                           sbe::value::bitcastFrom<bool>(isAscending)));
         } else if (isTopBottomN(outputField)) {
@@ -4971,9 +4743,9 @@ public:
                                                        std::move(sortSpecExpr),
                                                        makeVariable(*rootSlotOpt));
 
-                argExprs.emplace(AccArgs::kSortBy, getArgExprFromSBEExpression(std::move(key)));
+                argExprs.emplace(Accum::kSortBy, getArgExprFromSBEExpression(std::move(key)));
             } else {
-                argExprs.emplace(AccArgs::kSortSpec, sortSpecExpr->clone());
+                argExprs.emplace(Accum::kSortSpec, sortSpecExpr->clone());
 
                 // Build the key expression
                 auto key = collatorSlot ? makeFunction("generateCheapSortKey",
@@ -4983,7 +4755,7 @@ public:
                                         : makeFunction("generateCheapSortKey",
                                                        std::move(sortSpecExpr),
                                                        makeVariable(*rootSlotOpt));
-                argExprs.emplace(AccArgs::kSortBy,
+                argExprs.emplace(Accum::kSortBy,
                                  makeFunction("sortKeyComponentVectorToArray", std::move(key)));
             }
 
@@ -4992,7 +4764,7 @@ public:
                     if (key == AccumulatorN::kFieldNameOutput) {
                         auto outputExpr =
                             generateExpression(_state, value.get(), rootSlotOpt, outputs);
-                        argExprs.emplace(AccArgs::kValue,
+                        argExprs.emplace(Accum::kValue,
                                          getArgExprFromSBEExpression(
                                              makeFillEmptyNull(outputExpr.extractExpr(_state))));
                         break;
@@ -5010,7 +4782,7 @@ public:
                     auto [outputTag, outputVal] =
                         sbe::bson::convertFrom<false /* View */>(outputField);
                     auto outputExpr = makeConstant(outputTag, outputVal);
-                    argExprs.emplace(AccArgs::kValue, makeFillEmptyNull(std::move(outputExpr)));
+                    argExprs.emplace(Accum::kValue, makeFillEmptyNull(std::move(outputExpr)));
                 }
             } else {
                 tasserted(8155717,
@@ -5020,10 +4792,9 @@ public:
             tassert(8155718,
                     str::stream() << accName
                                   << " window function must have an output field in the argument",
-                    argExprs.find(AccArgs::kValue) != argExprs.end());
-
+                    argExprs.find(Accum::kValue) != argExprs.end());
         } else {
-            argExprs.emplace("", getArgExpr(outputField.expr->input().get()));
+            argExprs.emplace(Accum::kInput, getArgExpr(outputField.expr->input().get()));
         }
 
         return {std::move(stage), std::move(initExprArgs), std::move(argExprs)};
@@ -5031,7 +4802,7 @@ public:
 
     SbStage generateInitsAddsAndRemoves(SbStage stage,
                                         const WindowFunctionStatement& outputField,
-                                        const AccumulationOp& acc,
+                                        const Accum::Op& acc,
                                         bool removable,
                                         StringDataEExprMap initExprArgs,
                                         const StringDataEExprMap& argExprs,
@@ -5045,9 +4816,8 @@ public:
             return exprMapClone;
         };
         if (removable) {
-            if (initExprArgs.size() == 1) {
-                window.initExprs = buildWindowInit(
-                    _state, outputField, std::move(initExprArgs.begin()->second), collatorSlot);
+            if (initExprArgs.size() == 0) {
+                window.initExprs = buildWindowInit(_state, outputField, collatorSlot);
             } else {
                 window.initExprs =
                     buildWindowInit(_state, outputField, std::move(initExprArgs), collatorSlot);
@@ -5063,18 +4833,18 @@ public:
                 window.removeExprs = buildWindowRemove(_state, outputField, cloneExprMap(argExprs));
             }
         } else {
-            if (initExprArgs.size() == 1) {
-                window.initExprs =
-                    buildInitialize(acc, std::move(initExprArgs.begin()->second), _state);
+            if (initExprArgs.size() == 0) {
+                window.initExprs = buildInitializeForWindowFunc(acc, _state);
             } else {
-                window.initExprs = buildInitialize(acc, std::move(initExprArgs), _state);
+                window.initExprs =
+                    buildInitializeForWindowFunc(acc, std::move(initExprArgs), _state);
             }
             if (argExprs.size() == 1) {
                 window.addExprs =
-                    buildAccumulator(acc, argExprs.begin()->second->clone(), collatorSlot, _state);
+                    buildAccumulatorForWindowFunc(acc, argExprs.begin()->second->clone(), _state);
             } else {
                 window.addExprs =
-                    buildAccumulator(acc, cloneExprMap(argExprs), collatorSlot, _state);
+                    buildAccumulatorForWindowFunc(acc, cloneExprMap(argExprs), _state);
             }
             window.removeExprs =
                 std::vector<std::unique_ptr<sbe::EExpression>>{window.addExprs.size()};
@@ -5249,7 +5019,7 @@ public:
     }
 
     SlotId generateFinalExpr(const WindowFunctionStatement& outputField,
-                             const AccumulationOp& acc,
+                             const Accum::Op& acc,
                              bool removable,
                              StringDataEExprMap argExprs,
                              const sbe::WindowStage::Window& window) {
@@ -5273,15 +5043,14 @@ public:
             auto u = dynamic_cast<ExpressionWithUnit*>(outputField.expr.get())->unitInMillis();
             auto unit = u ? makeInt64Constant(*u) : makeNullConstant();
 
-            auto it = argExprs.find(AccArgs::kInput);
+            auto it = argExprs.find(Accum::kInput);
             tassert(7993401,
-                    str::stream() << "Window function expects '" << AccArgs::kInput << "' argument",
+                    str::stream() << "Window function expects '" << Accum::kInput << "' argument",
                     it != argExprs.end());
             auto inputExpr = it->second->clone();
-            it = argExprs.find(AccArgs::kSortBy);
+            it = argExprs.find(Accum::kSortBy);
             tassert(7993402,
-                    str::stream() << "Window function expects '" << AccArgs::kSortBy
-                                  << "' argument",
+                    str::stream() << "Window function expects '" << Accum::kSortBy << "' argument",
                     it != argExprs.end());
             auto sortByExpr = it->second->clone();
 
@@ -5291,11 +5060,11 @@ public:
             auto frameLastInput = getModifiedExpr(inputExpr->clone(), frameLastSlots);
             auto frameFirstSortBy = getModifiedExpr(sortByExpr->clone(), frameFirstSlots);
             auto frameLastSortBy = getModifiedExpr(sortByExpr->clone(), frameLastSlots);
-            finalArgExprs.emplace(AccArgs::kUnit, std::move(unit));
-            finalArgExprs.emplace(AccArgs::kInputFirst, std::move(frameFirstInput));
-            finalArgExprs.emplace(AccArgs::kInputLast, std::move(frameLastInput));
-            finalArgExprs.emplace(AccArgs::kSortByFirst, std::move(frameFirstSortBy));
-            finalArgExprs.emplace(AccArgs::kSortByLast, std::move(frameLastSortBy));
+            finalArgExprs.emplace(Accum::kUnit, std::move(unit));
+            finalArgExprs.emplace(Accum::kInputFirst, std::move(frameFirstInput));
+            finalArgExprs.emplace(Accum::kInputLast, std::move(frameLastInput));
+            finalArgExprs.emplace(Accum::kSortByFirst, std::move(frameFirstSortBy));
+            finalArgExprs.emplace(Accum::kSortByLast, std::move(frameLastSortBy));
         } else if (outputField.expr->getOpName() == "$first" && removable) {
             tassert(8085502,
                     str::stream() << "Window function $first expects 1 argument",
@@ -5304,8 +5073,8 @@ public:
             auto& frameFirstSlots = windowFrameFirstSlots[*windowFrameFirstSlotIdx.back()];
             auto inputExpr = it->second->clone();
             auto frameFirstInput = getModifiedExpr(inputExpr->clone(), frameFirstSlots);
-            finalArgExprs.emplace(AccArgs::kInput, std::move(frameFirstInput));
-            finalArgExprs.emplace(AccArgs::kDefaultVal, makeNullConstant());
+            finalArgExprs.emplace(Accum::kInput, std::move(frameFirstInput));
+            finalArgExprs.emplace(Accum::kDefaultVal, makeNullConstant());
         } else if (outputField.expr->getOpName() == "$last" && removable) {
             tassert(8085503,
                     str::stream() << "Window function $last expects 1 argument",
@@ -5314,8 +5083,8 @@ public:
             auto inputExpr = it->second->clone();
             auto& frameLastSlots = windowFrameLastSlots[*windowFrameLastSlotIdx.back()];
             auto frameLastInput = getModifiedExpr(inputExpr->clone(), frameLastSlots);
-            finalArgExprs.emplace(AccArgs::kInput, std::move(frameLastInput));
-            finalArgExprs.emplace(AccArgs::kDefaultVal, makeNullConstant());
+            finalArgExprs.emplace(Accum::kInput, std::move(frameLastInput));
+            finalArgExprs.emplace(Accum::kDefaultVal, makeNullConstant());
         } else if (outputField.expr->getOpName() == "$linearFill") {
             finalArgExprs = std::move(argExprs);
         } else if (outputField.expr->getOpName() == "$shift") {
@@ -5330,10 +5099,10 @@ public:
             auto& frameFirstSlots = windowFrameFirstSlots[*windowFrameFirstSlotIdx.back()];
             auto inputExpr = it->second->clone();
             auto frameFirstInput = getModifiedExpr(inputExpr->clone(), frameFirstSlots);
-            finalArgExprs.emplace(AccArgs::kInput, std::move(frameFirstInput));
-            finalArgExprs.emplace(AccArgs::kDefaultVal, getDefaultValueExpr(outputField));
+            finalArgExprs.emplace(Accum::kInput, std::move(frameFirstInput));
+            finalArgExprs.emplace(Accum::kDefaultVal, getDefaultValueExpr(outputField));
         } else if (isTopBottomN(outputField) && !removable) {
-            finalArgExprs.emplace(AccArgs::kSortSpec,
+            finalArgExprs.emplace(Accum::kSortSpec,
                                   sbe::makeE<sbe::EVariable>(_state.getSortSpecSlot(&outputField)));
         }
 
@@ -5349,10 +5118,10 @@ public:
                 : buildWindowFinalize(_state, outputField, window.windowExprSlots, collatorSlot);
         } else {
             finalExpr = finalArgExprs.size() > 0
-                ? buildFinalize(
-                      _state, acc, window.windowExprSlots, std::move(finalArgExprs), collatorSlot)
+                ? buildFinalizeForWindowFunc(
+                      acc, std::move(finalArgExprs), _state, window.windowExprSlots)
                       .extractExpr(_state)
-                : buildFinalize(_state, acc, window.windowExprSlots, collatorSlot)
+                : buildFinalizeForWindowFunc(acc, _state, window.windowExprSlots)
                       .extractExpr(_state);
         }
 
@@ -5450,8 +5219,8 @@ WindowStageBuilder::BuildOutput WindowStageBuilder::build(SbStage stage) {
         // Check whether window is removable or not.
         bool removable = isWindowRemovable(windowBounds);
 
-        // Create an AccumulationOp for non-removable window bounds.
-        auto acc = AccumulationOp{outputField.expr->getOpName()};
+        // Create an Accum::Op for non-removable window bounds.
+        auto acc = Accum::Op{outputField.expr->getOpName()};
 
         auto [outStage, initExprArgs, argExprs] =
             generateArgs(std::move(stage), outputField, removable);

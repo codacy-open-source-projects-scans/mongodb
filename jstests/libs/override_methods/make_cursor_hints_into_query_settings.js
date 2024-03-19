@@ -63,11 +63,19 @@ function runCommandOverride(conn, dbName, cmdName, cmdObj, clientFunction, makeF
 
     // Construct the equivalent query settings, remove the hint from the original command object and
     // build the representative query.
-    const allowedIndexes = [innerCmd.hint];
+    // TODO SERVER-85242 Remove the '$natural' hints once the fallback is re-implemented.
+    const allowedIndexes = [innerCmd.hint, {$natural: 1}, {$natural: -1}];
     delete innerCmd.hint;
     const commandType = getCommandType(innerCmd);
-    const collectionName = innerCmd[commandType];
-    const settings = {indexHints: {allowedIndexes}};
+
+    // If the collection used is a view, determine the underyling collection.
+    const collInfos = db.getCollectionInfos({name: innerCmd[commandType]});
+    if (!collInfos) {
+        return originalResponse;
+    }
+    const collectionName = collInfos[0].options.viewOn || innerCmd[commandType];
+
+    const settings = {indexHints: {ns: {db: dbName, coll: collectionName}, allowedIndexes}};
     const qsutils = new QuerySettingsUtils(db, collectionName);
     const representativeQuery = (function() {
         switch (commandType) {
@@ -82,13 +90,8 @@ function runCommandOverride(conn, dbName, cmdName, cmdObj, clientFunction, makeF
 
     // Set the equivalent query settings, execute the original command without the hint, and finally
     // remove all the settings.
-    qsutils.removeAllQuerySettings();
-    assert.commandWorked(db.adminCommand({setQuerySettings: representativeQuery, settings}));
-    qsutils.assertQueryShapeConfiguration(
-        [qsutils.makeQueryShapeConfiguration(settings, representativeQuery)]);
-    const response = clientFunction.apply(conn, makeFuncArgs(cmdObj));
-    qsutils.removeAllQuerySettings();
-    return response;
+    return qsutils.withQuerySettings(
+        representativeQuery, settings, () => clientFunction.apply(conn, makeFuncArgs(cmdObj)));
 }
 
 // Override the default runCommand with our custom version.

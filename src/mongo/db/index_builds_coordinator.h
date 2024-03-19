@@ -116,6 +116,7 @@ public:
     struct IndexBuildOptions {
         boost::optional<CommitQuorumOptions> commitQuorum;
         ApplicationMode applicationMode = ApplicationMode::kNormal;
+        boost::optional<repl::OpTime> startIndexBuildOpTime;
     };
 
     virtual ~IndexBuildsCoordinator() = default;
@@ -413,7 +414,7 @@ public:
     virtual Status voteAbortIndexBuild(OperationContext* opCtx,
                                        const UUID& buildUUID,
                                        const HostAndPort& hostAndPort,
-                                       const StringData& reason) = 0;
+                                       StringData reason) = 0;
 
     /**
      * Handles the 'VoteCommitIndexBuild' command request.

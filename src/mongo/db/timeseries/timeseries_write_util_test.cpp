@@ -384,13 +384,10 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOp) {
                                    /*validateCompression=*/true);
     ASSERT_TRUE(preImageCompressionResult.compressedBucket);
 
-    setUncompressedBucketDoc(*batch, uncompressedPreImage);
-
     batch->numPreviouslyCommittedMeasurements = 3;
     BSONObj bucketDataDoc =
         preImageCompressionResult.compressedBucket->getObjectField(kBucketDataFieldName).getOwned();
-    batch->intermediateBuilders.initBuilders(bucketDataDoc,
-                                             batch->numPreviouslyCommittedMeasurements);
+    batch->measurementMap.initBuilders(bucketDataDoc, batch->numPreviouslyCommittedMeasurements);
 
     const BSONObj expectedDiff = fromjson(
         R"({
@@ -456,13 +453,10 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpWithMeta) {
                                    /*validateCompression=*/true);
     ASSERT_TRUE(preImageCompressionResult.compressedBucket);
 
-    setUncompressedBucketDoc(*batch, uncompressedPreImage);
-
     batch->numPreviouslyCommittedMeasurements = 3;
     BSONObj bucketDataDoc =
         preImageCompressionResult.compressedBucket->getObjectField(kBucketDataFieldName).getOwned();
-    batch->intermediateBuilders.initBuilders(bucketDataDoc,
-                                             batch->numPreviouslyCommittedMeasurements);
+    batch->measurementMap.initBuilders(bucketDataDoc, batch->numPreviouslyCommittedMeasurements);
 
     const BSONObj expectedDiff = fromjson(
         R"({
@@ -945,7 +939,9 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
             sideBucketCatalog,
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
-            &bucketIds));
+            &bucketIds,
+            /*compressAndWriteBucketFunc=*/
+            nullptr));
         ASSERT_EQ(bucketIds.size(), 1);
     }
 
@@ -1019,7 +1015,9 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             sideBucketCatalog,
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
-            &bucketIds));
+            &bucketIds,
+            /*compressAndWriteBucketFunc=*/
+            nullptr));
         ASSERT_EQ(bucketIds.size(), 1);
     }
 
@@ -1037,7 +1035,9 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             sideBucketCatalog,
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
-            &bucketIds));
+            &bucketIds,
+            /*compressAndWriteBucketFunc=*/
+            nullptr));
         ASSERT_EQ(bucketIds.size(), 1);
     }
 
@@ -1055,7 +1055,9 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             sideBucketCatalog,
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
-            &bucketIds));
+            &bucketIds,
+            /*compressAndWriteBucketFunc=*/
+            nullptr));
         ASSERT_EQ(bucketIds.size(), 2);
     }
 }

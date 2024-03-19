@@ -110,6 +110,7 @@ auto& sbeNumReadsHistogram =
 }  // namespace
 
 CandidatePlans MultiPlanner::plan(
+    const QueryPlannerParams& plannerParams,
     std::vector<std::unique_ptr<QuerySolution>> solutions,
     std::vector<std::pair<std::unique_ptr<PlanStage>, stage_builder::PlanStageData>> roots) {
     auto candidates = collectExecutionStats(
@@ -120,7 +121,7 @@ CandidatePlans MultiPlanner::plan(
                                              internalQueryPlanEvaluationWorksSbe.load(),
                                              internalQueryPlanEvaluationCollFractionSbe.load()));
     auto decision = uassertStatusOK(mongo::plan_ranker::pickBestPlan<PlanStageStats>(candidates));
-    return finalizeExecutionPlans(std::move(decision), std::move(candidates));
+    return finalizeExecutionPlans(plannerParams, std::move(decision), std::move(candidates));
 }
 
 bool MultiPlanner::CandidateCmp::operator()(const plan_ranker::CandidatePlan* lhs,
@@ -262,6 +263,7 @@ std::vector<plan_ranker::CandidatePlan> MultiPlanner::collectExecutionStats(
 }
 
 CandidatePlans MultiPlanner::finalizeExecutionPlans(
+    const QueryPlannerParams& plannerParams,
     std::unique_ptr<mongo::plan_ranker::PlanRankingDecision> decision,
     std::vector<plan_ranker::CandidatePlan> candidates) const {
     invariant(decision);
@@ -342,14 +344,15 @@ CandidatePlans MultiPlanner::finalizeExecutionPlans(
     }
 
     // Extend the winning candidate with the agg pipeline and rebuild the execution tree. Because
-    // the trial was done with find-only part of the query, we cannot reuse the results. The
-    // non-winning plans are only used in 'explain()' so, to save on unnecessary work, we extend
-    // them only if this is an 'explain()' request.
+    // the trial was done with find-only part of the query, we cannot reuse the results. We do not
+    // extend the rejected plans because doing so erases execution statistics. The agg pipeline does
+    // not affect plan selection anyway. This is consistent with the classic runtime planner for
+    // SBE.
     if (!_cq.cqPipeline().empty()) {
         winner.root->close();
         _yieldPolicy->clearRegisteredPlans();
         auto solution = QueryPlanner::extendWithAggPipeline(
-            _cq, std::move(winner.solution), _queryParams.secondaryCollectionsInfo);
+            _cq, std::move(winner.solution), plannerParams.secondaryCollectionsInfo);
         auto [rootStage, data] = stage_builder::buildSlotBasedExecutableTree(
             _opCtx, _collections, _cq, *solution, _yieldPolicy);
         // The winner might have been replanned. So, pass through the replanning reason to the new
@@ -373,20 +376,6 @@ CandidatePlans MultiPlanner::finalizeExecutionPlans(
                                             plan_ranker::CandidatePlanData{std::move(data)}};
         candidates[winnerIdx].clonedPlan.emplace(std::move(clonedPlan));
         candidates[winnerIdx].root->open(false);
-
-        if (_cq.getExplain()) {
-            for (size_t i = 0; i < candidates.size(); ++i) {
-                if (i == winnerIdx)
-                    continue;  // have already done the winner
-
-                auto solution = QueryPlanner::extendWithAggPipeline(
-                    _cq, std::move(candidates[i].solution), _queryParams.secondaryCollectionsInfo);
-                auto&& [rootStage, data] = stage_builder::buildSlotBasedExecutableTree(
-                    _opCtx, _collections, _cq, *solution, _yieldPolicy);
-                candidates[i] = sbe::plan_ranker::CandidatePlan{
-                    std::move(solution), std::move(rootStage), std::move(data)};
-            }
-        }
     }
 
     // Writes a cache entry for the winning plan to the plan cache if possible.

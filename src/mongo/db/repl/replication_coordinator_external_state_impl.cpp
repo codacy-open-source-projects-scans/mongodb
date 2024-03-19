@@ -176,8 +176,8 @@ constexpr std::size_t kOplogApplyBufferSize = 100 * 1024 * 1024;
 constexpr std::size_t kOplogApplyBufferSizeLegacy = 256 * 1024 * 1024;
 
 
-// The count of items in the buffer
-OplogBuffer::Counters bufferGauge("repl.buffer");
+// The count of items in the oplog application buffer
+OplogBuffer::Counters& applyBufferGauge = *MetricBuilder<OplogBuffer::Counters>("repl.buffer");
 
 /**
  * Returns new thread pool for thread pool task executor.
@@ -274,7 +274,15 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
         // TODO (SERVER-85720): Add write buffer metrics to serverStatus.
         _oplogWriteBuffer = std::make_unique<OplogBufferBatchedQueue>(kOplogWriteBufferSize);
     }
-    _oplogApplyBuffer = std::make_unique<OplogBufferBlockingQueue>(applyBufferSize, &bufferGauge);
+
+    // When featureFlagReduceMajorityWriteLatency is enabled, we must drain the apply buffer on
+    // clean shutdown in order to make sure that every oplog that has been written is applied
+    // and thus recovery after clean shutdown does not need to apply any oplog, which is needed
+    // for downgrades to work.
+    OplogBufferBlockingQueue::Options bufferOptions;
+    bufferOptions.clearOnShutdown = !useOplogWriter;
+    _oplogApplyBuffer = std::make_unique<OplogBufferBlockingQueue>(
+        applyBufferSize, &applyBufferGauge, bufferOptions);
 
     // No need to log OplogBuffer::startup because the blocking queue and batched queue
     // implementations does not start any threads or access the storage layer.
@@ -295,7 +303,6 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
                                                          _oplogApplyBuffer.get(),
                                                          replCoord,
                                                          _storageInterface,
-                                                         _writerPool.get(),
                                                          &noopOplogWriterObserver,
                                                          OplogWriter::Options());
     }
@@ -363,8 +370,8 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication_inlock(
     auto oldApplierExecutor = std::move(_oplogApplierTaskExecutor);
     lock.unlock();
 
-    // _syncSourceFeedbackThread should be joined before _bgSync's shutdown because it has
-    // a pointer of _bgSync.
+    // The _syncSourceFeedbackThread should be joined before _bgSync's shutdown because it
+    // has a pointer of _bgSync.
     if (oldSSF) {
         LOGV2(21302, "Stopping replication reporter thread");
         _syncSourceFeedback.shutdown();
@@ -379,22 +386,17 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication_inlock(
     if (oldWriter) {
         LOGV2(8569801, "Stopping replication writer thread");
         oldWriter->shutdown();
-    }
-
-    if (oldApplier) {
-        LOGV2(21304, "Stopping replication applier thread");
+    } else if (oldApplier) {
+        LOGV2(8569806, "Stopping replication applier thread");
         oldApplier->shutdown();
     }
 
-    // Shutdown the buffers. This unblocks the OplogFetcher if it is blocked with a full queue,
-    // but ensures that it won't add anything. It will also unblock the OplogApplier pipeline
-    // if it is waiting for an operation to be past the secondaryDelaySecs point.
-    // TODO (SERVER-87720): Drain apply buffer on clean shutdown.
+    // Shutdown the buffer. This unblocks the OplogFetcher if it is blocked with a full
+    // queue, but ensures that it won't add anything. This also unblocks the downstream
+    // pipeline if it is waiting for an operation to be past secondaryDelaySecs.
     if (oldWriteBuffer) {
         oldWriteBuffer->shutdown(opCtx);
-    }
-
-    if (oldApplyBuffer) {
+    } else if (oldApplyBuffer) {
         oldApplyBuffer->shutdown(opCtx);
     }
 
@@ -402,11 +404,25 @@ void ReplicationCoordinatorExternalStateImpl::_stopDataReplication_inlock(
         oldBgSync->join(opCtx);
     }
 
+    // Since OplogApplier needs to drain the buffer on clean shutdown, we need to wait
+    // for OplogWriter to finish before shutting down the OplogApplier and its buffer,
+    // to make sure that no more oplog entries will be written.
     if (oldWriter) {
         _oplogWriterShutdownFuture.get();
+    } else if (oldApplier) {
+        _oplogApplierShutdownFuture.get();
     }
 
-    if (oldApplier) {
+    if (oldWriter && oldApplier) {
+        LOGV2(8569807, "Stopping replication applier thread");
+        oldApplier->shutdown();
+    }
+
+    if (oldWriteBuffer && oldApplyBuffer) {
+        oldApplyBuffer->shutdown(opCtx);
+    }
+
+    if (oldWriter && oldApplier) {
         _oplogApplierShutdownFuture.get();
     }
 
@@ -974,15 +990,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
         } else if (gFeatureFlagTransitionToCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
             CatalogCacheLoader::get(_service).onStepDown();
         }
-    } else if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
-        // TODO(SERVER-86759): Investigate if the router path is not initialized, if this can hit
-        // MONGO_UNREACHABLE. If this mongod has a router service, it needs to run stepdown hooks
-        // even if the shard-role isn't initialized yet.
-        // TODO SERVER-84243: Update this code once CatalogCacheLoader is split between
-        // router and shard roles.
-        if (Grid::get(_service)->isShardingInitialized()) {
-            CatalogCacheLoader::get(_service).onStepDown();
-        }
     }
     if (auto validator = LogicalTimeValidator::get(_service)) {
         auto opCtx = cc().getOperationContext();
@@ -1112,15 +1119,8 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
             // Schedule a drop of the temporary collections used by aggregations ($out
             // specifically).
             dropAggTempCollections(opCtx);
-        } else if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
-            // If this mongod has a router service, it needs to run stepdown
-            // hooks even if the shard-role isn't initialized yet.
-            // TODO SERVER-84243: Update this code once CatalogCacheLoader is split between
-            // router and shard roles.
-            if (Grid::get(_service)->isShardingInitialized()) {
-                CatalogCacheLoader::get(_service).onStepUp();
-            }
         }
+
         // The code above will only be executed after a stepdown happens, however the code below
         // needs to be executed also on startup, and the enabled check might fail in shards during
         // startup. Create uuid index on config.rangeDeletions if needed

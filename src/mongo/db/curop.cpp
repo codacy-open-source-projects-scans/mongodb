@@ -50,6 +50,7 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/execution_control_feature_flags_gen.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
@@ -65,7 +66,6 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/stats/timer_stats.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/storage_engine_feature_flags_gen.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -480,9 +480,8 @@ Milliseconds CurOp::_sumBlockedTimeTotal() {
             shard_role_details::getLocker(opCtx())->getFlowControlStats().timeAcquiringMicros));
     auto waitForLocks =
         duration_cast<Milliseconds>(Microseconds(lockerInfo.stats.getCumulativeWaitTimeMicros()));
-    auto waitForWriteConcern = _debug.waitForWriteConcernDurationMillis;
 
-    return waitForTickets + waitForLocks + waitForWriteConcern;
+    return waitForTickets + waitForLocks;
 }
 
 void CurOp::enter_inlock(NamespaceString nss, int dbProfileLevel) {
@@ -819,9 +818,15 @@ void CurOp::reportState(BSONObjBuilder* builder,
     // truncate.
     const boost::optional<size_t> maxQuerySize{truncateOps, 1000};
 
-    auto opDescription =
-        serializeDollarDbInOpDescription(_nss.tenantId(), _opDescription, serializationContext);
-    auto obj = appendCommentField(opCtx, opDescription);
+    auto obj = [&]() {
+        if (!gMultitenancySupport) {
+            return appendCommentField(opCtx, _opDescription);
+        } else {
+            return appendCommentField(opCtx,
+                                      serializeDollarDbInOpDescription(
+                                          _nss.tenantId(), _opDescription, serializationContext));
+        }
+    }();
 
     // If flag is true, add command field to builder without sensitive information.
     if (omitAndRedactInformation) {

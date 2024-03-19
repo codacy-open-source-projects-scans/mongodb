@@ -65,6 +65,7 @@
 #include "mongo/client/global_conn_pool.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/execution_control_init.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/audit_interface.h"
 #include "mongo/db/auth/auth_op_observer.h"
@@ -198,6 +199,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_mongod.h"
 #include "mongo/db/session/kill_sessions_local.h"
+#include "mongo/db/session/kill_sessions_remote.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_killer.h"
@@ -582,6 +584,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         repl::InitialSyncerFactory::get(serviceContext)->runCrashRecovery();
     }
 
+    admission::initializeExecutionControl(serviceContext);
+
     // Creating the operation context before initializing the storage engine allows the storage
     // engine initialization to make use of the lock manager. As the storage engine is not yet
     // initialized, a noop recovery unit is used until the initialization is complete.
@@ -705,8 +709,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     // error.
     FeatureCompatibilityVersion::fassertInitializedAfterStartup(startupOpCtx.get());
 
-    // TODO (SERVER-74847): Remove this function call once we remove testing around downgrading from
-    // latest to last continuous.
     if (!mongo::repl::disableTransitionFromLatestToLastContinuous) {
         FeatureCompatibilityVersion::addTransitionFromLatestToLastContinuous();
     }
@@ -1040,8 +1042,15 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
 
     PeriodicTask::startRunningPeriodicTasks();
 
-    SessionKiller::set(serviceContext,
-                       std::make_shared<SessionKiller>(serviceContext, killSessionsLocal));
+    auto shardService = serviceContext->getService(ClusterRole::ShardServer);
+    SessionKiller::set(shardService,
+                       std::make_shared<SessionKiller>(shardService, killSessionsLocal));
+
+    if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+        auto routerService = serviceContext->getService(ClusterRole::RouterServer);
+        SessionKiller::set(routerService,
+                           std::make_shared<SessionKiller>(routerService, killSessionsRemote));
+    }
 
     // Start up a background task to periodically check for and kill expired transactions; and a
     // background task to periodically check for and decrease cache pressure by decreasing the
@@ -2061,7 +2070,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                                   "Shut down full-time data capture",
                                                   &shutdownTimeElapsedBuilder);
-        stopMongoDFTDC(serviceContext);
+        stopMongoDFTDC();
     }
 
     LOGV2(20565, "Now exiting");
@@ -2075,7 +2084,10 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
     // SessionKiller relies on the network stack being cleanly shutdown which only occurs under
     // sanitizers
-    SessionKiller::shutdown(serviceContext);
+    SessionKiller::shutdown(serviceContext->getService(ClusterRole::ShardServer));
+    if (serverGlobalParams.clusterRole.has(ClusterRole::RouterServer)) {
+        SessionKiller::shutdown(serviceContext->getService(ClusterRole::RouterServer));
+    }
 #endif
 
     FlowControl::shutdown(serviceContext);

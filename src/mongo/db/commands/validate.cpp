@@ -245,7 +245,6 @@ public:
             reqSerializationCtx.setPrefixState(expectPrefix.boolean());
         }
         if (auto vts = auth::ValidatedTenancyScope::get(opCtx)) {
-            reqSerializationCtx.setTenantIdSource(vts->hasTenantId());
             // TODO SERVER-82320 we should no longer need to check here once expectPrefix only comes
             // from the unsigned security token.
             if (reqSerializationCtx.getPrefix() == SerializationContext::Prefix::ExcludePrefix) {
@@ -435,7 +434,6 @@ public:
         CollectionValidation::AdditionalOptions additionalOptions;
         additionalOptions.enforceTimeseriesBucketsAreAlwaysCompressed =
             cmdObj["enforceTimeseriesBucketsAreAlwaysCompressed"].trueValue();
-        additionalOptions.warnOnSchemaValidation = cmdObj["warnOnSchemaValidation"].trueValue();
         additionalOptions.validationVersion = getTestCommandsEnabled()
             ? (ValidationVersion)bsonTestValidationVersion
             : currentValidationVersion;

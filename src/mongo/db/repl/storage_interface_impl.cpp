@@ -991,7 +991,6 @@ StatusWith<BSONObj> makeUpsertQuery(const BSONElement& idKey) {
 Status _updateWithQuery(OperationContext* opCtx,
                         const UpdateRequest& request,
                         const Timestamp& ts) {
-    invariant(!request.isMulti());  // We only want to update one document for performance.
     invariant(!request.shouldReturnAnyDocs());
     invariant(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY == request.getYieldPolicy());
 
@@ -1129,6 +1128,7 @@ Status StorageInterfaceImpl::putSingleton(OperationContext* opCtx,
     request.setUpdateModification(
         write_ops::UpdateModification::parseFromClassicUpdate(update.obj));
     request.setUpsert(true);
+    invariant(!request.isMulti());  // We only want to update one document for performance.
     return _updateWithQuery(opCtx, request, update.timestamp);
 }
 
@@ -1141,6 +1141,21 @@ Status StorageInterfaceImpl::updateSingleton(OperationContext* opCtx,
     request.setQuery(query);
     request.setUpdateModification(
         write_ops::UpdateModification::parseFromClassicUpdate(update.obj));
+    invariant(!request.isUpsert());
+    invariant(!request.isMulti());  // We only want to update one document for performance.
+    return _updateWithQuery(opCtx, request, update.timestamp);
+}
+
+Status StorageInterfaceImpl::updateDocuments(OperationContext* opCtx,
+                                             const NamespaceString& nss,
+                                             const BSONObj& query,
+                                             const TimestampedBSONObj& update) {
+    auto request = UpdateRequest();
+    request.setNamespaceString(nss);
+    request.setQuery(query);
+    request.setUpdateModification(
+        write_ops::UpdateModification::parseFromClassicUpdate(update.obj));
+    request.setMulti(true);
     invariant(!request.isUpsert());
     return _updateWithQuery(opCtx, request, update.timestamp);
 }
@@ -1199,7 +1214,7 @@ Status StorageInterfaceImpl::deleteByFilter(OperationContext* opCtx,
     });
 }
 
-boost::optional<BSONObj> StorageInterfaceImpl::findOplogEntryLessThanOrEqualToTimestamp(
+boost::optional<OpTimeAndWallTime> StorageInterfaceImpl::findOplogOpTimeLessThanOrEqualToTimestamp(
     OperationContext* opCtx, const CollectionPtr& oplog, const Timestamp& timestamp) {
     invariant(oplog);
     invariant(shard_role_details::getLocker(opCtx)->isLocked());
@@ -1215,13 +1230,16 @@ boost::optional<BSONObj> StorageInterfaceImpl::findOplogEntryLessThanOrEqualToTi
                   "RecordId returned from seek (" + record->id.toString() +
                       ") is greater than the desired recordId (" + desiredRecordId.toString() +
                       ").");
-        return record->data.releaseToBson().getOwned();
+        return fassert(
+            8694200,
+            OpTimeAndWallTime::parseOpTimeAndWallTimeFromOplogEntry(record->data.toBson()));
     }
 
     return boost::none;
 }
 
-boost::optional<BSONObj> StorageInterfaceImpl::findOplogEntryLessThanOrEqualToTimestampRetryOnWCE(
+boost::optional<OpTimeAndWallTime>
+StorageInterfaceImpl::findOplogOpTimeLessThanOrEqualToTimestampRetryOnWCE(
     OperationContext* opCtx, const CollectionPtr& oplogCollection, const Timestamp& timestamp) {
     // Oplog reads are specially done under only MODE_IS global locks, without database or
     // collection level intent locks. Therefore, reads can run concurrently with validate cmds that
@@ -1236,7 +1254,7 @@ boost::optional<BSONObj> StorageInterfaceImpl::findOplogEntryLessThanOrEqualToTi
     int retries = 0;
     while (true) {
         try {
-            return findOplogEntryLessThanOrEqualToTimestamp(opCtx, oplogCollection, timestamp);
+            return findOplogOpTimeLessThanOrEqualToTimestamp(opCtx, oplogCollection, timestamp);
         } catch (const StorageUnavailableException&) {
             // This will log a message about the conflict initially and then every 5 seconds, with
             // the current rather arbitrary settings.
@@ -1420,6 +1438,11 @@ void StorageInterfaceImpl::setInitialDataTimestamp(ServiceContext* serviceCtx,
                                                    Timestamp snapshotName) {
     serviceCtx->getStorageEngine()->setInitialDataTimestamp(snapshotName);
 }
+
+Timestamp StorageInterfaceImpl::getInitialDataTimestamp(ServiceContext* serviceCtx) const {
+    return serviceCtx->getStorageEngine()->getInitialDataTimestamp();
+}
+
 
 Timestamp StorageInterfaceImpl::recoverToStableTimestamp(OperationContext* opCtx) {
     auto serviceContext = opCtx->getServiceContext();

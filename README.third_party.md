@@ -27,6 +27,7 @@ a notice will be included in
 | [benchmark]                | Apache-2.0                                                     | 1.5.2                                              |                      |                                 |
 | [Boost]                    | BSL-1.0                                                        | 1.79.0                                             |                      |                ✗                |
 | [c-ares]                   | MIT                                                            | 1.19.1                                             |                      |                ✗                |
+| [CRoaring]                 | Apache-2.0/ MIT                                                | 2.1.2.1                                            |                      |                ✗                |
 | [double-conversion]        | BSD 3-Clause                                                   | bf4607277fa7133825cb7899015374917cd06b8f           |                      |                ✗                |
 | [fmt]                      | BSD-2-Clause                                                   | 7.1.3                                              |                      |                ✗                |
 | [GPerfTools]               | BSD-3-Clause                                                   | 2.9.1                                              |                      |                ✗                |
@@ -57,16 +58,20 @@ a notice will be included in
 | [TomCrypt]                 | Public Domain                                                  | 1.18.2                                             |          ✗           |                ✗                |
 | [Unicode]                  | Unicode-DFS-2015                                               | 8.0.0                                              |          ✗           |                ✗                |
 | [libunwind]                | MIT                                                            | 1.6.2 + changes                                    |                      |                ✗                |
+| [lz4]                      | BSD-2-Clause                                                   | 1.9.3                                              |                      |                ✗                |
 | [Valgrind]                 | BSD-4-Clause<sup>\[<a href="#note_vg" id="ref_vg">1</a>]</sup> | 3.17.0                                             |                      |                ✗                |
 | [wiredtiger]               |                                                                | <sup>\[<a href="#note_wt" id="ref_wt">2</a>]</sup> |          ✗           |                ✗                |
+| [xxHash]                   | BSD-2-Clause                                                   | 0.8.0                                              |                      |                ✗                |
 | [yaml-cpp]                 | MIT                                                            | 0.6.3                                              |                      |                ✗                |
 | [Zlib]                     | Zlib                                                           | 1.3                                                |          ✗           |                ✗                |
 | [Zstandard]                | BSD-3-Clause                                                   | 1.5.5                                              |          ✗           |                ✗                |
+| [zydis]                    | MIT                                                            | 4d4fe4c293c5438f32688b14b29017ae3f48369e           |                      |                ✗                |
 
 [abseil-cpp]: https://github.com/abseil/abseil-cpp
 [ASIO]: https://github.com/chriskohlhoff/asio
 [benchmark]: https://github.com/google/benchmark
 [Boost]: http://www.boost.org/
+[CRoaring]: https://github.com/RoaringBitmap/CRoaring
 [double-conversion]: https://github.com/google/double-conversion "transitive dependency of MozJS"
 [fmt]: http://fmtlib.net/
 [GPerfTools]: https://github.com/gperftools/gperftools
@@ -79,6 +84,7 @@ a notice will be included in
 [librdkafka]: https://github.com/confluentinc/librdkafka
 [libmongocrypt]: https://github.com/mongodb/libmongocrypt
 [linenoise]: https://github.com/antirez/linenoise
+[lz4]: https://github.com/lz4/lz4
 [mongo-c-driver]: https://github.com/mongodb/mongo-c-driver
 [MozJS]: https://www.mozilla.org/en-US/security/known-vulnerabilities/firefox-esr
 [MurmurHash3]: https://github.com/aappleby/smhasher/blob/a6bd3ce/
@@ -98,9 +104,11 @@ a notice will be included in
 [libunwind]: http://www.nongnu.org/libunwind/
 [Valgrind]: http://valgrind.org/downloads/current.html
 [wiredtiger]: https://github.com/wiredtiger/wiredtiger
+[xxHash]: https://github.com/Cyan4973/xxHash
 [yaml-cpp]: https://github.com/jbeder/yaml-cpp/releases
 [Zlib]: https://zlib.net/
 [Zstandard]: https://github.com/facebook/zstd
+[zydis]: https://github.com/zyantific/zydis
 
 ## WiredTiger Vendored Test Libraries
 

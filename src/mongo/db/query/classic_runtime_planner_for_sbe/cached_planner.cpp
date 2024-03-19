@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/exec/trial_period_utils.h"
+#include "mongo/db/query/bind_input_params.h"
 #include "mongo/db/query/classic_runtime_planner_for_sbe/planner_interface.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/sbe_trial_runtime_executor.h"
@@ -46,13 +47,15 @@ CachedPlanner::CachedPlanner(PlannerDataForSBE plannerData,
       _yieldPolicy(std::move(yieldPolicy)),
       _cachedPlanHolder(std::move(cachedPlanHolder)) {}
 
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
+std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::makeExecutor(
+    std::unique_ptr<CanonicalQuery> canonicalQuery) {
     _cachedPlanHolder->cachedPlan->planStageData.debugInfo = _cachedPlanHolder->debugInfo;
     const auto& decisionReads = _cachedPlanHolder->decisionWorks;
     LOGV2_DEBUG(
         8523404, 5, "Recovering SBE plan from the cache", "decisionReads"_attr = decisionReads);
     if (!decisionReads) {
-        return prepareSbePlanExecutor(nullptr /*solution*/,
+        return prepareSbePlanExecutor(std::move(canonicalQuery),
+                                      nullptr /*solution*/,
                                       {std::move(_cachedPlanHolder->cachedPlan->root),
                                        std::move(_cachedPlanHolder->cachedPlan->planStageData)},
                                       true /*isFromPlanCache*/,
@@ -79,6 +82,15 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
                                                   candidate.data.stageData.debugInfo);
 
     if (!candidate.status.isOK()) {
+        // Recover $where expression JS function predicate from the SBE runtime environemnt, if
+        // necessary, so we could successfully replan the query. The primary match expression was
+        // modified during the input parameters bind-in process while we were collecting execution
+        // stats above.
+        if (cq()->getExpCtxRaw()->hasWhereClause) {
+            input_params::recoverWhereExprPredicate(cq()->getPrimaryMatchExpression(),
+                                                    candidate.data.stageData);
+        }
+
         // On failure, fall back to replanning the whole query. We neither evict the existing cache
         // entry, nor cache the result of replanning.
         LOGV2_DEBUG(8523802,
@@ -87,7 +99,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
                     "query"_attr = redact(cq()->toStringShort()),
                     "planSummary"_attr = explainer->getPlanSummary(),
                     "error"_attr = candidate.status.toString());
-        return _replan(false /*shouldCache*/,
+        return _replan(std::move(canonicalQuery),
+                       false /*shouldCache*/,
                        str::stream() << "cached plan returned: " << candidate.status);
     }
 
@@ -96,15 +109,15 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
     // candidate so that the executor will be able to reuse them.
     if (!candidate.exitedEarly) {
         auto nss = cq()->nss();
-        auto remoteCursors = cq()->getExpCtx()->explain
-            ? nullptr
-            : search_helpers::getSearchRemoteCursors(cq()->cqPipeline());
-        auto remoteExplains = cq()->getExpCtx()->explain
-            ? search_helpers::getSearchRemoteExplains(cq()->getExpCtxRaw(), cq()->cqPipeline())
+        auto expCtx = cq()->getExpCtxRaw();
+        auto remoteCursors =
+            expCtx->explain ? nullptr : search_helpers::getSearchRemoteCursors(cq()->cqPipeline());
+        auto remoteExplains = expCtx->explain
+            ? search_helpers::getSearchRemoteExplains(expCtx, cq()->cqPipeline())
             : nullptr;
         return uassertStatusOK(
             plan_executor_factory::make(opCtx(),
-                                        extractCq(),
+                                        std::move(canonicalQuery),
                                         {makeVector(std::move(candidate)), 0 /*winnerIdx*/},
                                         collections(),
                                         plannerOptions(),
@@ -128,7 +141,16 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::plan() {
         "numReads"_attr = numReads,
         "query"_attr = redact(cq()->toStringShort()),
         "planSummary"_attr = explainer->getPlanSummary());
+    // Recover $where expression JS function predicate from the SBE runtime environemnt, if
+    // necessary, so we could successfully replan the query. The primary match expression was
+    // modified during the input parameters bind-in process while we were collecting execution
+    // stats above.
+    if (cq()->getExpCtxRaw()->hasWhereClause) {
+        input_params::recoverWhereExprPredicate(cq()->getPrimaryMatchExpression(),
+                                                candidate.data.stageData);
+    }
     return _replan(
+        std::move(canonicalQuery),
         true /*shouldCache*/,
         str::stream()
             << "cached plan was less efficient than expected: expected trial execution to take "
@@ -176,7 +198,7 @@ sbe::plan_ranker::CandidatePlan CachedPlanner::_collectExecutionStatsForCachedPl
 }
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::_replan(
-    bool shouldCache, std::string replanReason) {
+    std::unique_ptr<CanonicalQuery> canonicalQuery, bool shouldCache, std::string replanReason) {
     // The plan drawn from the cache is being discarded, and should no longer be registered with the
     // yield policy.
     sbeYieldPolicy()->clearRegisteredPlans();
@@ -188,20 +210,12 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::_replan(
             *cq(), collections(), canonical_query_encoder::Optimizer::kSbeStageBuilders));
     }
 
-    QueryPlannerParams queryPlannerParams = plannerParams();
-    // TODO: SERVER-86174 Avoid unnecessary fillOutPlannerParams() and
-    // fillOutSecondaryCollectionsInformation() planner param calls.
-    queryPlannerParams.fillOutPlannerParams(
-        opCtx(), *cq(), collections(), false /* ignoreQuerySettings */);
-
     // Use the query planning module to plan the whole query.
-    auto statusWithMultiPlanSolns = QueryPlanner::plan(*cq(), queryPlannerParams);
-    auto solutions = uassertStatusOK(std::move(statusWithMultiPlanSolns));
-
+    auto solutions = uassertStatusOK(QueryPlanner::plan(*cq(), plannerParams()));
     if (solutions.size() == 1) {
         if (!cq()->cqPipeline().empty()) {
             solutions[0] = QueryPlanner::extendWithAggPipeline(
-                *cq(), std::move(solutions[0]), queryPlannerParams.secondaryCollectionsInfo);
+                *cq(), std::move(solutions[0]), plannerParams().secondaryCollectionsInfo);
         }
 
         auto [root, data] = stage_builder::buildSlotBasedExecutableTree(
@@ -215,7 +229,8 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::_replan(
                     "query"_attr = redact(cq()->toStringShort()),
                     "planSummary"_attr = explainer->getPlanSummary(),
                     "shouldCache"_attr = (shouldCache ? "yes" : "no"));
-        return prepareSbePlanExecutor(std::move(solutions[0]),
+        return prepareSbePlanExecutor(std::move(canonicalQuery),
+                                      std::move(solutions[0]),
                                       std::make_pair(std::move(root), std::move(data)),
                                       false /*isFromPlanCache*/,
                                       cachedPlanHash(),
@@ -225,7 +240,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> CachedPlanner::_replan(
         shouldCache ? PlanCachingMode::AlwaysCache : PlanCachingMode::NeverCache;
     MultiPlanner multiPlanner{
         extractPlannerData(), std::move(solutions), cachingMode, replanReason};
-    auto exec = multiPlanner.plan();
+    auto exec = multiPlanner.makeExecutor(std::move(canonicalQuery));
     LOGV2_DEBUG(8523805,
                 1,
                 "Query plan after replanning and its cache status",

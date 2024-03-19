@@ -385,7 +385,7 @@ void QueryPlannerAccess::handleRIDRangeMinMax(const CanonicalQuery& query,
     const MatchExpression* conjunct,
     const CollatorInterface* queryCollator,
     const CollatorInterface* ccCollator,
-    const StringData& clusterKeyFieldName,
+    StringData clusterKeyFieldName,
     RecordIdRange& recordRange,
     const std::function<void(const MatchExpression*)>& redundant) {
     if (conjunct == nullptr) {
@@ -2065,11 +2065,9 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::_buildIndexedDataAccess(
     return nullptr;
 }
 
-std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(
-    const IndexEntry& index,
-    const CanonicalQuery& query,
-    const QueryPlannerParams& params,
-    int direction) {
+std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(const IndexEntry& index,
+                                                                      const CanonicalQuery& query,
+                                                                      int direction) {
     std::unique_ptr<QuerySolutionNode> solnRoot;
 
     // Build an ixscan over the id index, use it, and return it.

@@ -1,5 +1,8 @@
-# Windows build variants for testing development environments that should run on master,
-# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
+# Windows build variants for testing development environments
+#
+# After the branching variants in this file
+# should continue to run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -75,8 +78,8 @@ buildvariants:
   - name: compile_test_parallel_unittest_stream_TG
   - name: compile_test_parallel_dbtest_stream_TG
   - name: compile_build_tools_next_TG
-  - name: server_discovery_and_monitoring_json_test_TG
-  - name: server_selection_json_test_TG
+  - name: server_discovery_and_monitoring_json_test
+  - name: server_selection_json_test
   - name: .crypt
   - name: generate_buildid_to_debug_symbols_mapping
 

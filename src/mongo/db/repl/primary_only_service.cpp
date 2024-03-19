@@ -434,7 +434,7 @@ void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
                 "service"_attr = getServiceName(),
                 "stepUpOpTime"_attr = stepUpOpTime);
     WaitForMajorityService::get(_serviceContext)
-        .waitUntilMajorityForWrite(_serviceContext, stepUpOpTime, _source.token())
+        .waitUntilMajorityForWrite(stepUpOpTime, _source.token())
         .thenRunOn(**newScopedExecutor)
         .then([this, newScopedExecutor, newTerm] {
             // Note that checking both the state and the term are optimizations and are
@@ -501,7 +501,7 @@ void PrimaryOnlyService::_interruptInstances(WithLock, Status status) {
     }
 
     for (auto opCtx : _opCtxs) {
-        stdx::lock_guard<Client> clientLock(*opCtx->getClient());
+        ClientLock clientLock(opCtx->getClient());
         _serviceContext->killOperation(clientLock, opCtx, status.code());
     }
 }

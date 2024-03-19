@@ -1,8 +1,8 @@
 // Tests setting query settings `reject` flag fails the relevant query (and not others).
 // @tags: [
 //   directly_against_shardsvrs_incompatible,
-//   featureFlagQuerySettings,
 //   simulate_atlas_proxy_incompatible,
+//   requires_fcv_80,
 //   assumes_read_preference_unchanged,
 //   does_not_support_stepdowns,
 // ]
@@ -28,8 +28,17 @@ function testRejection({query, queryPrime, unrelatedQuery}) {
 
     const rejectBaseline = getRejectCount();
 
-    const assertRejectedDelta = (delta) =>
-        assert.soon(() => getRejectCount() == delta + rejectBaseline);
+    const assertRejectedDelta = (delta) => {
+        let actual;
+        assert.soon(() => (actual = getRejectCount()) == delta + rejectBaseline,
+                    () => tojson({
+                        expected: delta + rejectBaseline,
+                        actual: actual,
+                        cmdType: type,
+                        cmdMetrics: db.runCommand({serverStatus: 1}).metrics.commands[type],
+                        metrics: db.runCommand({serverStatus: 1}).metrics,
+                    }));
+    };
 
     const getFailedCount = () => db.runCommand({serverStatus: 1}).metrics.commands[type].failed;
 

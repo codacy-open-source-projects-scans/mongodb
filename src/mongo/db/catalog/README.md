@@ -1748,7 +1748,7 @@ A ticketing mechanism that limits the number of concurrent storage engine transa
 
 There are 2 separate pools of available tickets: one pool for global lock read requests (MODE_S/MODE_IS), and one pool of tickets for global lock write requests (MODE_IX).
 
-As of v7.0, the size of each ticket pool is managed dynamically by the server to maximize throughput. Details of the algorithm can be found [here](https://github.com/mongodb/mongo/blob/master/src/mongo/db/storage/execution_control/README.md). This dynamic management can be disabled by specifying the size of each pool manually via server parameters `storageEngineConcurrentReadTransactions` (read ticket pool) and `storageEngineConcurrentWriteTransactions` (write ticket pool).
+As of v7.0, the size of each ticket pool is managed dynamically by the server to maximize throughput. Details of the algorithm can be found [here](https://github.com/mongodb/mongo/blob/master/src/mongo/db/admission/README.md). This dynamic management can be disabled by specifying the size of each pool manually via server parameters `storageEngineConcurrentReadTransactions` (read ticket pool) and `storageEngineConcurrentWriteTransactions` (write ticket pool).
 
 Each pool of tickets is maintained in a [TicketHolder](https://github.com/mongodb/mongo/blob/r6.3.0-rc0/src/mongo/util/concurrency/ticketholder.h#L52). Tickets distributed from a given TicketHolder will always be returned to the same TicketHolder (a write ticket will always be returned to the TicketHolder with the write ticket pool).
 
@@ -1984,6 +1984,13 @@ Repair mode is used by startup repair to avoid rebuilding indexes. Repair mode m
 standalone nodes by passing `{ repair: true }` to the validate command.
 
 See [RepairMode](https://github.com/mongodb/mongo/blob/4406491b2b137984c2583db98068b7d18ea32171/src/mongo/db/catalog/collection_validation.h#L71).
+
+## Pre-fetching
+
+Pre-fetching is an optimisation feature used in validate. When a page has been read from disk, prefetch workers pre-emptively
+read neighbouring leaf pages into the cache in an attempt to avoid waiting on I/O.
+
+It is currently enabled by default across all variants. See PM-3292 for more details.
 
 # Fast Truncation on Internal Collections
 

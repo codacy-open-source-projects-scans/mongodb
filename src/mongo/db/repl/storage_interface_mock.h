@@ -270,6 +270,13 @@ public:
         return Status{ErrorCodes::IllegalOperation, "updateSingleton not implemented."};
     }
 
+    Status updateDocuments(OperationContext* opCtx,
+                           const NamespaceString& nss,
+                           const BSONObj& query,
+                           const TimestampedBSONObj& update) override {
+        return Status{ErrorCodes::IllegalOperation, "updateDocuments not implemented."};
+    }
+
     StatusWith<BSONObj> findById(OperationContext* opCtx,
                                  const NamespaceStringOrUUID&,
                                  const BSONElement& idKey) override {
@@ -295,12 +302,12 @@ public:
         return Status{ErrorCodes::IllegalOperation, "deleteByFilter not implemented."};
     }
 
-    boost::optional<BSONObj> findOplogEntryLessThanOrEqualToTimestamp(
+    boost::optional<OpTimeAndWallTime> findOplogOpTimeLessThanOrEqualToTimestamp(
         OperationContext* opCtx, const CollectionPtr& oplog, const Timestamp& timestamp) override {
         return boost::none;
     }
 
-    boost::optional<BSONObj> findOplogEntryLessThanOrEqualToTimestampRetryOnWCE(
+    boost::optional<OpTimeAndWallTime> findOplogOpTimeLessThanOrEqualToTimestampRetryOnWCE(
         OperationContext* opCtx, const CollectionPtr& oplog, const Timestamp& timestamp) override {
         return boost::none;
     }
@@ -342,7 +349,7 @@ public:
 
     Timestamp getStableTimestamp() const;
 
-    Timestamp getInitialDataTimestamp() const;
+    Timestamp getInitialDataTimestamp(ServiceContext* serviceCtx) const override;
 
     Timestamp recoverToStableTimestamp(OperationContext* opCtx) override {
         return Timestamp();

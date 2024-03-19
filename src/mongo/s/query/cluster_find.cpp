@@ -347,10 +347,9 @@ CursorId runQueryWithoutRetrying(OperationContext* opCtx,
                                  bool* partialResultsReturned) {
     const auto& cm = cri.cm;
 
-    auto findCommand = query.getFindCommandRequest();
+    const auto& findCommand = query.getFindCommandRequest();
     // Get the set of shards on which we will run the query.
-    auto shardIds = getTargetedShardsForQuery(
-        query.getExpCtx(), cm, findCommand.getFilter(), findCommand.getCollation());
+    auto shardIds = getTargetedShardsForCanonicalQuery(query, cm);
 
     bool requestQueryStatsFromRemotes =
         feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
@@ -688,7 +687,7 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
     // We must always have a BSONObj vector into which to output our results.
     invariant(results);
 
-    auto findCommand = query.getFindCommandRequest();
+    const auto& findCommand = query.getFindCommandRequest();
     // Projection on the reserved sort key field is illegal in mongos.
     if (findCommand.getProjection().hasField(AsyncResultsMerger::kSortKeyField)) {
         uasserted(ErrorCodes::BadValue,
@@ -770,7 +769,6 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
                               << "Failed to run query after " << kMaxRetries << " retries");
                 throw;
             } else if (!ErrorCodes::isStaleShardVersionError(ex.code()) &&
-                       ex.code() != ErrorCodes::ShardInvalidatedForTargeting &&
                        ex.code() != ErrorCodes::ShardNotFound) {
 
                 if (ErrorCodes::isRetriableError(ex.code())) {
@@ -792,23 +790,15 @@ CursorId ClusterFind::runQuery(OperationContext* opCtx,
                         "maxRetries"_attr = kMaxRetries,
                         "error"_attr = redact(ex));
 
-            if (ex.code() != ErrorCodes::ShardInvalidatedForTargeting) {
-                if (auto staleInfo = ex.extraInfo<StaleConfigInfo>()) {
-                    catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
-                        query.nss(), staleInfo->getVersionWanted(), staleInfo->getShardId());
-                } else {
-                    catalogCache->invalidateCollectionEntry_LINEARIZABLE(query.nss());
-                }
+            if (auto staleInfo = ex.extraInfo<StaleConfigInfo>()) {
+                catalogCache->invalidateShardOrEntireCollectionEntryForShardedCollection(
+                    query.nss(), staleInfo->getVersionWanted(), staleInfo->getShardId());
+            } else {
+                catalogCache->invalidateCollectionEntry_LINEARIZABLE(query.nss());
             }
-
-            catalogCache->setOperationShouldBlockBehindCatalogCacheRefresh(opCtx, true);
 
             if (auto txnRouter = TransactionRouter::get(opCtx)) {
                 if (!txnRouter.canContinueOnStaleShardOrDbError(kFindCmdName, ex.toStatus())) {
-                    if (ex.code() == ErrorCodes::ShardInvalidatedForTargeting) {
-                        (void)catalogCache->getCollectionRoutingInfoWithPlacementRefresh(
-                            opCtx, query.nss());
-                    }
                     throw;
                 }
 

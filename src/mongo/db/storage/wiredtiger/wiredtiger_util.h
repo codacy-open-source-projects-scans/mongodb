@@ -253,7 +253,7 @@ public:
      *
      * Returns the FailedToParse status if the storage engine metadata object is malformed.
      */
-    static StatusWith<std::string> generateImportString(const StringData& ident,
+    static StatusWith<std::string> generateImportString(StringData ident,
                                                         const BSONObj& storageMetadata,
                                                         const ImportOptions& importOptions);
 
@@ -347,6 +347,11 @@ public:
      */
     static int64_t getIdentReuseSize(WT_SESSION* s, const std::string& uri);
 
+    /**
+     * Returns the bytes compaction may reclaim for an ident. This is the amount of allocated space
+     * on disk that can be potentially reclaimed.
+     */
+    static int64_t getIdentCompactRewrittenExpectedSize(WT_SESSION* s, const std::string& uri);
 
     /**
      * Return amount of memory to use for the WiredTiger cache based on either the startup

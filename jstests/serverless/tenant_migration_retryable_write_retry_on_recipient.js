@@ -143,6 +143,11 @@ function setupRetryableWritesForCollection(collName) {
 const beforeWrites = setupRetryableWritesForCollection(kCollNameBefore);
 const duringWrites = setupRetryableWritesForCollection(kCollNameDuring);
 
+// Ensure retryable insert generates multiple oplog entries.
+if (FeatureFlagUtil.isPresentAndEnabled(donorDb, "ReplicateVectoredInsertsTransactionally")) {
+    assert.commandWorked(donorDb.adminCommand({setParameter: 1, internalInsertMaxBatchSize: 2}));
+}
+
 jsTestLog("Run retryable writes before the migration");
 
 assert.commandWorked(donorDb.runCommand(beforeWrites.retryableInsertCommand));
@@ -211,13 +216,10 @@ modifyDataForErrorDetection(duringWrites);
 
 function testRecipientRetryableWrites(db, writes) {
     const kCollName = writes.collName;
-    // TODO(SERVER-86809): Re-enable this test.
-    if (!FeatureFlagUtil.isPresentAndEnabled(db, "ReplicateVectoredInsertsTransactionally")) {
-        jsTestLog("Testing retryable inserts");
-        assert.commandWorked(db.runCommand(writes.retryableInsertCommand));
-        // If retryable inserts don't work, we will see 6 here.
-        assert.eq(3, db[kCollName].find({tag: writes.sessionTag1}).itcount());
-    }
+    jsTestLog("Testing retryable inserts");
+    assert.commandWorked(db.runCommand(writes.retryableInsertCommand));
+    // If retryable inserts don't work, we will see 6 here.
+    assert.eq(3, db[kCollName].find({tag: writes.sessionTag1}).itcount());
 
     jsTestLog("Testing retryable update");
     assert.commandWorked(db.runCommand(writes.retryableUpdateCommand));

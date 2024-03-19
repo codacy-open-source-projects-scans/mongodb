@@ -143,13 +143,13 @@ BSONObj FTDCController::getMostRecentPeriodicDocument() {
     }
 }
 
-void FTDCController::start() {
+void FTDCController::start(Service* service) {
     LOGV2(20625,
           "Initializing full-time diagnostic data capture",
           "dataDirectory"_attr = _path.generic_string());
 
     // Start the thread
-    _thread = stdx::thread([this] { doLoop(); });
+    _thread = stdx::thread([this, service] { doLoop(service); });
 
     {
         stdx::lock_guard<Latch> lock(_mutex);
@@ -195,10 +195,10 @@ void FTDCController::stop() {
     }
 }
 
-void FTDCController::doLoop() noexcept {
+void FTDCController::doLoop(Service* service) noexcept {
     // Note: All exceptions thrown in this loop are considered process fatal. The default terminate
     // is used to provide a good stack trace of the issue.
-    Client::initThread(kFTDCThreadName, getGlobalServiceContext()->getService());
+    Client::initThread(kFTDCThreadName, service);
     Client* client = &cc();
 
     // TODO(SERVER-74659): Please revisit if this thread could be made killable.
@@ -254,12 +254,13 @@ void FTDCController::doLoop() noexcept {
             // Delay initialization of FTDCFileManager until we are sure the user has enabled
             // FTDC
             if (!_mgr) {
-                auto swMgr = FTDCFileManager::create(&_config, _path, &_rotateCollectors, client);
+                auto swMgr = FTDCFileManager::create(
+                    &_config, _path, &_rotateCollectors, client, _multiserviceSchema);
 
                 _mgr = uassertStatusOK(std::move(swMgr));
             }
 
-            auto collectSample = _periodicCollectors.collect(client);
+            auto collectSample = _periodicCollectors.collect(client, _multiserviceSchema);
 
             Status s = _mgr->writeSampleAndRotateIfNeeded(
                 client, std::get<0>(collectSample), std::get<1>(collectSample));

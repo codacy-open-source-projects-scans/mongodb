@@ -137,7 +137,7 @@ def convert_scons_node_to_bazel_target(scons_node: SCons.Node.FS.File) -> str:
         prefix = "lib"
 
     # now get just the file name without and prefix or suffix i.e.: libcommands.so -> 'commands'
-    prefix_suffix_removed = os.path.splitext(scons_node.name[len(prefix):])[0]
+    prefix_suffix_removed = scons_node.name[len(prefix):].split(".")[0]
 
     # i.e.: //src/mongo/db:commands>
     return f"//{bazel_dir}:{prefix_suffix_removed}"
@@ -405,7 +405,7 @@ def create_idlc_builder(env: SCons.Environment.Environment) -> None:
 
 
 def validate_remote_execution_certs(env: SCons.Environment.Environment) -> bool:
-    running_in_evergreen = env.GetOption("evergreen-tmp-dir") is not None
+    running_in_evergreen = os.environ.get("CI")
 
     if running_in_evergreen and not os.path.exists("./engflow.cert"):
         print(
@@ -614,7 +614,12 @@ def generate(env: SCons.Environment.Environment) -> None:
 
         # === Build settings ===
 
-        linkstatic = env.GetOption("link-model") in ["auto", "static"]
+        # We don't support DLL generation on Windows, but need shared object generation in dynamic-sdk mode
+        # on linux.
+        linkstatic = env.GetOption("link-model") in [
+            "auto", "static"
+        ] or (normalized_os == "windows" and env.GetOption("link-model") == "dynamic-sdk")
+
         allocator = env.get('MONGO_ALLOCATOR', 'tcmalloc-google')
 
         distro_or_os = normalized_os
@@ -653,6 +658,9 @@ def generate(env: SCons.Environment.Environment) -> None:
             '--compilation_mode=dbg',  # always build this compilation mode as we always build with -g
         ]
 
+        if env["DWARF_VERSION"]:
+            bazel_internal_flags.append(f"--//bazel/config:dwarf_version={env['DWARF_VERSION']}")
+
         if normalized_os == "macos":
             minimum_macos_version = "11.0" if normalized_arch == "arm64" else "10.14"
             bazel_internal_flags.append(f'--macos_minimum_os={minimum_macos_version}')
@@ -671,11 +679,10 @@ def generate(env: SCons.Environment.Environment) -> None:
             formatted_options = [f'--//bazel/config:{_SANITIZER_MAP[opt]}=True' for opt in options]
             bazel_internal_flags.extend(formatted_options)
 
-        # Disable RE for external developers
+        # Disable RE for external developers and when executing on non-linux amd64/arm64 platforms
         is_external_developer = not os.path.exists("/opt/mongodbtoolchain")
-
-        # TODO SERVER-85806 enable RE for amd64
-        if normalized_os != "linux" or normalized_arch not in ["arm64"] or is_external_developer:
+        if normalized_os != "linux" or normalized_arch not in ["arm64"
+                                                               "amd64"] or is_external_developer:
             bazel_internal_flags.append('--config=local')
 
         # Disable remote execution for public release builds.

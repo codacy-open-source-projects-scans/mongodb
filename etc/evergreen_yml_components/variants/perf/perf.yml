@@ -500,7 +500,7 @@ buildvariants:
 - <<: *amazon_linux2_x86_streams_compile_variant_dependency
   name: perf-streams-single.intel.aws.2023-10
   display_name: PERF Streams-Single Intel AWS 2023-10
-  # cron: "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
+  cron: "0 0 * * 2,4,6"  # Tuesday, Thursday and Saturday at 00:00
   modules: *perf_modules
   expansions:
     compile_variant: amazon2-x86-streams-compile
@@ -1472,8 +1472,8 @@ buildvariants:
     infrastructure_provisioning_release: 2023-09
     infrastructure_provisioning: initialsync-logkeeper
     workload_setup: 2022-11
-    # EBS logkeeper snapshot with FCV set to 7.2
-    snapshotId: snap-042ca2a003313ebc2
+    # EBS logkeeper snapshot with FCV set to 8.0
+    snapshotId: snap-0679c2f4a929231e7
     platform: linux
     authentication: disabled
     storageEngine: wiredTiger
@@ -1489,28 +1489,26 @@ buildvariants:
 
 # Uncomment this to run logkeeper FCV updates automatically. This is only intended to be run in
 # patch builds.
-# - name: linux-replSet-initialsync-logkeeper-snapshot-update
+# - <<: *amazon_linux2_arm64_compile_variant_dependency
+#   name: linux-replSet-initialsync-logkeeper-snapshot-update
 #   display_name: Linux ReplSet Initial Sync LogKeeper Snapshot Update
 #   cron: "0 0 * * 4"  # 00:00 on Thursday
-#   modules: *modules
+#   modules: *perf_modules
 #   expansions:
 #     mongodb_setup_release: 2022-11
 #     mongodb_setup: initialsync-logkeeper-snapshot-update
 #     infrastructure_provisioning_release: 2022-11
 #     infrastructure_provisioning: initialsync-logkeeper-snapshot-update
 #     # Update this to latest snapshot after each LTS release.
-#     snapshotId: snap-042ca2a003313ebc2
+#     snapshotId: snap-0679c2f4a929231e7
 #     platform: linux
 #     authentication: disabled
 #     storageEngine: wiredTiger
 #     project_dir: *perf_project_dir
-#     compile_variant: "-arm64"
+#     compile_variant: "amazon2-arm64-compile"
 #   run_on:
 #     - "rhel70-perf-initialsync-logkeeper"
-#   depends_on: *_compile_amazon_linux2_arm64
 #   tasks:
-#     - *schedule_patch_auto_tasks_task
-#     - *schedule_variant_auto_tasks_task
 #     - name: initialsync-logkeeper-snapshot-update
 
 - <<: *amazon_linux2_arm64_compile_variant_dependency
@@ -1638,6 +1636,7 @@ buildvariants:
     - name: aggregation_read_commands
     - name: aggregation_read_commands_large_dataset
     - name: agg-query-comparison_read_commands
+    - name: agg-query-comparison_read_commands_high_value
       cron: "0 0 * * 0,2,3,4,5" # *linux-microbenchmarks-standalone-arm contains high-value cron for this task. resetting correct cron
     - name: query_read_commands
     - name: query_read_commands_large_dataset
@@ -1688,6 +1687,7 @@ buildvariants:
     - name: aggregation_read_commands
     - name: aggregation_read_commands_large_dataset
     - name: agg-query-comparison_read_commands
+    - name: agg-query-comparison_read_commands_high_value
       cron: *cron_query_perf_schedule # *linux-microbenchmarks-standalone-arm contains high-value cron for this task. resetting to correct cron
     - name: query_read_commands
     - name: query_read_commands_large_dataset
@@ -1741,6 +1741,7 @@ buildvariants:
     - name: aggregation_read_commands
     - name: aggregation_read_commands_large_dataset
     - name: agg-query-comparison_read_commands
+    - name: agg-query-comparison_read_commands_high_value
       cron: *cron_query_perf_schedule # *linux-microbenchmarks-standalone-arm contains high-value cron for this task. resetting to correct cron
     - name: query_read_commands
     - name: query_read_commands_large_dataset
@@ -1890,6 +1891,7 @@ buildvariants:
     - name: aggregation_read_commands
     - name: aggregation_read_commands_large_dataset
     - name: agg-query-comparison_read_commands
+    - name: agg-query-comparison_read_commands_high_value
       cron: *cron_query_perf_schedule # *linux-microbenchmarks-standalone-arm contains high-value cron for this task. Resetting to correct cron
     - name: query_read_commands
     - name: query_read_commands_large_dataset
@@ -1934,6 +1936,7 @@ buildvariants:
     - name: aggregation_read_commands
     - name: aggregation_read_commands_large_dataset
     - name: agg-query-comparison_read_commands
+    - name: agg-query-comparison_read_commands_high_value
       cron: *cron_query_perf_schedule # *linux-microbenchmarks-standalone-arm contains high-value cron for this task. Resetting to correct cron
     - name: query_read_commands
     - name: query_read_commands_large_dataset
@@ -2251,44 +2254,7 @@ buildvariants:
   run_on:
     - rhel70-small
   # Not using 1nodetasks because some need to be temporarily disabled.
-  # TODO SERVER-87402: Use 1nodetasks once all tasks can work on this variant.
-  tasks:
-    - *schedule_patch_auto_tasks_task
-    - *schedule_variant_auto_tasks_task
-    - name: ycsb.2023-09
-    - name: ycsb_single_thread
-    - name: ycsb_60GB.2023-09
-    - name: ycsb_60GB.long.2023-09
-    # - name: crud_workloads_majority
-    # - name: misc_workloads
-    # - name: map_reduce_workloads
-    - name: smoke_test
-    - name: canaries_only
-    - name: non_sharded_workloads
-    # - name: bestbuy_agg
-    # - name: bestbuy_agg_merge_different_db
-    # - name: bestbuy_agg_merge_same_db
-    # - name: bestbuy_agg_merge_wordcount
-    # - name: bestbuy_query
-    # - name: change_streams_latency
-    # - name: change_streams_listen_throughput
-    # - name: snapshot_reads
-    - name: linkbench
-    - name: linkbench2
-    # - name: tsbs_load
-    # - name: tsbs_query
-    # - name: tsbs_query_finance
-    # - name: tsbs_query_manual_bucketing
-    # - name: tsbs_query_fixed_bucketing
-    # - name: tsbs-query-genny
-    # - name: tsbs-query-optimizations
-    # - name: tpcc
-    # - name: tpcc_majority
-    # - name: tpch_1_normalized
-    # - name: tpch_1_denormalized
-    # - name: tpch_10_normalized
-    # - name: tpch_10_denormalized
-    # - name: genny_execution_ValidationFull
+  tasks: *1nodetasks
 
 # Variant which runs a single shard cluster with a config
 # shard and mongos processes processes co-located on the
@@ -2327,62 +2293,59 @@ buildvariants:
     - name: ycsb_60GB.long.2023-09
       cron: *high-value-workload-cron
     - name: ycsb_secondary_reads.2023-09
-    # TODO SERVER-87402: Enable these tasks.
-    # - name: crud_workloads_majority
-    # - name: crud_workloads_w1
-    # - name: misc_workloads
-    # - name: map_reduce_workloads
+    - name: crud_workloads_majority
+    - name: crud_workloads_w1
+    - name: misc_workloads
+    - name: map_reduce_workloads
     - name: smoke_test
     - name: secondary_performance # Uses a special 2 node mongodb setup
     - name: non_sharded_workloads
-    # TODO SERVER-87402: Enable these tasks.
-    # - name: bestbuy_agg
-      # cron: *high-value-workload-cron
-    # - name: bestbuy_agg_merge_different_db
-    # - name: bestbuy_agg_merge_same_db
-    # - name: bestbuy_agg_merge_wordcount
-    # - name: bestbuy_query
-    # - name: change_streams_preimage_throughput
-    # - name: change_streams_latency
-    # - name: change_streams_preimage_latency
-    # - name: change_streams_listen_throughput
-    # - name: snapshot_reads
-    # - name: secondary_reads
-    # - name: tpcc
-    # - name: tpcc_majority
-      # cron: *high-value-workload-cron
-    # - name: tpch_1_normalized
-    # - name: tpch_1_denormalized
+    - name: bestbuy_agg
+      cron: *high-value-workload-cron
+    - name: bestbuy_agg_merge_different_db
+    - name: bestbuy_agg_merge_same_db
+    - name: bestbuy_agg_merge_wordcount
+    - name: bestbuy_query
+    - name: change_streams_preimage_throughput
+    - name: change_streams_latency
+    - name: change_streams_preimage_latency
+    - name: change_streams_listen_throughput
+    - name: snapshot_reads
+    - name: secondary_reads
+    - name: tpcc
+    - name: tpcc_majority
+      cron: *high-value-workload-cron
+    - name: tpch_1_normalized
+    - name: tpch_1_denormalized
     # TODO: Enable in SERVER-66572.
     # - name: tpch_10_normalized
     # - name: tpch_10_denormalized
     - name: linkbench
     - name: linkbench2
       cron: *high-value-workload-cron
-    # TODO SERVER-87402: Enable these tasks.
-    # - name: tsbs_load
-      # cron: *high-value-workload-cron
-    # - name: tsbs_query
-      # cron: *high-value-workload-cron
-    # - name: tsbs_query_finance
-    # - name: tsbs_query_manual_bucketing
-    # - name: tsbs_query_fixed_bucketing
-    # - name: tsbs-query-genny
-    # - name: tsbs-query-optimizations
-    # - name: tsbs-expression-query
-    # - name: big_update_10k
-    # - name: mixed_workloads_genny_rate_limited_high_value
-      # cron: *high-value-workload-cron
-    # - name: load_test_high_value
-      # cron: *high-value-workload-cron
-    # - name: majority_reads10_k_threads_high_value
-      # cron: *high-value-workload-cron
-    # - name: large_indexed_ins_high_value
-      # cron: *high-value-workload-cron
-    # - name: expressive_queries_high_value
-      # cron: *high-value-workload-cron
-    # - name: time_series_sort_high_value
-      # cron: *high-value-workload-cron
-    # - name: array_traversal_high_value
-    # - name: filter_with_complex_logical_expression_high_value
-    # - name: mongos_workloads
+    - name: tsbs_load
+      cron: *high-value-workload-cron
+    - name: tsbs_query
+      cron: *high-value-workload-cron
+    - name: tsbs_query_finance
+    - name: tsbs_query_manual_bucketing
+    - name: tsbs_query_fixed_bucketing
+    - name: tsbs-query-genny
+    - name: tsbs-query-optimizations
+    - name: tsbs-expression-query
+    - name: big_update_10k
+    - name: mixed_workloads_genny_rate_limited_high_value
+      cron: *high-value-workload-cron
+    - name: load_test_high_value
+      cron: *high-value-workload-cron
+    - name: majority_reads10_k_threads_high_value
+      cron: *high-value-workload-cron
+    - name: large_indexed_ins_high_value
+      cron: *high-value-workload-cron
+    - name: expressive_queries_high_value
+      cron: *high-value-workload-cron
+    - name: time_series_sort_high_value
+      cron: *high-value-workload-cron
+    - name: array_traversal_high_value
+    - name: filter_with_complex_logical_expression_high_value
+    - name: mongos_workloads

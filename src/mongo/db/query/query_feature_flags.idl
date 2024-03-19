@@ -91,7 +91,8 @@ feature_flags:
     featureFlagQuerySettings:
       description: "Feature flag for enabling persistent query settings"
       cpp_varname: gFeatureFlagQuerySettings
-      default: false
+      default: true
+      version: 8.0
       shouldBeFCVGated: true
 
     featureFlagVectorSearchPublicPreview:
@@ -110,6 +111,12 @@ feature_flags:
       description: "Feature flag to enable queries against time-series collections to execute in SBE"
       cpp_varname: gFeatureFlagTimeSeriesInSbe
       default: true
+      shouldBeFCVGated: false
+
+    featureFlagSbeBlockHashAgg:
+      description: "Feature flag to enable Block Hash Aggregation for TS queries SBE"
+      cpp_varname: gFeatureFlagSbeBlockHashAgg
+      default: false
       shouldBeFCVGated: false
 
     featureFlagClassicRuntimePlanningForSbe:

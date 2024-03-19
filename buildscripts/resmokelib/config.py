@@ -92,7 +92,6 @@ DEFAULTS = {
     "num_clients_per_fixture": 1,
     "use_tenant_client": False,
     "origin_suite": None,
-    "perf_report_file": None,
     "cedar_report_file": None,
     "repeat_suites": 1,
     "repeat_tests": 1,
@@ -151,6 +150,7 @@ DEFAULTS = {
     "task_doc": None,
     "variant_name": None,
     "version_id": None,
+    "work_dir": None,
     "evg_project_config_path": "etc/evergreen.yml",
 
     # WiredTiger options.
@@ -391,6 +391,9 @@ EVERGREEN_VARIANT_NAME = None
 # the commit hash.
 EVERGREEN_VERSION_ID = None
 
+# The Evergreen task's working directory.
+EVERGREEN_WORK_DIR = None
+
 # Path to evergreen project configuration yaml file
 EVERGREEN_PROJECT_CONFIG_PATH = None
 
@@ -486,9 +489,6 @@ USE_TENANT_CLIENT = False
 
 # Indicates the name of the test suite prior to the suite being split up by uite generation
 ORIGIN_SUITE = None
-
-# Report file for the Evergreen performance plugin.
-PERF_REPORT_FILE = None
 
 # Report file for Cedar.
 CEDAR_REPORT_FILE = None

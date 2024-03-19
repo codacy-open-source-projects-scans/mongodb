@@ -1,0 +1,21 @@
+- name: embedded_router
+  value:
+    executor:
+      fixture:
+        embedded_router: 1
+        mongod_options:
+          set_parameters:
+            featureFlagEmbeddedRouter: 1
+
+# Contains overrides specific to the concurrency/FSM suites when run against an embedded router.
+# Deletes mongos_options from the config (since mongoses don't run on embedded router fixtures)
+# and copies mongos options to mongod_options that aren't already set in the original sharded
+# suite definitions.
+- name: concurrency_embedded_router
+  value:
+    executor:
+      fixture:
+        mongos_options: null
+        mongod_options:
+          set_parameters:
+            queryAnalysisSamplerConfigurationRefreshSecs: 1

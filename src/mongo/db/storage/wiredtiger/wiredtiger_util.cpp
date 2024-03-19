@@ -626,6 +626,17 @@ int64_t WiredTigerUtil::getIdentReuseSize(WT_SESSION* s, const std::string& uri)
     return result.getValue();
 }
 
+int64_t WiredTigerUtil::getIdentCompactRewrittenExpectedSize(WT_SESSION* s,
+                                                             const std::string& uri) {
+    auto result =
+        WiredTigerUtil::getStatisticsValue(s,
+                                           "statistics:" + uri,
+                                           "statistics=(fast)",
+                                           WT_STAT_DSRC_BTREE_COMPACT_BYTES_REWRITTEN_EXPECTED);
+    uassertStatusOK(result.getStatus());
+    return result.getValue();
+}
+
 size_t WiredTigerUtil::getCacheSizeMB(double requestedCacheSizeGB) {
     double cacheSizeMB;
     const double kMaxSizeCacheMB = 10 * 1000 * 1000;
@@ -939,7 +950,15 @@ int WiredTigerUtil::verifyTable(WiredTigerRecoveryUnit& ru,
     // Open a new session with custom error handlers.
     WT_CONNECTION* conn = ru.getSessionCache()->conn();
     WT_SESSION* session;
-    invariantWTOK(conn->open_session(conn, &eventHandler, nullptr, &session), nullptr);
+
+    if (gFeatureFlagPrefetch.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        invariantWTOK(conn->open_session(conn, &eventHandler, "prefetch=(enabled=true)", &session),
+                      nullptr);
+    } else {
+        invariantWTOK(conn->open_session(conn, &eventHandler, nullptr, &session), nullptr);
+    }
+
     ON_BLOCK_EXIT([&] { session->close(session, ""); });
 
     // Do the verify. Weird parens prevent treating "verify" as a macro.
@@ -1161,7 +1180,7 @@ Status WiredTigerUtil::exportTableToBSON(WT_SESSION* session,
     return Status::OK();
 }
 
-StatusWith<std::string> WiredTigerUtil::generateImportString(const StringData& ident,
+StatusWith<std::string> WiredTigerUtil::generateImportString(StringData ident,
                                                              const BSONObj& storageMetadata,
                                                              const ImportOptions& importOptions) {
     if (!storageMetadata.hasField(ident)) {

@@ -39,15 +39,18 @@ template <class T>
 class Tracked {
 public:
     Tracked(TrackingAllocatorStats& stats, T obj) : _stats(stats), _obj(std::move(obj)) {
-        _stats.get().bytesAllocated.fetchAndAddRelaxed(_obj.allocated());
+        _stats.get().bytesAllocated(_obj.allocated());
     }
 
-    Tracked(Tracked&) = delete;
+    Tracked(T obj, TrackingAllocator<void> allocator)
+        : Tracked(allocator.getStats(), std::move(obj)) {}
+
+    Tracked(Tracked& other) = delete;
     Tracked(Tracked&& other) : _stats(other._stats), _obj(std::move(other._obj)) {
         invariant(other._obj.allocated() == 0);
     }
 
-    Tracked& operator=(Tracked&) = delete;
+    Tracked& operator=(Tracked& other) = delete;
     Tracked& operator=(Tracked&& other) {
         if (&other == this) {
             return *this;
@@ -61,7 +64,7 @@ public:
     }
 
     ~Tracked() {
-        _stats.get().bytesAllocated.fetchAndSubtractRelaxed(_obj.allocated());
+        _stats.get().bytesDeallocated(_obj.allocated());
     }
 
     T& get() {
@@ -74,6 +77,23 @@ public:
 
 private:
     std::reference_wrapper<TrackingAllocatorStats> _stats;
+    T _obj;
+};
+
+template <class T>
+class Untracked {
+public:
+    Untracked(T obj, std::allocator<void> = {}) : _obj(std::move(obj)) {}
+
+    T& get() {
+        return _obj;
+    }
+
+    const T& get() const {
+        return _obj;
+    }
+
+private:
     T _obj;
 };
 
@@ -93,11 +113,15 @@ public:
 
     template <class T>
     TrackingAllocator<T> makeAllocator() {
-        return TrackingAllocator<T>(&_stats);
+        return TrackingAllocator<T>(_stats);
+    }
+
+    TrackingAllocatorStats& stats() {
+        return _stats;
     }
 
     uint64_t allocated() const {
-        return _stats.bytesAllocated.loadRelaxed();
+        return _stats.allocated();
     }
 
 private:

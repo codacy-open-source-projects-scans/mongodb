@@ -30,6 +30,7 @@
 #pragma once
 
 #include <algorithm>
+#include <span>
 
 #include "mongo/bson/util/bsoncolumn_helpers.h"
 
@@ -71,8 +72,8 @@ public:
      * Decompresses interleaved data where data at a given path is sent to the corresonding buffer.
      * Returns a pointer to the next byte after the EOO that ends the interleaved data.
      */
-    template <typename Path, typename Buffer>
-    const char* decompress(std::vector<std::pair<Path, Buffer>>& paths);
+    template <typename Path, typename Buffer, std::size_t N = std::dynamic_extent>
+    const char* decompress(std::span<std::pair<Path, Buffer&>, N> paths);
 
 private:
     /**
@@ -192,6 +193,14 @@ private:
         }
     }
 
+    /*
+     * If the 'Container' needs the decompressor to collect position information, this function will
+     * append the position information of the decompressed document to the buffer, and clear the
+     * position information stored in the map. This function is a no-op otherwise.
+     */
+    template <class Buffer>
+    static void flushPositionsToBuffers(absl::flat_hash_map<Buffer*, int32_t>& bufferToPositions);
+
     ElementStorage& _allocator;
     const char* const _control;
     const char* const _end;
@@ -226,9 +235,9 @@ void BlockBasedSubObjectFinisher<Buffer>::finishMissing() {
  * Decompresses interleaved data where data at a given path is sent to the corresonding buffer.
  * Returns a pointer to the next byte after the EOO that ends the interleaved data.
  */
-template <typename Path, typename Buffer>
+template <typename Path, typename Buffer, std::size_t N>
 const char* BlockBasedInterleavedDecompressor::decompress(
-    std::vector<std::pair<Path, Buffer>>& paths) {
+    std::span<std::pair<Path, Buffer&>, N> paths) {
 
     // The reference object will appear right after the control byte that starts interleaved
     // mode.
@@ -321,9 +330,14 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
     // just one buffer.
     std::vector<BufferVector<Buffer*>> posToBuffers;
 
-    // Decoding states for each scalar field appearing in the refence object, in pre-order
+    // Decoding states for each scalar field appearing in the reference object, in pre-order
     // traversal order.
     std::vector<DecodingState> decoderStates;
+
+    // A map from the buffer address to the position information of the values decompressed in that
+    // buffer. Each buffer must have its own position information. Each value in the map represents
+    // the number of values decompressed for that path for one document.
+    absl::flat_hash_map<Buffer*, int32_t> bufferToPositions;
 
     {
         BSONObjTraversal trInit{
@@ -331,6 +345,11 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
             _rootType,
             [&](StringData fieldName, const BSONObj& obj, BSONType type) {
                 if (auto it = elemToBuffer.find(obj.objdata()); it != elemToBuffer.end()) {
+                    if constexpr (Buffer::kCollectsPositionInfo) {
+                        for (auto&& buf : it->second) {
+                            bufferToPositions[buf] = 0;
+                        }
+                    }
                     posToBuffers.push_back(std::move(it->second));
                 } else {
                     // An empty list to indicate that this element isn't being materialized.
@@ -390,6 +409,18 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
                 // Either caller requested that this sub-object be materialized to a
                 // container, or we are already materializing this object because it is
                 // contained by such a sub-object.
+                //
+                // Only increment the position information if the 'Container' requests position
+                // information, and if we are materializing the top-level object, not an object
+                // contained by another sub-object.
+                if constexpr (Buffer::kCollectsPositionInfo) {
+                    if (!_allocator.contiguousEnabled()) {
+                        for (auto&& buffer : buffers) {
+                            bufferToPositions[buffer]++;
+                        }
+                    }
+                }
+
                 return SOAlloc(
                     _allocator, fieldName, obj, type, BlockBasedSubObjectFinisher{buffers});
             }
@@ -437,6 +468,13 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
                 writeToElementStorage(
                     decodingStateElem, state._lastLiteral, referenceField.fieldNameStringData());
             } else if (buffers.size() > 0) {
+                // This scalar is not part of an object being materialized. Increment the position
+                // counter if the 'Container' is requesting position information.
+                if constexpr (Buffer::kCollectsPositionInfo) {
+                    for (auto&& buffer : buffers) {
+                        bufferToPositions[buffer]++;
+                    }
+                }
                 appendToBuffers(buffers, decodingStateElem, state._lastLiteral);
             }
 
@@ -446,7 +484,12 @@ const char* BlockBasedInterleavedDecompressor::decompressGeneral(
     while (moreData(decoderStates[0], control)) {
         scalarIdx = 0;
         nodeIdx = 0;
+
+        // In each iteration of the traverse we produce one document. After decompressing a single
+        // document, we will push how many elements were materialized for the specific path if the
+        // 'Container' requests the position information to be collected.
         trDecompress.traverse(refObj);
+        flushPositionsToBuffers(bufferToPositions);
     }
 
     invariant(*control == EOO, "expected EOO that ends interleaved mode");
@@ -715,6 +758,22 @@ const char* BlockBasedInterleavedDecompressor::decompressFast(
         for (auto&& buffer : it->second) {
             for (size_t i = 0; i < valueCount; ++i) {
                 buffer->appendMissing();
+                if constexpr (Buffer::kCollectsPositionInfo) {
+                    buffer->appendPositionInfo(1);
+                }
+            }
+        }
+    }
+
+    // Since we are guaranteed to decompress scalars or missing, we can append 1 to the position
+    // information for all of the buffers for all of the values if the 'Container' requested to
+    // collect the position information.
+    if constexpr (Buffer::kCollectsPositionInfo) {
+        for (auto&& elem : heap) {
+            for (auto&& buffer : elem._buffers) {
+                for (size_t i = 0; i < elem._valueCount; ++i) {
+                    buffer->appendPositionInfo(1);
+                }
             }
         }
     }
@@ -745,6 +804,12 @@ void BlockBasedInterleavedDecompressor::appendToBuffers(BufferVector<Buffer*>& b
                       case Date:
                           appendEncodedToBuffers<Buffer, Date_t>(
                               buffers, Date_t::fromMillisSinceEpoch(encoded.second));
+                          break;
+                      case NumberDouble:
+                          appendEncodedToBuffers<Buffer, double>(
+                              buffers,
+                              Simple8bTypeUtil::decodeDouble(encoded.second,
+                                                             Simple8bTypeUtil::kMemoryAsInteger));
                           break;
                       case NumberLong:
                           appendEncodedToBuffers<Buffer, int64_t>(buffers, encoded.second);
@@ -799,5 +864,16 @@ void BlockBasedInterleavedDecompressor::appendToBuffers(BufferVector<Buffer*>& b
               },
           },
           elem);
+}
+
+template <class Buffer>
+void BlockBasedInterleavedDecompressor::flushPositionsToBuffers(
+    absl::flat_hash_map<Buffer*, int32_t>& bufferToPositions) {
+    if constexpr (Buffer::kCollectsPositionInfo) {
+        for (auto&& bufferAndPos : bufferToPositions) {
+            bufferAndPos.first->appendPositionInfo(bufferAndPos.second);
+            bufferAndPos.second = 0;
+        }
+    }
 }
 }  // namespace mongo::bsoncolumn

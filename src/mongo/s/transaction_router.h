@@ -122,7 +122,7 @@ public:
      * the transaction that created it.
      */
     struct Participant {
-        enum class ReadOnly { kUnset, kReadOnly, kNotReadOnly };
+        enum class ReadOnly { kUnset, kReadOnly, kNotReadOnly, kOutstandingAdditionalParticipant };
 
         Participant(bool isCoordinator,
                     StmtId stmtIdCreatedAt,
@@ -141,8 +141,8 @@ public:
         // True if the participant has been chosen as the coordinator for its transaction
         const bool isCoordinator{false};
 
-        // Is updated to kReadOnly or kNotReadOnly based on the readOnly field in the participant's
-        // responses to statements.
+        // Is updated to kReadOnly, kNotReadOnly, or kOutstandingAdditionalParticipant based on the
+        // readOnly field in the participant's responses to statements.
         const ReadOnly readOnly{ReadOnly::kUnset};
 
         // Returns the shared transaction options this participant was created with
@@ -499,6 +499,12 @@ public:
          * atClusterTime has already been selected and cannot be changed.
          */
         void setDefaultAtClusterTime(OperationContext* opCtx);
+
+        /**
+         * Sets the atClusterTime for starting a transaction in a sub-router using opCtx
+         * atClusterTime. This should only be called when the TransactionAction is kStartOrContinue.
+         */
+        void setAtClusterTimeForStartOrContinue(OperationContext* opCtx);
 
         /**
          * If the transaction has specified a placementConflictTime returns the value, otherwise

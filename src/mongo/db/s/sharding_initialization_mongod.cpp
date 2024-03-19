@@ -111,6 +111,7 @@
 #include "mongo/s/config_server_catalog_cache_loader.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/router_uptime_reporter.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_initialization.h"
 #include "mongo/s/sharding_state.h"
@@ -713,6 +714,10 @@ void ShardingInitializationMongoD::_initializeShardingEnvironmentOnShardServer(
             UserCacheInvalidator::start(service, opCtx);
         }
     }
+    // Start reporting statistics from the router port uptime if opened.
+    if (serverGlobalParams.routerPort) {
+        RouterUptimeReporter::get(service).startPeriodicThread(service);
+    }
 
     // Start transaction coordinator service only if the node is the primary of a replica set.
     TransactionCoordinatorService::get(opCtx)->onShardingInitialization(
@@ -758,7 +763,7 @@ boost::optional<ShardIdentity> ShardingInitializationMongoD::getShardIdentityDoc
     // In sharded queryableBackupMode mode, we ignore the shardIdentity document on disk and instead
     // *require* a shardIdentity document to be passed through --overrideShardIdentity
     if (storageGlobalParams.queryableBackupMode) {
-        if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::ShardServer)) {
+        if (serverGlobalParams.clusterRole.isShardOnly()) {
             uassert(ErrorCodes::InvalidOptions,
                     "If started with --shardsvr in queryableBackupMode, a shardIdentity document "
                     "must be provided through --overrideShardIdentity",

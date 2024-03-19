@@ -347,7 +347,7 @@ void RollbackImpl::_killAllUserOperations(OperationContext* opCtx) {
     int numOpsRunning = 0;
 
     for (ServiceContext::LockedClientsCursor cursor(serviceCtx); Client* client = cursor.next();) {
-        stdx::lock_guard<Client> lk(*client);
+        ClientLock lk(client);
         if (client->isFromSystemConnection() && !client->canKillSystemOperationInStepdown(lk)) {
             continue;
         }
@@ -956,7 +956,8 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
         // Follow chain on applyOps oplog entries to process entire unprepared transaction.
         // The beginning of the applyOps chain may precede the common point.
         auto status = _processRollbackOpForApplyOps(opCtx, oplogEntry);
-        if (const auto prevOpTime = oplogEntry.getPrevWriteOpTimeInTransaction()) {
+        if (oplogEntry.applyOpsIsLinkedTransactionally()) {
+            const auto prevOpTime = oplogEntry.getPrevWriteOpTimeInTransaction();
             for (TransactionHistoryIterator iter(*prevOpTime); status.isOK() && iter.hasNext();) {
                 status = _processRollbackOpForApplyOps(opCtx, iter.next(opCtx));
             }

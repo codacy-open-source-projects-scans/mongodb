@@ -99,7 +99,6 @@ struct WriteBatch {
     BSONObj max;  // Batch-local max; full if first batch, updates otherwise.
     uint32_t numPreviouslyCommittedMeasurements = 0;
     StringMap<std::size_t> newFieldNamesToBeInserted;  // Value is hash of string key
-    TrackedBSONObj uncompressedBucketDoc;
     bool generateCompressedDiff = false;
 
     /**
@@ -109,7 +108,10 @@ struct WriteBatch {
      * for the current WriteBatch and will contain uncommitted data fields in
      * makeTimeseriesCompressedDiffUpdateOp.
      */
-    MeasurementMap intermediateBuilders;
+    MeasurementMap measurementMap;
+
+    // For always compressed, adds the compressed measurement sizes while committing.
+    int32_t size = 0;
 
     // Whether the measurements in the bucket are sorted by timestamp or not.
     // True by default, if a v2 buckets gets promoted to v3 this is set to false.

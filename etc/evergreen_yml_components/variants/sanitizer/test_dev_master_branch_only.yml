@@ -1,5 +1,8 @@
 # Instrumented build variants for testing development environments
-# that should run only on master branch projects
+#
+# After the branching variants in this file
+# should NOT run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 variables:
 # THIS HAS COPIES IN:
@@ -235,12 +238,12 @@ buildvariants:
     - rhel80-xlarge
   - name: .updatefuzzer !.no_debug_mode
   - name: secondary_reads_passthrough_gen
-  - name: server_discovery_and_monitoring_json_test_TG
+  - name: server_discovery_and_monitoring_json_test
   # TODO(SERVER-70015) reenable after ticket is complete
   # - name: .serverless
   #   distros:
   #   - rhel80-xlarge
-  - name: server_selection_json_test_TG
+  - name: server_selection_json_test
     distros:
     - rhel80-xlarge
   - name: streams
@@ -335,8 +338,8 @@ buildvariants:
   - name: sharding_gen
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
   - name: .stitch
-  - name: server_discovery_and_monitoring_json_test_TG
-  - name: server_selection_json_test_TG
+  - name: server_discovery_and_monitoring_json_test
+  - name: server_selection_json_test
 
 - name: &enterprise-windows-debug-unoptimized enterprise-windows-debug-unoptimized
   display_name: "Enterprise Windows DEBUG (Unoptimized)"
@@ -621,7 +624,7 @@ buildvariants:
     # thread leaks, which we have because we don't do a clean shutdown
     # of the ServiceContext.
     #
-    san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+    san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=5:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
     compile_flags: >-
       --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars
       --dbg=on
@@ -728,11 +731,11 @@ buildvariants:
   - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
   - name: .stitch
   - name: secondary_reads_passthrough_gen
-  - name: server_discovery_and_monitoring_json_test_TG
+  - name: server_discovery_and_monitoring_json_test
   - name: .serverless
     distros:
     - rhel80-xlarge
-  - name: server_selection_json_test_TG
+  - name: server_selection_json_test
     distros:
     - rhel80-xlarge
   - name: streams

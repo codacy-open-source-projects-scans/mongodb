@@ -31,10 +31,25 @@
 
 #include "mongo/db/repl/oplog_writer.h"
 #include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/stats/timer_stats.h"
 #include "mongo/util/concurrency/thread_pool.h"
 
 namespace mongo {
 namespace repl {
+
+class OplogWriterStats {
+public:
+    void incrementBatchSize(uint64_t n);
+    TimerStats& getBatches();
+    BSONObj getReport() const;
+    operator BSONObj() const {
+        return getReport();
+    }
+
+private:
+    TimerStats _batches;
+    Counter64 _batchSize;
+};
 
 /**
  * Writes oplog entries.
@@ -60,7 +75,6 @@ public:
                     OplogBuffer* applyBuffer,
                     ReplicationCoordinator* replCoord,
                     StorageInterface* storageInterface,
-                    ThreadPool* writerPool,
                     Observer* observer,
                     const OplogWriter::Options& options);
 
@@ -103,8 +117,8 @@ private:
 
     void _writeOplogBatchImpl(OperationContext* opCtx,
                               const std::vector<InsertStatement>& docs,
-                              const NamespaceString& nss,
-                              writeDocsFn&& writeDocsFn);
+                              bool writeOplogColl,
+                              bool writeChangeColl);
 
     OplogBuffer* const _applyBuffer;
 
@@ -113,10 +127,6 @@ private:
 
     // Not owned by us.
     StorageInterface* _storageInterface;
-
-    // Pool of worker threads for writing oplog entries.
-    // Not owned by us.
-    ThreadPool* const _writerPool;
 
     // Not owned by us.
     Observer* const _observer;

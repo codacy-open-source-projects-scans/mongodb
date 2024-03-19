@@ -51,6 +51,7 @@
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/storage/compact_options.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_data.h"
@@ -225,22 +226,6 @@ public:
      * of the cursor is unspecified.
      */
     virtual boost::optional<Record> seekExact(const RecordId& id) = 0;
-
-    /**
-     * Positions this cursor near 'start' or an adjacent record if 'start' does not exist. If there
-     * is not an exact match, the cursor is positioned on the directionally previous Record. If no
-     * earlier record exists, the cursor is positioned on the directionally following record.
-     * Returns boost::none if the RecordStore is empty.
-     *
-     * For forward cursors, returns the Record with the highest RecordId less than or equal to
-     * 'start'. If no such record exists, positions on the next highest RecordId after 'start'.
-     *
-     * For reverse cursors, returns the Record with the lowest RecordId greater than or equal to
-     * 'start'. If no such record exists, positions on the next lowest RecordId before 'start'.
-     *
-     * Note: Only supported on capped collections.
-     */
-    virtual boost::optional<Record> seekNear(const RecordId& start) = 0;
 
     /**
      * Prepares for state changes in underlying data without necessarily saving the current
@@ -637,13 +622,11 @@ public:
     }
 
     /**
-     * Attempt to reduce the storage space used by this RecordStore. If the freeSpaceTargetMB is
-     * provided, compaction will only proceed if the free storage space available is greater than
-     * the provided value.
-     *
+     * Attempt to reduce the storage space used by this RecordStore.
      * Only called if compactSupported() returns true.
+     * Returns an estimated number of bytes when doing a dry run.
      */
-    Status compact(OperationContext* opCtx, boost::optional<int64_t> freeSpaceTargetMB);
+    StatusWith<int64_t> compact(OperationContext* opCtx, const CompactOptions& options);
 
     /**
      * Performs record store specific validation to ensure consistency of underlying data
@@ -811,7 +794,8 @@ protected:
                                        const RecordId& end,
                                        bool inclusive,
                                        const AboutToDeleteRecordCallback& aboutToDelete) = 0;
-    virtual Status doCompact(OperationContext* opCtx, boost::optional<int64_t> freeSpaceTargetMB) {
+
+    virtual StatusWith<int64_t> doCompact(OperationContext* opCtx, const CompactOptions& options) {
         MONGO_UNREACHABLE;
     }
 

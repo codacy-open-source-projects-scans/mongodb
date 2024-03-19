@@ -48,7 +48,7 @@ const allCommands = {
     _configsvrCreateDatabase: {skip: isPrimaryOnly},
     _configsvrDropIndexCatalogEntry: {skip: isPrimaryOnly},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isPrimaryOnly},
-    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},  // TODO SERVER-73029 remove
+    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isPrimaryOnly},
     _configsvrRefineCollectionShardKey: {skip: isPrimaryOnly},
     _configsvrRemoveChunks: {skip: isPrimaryOnly},
@@ -148,6 +148,7 @@ const allCommands = {
     streams_getMetrics: {skip: isAnInternalCommand},
     streams_updateFeatureFlags: {skip: isAnInternalCommand},
     streams_testOnlyGetFeatureFlags: {skip: isAnInternalCommand},
+    streams_writeCheckpoint: {skip: isAnInternalCommand},
     _transferMods: {skip: isPrimaryOnly},
     _vectorClockPersist: {skip: isPrimaryOnly},
     abortMoveCollection: {skip: isPrimaryOnly},

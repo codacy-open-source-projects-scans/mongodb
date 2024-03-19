@@ -69,6 +69,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_connection_hook.h"
@@ -138,8 +139,8 @@ OpTimeAndWallTime makeOpTimeAndWallTime(OpTime opTime, Date_t wallTime = Date_t(
  * Helper that kills an operation, taking the necessary locks.
  */
 void killOperation(OperationContext* opCtx) {
-    stdx::lock_guard<Client> lkClient(*opCtx->getClient());
-    opCtx->getServiceContext()->killOperation(lkClient, opCtx);
+    ClientLock lk(opCtx->getClient());
+    opCtx->getServiceContext()->killOperation(lk, opCtx);
 }
 
 std::shared_ptr<const repl::HelloResponse> awaitHelloWithNewOpCtx(
@@ -500,7 +501,7 @@ TEST_F(ReplCoordTest, InitiateSucceedsWhenQuorumCheckPasses) {
     ASSERT_OK(status);
     ASSERT(getReplCoord()->getSettings().isReplSet());
 
-    ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
+    ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(getServiceContext()), appliedTS);
 }
 
 TEST_F(ReplCoordTest,
@@ -634,7 +635,8 @@ TEST_F(
     ReplCoordTest,
     NodeReturnsNoReplicationEnabledAndInfoConfigsvrWhenCheckReplEnabledForCommandWhileConfigsvr) {
     ReplSettings settings;
-    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
+    serverGlobalParams.clusterRole = {
+        ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
     init(settings);
     start();
 
@@ -1266,7 +1268,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigMajorit
     prsiThread.join();
     ASSERT(getReplCoord()->getSettings().isReplSet());
 
-    ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
+    ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(getServiceContext()), appliedTS);
 
     auto& rwcDefaults = ReadWriteConcernDefaults::get(getServiceContext());
     ASSERT(rwcDefaults.getImplicitDefaultWriteConcernMajority_forTest());
@@ -1328,7 +1330,7 @@ TEST_F(ReplCoordTest, NodeCalculatesDefaultWriteConcernOnStartupNewConfigNoMajor
     prsiThread.join();
     ASSERT(getReplCoord()->getSettings().isReplSet());
 
-    ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(), appliedTS);
+    ASSERT_EQUALS(getStorageInterface()->getInitialDataTimestamp(getServiceContext()), appliedTS);
 
     auto& rwcDefaults = ReadWriteConcernDefaults::get(getServiceContext());
     ASSERT_FALSE(rwcDefaults.getImplicitDefaultWriteConcernMajority_forTest());
@@ -9062,6 +9064,38 @@ TEST_F(ReplCoordTest, GetLastWrittenDuringRollback) {
     ASSERT_TRUE(
         getReplCoord()->getMyLastWrittenOpTimeAndWallTime(true /*rollbackSafe*/).opTime.isNull());
     ASSERT_EQUALS(time1, getReplCoord()->getMyLastAppliedOpTimeAndWallTime().opTime);
+}
+
+TEST_F(ReplCoordTest, CanAcceptWritesForMagicRestore) {
+    init("mySet/test1:1234,test2:1234,test3:1234");
+    assertStartSuccess(BSON("_id"
+                            << "mySet"
+                            << "version" << 1 << "members"
+                            << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                     << "test1:1234")
+                                          << BSON("_id" << 1 << "host"
+                                                        << "test2:1234")
+                                          << BSON("_id" << 2 << "host"
+                                                        << "test3:1234"))),
+                       HostAndPort("test1", 1234));
+    ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
+    const auto opCtx = makeOperationContext();
+    ReplicationStateTransitionLockGuard transitionGuard(opCtx.get(), MODE_X);
+    storageGlobalParams.magicRestore = true;
+
+    // magicRestore allows writes to config and admin DBs.
+    ASSERT_TRUE(getReplCoord()->canAcceptWritesFor(opCtx.get(),
+                                                   NamespaceString::kServerConfigurationNamespace));
+    ASSERT_TRUE(getReplCoord()->canAcceptWritesFor(opCtx.get(),
+                                                   NamespaceString::kConfigsvrShardsNamespace));
+    ASSERT_FALSE(getReplCoord()->canAcceptWritesFor(opCtx.get(), NamespaceString()));
+
+    storageGlobalParams.magicRestore = false;
+
+    ASSERT_FALSE(getReplCoord()->canAcceptWritesFor(
+        opCtx.get(), NamespaceString::kServerConfigurationNamespace));
+    ASSERT_FALSE(getReplCoord()->canAcceptWritesFor(opCtx.get(),
+                                                    NamespaceString::kConfigsvrShardsNamespace));
 }
 
 // TODO(schwerin): Unit test election id updating

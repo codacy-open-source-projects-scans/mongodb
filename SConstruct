@@ -220,8 +220,12 @@ add_option(
 
 add_option(
     'release',
+    choices=['on', 'off'],
+    const='on',
+    default=build_profile.release,
     help='release build',
-    nargs=0,
+    nargs='?',
+    type='choice',
 )
 
 add_option(
@@ -330,7 +334,7 @@ add_option(
     'separate-debug',
     choices=['on', 'off'],
     const='on',
-    default='off',
+    default="off",
     help='Produce separate debug files',
     nargs='?',
     type='choice',
@@ -753,7 +757,7 @@ add_option(
     " jlink value."
     "\n\nExample: --jlink=0.75 --jobs 8 will result in a jlink value of 6",
     const=0.5,
-    default=None,
+    default=build_profile.jlink,
     nargs='?',
     type=float,
 )
@@ -963,8 +967,15 @@ def fatal_error(env, msg, *args):
 
 def bazel_by_default():
     try:
-        return distro.name() == "Ubuntu" and distro.version().split(
-            ".")[0] == "22" and platform.machine() == "aarch64"
+        distro_name = distro.name()
+        distro_version = distro.version()
+        arch = platform.machine()
+
+        is_ubuntu_22_arm = distro_name == "Ubuntu" and distro_version.split(
+            ".")[0] == "22" and arch == "aarch64"
+        is_amazon_linux_2_arm = distro_name == "Amazon Linux" and distro_version == "2" and arch == "aarch64"
+
+        return is_ubuntu_22_arm or is_amazon_linux_2_arm
     except Exception as e:
         print(f"Error determining if Bazel should be enabled by default: {e}")
         print("Defaulting to disable Bazel")
@@ -2033,7 +2044,7 @@ def is_toolchain(self, *args):
 env.AddMethod(get_toolchain_name, 'ToolchainName')
 env.AddMethod(is_toolchain, 'ToolchainIs')
 
-releaseBuild = has_option("release")
+releaseBuild = get_option("release") == "on"
 debugBuild = get_option('dbg') == "on"
 optBuild = mongo_generators.get_opt_options(env)
 
@@ -4502,7 +4513,7 @@ def doConfigure(myenv):
             # reporting thread leaks, which we have because we don't
             # do a clean shutdown of the ServiceContext.
             #
-            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=4:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
+            tsan_options = f"abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=5:suppressions={myenv.File('#etc/tsan.suppressions').abspath}"
             myenv['ENV']['TSAN_OPTIONS'] = tsan_options + symbolizer_option
             myenv.AppendUnique(CPPDEFINES=['THREAD_SANITIZER'])
 
@@ -5846,7 +5857,7 @@ if get_option('ninja') != 'disabled':
             "$env$WINLINK @$out.rsp",
             description="Linked $out",
             deps=None,
-            pool="local_pool",
+            pool="link_pool",
             use_depfile=False,
             use_response_file=True,
             response_file_content="$rspc $in_newline",
@@ -6577,11 +6588,13 @@ env.Alias("distsrc", "distsrc-tgz")
 env.Tool('task_limiter')
 if has_option('jlink'):
 
-    env.SetupTaskLimiter(
+    link_jobs = env.SetupTaskLimiter(
         name='jlink',
         concurrency_ratio=get_option('jlink'),
         builders=['Program', 'SharedLibrary', 'LoadableModule'],
     )
+    if get_option("ninja") != "disabled":
+        env['NINJA_LINK_JOBS'] = link_jobs
 
 if env.get('UNITTESTS_COMPILE_CONCURRENCY'):
 

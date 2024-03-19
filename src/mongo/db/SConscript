@@ -24,6 +24,7 @@ def shouldBuildGRPC(myEnv):
 
 env.SConscript(
     dirs=[
+        'admission',
         'auth',
         'bson',
         'catalog',
@@ -382,6 +383,17 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/util/options_parser/options_parser',
+        'server_base',
+    ],
+)
+
+env.Library(
+    target='namespace_spec',
+    source=[
+        'namespace_spec.idl',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         'server_base',
     ],
 )
@@ -894,6 +906,7 @@ env.Library(
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/namespace_string_database_name_util',
         '$BUILD_DIR/mongo/util/progress_meter',
+        'admission/ticketholder_manager',
         'audit',
         'auth/auth',
         'auth/authprivilege',
@@ -912,8 +925,6 @@ env.Library(
         'server_base',
         'stats/resource_consumption_metrics',
         'stats/timer_stats',
-        # TODO (SERVER-66896): Remove this dependency.
-        'storage/storage_engine_feature_flags',
         'timeseries/timeseries_options',
     ],
 )
@@ -974,7 +985,6 @@ env.Library(
         'transaction_resources.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/s/replica_set_endpoint_feature_flag',
         '$BUILD_DIR/mongo/s/grid',
         '$BUILD_DIR/mongo/util/concurrency/admission_context',
         'concurrency/lock_manager',
@@ -1195,7 +1205,6 @@ env.Library(
         'storage/storage_engine_common',
     ],
     LIBDEPS_PRIVATE=[
-        '$BUILD_DIR/mongo/db/s/replica_set_endpoint_feature_flag',
         '$BUILD_DIR/mongo/s/startup_initialization',
         'auth/auth',
         'command_can_run_here',
@@ -1249,6 +1258,7 @@ env.Library(
         '$BUILD_DIR/mongo/s/sharding_router_api',
         '$BUILD_DIR/mongo/s/startup_initialization',
         '$BUILD_DIR/mongo/transport/service_executor',
+        'admission/ingress_admission_control',
         'audit',
         'auth/auth',
         'auth/auth_umc',
@@ -2273,6 +2283,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/query/query_settings/manager',
         '$BUILD_DIR/mongo/util/clock_source_mock',
     ],
 )
@@ -2585,6 +2596,7 @@ env.Library(
         '$BUILD_DIR/mongo/util/periodic_runner_factory',
         '$BUILD_DIR/mongo/util/signal_handlers',
         '$BUILD_DIR/mongo/watchdog/watchdog_mongod',
+        'admission/execution_control',
         'auth/auth_op_observer',
         'catalog/catalog_helpers',
         'catalog/catalog_impl',
@@ -2640,8 +2652,8 @@ env.Library(
         'serverinit',
         'serverless/shard_split_donor_service',
         'service_context_d',
-        'session/kill_sessions',
         'session/kill_sessions_local',
+        'session/kill_sessions_remote',
         'session/service_liaison_mongod',
         'session/session_catalog_mongod',
         'session/sessions_collection_rs',
@@ -2854,6 +2866,7 @@ if wiredtiger:
             '$BUILD_DIR/mongo/util/net/ssl_options_server',
             '$BUILD_DIR/mongo/util/periodic_runner_factory',
             '$BUILD_DIR/mongo/util/progress_meter',
+            'admission/ticketholder_manager',
             'auth/auth',
             'auth/authmocks',
             'auth/security_token',

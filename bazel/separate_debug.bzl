@@ -2,6 +2,7 @@ load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 
 WITH_DEBUG_SUFFIX = "_with_debug"
 CC_SHARED_LIBRARY_SUFFIX = "_shared"
+SHARED_ARCHIVE_SUFFIX = "_shared_archive"
 
 def get_inputs_and_outputs(ctx, shared_ext, static_ext, debug_ext):
     """
@@ -68,6 +69,37 @@ def propgate_static_lib(ctx, static_lib, static_ext, inputs):
     )
 
     return unstripped_static_lib
+
+def get_transitive_dyn_libs(deps):
+    """
+    Get a transitive list of all dynamic library files under a set of dependencies.
+    """
+
+    # TODO(SERVER-85819): Investigate to see if it's possible to merge the depset without looping over all transitive
+    # dependencies.
+    transitive_dyn_libs = []
+    for dep in deps:
+        for input in dep[CcInfo].linking_context.linker_inputs.to_list():
+            for library in input.libraries:
+                if library.dynamic_library:
+                    transitive_dyn_libs.append(library.dynamic_library)
+    return transitive_dyn_libs
+
+def symlink_shared_archive(ctx, shared_ext, static_ext):
+    """
+    Shared archives (.so.a/.dll.lib) have different extensions depending on the operating system.
+    Strip the suffix added on by the target rule and replace the static library ext with the shared archive
+    ext.
+    """
+    original_output = ctx.attr.shared_archive.files.to_list()[0]
+    basename = original_output.basename[:-len(SHARED_ARCHIVE_SUFFIX + static_ext)]
+    symlink = ctx.actions.declare_file(basename + shared_ext + static_ext)
+
+    ctx.actions.symlink(
+        output = symlink,
+        target_file = original_output,
+    )
+    return symlink
 
 def create_new_ccinfo_library(ctx, cc_toolchain, shared_lib, static_lib, cc_shared_library = None):
     """
@@ -211,6 +243,16 @@ def linux_extraction(ctx, cc_toolchain, inputs):
         unstripped_static_bin = propgate_static_lib(ctx, static_lib, ".a", inputs)
         outputs.append(unstripped_static_bin)
 
+    if ctx.attr.shared_archive:
+        unstripped_shared_archive = symlink_shared_archive(ctx, ".so", ".a")
+        outputs.append(unstripped_shared_archive)
+
+    # The final program binary depends on the existence of the dependent dynamic library files. With
+    # build-without-the-bytes enabled, these aren't downloaded. Manually collect them and add them to the
+    # output set.
+    if ctx.attr.type == "program":
+        outputs.extend(get_transitive_dyn_libs(ctx.attr.deps))
+
     provided_info = [
         DefaultInfo(
             files = depset(outputs),
@@ -271,6 +313,16 @@ def macos_extraction(ctx, cc_toolchain, inputs):
         unstripped_static_bin = propgate_static_lib(ctx, static_lib, ".a", inputs)
         outputs.append(unstripped_static_bin)
 
+    if ctx.attr.shared_archive:
+        unstripped_shared_archive = symlink_shared_archive(ctx, ".dylib", ".a")
+        outputs.append(unstripped_shared_archive)
+
+    # The final program binary depends on the existence of the dependent dynamic library files. With
+    # build-without-the-bytes enabled, these aren't downloaded. Manually collect them and add them to the
+    # output set.
+    if ctx.attr.type == "program":
+        outputs.extend(get_transitive_dyn_libs(ctx.attr.deps))
+
     provided_info = [
         DefaultInfo(
             files = depset(outputs),
@@ -316,6 +368,10 @@ def windows_extraction(ctx, cc_toolchain, inputs):
             output = output,
             target_file = input,
         )
+
+    if ctx.attr.shared_archive:
+        unstripped_shared_archive = symlink_shared_archive(ctx, ".dll", ".lib")
+        outputs.append(unstripped_shared_archive)
 
     provided_info = [
         DefaultInfo(
@@ -372,6 +428,10 @@ extract_debuginfo = rule(
             doc = "If extracting from a shared library, the target of the cc_shared_library. Otherwise empty.",
             allow_files = True,
         ),
+        "shared_archive": attr.label(
+            doc = "If generating a shared archive(.so.a/.dll.lib), the shared archive's cc_library. Otherwise empty.",
+            allow_files = True,
+        ),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
         "_linux_constraint": attr.label(default = "@platforms//os:linux"),
         "_macos_constraint": attr.label(default = "@platforms//os:macos"),
@@ -396,6 +456,10 @@ extract_debuginfo_binary = rule(
         "deps": attr.label_list(providers = [CcInfo]),
         "cc_shared_library": attr.label(
             doc = "If extracting from a shared library, the target of the cc_shared_library. Otherwise empty.",
+            allow_files = True,
+        ),
+        "shared_archive": attr.label(
+            doc = "If generating a shared archive(.so.a/.dll.lib), the shared archive's cc_library. Otherwise empty.",
             allow_files = True,
         ),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),

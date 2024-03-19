@@ -2761,7 +2761,7 @@ void ReplicationCoordinatorImpl::_killConflictingOpsOnStepUpAndStepDown(
     invariant(serviceCtx);
 
     for (ServiceContext::LockedClientsCursor cursor(serviceCtx); Client* client = cursor.next();) {
-        stdx::lock_guard<Client> lk(*client);
+        ClientLock lk(client);
         if (client->isFromSystemConnection() && !client->canKillSystemOperationInStepdown(lk)) {
             continue;
         }
@@ -3261,6 +3261,13 @@ bool ReplicationCoordinatorImpl::canAcceptWritesFor(OperationContext* opCtx,
     if (!_isCollectionReplicated(opCtx, nsOrUUID)) {
         return true;
     }
+
+    // Allow writes to admin and config in magicRestore mode.
+    if (storageGlobalParams.magicRestore && nsOrUUID.isNamespaceString() &&
+        (nsOrUUID.nss().isAdminDB() || nsOrUUID.nss().isConfigDB())) {
+        return true;
+    }
+
     // Assert that we are holding the RSTL, meaning the value returned from
     // `_canAcceptReplicatedWrites_UNSAFE` is guaranteed to be accurate.
     invariant(shard_role_details::getLocker(opCtx)->isRSTLLocked(), toStringForLogging(nsOrUUID));

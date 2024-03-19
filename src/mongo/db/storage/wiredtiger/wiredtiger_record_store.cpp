@@ -1335,18 +1335,6 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
                               *WiredTigerRecoveryUnit::get(opCtx), c, entries.data(), nentries)),
                 c->session);
 
-            size_t modifiedDataSize = 0;
-            // Don't perform a range-based for loop because there may be fewer calculated entries
-            // than the reserved maximum.
-            for (auto i = 0; i < nentries; i++) {
-                // Account for both the amount of old data we are overwriting (size) and new data we
-                // are inserting (data.size).
-                modifiedDataSize += entries[i].size + entries[i].data.size;
-            }
-
-            auto keyLength = computeRecordIdSize(id);
-            metricsCollector.incrementOneDocWritten(_uri, modifiedDataSize + keyLength);
-
             WT_ITEM new_value;
             dassert(nentries == 0 ||
                     (c->get_value(c, &new_value) == 0 && new_value.size == value.size &&
@@ -1360,13 +1348,15 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
     if (!skip_update) {
         c->set_value(c, value.Get());
         ret = WT_OP_CHECK(wiredTigerCursorInsert(*WiredTigerRecoveryUnit::get(opCtx), c));
-
-        auto keyLength = computeRecordIdSize(id);
-        metricsCollector.incrementOneDocWritten(_uri, value.size + keyLength);
     }
     invariantWTOK(ret, c->session);
 
-    _changeNumRecordsAndDataSize(opCtx, 0, len - old_length);
+    auto sizeDiff = len - old_length;
+
+    // For updates that don't modify the document size, they should count as at least one unit, so
+    // just attribute them as 1-byte modifications for simplicity.
+    metricsCollector.incrementOneDocWritten(_uri, std::max((int64_t)1, std::abs(sizeDiff)));
+    _changeNumRecordsAndDataSize(opCtx, 0, sizeDiff);
     return Status::OK();
 }
 
@@ -1385,16 +1375,11 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(
     mutablebson::DamageVector::const_iterator where = damages.begin();
     const mutablebson::DamageVector::const_iterator end = damages.cend();
     std::vector<WT_MODIFY> entries(nentries);
-    size_t modifiedDataSize = 0;
     for (u_int i = 0; where != end; ++i, ++where) {
         entries[i].data.data = damageSource + where->sourceOffset;
         entries[i].data.size = where->sourceSize;
         entries[i].offset = where->targetOffset;
         entries[i].size = where->targetSize;
-        // Account for both the amount of old data we are overwriting (size) and new data we are
-        // inserting (data.size).
-        modifiedDataSize += entries[i].size;
-        modifiedDataSize += entries[i].data.size;
     }
 
     WiredTigerCursor curwrap(*WiredTigerRecoveryUnit::get(opCtx), _uri, _tableId, true);
@@ -1412,16 +1397,17 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(
                           *WiredTigerRecoveryUnit::get(opCtx), c, entries.data(), nentries)),
                       c->session);
 
-    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-
-    auto keyLength = computeRecordIdSize(id);
-    metricsCollector.incrementOneDocWritten(_uri, modifiedDataSize + keyLength);
 
     WT_ITEM value;
     invariantWTOK(c->get_value(c, &value), c->session);
 
-    _changeNumRecordsAndDataSize(
-        opCtx, 0, static_cast<int64_t>(value.size) - static_cast<int64_t>(oldRec.size()));
+    auto sizeDiff = static_cast<int64_t>(value.size) - static_cast<int64_t>(oldRec.size());
+    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
+
+    // For updates that don't modify the document size, they should count as at least one unit, so
+    // just attribute them as 1-byte modifications for simplicity.
+    metricsCollector.incrementOneDocWritten(_uri, std::max((int64_t)1, std::abs(sizeDiff)));
+    _changeNumRecordsAndDataSize(opCtx, 0, sizeDiff);
 
     return RecordData(static_cast<const char*>(value.data), value.size).getOwned();
 }
@@ -1575,42 +1561,49 @@ Status WiredTigerRecordStore::doRangeTruncate(OperationContext* opCtx,
     return Status::OK();
 }
 
-Status WiredTigerRecordStore::doCompact(OperationContext* opCtx,
-                                        boost::optional<int64_t> freeSpaceTargetMB) {
+StatusWith<int64_t> WiredTigerRecordStore::doCompact(OperationContext* opCtx,
+                                                     const CompactOptions& options) {
     dassert(shard_role_details::getLocker(opCtx)->isWriteLocked());
 
     WiredTigerSessionCache* cache = WiredTigerRecoveryUnit::get(opCtx)->getSessionCache();
-    if (!cache->isEphemeral()) {
-        WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
-        shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
-
-        // Set a pointer on the WT_SESSION to the opCtx, so that WT::compact can use a callback to
-        // check for interrupts.
-        SessionDataRAII sessionRaii(s, opCtx);
-
-        std::string config = "timeout=0";
-        if (freeSpaceTargetMB) {
-            config += ",free_space_target=" + std::to_string(*freeSpaceTargetMB) + "MB";
-        }
-        int ret = s->compact(s, getURI().c_str(), config.c_str());
-        if (ret == WT_ERROR && !opCtx->checkForInterruptNoAssert().isOK()) {
-            return Status(ErrorCodes::Interrupted,
-                          str::stream()
-                              << "Storage compaction interrupted on " << getURI().c_str());
-        }
-
-        if (MONGO_unlikely(WTCompactRecordStoreEBUSY.shouldFail())) {
-            ret = EBUSY;
-        }
-
-        if (ret == EBUSY) {
-            return Status(ErrorCodes::Interrupted,
-                          str::stream() << "Compaction interrupted on " << getURI().c_str()
-                                        << " due to cache eviction pressure");
-        }
-        invariantWTOK(ret, s);
+    if (cache->isEphemeral()) {
+        return 0;
     }
-    return Status::OK();
+
+    WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
+    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+
+    // Set a pointer on the WT_SESSION to the opCtx, so that WT::compact can use a callback to
+    // check for interrupts.
+    SessionDataRAII sessionRaii(s, opCtx);
+
+    StringBuilder config;
+    config << "timeout=0";
+    if (options.dryRun) {
+        config << ",dryrun=true";
+    }
+    if (options.freeSpaceTargetMB) {
+        config << ",free_space_target=" << std::to_string(*options.freeSpaceTargetMB) << "MB";
+    }
+    const std::string uri(getURI());
+    int ret = s->compact(s, uri.c_str(), config.str().c_str());
+    if (ret == WT_ERROR && !opCtx->checkForInterruptNoAssert().isOK()) {
+        return Status(ErrorCodes::Interrupted,
+                      str::stream() << "Storage compaction interrupted on " << uri);
+    }
+
+    if (MONGO_unlikely(WTCompactRecordStoreEBUSY.shouldFail())) {
+        ret = EBUSY;
+    }
+
+    if (ret == EBUSY) {
+        return Status(ErrorCodes::Interrupted,
+                      str::stream() << "Compaction interrupted on " << getURI()
+                                    << " due to cache eviction pressure");
+    }
+    invariantWTOK(ret, s);
+
+    return options.dryRun ? WiredTigerUtil::getIdentCompactRewrittenExpectedSize(s, uri) : 0;
 }
 
 void WiredTigerRecordStore::validate(OperationContext* opCtx, bool full, ValidateResults* results) {
@@ -2388,86 +2381,6 @@ boost::optional<Record> WiredTigerCappedCursorBase::seek(const RecordId& start,
     return toReturn;
 }
 
-boost::optional<Record> WiredTigerCappedCursorBase::seekNear(const RecordId& id) {
-    invariant(_hasRestored);
-    dassert(shard_role_details::getLocker(_opCtx)->isReadLocked());
-
-    RecordId start = getStartForSeekNear(id);
-
-    _skipNextAdvance = false;
-    WiredTigerRecoveryUnit::get(_opCtx)->getSession();
-    WT_CURSOR* c = _cursor->get();
-
-    // Reset the cursor before using it in case it has any saved bounds from a previous seek.
-    if (_boundSet) {
-        resetCursor();
-    }
-
-    auto key = makeCursorKey(start, _keyFormat);
-    setKey(c, &key);
-
-    int cmp;
-    int ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->search_near(c, &cmp); });
-    if (ret == WT_NOTFOUND) {
-        _positioned = false;
-        _eof = true;
-        return boost::none;
-    }
-    invariantWTOK(ret, c->session);
-
-    if (_metrics) {
-        _metrics->incrementOneCursorSeek(_uri);
-    }
-
-    RecordId curId = getKey(c, _keyFormat);
-
-    // Per the requirement of the API, return the lower (for forward) or higher (for reverse)
-    // record.
-    if (_forward && cmp > 0) {
-        ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->prev(c); });
-    } else if (!_forward && cmp < 0) {
-        ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->next(c); });
-    }
-
-    if (ret != WT_NOTFOUND) {
-        curId = getKey(c, _keyFormat);
-        // If the curId is higher than the read timestamp, it must be for backward search. Per the
-        // requirement of the API, the largest smaller than the oplog read timestamp should be
-        // returned.
-        if (!isVisible(curId)) {
-            invariant(!_forward);
-            ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->prev(c); });
-        }
-    }
-
-    // If we tried to return an earlier record but we found the end (for forward) or beginning (for
-    // reverse), go back to our original location so that we have something to return.
-    if (ret == WT_NOTFOUND) {
-        if (_forward) {
-            invariant(cmp > 0);
-            ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->next(c); });
-        } else if (!_forward) {
-            invariant(cmp < 0);
-            ret = wiredTigerPrepareConflictRetry(_opCtx, [&] { return c->prev(c); });
-        }
-    }
-    invariantWTOK(ret, c->session);
-
-    _positioned = true;
-    curId = getKey(c, _keyFormat);
-
-    // After we've positioned to the first document to return, apply visibility rules again.
-    if (!isVisible(curId)) {
-        _eof = true;
-        return boost::none;
-    }
-
-    _eof = false;
-    Record toReturn = {std::move(curId), getRecordData(_cursor->get())};
-    trackReturn(toReturn);
-    return toReturn;
-}
-
 boost::optional<Record> WiredTigerCappedCursorBase::next() {
     auto id = nextIdCommon();
     if (id.isNull()) {
@@ -2577,14 +2490,6 @@ void WiredTigerStandardCappedCursor::resetVisibility() {
     _cappedSnapshot = boost::none;
 }
 
-RecordId WiredTigerStandardCappedCursor::getStartForSeekNear(const RecordId& start) const {
-    // Forward scanning oplog cursors must not see past holes.
-    if (_forward && _cappedSnapshot && !_cappedSnapshot->isRecordVisible(start)) {
-        return _cappedSnapshot->getHighestVisible();
-    }
-    return start;
-}
-
 WiredTigerOplogCursor::WiredTigerOplogCursor(OperationContext* opCtx,
                                              const WiredTigerRecordStore& rs,
                                              bool forward)
@@ -2621,20 +2526,6 @@ bool WiredTigerOplogCursor::isVisible(const RecordId& id) {
 void WiredTigerOplogCursor::resetVisibility() {
     _oplogVisibleTs = boost::none;
     _readTimestampForOplog = boost::none;
-}
-
-RecordId WiredTigerOplogCursor::getStartForSeekNear(const RecordId& id) const {
-    RecordId start = id;
-    // Oplog queries must manually implement read_timestamp visibility.
-    if (_readTimestampForOplog && start.getLong() > *_readTimestampForOplog) {
-        start = RecordId(*_readTimestampForOplog);
-    }
-
-    // Additionally, forward scanning oplog cursors must not see past holes.
-    if (_forward && _oplogVisibleTs && start.getLong() > *_oplogVisibleTs) {
-        start = RecordId(*_oplogVisibleTs);
-    }
-    return start;
 }
 
 boost::optional<Record> WiredTigerOplogCursor::next() {

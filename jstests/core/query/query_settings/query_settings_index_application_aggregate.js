@@ -9,33 +9,41 @@
 //   # $planCacheStats can not be run in transactions.
 //   does_not_support_transactions,
 //   directly_against_shardsvrs_incompatible,
-//   featureFlagQuerySettings,
 //   simulate_atlas_proxy_incompatible,
 //   cqf_incompatible,
 //   # 'planCacheClear' command is not allowed with the security token.
 //   not_allowed_with_signed_security_token,
+//   requires_fcv_80,
 //   # Explain for tracked unsharded collections return IXSCAN as inputStage
 //   # TODO SERVER-87164 re-enable the tests in suites with random migrations
 //   assumes_balancer_off,
 // ]
 //
 
-import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
+import {
+    assertDropAndRecreateCollection,
+    assertDropCollection
+} from "jstests/libs/collection_drop_recreate.js";
 import {QuerySettingsIndexHintsTests} from "jstests/libs/query_settings_index_hints_tests.js";
 import {QuerySettingsUtils} from "jstests/libs/query_settings_utils.js";
+import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/sbe_util.js";
 
 const coll = assertDropAndRecreateCollection(db, jsTestName());
+const viewName = "identityView";
+assertDropCollection(db, viewName);
+assert.commandWorked(db.createView(viewName, coll.getName(), []));
 const mainNs = {
     db: db.getName(),
     coll: coll.getName()
 };
 const secondaryColl = assertDropAndRecreateCollection(db, "secondary");
+const secondaryViewName = "secondaryIdentityView";
+assertDropCollection(db, secondaryViewName);
+assert.commandWorked(db.createView(secondaryViewName, secondaryColl.getName(), []));
 const secondaryNs = {
     db: db.getName(),
     coll: secondaryColl.getName()
 };
-const qsutils = new QuerySettingsUtils(db, coll.getName());
-const qstests = new QuerySettingsIndexHintsTests(qsutils);
 
 // Insert data into the collection.
 assert.commandWorked(coll.insertMany([
@@ -52,34 +60,49 @@ assert.commandWorked(secondaryColl.insertMany([
     {a: 3, b: 1},
 ]));
 
-// Ensure that query settings cluster parameter is empty.
-qsutils.assertQueryShapeConfiguration([]);
-
 function setIndexes(coll, indexList) {
     assert.commandWorked(coll.dropIndexes());
     assert.commandWorked(coll.createIndexes(indexList));
 }
-setIndexes(coll, [qstests.indexA, qstests.indexB, qstests.indexAB]);
-setIndexes(secondaryColl, [qstests.indexA, qstests.indexB, qstests.indexAB]);
 
-(function testAggregateQuerySettingsApplicationWithoutSecondaryCollections() {
+function testAggregateQuerySettingsApplicationWithoutSecondaryCollections(collOrViewName) {
+    const qsutils = new QuerySettingsUtils(db, collOrViewName);
+    const qstests = new QuerySettingsIndexHintsTests(qsutils);
+
+    setIndexes(coll, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+
+    // Ensure that query settings cluster parameter is empty.
+    qsutils.assertQueryShapeConfiguration([]);
+
     const aggregateCmd = qsutils.makeAggregateQueryInstance({
         pipeline: [{$match: {a: 1, b: 5}}],
         cursor: {},
     });
     qstests.assertQuerySettingsIndexApplication(aggregateCmd, mainNs);
     qstests.assertQuerySettingsIgnoreCursorHints(aggregateCmd, mainNs);
-    qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
+    // TODO SERVER-85242 Re-enable once the fallback mechanism is reimplemented.
+    // qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
-})();
+}
 
-(function testAggregateQuerySettingsApplicationWithLookupEquiJoin() {
+function testAggregateQuerySettingsApplicationWithLookupEquiJoin(
+    collOrViewName, secondaryCollOrViewName, isSecondaryCollAView) {
+    const qsutils = new QuerySettingsUtils(db, collOrViewName);
+    const qstests = new QuerySettingsIndexHintsTests(qsutils);
+
+    // Set indexes on both collections.
+    setIndexes(coll, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+    setIndexes(secondaryColl, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+
+    // Ensure that query settings cluster parameter is empty.
+    qsutils.assertQueryShapeConfiguration([]);
+
     const aggregateCmd = qsutils.makeAggregateQueryInstance({
     pipeline: [
       { $match: { a: 1, b: 5 } },
       {
         $lookup:
-          { from: secondaryColl.getName(), localField: "a", foreignField: "a", as: "output" }
+          { from: secondaryCollOrViewName, localField: "a", foreignField: "a", as: "output" }
       }
     ],
     cursor: {},
@@ -87,32 +110,54 @@ setIndexes(secondaryColl, [qstests.indexA, qstests.indexB, qstests.indexAB]);
 
     // Ensure query settings index application for 'mainNs', 'secondaryNs' and both.
     qstests.assertQuerySettingsIndexApplication(aggregateCmd, mainNs);
-    qstests.assertQuerySettingsLookupJoinIndexApplication(aggregateCmd, secondaryNs);
-    qstests.assertQuerySettingsIndexAndLookupJoinApplications(aggregateCmd, mainNs, secondaryNs);
+    qstests.assertQuerySettingsLookupJoinIndexApplication(
+        aggregateCmd, secondaryNs, isSecondaryCollAView);
+    qstests.assertQuerySettingsIndexAndLookupJoinApplications(
+        aggregateCmd, mainNs, secondaryNs, isSecondaryCollAView);
 
-    // Ensure query settings ignore cursor hints when being set on main or secondary collection.
+    // Ensure query settings ignore cursor hints when being set on main collection.
     qstests.assertQuerySettingsIgnoreCursorHints(aggregateCmd, mainNs);
-    qstests.assertQuerySettingsIgnoreCursorHints(aggregateCmd, secondaryNs);
+    if (checkSbeRestrictedOrFullyEnabled(db) && !isSecondaryCollAView) {
+        // The aggregation stage will get pushed down to SBE, and index hints will get applied to
+        // secondary collections. This prevents cursor hints from also being applied.
+        qstests.assertQuerySettingsIgnoreCursorHints(aggregateCmd, secondaryNs);
+    } else {
+        // No SBE push down happens. The $lookup will get executed as a separate pipeline, so we
+        // expect cursor hints to be applied on the main collection, while query settings will get
+        // applied on the secondary collection.
+        qstests.assertQuerySettingsWithCursorHints(aggregateCmd, mainNs, secondaryNs);
+    }
 
     // Ensure that providing query settings with an invalid index result in the same plan as no
     // query settings being set.
     // NOTE: The fallback is not tested when hinting secondary collections, as instead of fallback,
     // hash join or nlj will be used.
     // TODO: SERVER-86400 Add support for $natural hints on secondary collections.
-    qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
+    // TODO SERVER-85242 Re-enable once the fallback mechanism is reimplemented.
+    // qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
 
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, secondaryNs);
-})();
+}
 
-(function testAggregateQuerySettingsApplicationWithLookupPipeline() {
+function testAggregateQuerySettingsApplicationWithLookupPipeline(collOrViewName,
+                                                                 secondaryCollOrViewName) {
+    const qsutils = new QuerySettingsUtils(db, collOrViewName);
+    const qstests = new QuerySettingsIndexHintsTests(qsutils);
+
+    // Set indexes on both collections.
+    setIndexes(coll, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+    setIndexes(secondaryColl, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+
+    // Ensure that query settings cluster parameter is empty.
+    qsutils.assertQueryShapeConfiguration([]);
+
     const aggregateCmd = qsutils.makeAggregateQueryInstance({
-    aggregate: coll.getName(),
     pipeline: [
       { $match: { a: 1, b: 5 } },
       {
         $lookup:
-          { from: secondaryColl.getName(), pipeline: [{ $match: { a: 1, b: 5 } }], as: "output" }
+          { from: secondaryCollOrViewName, pipeline: [{ $match: { a: 1, b: 5 } }], as: "output" }
       }
     ],
     cursor: {},
@@ -131,9 +176,24 @@ setIndexes(secondaryColl, [qstests.indexA, qstests.indexB, qstests.indexAB]);
     // different pipelines.
     qstests.assertQuerySettingsWithCursorHints(aggregateCmd, mainNs, secondaryNs);
 
-    qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
-    qstests.assertQuerySettingsFallback(aggregateCmd, secondaryNs);
+    // TODO SERVER-85242 Re-enable once the fallback mechanism is reimplemented.
+    // qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
+    // qstests.assertQuerySettingsFallback(aggregateCmd, secondaryNs);
 
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, secondaryNs);
-})();
+}
+
+testAggregateQuerySettingsApplicationWithoutSecondaryCollections(coll.getName());
+testAggregateQuerySettingsApplicationWithoutSecondaryCollections(viewName);
+
+testAggregateQuerySettingsApplicationWithLookupEquiJoin(
+    coll.getName(), secondaryColl.getName(), false);
+testAggregateQuerySettingsApplicationWithLookupEquiJoin(viewName, secondaryColl.getName(), false);
+testAggregateQuerySettingsApplicationWithLookupEquiJoin(coll.getName(), secondaryViewName, true);
+testAggregateQuerySettingsApplicationWithLookupEquiJoin(viewName, secondaryViewName, true);
+
+testAggregateQuerySettingsApplicationWithLookupPipeline(coll.getName(), secondaryColl.getName());
+testAggregateQuerySettingsApplicationWithLookupPipeline(viewName, secondaryColl.getName());
+testAggregateQuerySettingsApplicationWithLookupPipeline(coll.getName(), secondaryViewName);
+testAggregateQuerySettingsApplicationWithLookupPipeline(viewName, secondaryViewName);

@@ -1,5 +1,8 @@
-# Build variants corresponding to Atlas's OS for testing release environments that should run on master,
-# rapid release (7.1, 7.2 etc.) and LTS release (7.0, 6.0 etc.) branch projects
+# Build variants corresponding to Atlas's OS for testing release environments
+#
+# After the branching variants in this file
+# should continue to run on a new rapid release (v7.1, v7.2 etc.)
+# and LTS release (v7.0, v6.0 etc.) branch projects
 
 buildvariants:
 - name: enterprise-rhel-79-64-bit
@@ -31,6 +34,8 @@ buildvariants:
     packager_distro: rhel79
     repo_edition: enterprise
     scons_cache_scope: shared
+    # TODO SERVER-64479 remove external_auth_jobs_max once resolved
+    external_auth_jobs_max: 1
     compile_variant: enterprise-rhel-79-64-bit
     core_analyzer_distro_name: rhel7.9-large
   tasks:

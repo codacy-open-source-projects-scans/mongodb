@@ -34,11 +34,62 @@
 #include <type_traits>
 
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/util/aligned.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/shared_buffer.h"
 
 namespace mongo {
 
-struct TrackingAllocatorStats {
-    AtomicWord<uint64_t> bytesAllocated;
+/**
+ * A minimal implementation of a partitioned counter for incrementing and decrementing allocations
+ * across multiple threads.
+ */
+class TrackingAllocatorStats {
+public:
+    // The counter will be partitioned based on the number of available cores.
+    TrackingAllocatorStats()
+        : _numPartitions(ProcessInfo::getNumLogicalCores() * 2), _bytesAllocated(_numPartitions) {}
+    TrackingAllocatorStats(size_t numPartitions)
+        : _numPartitions(numPartitions), _bytesAllocated(_numPartitions) {}
+
+    void bytesAllocated(size_t n) {
+        auto& counter = _bytesAllocated[_getSlot()];
+        counter.value.fetchAndAddRelaxed(n);
+    }
+
+    void bytesDeallocated(size_t n) {
+        auto& counter = _bytesAllocated[_getSlot()];
+        counter.value.fetchAndSubtractRelaxed(n);
+    }
+
+    uint64_t allocated() const {
+        int64_t sum = 0;
+        for (auto& counter : _bytesAllocated) {
+            sum += counter.value.loadRelaxed();
+        }
+
+        // After summing the memory usage, we should not have a negative number.
+        invariant(sum >= 0,
+                  str::stream() << "Tracking allocator memory usage was negative " << sum);
+        return static_cast<uint64_t>(sum);
+    }
+
+private:
+    size_t _getSlot() const {
+        return std::hash<std::thread::id>{}(stdx::this_thread::get_id()) % _numPartitions;
+    }
+
+    const size_t _numPartitions;
+
+    // The counter is signed to handle the case where a thread closes a time-series bucket that
+    // deallocates more memory than is going to be allocated.
+    struct AlignedAtomic {
+        alignas(stdx::hardware_destructive_interference_size) AtomicWord<int64_t> value;
+    };
+    static_assert(alignof(AlignedAtomic) == stdx::hardware_destructive_interference_size);
+
+    std::vector<AlignedAtomic> _bytesAllocated;
 };
 
 /**
@@ -51,7 +102,7 @@ public:
     using propagate_on_container_move_assignment = std::true_type;
 
     TrackingAllocator() = delete;
-    explicit TrackingAllocator(TrackingAllocatorStats* stats) noexcept : _stats(stats){};
+    explicit TrackingAllocator(TrackingAllocatorStats& stats) noexcept : _stats(stats){};
     TrackingAllocator(const TrackingAllocator&) noexcept = default;
 
     ~TrackingAllocator() = default;
@@ -61,32 +112,82 @@ public:
 
     T* allocate(size_t n) {
         const size_t allocation = n * sizeof(T);
-        _stats->bytesAllocated.fetchAndAddRelaxed(allocation);
+        _stats.get().bytesAllocated(allocation);
         return static_cast<T*>(::operator new(allocation));
     }
 
     void deallocate(T* p, size_t n) {
         auto size = n * sizeof(T);
-        _stats->bytesAllocated.fetchAndSubtractRelaxed(size);
+        _stats.get().bytesDeallocated(size);
         ::operator delete(p, size);
     }
 
-    TrackingAllocatorStats* getStats() const {
+    TrackingAllocatorStats& getStats() const {
         return _stats;
     }
 
 private:
-    TrackingAllocatorStats* _stats;
+    std::reference_wrapper<TrackingAllocatorStats> _stats;
 };
 
 template <class T, class U>
 bool operator==(const TrackingAllocator<T>& lhs, const TrackingAllocator<U>& rhs) noexcept {
-    return lhs.getStats() == rhs.getStats();
+    return &lhs.getStats() == &rhs.getStats();
 }
 
 template <class T, class U>
 bool operator!=(const TrackingAllocator<T>& lhs, const TrackingAllocator<U>& rhs) noexcept {
-    return lhs.getStats() != rhs.getStats();
+    return &lhs.getStats() != &rhs.getStats();
 }
+
+class TrackingSharedBufferAllocator {
+public:
+    static constexpr size_t kBuffHolderSize = SharedBuffer::kHolderSize;
+
+    TrackingSharedBufferAllocator(TrackingAllocatorStats& stats, size_t size = 0) : _stats(stats) {
+        if (size > 0) {
+            malloc(size);
+        }
+    }
+
+    TrackingSharedBufferAllocator(TrackingSharedBufferAllocator&&) = default;
+    TrackingSharedBufferAllocator& operator=(TrackingSharedBufferAllocator&&) = default;
+
+    void malloc(size_t size) {
+        _stats.get().bytesAllocated(size);
+        _buf = SharedBuffer::allocate(size);
+    }
+
+    void realloc(size_t size) {
+        if (size > _buf.capacity()) {
+            _stats.get().bytesAllocated(size - _buf.capacity());
+        } else {
+            _stats.get().bytesDeallocated(_buf.capacity() - size);
+        }
+        _buf.realloc(size);
+    }
+
+    void free() {
+        _stats.get().bytesDeallocated(_buf.capacity());
+        _buf = {};
+    }
+
+    SharedBuffer release() {
+        _stats.get().bytesDeallocated(_buf.capacity());
+        return std::move(_buf);
+    }
+
+    size_t capacity() const {
+        return _buf.capacity();
+    }
+
+    char* get() const {
+        return _buf.get();
+    }
+
+private:
+    SharedBuffer _buf;
+    std::reference_wrapper<TrackingAllocatorStats> _stats;
+};
 
 }  // namespace mongo

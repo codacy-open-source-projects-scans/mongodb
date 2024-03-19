@@ -9,11 +9,13 @@
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {
     checkHealthLog,
+    checkNumSnapshots,
     logQueries,
     resetAndInsert,
     resetAndInsertTwoFields,
-    runDbCheck,
+    runDbCheck
 } from "jstests/replsets/libs/dbcheck_utils.js";
+
 (function() {
 "use strict";
 
@@ -58,9 +60,9 @@ assert.commandWorked(primaryDB.adminCommand({
 
 function setSnapshotSize(snapshotSize) {
     assert.commandWorked(primaryDB.adminCommand(
-        {"setParameter": 1, "dbCheckMaxExtraIndexKeysReverseLookupPerSnapshot": snapshotSize}));
+        {"setParameter": 1, "dbCheckMaxTotalIndexKeysPerSnapshot": snapshotSize}));
     assert.commandWorked(secondaryDB.adminCommand(
-        {"setParameter": 1, "dbCheckMaxExtraIndexKeysReverseLookupPerSnapshot": snapshotSize}));
+        {"setParameter": 1, "dbCheckMaxTotalIndexKeysPerSnapshot": snapshotSize}));
 }
 function resetSnapshotSize() {
     setSnapshotSize(defaultSnapshotSize);
@@ -79,12 +81,12 @@ function getNumDocsChecked(nDocsInserted, start, end) {
 }
 
 function checkNumBatchesAndSnapshots(
-    healthLog, nDocs, batchSize, snapshotSize, inconsistentBatch = false) {
-    const expectedNumBatches = Math.ceil(nDocs / batchSize);
+    healthLog, nDocsChecked, batchSize, snapshotSize, inconsistentBatch = false) {
+    const expectedNumBatches = Math.ceil(nDocsChecked / batchSize);
 
     let query = logQueries.infoBatchQuery;
     if (inconsistentBatch) {
-        query = {"severity": "error", "msg": "dbCheck batch inconsistent"};
+        query = logQueries.inconsistentBatchQuery;
     }
 
     checkHealthLog(healthLog, query, expectedNumBatches);
@@ -93,32 +95,83 @@ function checkNumBatchesAndSnapshots(
         let expectedNumSnapshots = expectedNumBatches;
         if (snapshotSize < batchSize) {
             const snapshotsPerBatch = Math.ceil(batchSize / snapshotSize);
-            const lastBatchSize = nDocs % batchSize == 0 ? batchSize : nDocs % batchSize;
+            const lastBatchSize =
+                nDocsChecked % batchSize == 0 ? batchSize : nDocsChecked % batchSize;
             const lastBatchSnapshots = Math.ceil(lastBatchSize / snapshotSize);
 
             expectedNumSnapshots =
                 ((expectedNumBatches - 1) * snapshotsPerBatch) + lastBatchSnapshots;
         }
-        const actualNumSnapshots =
-            rawMongoProgramOutput()
-                .split(/7844808.*Catalog snapshot for extra index keys check ending/)
-                .length -
-            1;
-        assert.eq(actualNumSnapshots,
-                  expectedNumSnapshots,
-                  "expected " + expectedNumSnapshots +
-                      " catalog snapshots during extra index keys check, found " +
-                      actualNumSnapshots);
+        checkNumSnapshots(debugBuild, expectedNumSnapshots);
+    }
+}
+
+// Verifies that the healthlog contains entries that span the entire range that dbCheck should run
+// against.
+function assertCompleteCoverage(
+    healthlog, nDocs, docSuffix, start, end, inconsistentBatch = false) {
+    // For non-empty docSuffix like 'aaa' for instance, if we insert over 10 docs, the lexicographic
+    // sorting order would be '0aaa', '1aaa', '10aaa', instead of increasing numerical order. Skip
+    // these checks as we have test coverage without needing to account for these specific cases.
+    if (nDocs >= 10 && (docSuffix !== null || docSuffix !== "")) {
+        return;
+    }
+
+    const truncateDocSuffix =
+        (batchBoundary, docSuffix) => {
+            const index = batchBoundary.indexOf(docSuffix);
+            jsTestLog("Index : " + index);
+            if (index < 1) {
+                return batchBoundary;
+            }
+            return batchBoundary.substring(0, batchBoundary.indexOf(docSuffix));
+        }
+
+    let query = logQueries.infoBatchQuery;
+    if (inconsistentBatch) {
+        query = {"severity": "error", "msg": "dbCheck batch inconsistent"};
+    }
+
+    const batches = healthlog.find(query).toArray();
+    let expectedBatchStart = start === null ? 0 : start;
+    let batchEnd = "";
+    for (let batch of batches) {
+        let batchStart = batch.data.batchStart.a;
+        if (docSuffix) {
+            batchStart = truncateDocSuffix(batchStart, docSuffix);
+        }
+
+        // Verify that the batch start is correct.
+        assert.eq(expectedBatchStart, batchStart);
+        // Set our next expected batch start to the next value after the end of this batch.
+        batchEnd = batch.data.batchEnd.a;
+        if (docSuffix) {
+            batchEnd = truncateDocSuffix(batchEnd, docSuffix);
+        }
+        expectedBatchStart = batchEnd + 1;
+    }
+
+    if (end === null) {
+        // User did not issue a custom range, assert that we checked all documents.
+        // TODO (SERVER-86323): Fix this behavior and ensure maxKey is logged.
+        assert.eq(nDocs - 1, batchEnd);
+    } else {
+        // User issued a custom end, but we do not know if the documents in the collection actually
+        // ended at that range. Verify that we have hit either the end of the collection, or we
+        // checked up until the specified range.
+        assert((batchEnd === nDocs - 1) || (batchEnd === end),
+               `batch end ${batchEnd} did not equal end of collection ${
+                   nDocs - 1} nor end of custom range ${end}`);
     }
 }
 
 function noExtraIndexKeys(
     nDocs, batchSize, snapshotSize, skipLookupForExtraKeys, docSuffix, start = null, end = null) {
     clearRawMongoProgramOutput();
-    jsTestLog("Testing that a valid index will not result in any health log entries with " + nDocs +
-              " docs, batchSize: " + batchSize + ", snapshotSize: " + snapshotSize +
-              ", skipLookupForExtraKeys: " + skipLookupForExtraKeys + ", docSuffix: " + docSuffix +
-              ", start:" + start + ", end:" + end);
+    jsTestLog(`Testing that a valid index will not result in any health log entries with ${nDocs} docs, 
+    batchSize: ${batchSize}, snapshotSize: ${snapshotSize}
+              , skipLookupForExtraKeys: ${skipLookupForExtraKeys}, docSuffix: ${docSuffix}
+              , start: ${start}, end: ${end}`);
 
     resetAndInsert(replSet, primaryDB, collName, nDocs, docSuffix);
     assert.commandWorked(primaryDB.runCommand({
@@ -162,6 +215,8 @@ function noExtraIndexKeys(
     checkNumBatchesAndSnapshots(primaryHealthLog, nDocsChecked, batchSize, snapshotSize);
     jsTestLog("Checking for correct number of batches on secondary");
     checkNumBatchesAndSnapshots(secondaryHealthLog, nDocsChecked, batchSize, snapshotSize);
+    assertCompleteCoverage(primaryHealthLog, nDocs, docSuffix, start, end);
+    assertCompleteCoverage(secondaryHealthLog, nDocs, docSuffix, start, end);
 
     resetSnapshotSize();
 }
@@ -169,10 +224,10 @@ function noExtraIndexKeys(
 function recordNotFound(
     nDocs, batchSize, snapshotSize, skipLookupForExtraKeys, docSuffix, start = null, end = null) {
     clearRawMongoProgramOutput();
-    jsTestLog("Testing that an extra key will generate a health log entry with " + nDocs +
-              " docs, batchSize: " + batchSize + ", snapshotSize: " + snapshotSize +
-              ", skipLookupForExtraKeys: " + skipLookupForExtraKeys + ", docSuffix: " + docSuffix +
-              ", start:" + start + ", end:" + end);
+    jsTestLog(`Testing that an extra key will generate a health log entry with ${nDocs} docs, 
+              batchSize: ${batchSize}, snapshotSize: ${snapshotSize}
+                        , skipLookupForExtraKeys: ${skipLookupForExtraKeys}, docSuffix: ${docSuffix}
+                        , start: ${start}, end: ${end}`);
 
     resetAndInsert(replSet, primaryDB, collName, nDocs, docSuffix);
     const primaryColl = primaryDB.getCollection(collName);
@@ -237,6 +292,8 @@ function recordNotFound(
     checkNumBatchesAndSnapshots(primaryHealthLog, nDocsChecked, batchSize, snapshotSize);
     jsTestLog("Checking for correct number of batches on secondary");
     checkNumBatchesAndSnapshots(secondaryHealthLog, nDocsChecked, batchSize, snapshotSize);
+    assertCompleteCoverage(primaryHealthLog, nDocs, docSuffix, start, end);
+    assertCompleteCoverage(secondaryHealthLog, nDocs, docSuffix, start, end);
 
     skipUnindexingDocumentWhenDeletedPrimary.off();
     skipUnindexingDocumentWhenDeletedSecondary.off();
@@ -246,11 +303,10 @@ function recordNotFound(
 function recordDoesNotMatch(
     nDocs, batchSize, snapshotSize, skipLookupForExtraKeys, docSuffix, start = null, end = null) {
     clearRawMongoProgramOutput();
-    jsTestLog(
-        "Testing that a key with a record that does not contain the expected keystring will generate a health log entry with " +
-        nDocs + " docs, batchSize: " + batchSize + ", snapshotSize: " + snapshotSize +
-        ", skipLookupForExtraKeys: " + skipLookupForExtraKeys + ", docSuffix: " + docSuffix +
-        ", start:" + start + ", end:" + end);
+    jsTestLog(`Testing that a key with a record that does not contain the expected keystring will generate a health log entry with ${nDocs} docs, 
+        batchSize: ${batchSize}, snapshotSize: ${snapshotSize}
+                  , skipLookupForExtraKeys: ${skipLookupForExtraKeys}, docSuffix: ${docSuffix}
+                  , start: ${start}, end: ${end}`);
 
     resetAndInsert(replSet, primaryDB, collName, nDocs, docSuffix);
     const primaryColl = primaryDB.getCollection(collName);
@@ -316,6 +372,8 @@ function recordDoesNotMatch(
     checkNumBatchesAndSnapshots(primaryHealthLog, nDocsChecked, batchSize, snapshotSize);
     jsTestLog("Checking for correct number of batches on secondary");
     checkNumBatchesAndSnapshots(secondaryHealthLog, nDocsChecked, batchSize, snapshotSize);
+    assertCompleteCoverage(primaryHealthLog, nDocs, docSuffix, start, end);
+    assertCompleteCoverage(secondaryHealthLog, nDocs, docSuffix, start, end);
 
     skipUpdatingIndexDocumentPrimary.off();
     skipUpdatingIndexDocumentSecondary.off();
@@ -325,11 +383,10 @@ function recordDoesNotMatch(
 function hashingInconsistentExtraKeyOnPrimary(
     nDocs, batchSize, snapshotSize, skipLookupForExtraKeys, docSuffix, start = null, end = null) {
     clearRawMongoProgramOutput();
-    jsTestLog(
-        "Testing that an extra key on only the primary will log an inconsistent batch health log entry: " +
-        nDocs + "docs, batchSize: " + batchSize + ", snapshotSize: " + snapshotSize +
-        ", skipLookupForExtraKeys: " + skipLookupForExtraKeys + ", docSuffix: " + docSuffix +
-        ", start:" + start + ", end:" + end);
+    jsTestLog(`Testing that an extra key on only the primary will log an inconsistent batch health log entry with ${nDocs} docs, 
+        batchSize: ${batchSize}, snapshotSize: ${snapshotSize}
+                  , skipLookupForExtraKeys: ${skipLookupForExtraKeys}, docSuffix: ${docSuffix}
+                  , start: ${start}, end: ${end}`);
 
     setSnapshotSize(snapshotSize);
     const primaryColl = primaryDB.getCollection(collName);
@@ -399,6 +456,9 @@ function hashingInconsistentExtraKeyOnPrimary(
     jsTestLog("Checking for correct number of inconsistent batches on secondary");
     checkNumBatchesAndSnapshots(
         secondaryHealthLog, nDocsChecked, batchSize, snapshotSize, true /* inconsistentBatch */);
+    assertCompleteCoverage(primaryHealthLog, nDocs, docSuffix, start, end);
+    assertCompleteCoverage(
+        secondaryHealthLog, nDocs, docSuffix, start, end, true /* inconsistentBatch */);
 
     skipUnindexingDocumentWhenDeleted.off();
     resetSnapshotSize();
@@ -407,12 +467,10 @@ function hashingInconsistentExtraKeyOnPrimary(
 function hashingInconsistentExtraKeyOnPrimaryCompoundIndex(
     nDocs, batchSize, snapshotSize, skipLookupForExtraKeys, docSuffix, start = null, end = null) {
     clearRawMongoProgramOutput();
-    jsTestLog(
-        "Testing that an extra key on only the primary with compound index will log an inconsistent batch health log entry: " +
-        nDocs + "docs, batchSize: " + batchSize + ", snapshotSize: " + snapshotSize +
-        ", skipLookupForExtraKeys: " + skipLookupForExtraKeys + ", docSuffix: " + docSuffix +
-        ", start:" + start + ", end:" + end);
-
+    jsTestLog(`Testing that an extra key on only the primary with compound index will log an inconsistent batch health log entry with ${nDocs} docs, 
+        batchSize: ${batchSize}, snapshotSize: ${snapshotSize}
+                  , skipLookupForExtraKeys: ${skipLookupForExtraKeys}, docSuffix: ${docSuffix}
+                  , start: ${start}, end: ${end}`);
     setSnapshotSize(snapshotSize);
     const primaryColl = primaryDB.getCollection(collName);
     resetAndInsertTwoFields(replSet, primaryDB, collName, nDocs, docSuffix);
@@ -484,6 +542,9 @@ function hashingInconsistentExtraKeyOnPrimaryCompoundIndex(
     jsTestLog("Checking for correct number of inconsistent batches on secondary");
     checkNumBatchesAndSnapshots(
         secondaryHealthLog, nDocsChecked, batchSize, snapshotSize, true /* inconsistentBatch */);
+    assertCompleteCoverage(primaryHealthLog, nDocs, docSuffix, start, end);
+    assertCompleteCoverage(
+        secondaryHealthLog, nDocs, docSuffix, start, end, true /* inconsistentBatch */);
 
     skipUnindexingDocumentWhenDeleted.off();
     resetSnapshotSize();
