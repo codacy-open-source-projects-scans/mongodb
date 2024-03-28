@@ -94,7 +94,6 @@
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/rpc/reply_builder_interface.h"
@@ -248,15 +247,14 @@ void ExecCommandClient::_prologue() {
     auto opCtx = _rec->getOpCtx();
     auto result = _rec->getReplyBuilder();
     const auto& request = _rec->getRequest();
-    const Command* c = _invocation->definition();
 
-    const auto dbname = request.getDatabase();
+    const auto& dbname = _invocation->db();
     uassert(ErrorCodes::IllegalOperation,
             "Can't use 'local' database through mongos",
-            dbname != DatabaseName::kLocal.db(omitTenant));
+            !dbname.isLocalDB());
     uassert(ErrorCodes::InvalidNamespace,
-            "Invalid database name: '{}'"_format(dbname),
-            DatabaseName::validDBName(dbname, DatabaseName::DollarInDbNameBehavior::Allow));
+            "Invalid database name: '{}'"_format(dbname.toStringForErrorMsg()),
+            DatabaseName::isValid(dbname, DatabaseName::DollarInDbNameBehavior::Allow));
 
     StringDataSet topLevelFields(8);
     for (auto&& element : request.body) {
@@ -272,12 +270,6 @@ void ExecCommandClient::_prologue() {
         auto body = result->getBodyBuilder();
         CommandHelpers::appendCommandStatusNoThrow(body, e.toStatus());
         iassert(Status(ErrorCodes::SkipCommandExecution, "Failed to check authorization"));
-    }
-
-    if (MONGO_unlikely(shouldLog(logv2::LogComponent::kTracking, logv2::LogSeverity::Debug(1)))) {
-        rpc::TrackingMetadata trackingMetadata;
-        trackingMetadata.initWithOperName(c->getName());
-        rpc::TrackingMetadata::get(opCtx) = trackingMetadata;
     }
 }
 
@@ -479,6 +471,7 @@ void ParseAndRunCommand::_updateStatsAndApplyErrorLabels(const Status& status) {
                                       boost::none,
                                       false /* isInternalClient */,
                                       true /* isMongos */,
+                                      false /* isComingFromRouter */,
                                       repl::OpTime{},
                                       repl::OpTime{});
     _errorBuilder->appendElements(errorLabels);
@@ -515,7 +508,12 @@ void ParseAndRunCommand::_parseCommand() {
 
     CommandHelpers::uassertShouldAttemptParse(opCtx, command, request);
 
-    _requestArgs = CommonRequestArgs::parse(IDLParserContext("request"), request.body);
+    _requestArgs = CommonRequestArgs::parse(IDLParserContext("request",
+                                                             false,
+                                                             request.validatedTenancyScope,
+                                                             request.getValidatedTenantId(),
+                                                             request.getSerializationContext()),
+                                            request.body);
 
     // Parse the 'maxTimeMS' command option, and use it to set a deadline for the operation on
     // the OperationContext. Be sure to do this as soon as possible so that further processing by
@@ -554,7 +552,7 @@ void ParseAndRunCommand::_parseCommand() {
     // the command does not define a fully-qualified namespace, set CurOp to the generic command
     // namespace db.$cmd.
     _ns.emplace(_invocation->ns());
-    const auto nss = (NamespaceString(request.getDbName()) == *_ns
+    const auto nss = (NamespaceString(_invocation->db()) == *_ns
                           ? NamespaceString::makeCommandNamespace(_invocation->ns().dbName())
                           : _invocation->ns());
 
@@ -667,7 +665,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     if (auto clientMetadata = ClientMetadata::get(opCtx->getClient())) {
         auto& apiParams = APIParameters::get(opCtx);
         auto& apiVersionMetrics = APIVersionMetrics::get(opCtx->getServiceContext());
-        auto appName = clientMetadata->getApplicationName().toString();
+        auto appName = clientMetadata->getApplicationName();
         apiVersionMetrics.update(appName, apiParams);
     }
 
@@ -1202,11 +1200,8 @@ public:
     Future<DbResponse> run();
 
 private:
-    std::string _getDatabaseStringForLogging() const try {
-        // `getDatabase` throws if the request doesn't have a '$db' field.
-        return _rec->getRequest().getDatabase().toString();
-    } catch (const DBException& ex) {
-        return ex.toString();
+    StringData _getDatabaseStringForLogging() const {
+        return _rec->getRequest().readDatabaseForLogging();
     }
 
     void _parseMessage();

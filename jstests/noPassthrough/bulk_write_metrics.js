@@ -150,7 +150,7 @@ function runTest(isMongos, cluster, bulkWrite, retryCount, timeseries) {
     // inserts (each on a different shard). This means that the bulkWrite as a whole counts as 1 in
     // update.manyShards and 1 in insert.allShards.
     let insertShardField = bulkWrite ? "allShards" : "oneShard";
-    let updateShardField = bulkWrite || timeseries ? "manyShards" : "oneShard";
+    let updateShardField = bulkWrite ? "manyShards" : "oneShard";
 
     const key3 = ISODate("2024-01-10T00:00:00.00Z");  // On shard1.
     const key4 = ISODate("2024-01-30T00:00:00.00Z");  // On shard2.

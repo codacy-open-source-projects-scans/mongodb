@@ -57,6 +57,7 @@
 #include "mongo/db/commands/bulk_write_gen.h"
 #include "mongo/db/commands/bulk_write_parser.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/namespace_string.h"
@@ -98,7 +99,7 @@ public:
         return true;
     }
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return Impl::getApiVersions();
     }
 
@@ -181,6 +182,10 @@ public:
 
         NamespaceString ns() const final {
             return NamespaceString(_request.getDbName());
+        }
+
+        const DatabaseName& db() const final {
+            return _request.getDbName();
         }
 
         bool supportsWriteConcern() const override {
@@ -356,7 +361,7 @@ public:
             return true;
         }
 
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
             preRunImplHook(opCtx);
 
             BSONObjBuilder bob = result->getBodyBuilder();
@@ -505,7 +510,7 @@ public:
 
         void explain(OperationContext* opCtx,
                      ExplainOptions::Verbosity verbosity,
-                     rpc::ReplyBuilderInterface* result) {
+                     rpc::ReplyBuilderInterface* result) override {
             preExplainImplHook(opCtx);
 
             uassert(ErrorCodes::InvalidLength,

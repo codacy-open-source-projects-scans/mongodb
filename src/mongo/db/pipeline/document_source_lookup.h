@@ -73,6 +73,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
@@ -117,9 +118,11 @@ public:
         /**
          * Lookup from a sharded collection may not be allowed.
          */
-        Status checkShardedForeignCollAllowed(
-            const NamespaceString& nss, bool inMultiDocumentTransaction) const override final {
-            if (!inMultiDocumentTransaction) {
+        Status checkShardedForeignCollAllowed(const NamespaceString& nss,
+                                              bool inMultiDocumentTransaction) const final {
+            const auto fcvSnapshot = serverGlobalParams.mutableFCV.acquireFCVSnapshot();
+            if (!inMultiDocumentTransaction ||
+                gFeatureFlagAllowAdditionalParticipants.isEnabled(fcvSnapshot)) {
                 return Status::OK();
             }
             auto involvedNss = getInvolvedNamespaces();
@@ -152,7 +155,7 @@ public:
         }
 
         PrivilegeVector requiredPrivileges(bool isMongos,
-                                           bool bypassDocumentValidation) const override final;
+                                           bool bypassDocumentValidation) const final;
 
     private:
         bool _hasInternalCollation = false;
@@ -165,9 +168,8 @@ public:
                          const boost::intrusive_ptr<ExpressionContext>&);
 
     const char* getSourceName() const final;
-    void serializeToArray(
-        std::vector<Value>& array,
-        const SerializationOptions& opts = SerializationOptions{}) const final override;
+    void serializeToArray(std::vector<Value>& array,
+                          const SerializationOptions& opts = SerializationOptions{}) const final;
 
     /**
      * Returns the 'as' path, and possibly fields modified by an absorbed $unwind.
@@ -329,6 +331,7 @@ public:
 protected:
     GetNextResult doGetNext() final;
     void doDispose() final;
+    boost::optional<ShardId> computeMergeShardId() const final;
 
     /**
      * Attempts to combine with an immediately following $unwind stage that unwinds the $lookup's
@@ -375,8 +378,7 @@ private:
     /**
      * Should not be called; use serializeToArray instead.
      */
-    Value serialize(
-        const SerializationOptions& opts = SerializationOptions{}) const final override {
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final {
         MONGO_UNREACHABLE_TASSERT(7484304);
     }
 

@@ -130,7 +130,6 @@
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/clock_source.h"
-#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -1343,6 +1342,7 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
     _ruState = shard_role_details::getWriteUnitOfWork(opCtx)->release();
     shard_role_details::setWriteUnitOfWork(opCtx, nullptr);
 
+    CurOp::get(opCtx)->updateStatsOnTransactionStash();
     _locker = shard_role_details::swapLocker(
         opCtx, std::make_unique<Locker>(opCtx->getServiceContext()), wl);
     _locker->releaseTicket();
@@ -1383,7 +1383,7 @@ TransactionParticipant::TxnResources::TxnResources(WithLock wl,
 
     _apiParameters = APIParameters::get(opCtx);
     _readConcernArgs = repl::ReadConcernArgs::get(opCtx);
-    _admCtx = AdmissionContext::get(opCtx);
+    _execCtrlCtx = ExecutionAdmissionContext::get(opCtx);
 }
 
 TransactionParticipant::TxnResources::~TxnResources() {
@@ -1446,6 +1446,7 @@ void TransactionParticipant::TxnResources::release(OperationContext* opCtx) {
     // is just an empty locker. At the end of the operation, if the transaction is not complete, we
     // will stash the operation context's locker and replace it with a new empty locker.
     shard_role_details::swapLocker(opCtx, std::move(_locker), lk);
+    CurOp::get(opCtx)->updateStatsOnTransactionUnstash();
     shard_role_details::getLocker(opCtx)->updateThreadIdToCurrentThread();
 
     auto oldState = shard_role_details::setRecoveryUnit(
@@ -1601,9 +1602,10 @@ void TransactionParticipant::Participant::_releaseTransactionResourcesToOpCtx(
     }
 
     if (acquireTicket == AcquireTicket::kSkip) {
-        tempTxnResourceStash->admissionContext().copyTo(opCtx, AdmissionContext::Priority::kExempt);
+        tempTxnResourceStash->executionControlContext().copyTo(opCtx,
+                                                               AdmissionContext::Priority::kExempt);
     } else {
-        tempTxnResourceStash->admissionContext().copyTo(opCtx);
+        tempTxnResourceStash->executionControlContext().copyTo(opCtx);
     }
 
     tempTxnResourceStash->release(opCtx);

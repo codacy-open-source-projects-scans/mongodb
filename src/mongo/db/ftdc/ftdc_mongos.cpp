@@ -54,7 +54,6 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/transport/transport_layer_ftdc_collector.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
@@ -72,13 +71,13 @@ public:
         // Sharding connections.
         {
             auto const grid = Grid::get(opCtx);
-            if (grid->getExecutorPool()) {
+            if (grid->isInitialized()) {
                 grid->getExecutorPool()->appendConnectionStats(&stats);
-            }
 
-            auto const customConnPoolStatsFn = grid->getCustomConnectionPoolStatsFn();
-            if (customConnPoolStatsFn) {
-                customConnPoolStatsFn(&stats);
+                auto const customConnPoolStatsFn = grid->getCustomConnectionPoolStatsFn();
+                if (customConnPoolStatsFn) {
+                    customConnPoolStatsFn(&stats);
+                }
             }
         }
 
@@ -100,8 +99,8 @@ class NetworkInterfaceStatsCollector final : public FTDCCollectorInterface {
 public:
     void collect(OperationContext* opCtx, BSONObjBuilder& builder) override {
         auto const grid = Grid::get(opCtx);
-        if (auto executorPool = grid->getExecutorPool()) {
-            executorPool->appendNetworkInterfaceStats(builder);
+        if (grid->isInitialized()) {
+            grid->getExecutorPool()->appendNetworkInterfaceStats(builder);
         }
 
         if (auto executor = ReplicaSetMonitorManager::get()->getExecutor()) {
@@ -114,7 +113,7 @@ public:
     }
 };
 
-void registerMongoSCollectors(FTDCController* controller) {
+void registerRouterCollectors(FTDCController* controller) {
     registerServerCollectorsForRole(controller, ClusterRole::RouterServer);
 
     // PoolStats
@@ -122,9 +121,6 @@ void registerMongoSCollectors(FTDCController* controller) {
                                      ClusterRole::RouterServer);
 
     controller->addPeriodicCollector(std::make_unique<NetworkInterfaceStatsCollector>(),
-                                     ClusterRole::RouterServer);
-
-    controller->addPeriodicCollector(std::make_unique<transport::TransportLayerFTDCCollector>(),
                                      ClusterRole::RouterServer);
 }
 
@@ -154,14 +150,11 @@ void startMongoSFTDC(ServiceContext* serviceContext) {
         }
     }
 
-    // TODO (SERVER-87249): remove after the internal router is enabled by default (hardcode to
-    // `true`).
     // (Ignore FCV check): This code is only executed in mongoS, and they're not FCV-gated anyway.
-    const UseMultiserviceSchema multiserviceSchema{
-        feature_flags::gMultiserviceFTDCSchema.isEnabledAndIgnoreFCVUnsafe() &&
-        feature_flags::gEmbeddedRouter.isEnabledAndIgnoreFCVUnsafe()};
+    const UseMultiServiceSchema multiServiceSchema{
+        feature_flags::gMultiServiceLogAndFTDCFormat.isEnabledAndIgnoreFCVUnsafe()};
 
-    startFTDC(serviceContext, directory, startMode, {registerMongoSCollectors}, multiserviceSchema);
+    startFTDC(serviceContext, directory, startMode, {registerRouterCollectors}, multiServiceSchema);
 }
 
 void stopMongoSFTDC() {

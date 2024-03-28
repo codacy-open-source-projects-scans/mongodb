@@ -114,7 +114,7 @@ class CmdCount : public BasicCommand {
 public:
     CmdCount() : BasicCommand("count") {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return kApiVersions1;
     }
 
@@ -204,7 +204,7 @@ public:
                    const OpMsgRequest& opMsgRequest,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) const override {
-        DatabaseName dbName = opMsgRequest.getDbName();
+        DatabaseName dbName = opMsgRequest.parseDbName();
         const BSONObj& cmdObj = opMsgRequest.body;
         // Acquire locks. The RAII object is optional, because in the case
         // of a view, the locks need to be released.

@@ -52,6 +52,7 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/dbclient_cursor.h"
@@ -140,7 +141,7 @@ namespace mongo {
 namespace {
 
 class ReshardingTxnClonerTest : public ShardServerTestFixtureWithCatalogCacheLoaderMock {
-    void setUp() {
+    void setUp() override {
         ShardServerTestFixtureWithCatalogCacheLoaderMock::setUp();
 
         // The config database's primary shard is always config, and it is always sharded.
@@ -168,7 +169,7 @@ class ReshardingTxnClonerTest : public ShardServerTestFixtureWithCatalogCacheLoa
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
     }
 
-    void tearDown() {
+    void tearDown() override {
         WaitForMajorityService::get(getServiceContext()).shutDown();
         ShardServerTestFixtureWithCatalogCacheLoaderMock::tearDown();
     }
@@ -179,7 +180,7 @@ class ReshardingTxnClonerTest : public ShardServerTestFixtureWithCatalogCacheLoa
      * ShardRegistry reload is done over DBClient, not the NetworkInterface, and there is no
      * DBClientMock analogous to the NetworkInterfaceMock.
      */
-    std::unique_ptr<ShardingCatalogClient> makeShardingCatalogClient() {
+    std::unique_ptr<ShardingCatalogClient> makeShardingCatalogClient() override {
 
         class StaticCatalogClient final : public ShardingCatalogClientMock {
         public:
@@ -1234,6 +1235,34 @@ TEST_F(ReshardingTxnClonerTest, CancelableWhileWaitingOnInProgressInternalTxnFor
 
     cancelSource.cancel();
     ASSERT_EQ(future.getNoThrow(), ErrorCodes::CallbackCanceled);
+}
+
+TEST_F(ReshardingTxnClonerTest, DoNotAddDeadEndSentinelTwice) {
+    auto opCtx = operationContext();
+    ReshardingTxnCloner cloner(kTwoSourceIdList[1], Timestamp::max());
+    auto txnRecord = SessionTxnRecord::parse(
+        IDLParserContext{"ReshardingTxnClonerTest::DoNotAddDeadEndSentinelTwice"}, makeTxn());
+
+    DBDirectClient client(opCtx);
+    auto filter = fromjson(fmt::format(
+        R"(
+            {{
+                lsid: {{ $eq: {} }},
+                o2: {{ $eq: {} }}
+            }}
+        )",
+        tojson(txnRecord.getSessionId().toBSON()),
+        tojson(TransactionParticipant::kDeadEndSentinel)));
+
+    auto getSentinelCount = [&] {
+        return client.count(NamespaceString::kRsOplogNamespace, filter);
+    };
+
+    ASSERT_EQ(getSentinelCount(), 0);
+    cloner.doOneRecord(opCtx, txnRecord);
+    ASSERT_EQ(getSentinelCount(), 1);
+    cloner.doOneRecord(opCtx, txnRecord);
+    ASSERT_EQ(getSentinelCount(), 1);
 }
 
 }  // namespace

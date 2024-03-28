@@ -110,13 +110,6 @@ QuerySettings mergeQuerySettings(const QuerySettings& lhs, const QuerySettings& 
     return querySettings;
 }
 
-void simplifyQuerySettings(QuerySettings& settings) {
-    // If reject is present, but is false, set to an empty optional.
-    if (settings.getReject().has_value() && !settings.getReject()) {
-        settings.setReject({});
-    }
-}
-
 /**
  * Reads (from the in-memory 'storage' = cache), modifies, and updates the 'querySettings' cluster
  * parameter.
@@ -187,7 +180,7 @@ public:
 
         SetQuerySettingsCommandReply insertQuerySettings(
             OperationContext* opCtx, QueryShapeConfiguration newQueryShapeConfiguration) {
-            simplifyQuerySettings(newQueryShapeConfiguration.getSettings());
+            utils::simplifyQuerySettings(newQueryShapeConfiguration.getSettings());
             utils::validateQuerySettings(newQueryShapeConfiguration.getSettings());
 
             // Append 'newQueryShapeConfiguration' to the list of all 'QueryShapeConfigurations' for
@@ -204,7 +197,7 @@ public:
         SetQuerySettingsCommandReply updateQuerySettings(
             OperationContext* opCtx, QueryShapeConfiguration newQueryShapeConfiguration) {
             // Simplify query settings and ensure that they are valid.
-            simplifyQuerySettings(newQueryShapeConfiguration.getSettings());
+            utils::simplifyQuerySettings(newQueryShapeConfiguration.getSettings());
             utils::validateQuerySettings(newQueryShapeConfiguration.getSettings());
 
             // Build the new 'settingsArray' by updating the existing QueryShapeConfiguration with
@@ -283,6 +276,8 @@ public:
 
                 auto mergedQuerySettings =
                     mergeQuerySettings(lookupResult->first, request().getSettings());
+                utils::verifyQueryCompatibleWithSettings(representativeQueryInfo,
+                                                         mergedQuerySettings);
                 QueryShapeConfiguration newQueryShapeConfiguration(std::move(queryShapeHash),
                                                                    std::move(mergedQuerySettings));
 
@@ -299,6 +294,8 @@ public:
 
                 // Assert that query settings will be set on a valid query.
                 utils::validateRepresentativeQuery(representativeQueryInfo);
+                utils::verifyQueryCompatibleWithSettings(representativeQueryInfo,
+                                                         newQueryShapeConfiguration.getSettings());
                 return insertQuerySettings(opCtx, std::move(newQueryShapeConfiguration));
             }
         }

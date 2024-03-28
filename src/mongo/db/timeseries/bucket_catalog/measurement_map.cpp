@@ -30,6 +30,7 @@
 #include "mongo/db/timeseries/bucket_catalog/measurement_map.h"
 #include "mongo/bson/util/bsoncolumn.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/testing_proctor.h"
 
@@ -39,21 +40,22 @@ namespace mongo::timeseries::bucket_catalog {
 
 MeasurementMap::MeasurementMap(TrackingContext& trackingContext)
     : _trackingContext(trackingContext),
-      _builders(
-          makeTrackedStringMap<std::tuple<size_t, TrackedBSONColumnBuilder>>(_trackingContext)) {}
+      _builders(makeTrackedStringMap<TrackedBSONColumnBuilder>(_trackingContext)) {}
 
 void MeasurementMap::initBuilders(BSONObj bucketDataDocWithCompressedBuilders,
                                   size_t numMeasurements) {
     for (auto&& [key, columnValue] : bucketDataDocWithCompressedBuilders) {
+        str::stream errMsg;
+        errMsg << "Compressed bucket contains uncompressed data field: " << key.toString();
+        massert(8830600, errMsg, columnValue.isBinData(BinDataType::Column));
+
         int binLength = 0;
         const char* binData = columnValue.binData(binLength);
 
         _compressedSize += binLength;
-        _builders.emplace(
-            make_tracked_string(_trackingContext, key.data(), key.size()),
-            std::make_pair(numMeasurements,
-                           TrackedBSONColumnBuilder(
-                               binData, binLength, _trackingContext.get().makeAllocator<void>())));
+        _builders.emplace(make_tracked_string(_trackingContext, key.data(), key.size()),
+                          TrackedBSONColumnBuilder(
+                              binData, binLength, _trackingContext.get().makeAllocator<void>()));
     }
     _measurementCount = numMeasurements;
     if (TestingProctor::instance().isEnabled()) {
@@ -68,12 +70,13 @@ void MeasurementMap::initBuilders(BSONObj bucketDataDocWithCompressedBuilders,
             }
             [[maybe_unused]] auto diff = builderToCompareTo.intermediate();
             auto it = _builders.find(key);
-            bool isInternalStateCorrect =
-                std::get<1>(it->second).isInternalStateIdentical(builderToCompareTo);
+            bool isInternalStateCorrect = it->second.isInternalStateIdentical(builderToCompareTo);
             if (!isInternalStateCorrect) {
-                LOGV2(10402,
-                      "Detected incorrect internal state when reopening from following binary: ",
-                      "binary"_attr = base64::encode(StringData(binData, binLength)));
+                LOGV2_OPTIONS(
+                    10402,
+                    logv2::LogTruncation::Disabled,
+                    "Detected incorrect internal state when reopening from following binary: ",
+                    "binary"_attr = base64::encode(StringData(binData, binLength)));
             }
             invariant(isInternalStateCorrect);
         }
@@ -88,7 +91,7 @@ MeasurementMap::intermediate(int32_t& size) {
 
     std::vector<std::pair<StringData, TrackedBSONColumnBuilder::BinaryDiff>> intermediates;
     for (auto& entry : _builders) {
-        auto& builder = std::get<1>(entry.second);
+        auto& builder = entry.second;
         auto diff = builder.intermediate();
 
         _compressedSize += (diff.offset() + diff.size());
@@ -102,34 +105,29 @@ MeasurementMap::intermediate(int32_t& size) {
 
 void MeasurementMap::_insertNewKey(StringData key,
                                    const BSONElement& elem,
-                                   TrackedBSONColumnBuilder builder,
-                                   size_t numMeasurements) {
+                                   TrackedBSONColumnBuilder builder) {
     builder.append(elem);
     _builders.try_emplace(make_tracked_string(_trackingContext, key.data(), key.size()),
-                          numMeasurements,
                           std::move(builder));
 }
 
-
-void MeasurementMap::_fillSkipsInMissingFields() {
-    size_t numExpectedMeasurements = _measurementCount;
-
+void MeasurementMap::_fillSkipsInMissingFields(const std::set<StringData>& fieldsSeen) {
     // Fill in skips for any fields that existed in prior measurements in this bucket, but
     // weren't in this measurement.
     for (auto& entry : _builders) {
-        auto& [numMeasurements, builder] = entry.second;
-        if (numMeasurements != numExpectedMeasurements) {
-            invariant((numMeasurements + 1) == numExpectedMeasurements,
-                      "Measurement count should only be off by one when inserting measurements.");
-            builder.skip();
-            ++numMeasurements;
+        if (fieldsSeen.contains(entry.first.c_str())) {
+            continue;
         }
+        entry.second.skip();
     }
 }
 
 void MeasurementMap::insertOne(std::vector<BSONElement> oneMeasurementDataFields) {
+    std::set<StringData> fieldsSeen;
+
     for (const auto& elem : oneMeasurementDataFields) {
         StringData key = elem.fieldNameStringData();
+        fieldsSeen.insert(key);
 
         auto builderIt = _builders.find(key);
         if (builderIt == _builders.end()) {
@@ -137,27 +135,19 @@ void MeasurementMap::insertOne(std::vector<BSONElement> oneMeasurementDataFields
             for (size_t i = 0; i < _measurementCount; ++i) {
                 columnBuilder.skip();
             }
-            _insertNewKey(key, elem, std::move(columnBuilder), _measurementCount + 1);
+            _insertNewKey(key, elem, std::move(columnBuilder));
         } else {
-            auto& [numMeasurements, columnBuilder] = builderIt->second;
-            columnBuilder.append(elem);
-            ++numMeasurements;
+            builderIt->second.append(elem);
         }
     }
     _measurementCount++;
-    _fillSkipsInMissingFields();
+    _fillSkipsInMissingFields(fieldsSeen);
 }
 
 Timestamp MeasurementMap::timeOfLastMeasurement(StringData key) const {
     auto it = _builders.find(key);
     invariant(it != _builders.end());
-    return std::get<1>(it->second).last().timestamp();
-}
-
-void MeasurementMap::_assertInternalStateIdentical_forTest() {
-    for (auto& entry : _builders) {
-        invariant(std::get<0>(entry.second) == _measurementCount);
-    }
+    return it->second.last().timestamp();
 }
 
 }  // namespace mongo::timeseries::bucket_catalog

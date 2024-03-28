@@ -352,6 +352,10 @@ std::unique_ptr<PlanStageStats> IndexScanStageBase::getStats(bool includeDebugIn
         bob.appendNumber("keysExamined", static_cast<long long>(_specificStats.keysExamined));
         bob.appendNumber("seeks", static_cast<long long>(_specificStats.seeks));
         bob.appendNumber("numReads", static_cast<long long>(_specificStats.numReads));
+        if (_specificStats.keyCheckSkipped != 0) {
+            bob.appendNumber("keyCheckSkipped",
+                             static_cast<long long>(_specificStats.keyCheckSkipped));
+        }
         if (_indexKeySlot) {
             bob.appendNumber("indexKeySlot", static_cast<long long>(*_indexKeySlot));
         }
@@ -554,6 +558,8 @@ void SimpleIndexScanStage::open(bool reOpen) {
         auto& highKey = *getSeekKeyHigh();
         _pointBound = getSeekKeyLow().compareWithoutDiscriminator(highKey) == 0 &&
             highKey.computeElementCount(*_ordering) == _entry->descriptor()->getNumFields();
+
+        _cursor->setEndPosition(highKey);
     } else if (_seekKeyLow) {
         auto [ownedLow, tagLow, valLow] = _bytecode.run(_seekKeyLowCode.get());
         const auto msgTagLow = tagLow;
@@ -640,21 +646,6 @@ bool SimpleIndexScanStage::validateKey(const boost::optional<KeyStringEntry>& ke
         return false;
     }
 
-    if (auto seekKeyHigh = getSeekKeyHigh(); seekKeyHigh) {
-        auto cmp = key->keyString.compare(*seekKeyHigh);
-
-        if (_forward) {
-            if (cmp > 0) {
-                _scanState = ScanState::kFinished;
-                return false;
-            }
-        } else {
-            if (cmp < 0) {
-                _scanState = ScanState::kFinished;
-                return false;
-            }
-        }
-    }
     // Note: we may in the future want to bump 'keysExamined' for comparisons to a key that result
     // in the stage returning EOF.
     ++_specificStats.keysExamined;
@@ -689,7 +680,8 @@ GenericIndexScanStage::GenericIndexScanStage(UUID collUuid,
                          yieldPolicy,
                          planNodeId,
                          participateInTrialRunTracking),
-      _params{std::move(params)} {}
+      _params{std::move(params)},
+      _endKey{_params.version} {}
 
 std::unique_ptr<PlanStage> GenericIndexScanStage::clone() const {
     sbe::GenericIndexScanStageParams params{_params.indexBounds->clone(),
@@ -763,9 +755,21 @@ boost::optional<KeyStringEntry> GenericIndexScanStage::seek() {
 }
 
 bool GenericIndexScanStage::validateKey(const boost::optional<KeyStringEntry>& key) {
-    if (key && _checker) {
-        ++_specificStats.keysExamined;
+    if (!key) {
+        _scanState = ScanState::kFinished;
+        return false;
+    }
+    ++_specificStats.keysExamined;
 
+    if (!_endKey.isEmpty() &&
+        ((_forward && key->keyString.compare(_endKey) <= 0) ||
+         (!_forward && key->keyString.compare(_endKey) >= 0))) {
+        ++_specificStats.keyCheckSkipped;
+        _scanState = ScanState::kScanning;
+        return true;
+    }
+
+    if (_checker) {
         _keyBuffer.reset();
         BSONObjBuilder keyBuilder(_keyBuffer);
         key_string::toBsonSafe(key->keyString.getBuffer(),
@@ -775,7 +779,8 @@ bool GenericIndexScanStage::validateKey(const boost::optional<KeyStringEntry>& k
                                keyBuilder);
         auto bsonKey = keyBuilder.done();
 
-        switch (_checker->checkKey(bsonKey, &_seekPoint)) {
+        switch (_checker->checkKeyWithEndPosition(
+            bsonKey, &_seekPoint, _endKey, _params.ord, _forward)) {
             case IndexBoundsChecker::VALID:
                 _scanState = ScanState::kScanning;
                 return true;

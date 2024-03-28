@@ -47,6 +47,8 @@ MultiPlanner::MultiPlanner(PlannerDataForSBE plannerData,
     : PlannerBase(std::move(plannerData)),
       _cachingMode((std::move(cachingMode))),
       _replanReason(replanReason) {
+    LOGV2_DEBUG(
+        6215001, 5, "Using classic multi-planner for SBE", "replanReason"_attr = _replanReason);
     _multiPlanStage =
         std::make_unique<MultiPlanStage>(cq()->getExpCtxRaw(),
                                          collections().getMainCollectionPtrOrAcquisition(),
@@ -58,11 +60,6 @@ MultiPlanner::MultiPlanner(PlannerDataForSBE plannerData,
             opCtx(), collections().getMainCollectionPtrOrAcquisition(), *cq(), *solution, ws());
         _multiPlanStage->addPlan(std::move(solution), std::move(nextPlanRoot), ws());
     }
-}
-
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
-    std::unique_ptr<CanonicalQuery> canonicalQuery) {
-    LOGV2_DEBUG(6215001, 5, "Using classic multi-planner for SBE");
 
     auto trialPeriodYieldPolicy =
         makeClassicYieldPolicy(opCtx(),
@@ -70,9 +67,11 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
                                static_cast<PlanStage*>(_multiPlanStage.get()),
                                yieldPolicy(),
                                collections().getMainCollectionPtrOrAcquisition());
-
     uassertStatusOK(_multiPlanStage->pickBestPlan(trialPeriodYieldPolicy.get()));
+}
 
+std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
+    std::unique_ptr<CanonicalQuery> canonicalQuery) {
     // Calculate and update the number of works based on totalKeysExamined + totalDocsExamined to
     // align with how SBE calculates the works.
     auto stats = _multiPlanStage->getStats();
@@ -121,9 +120,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> MultiPlanner::makeExecutor(
 
 MultiPlanner::SbePlanAndData MultiPlanner::_buildSbePlanAndUpdatePlanCache(
     const QuerySolution* winningSolution, const plan_ranker::PlanRankingDecision& ranking) {
-    auto sbePlanAndData = stage_builder::buildSlotBasedExecutableTree(
-        opCtx(), collections(), *cq(), *winningSolution, sbeYieldPolicy());
-    sbePlanAndData.second.replanReason = std::move(_replanReason);
+    auto sbePlanAndData = prepareSbePlanAndData(*winningSolution, std::move(_replanReason));
     plan_cache_util::updateSbePlanCacheFromClassicCandidates(opCtx(),
                                                              collections(),
                                                              _cachingMode,

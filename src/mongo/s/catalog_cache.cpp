@@ -258,11 +258,14 @@ bool ComparableDatabaseVersion::operator<(const ComparableDatabaseVersion& other
     return _disambiguatingSequenceNum < other._disambiguatingSequenceNum;
 }
 
-CatalogCache::CatalogCache(ServiceContext* const service, CatalogCacheLoader& cacheLoader)
-    : _cacheLoader(cacheLoader),
-      _executor([] {
+CatalogCache::CatalogCache(ServiceContext* const service,
+                           CatalogCacheLoader& cacheLoader,
+                           StringData kind)
+    : _kind(kind),
+      _cacheLoader(cacheLoader),
+      _executor([this] {
           ThreadPool::Options options;
-          options.poolName = "CatalogCache";
+          options.poolName = "CatalogCache" + (_kind.empty() ? "" : "::" + _kind);
           options.minThreads = 0;
           options.maxThreads = 6;
           return options;
@@ -442,15 +445,16 @@ StatusWith<ChunkManager> CatalogCache::_getCollectionPlacementInfoAt(
 }
 
 StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfoAt(
-    OperationContext* opCtx, const NamespaceString& nss, Timestamp atClusterTime) {
+    OperationContext* opCtx, const NamespaceString& nss, Timestamp atClusterTime, bool allowLocks) {
     try {
-        auto cm = uassertStatusOK(_getCollectionPlacementInfoAt(opCtx, nss, atClusterTime));
+        auto cm =
+            uassertStatusOK(_getCollectionPlacementInfoAt(opCtx, nss, atClusterTime, allowLocks));
         if (!cm.isSharded()) {
             // If the collection is unsharded, it cannot have global indexes so there is no need to
             // fetch the index information.
             return CollectionRoutingInfo{std::move(cm), boost::none};
         }
-        auto sii = _getCollectionIndexInfoAt(opCtx, nss);
+        auto sii = _getCollectionIndexInfoAt(opCtx, nss, allowLocks);
         return _retryUntilConsistentRoutingInfo(opCtx, nss, std::move(cm), std::move(sii));
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -813,7 +817,8 @@ void CatalogCache::purgeAllDatabases() {
 }
 
 void CatalogCache::report(BSONObjBuilder* builder) const {
-    BSONObjBuilder cacheStatsBuilder(builder->subobjStart("catalogCache"));
+    BSONObjBuilder cacheStatsBuilder(
+        builder->subobjStart("catalogCache" + (_kind.empty() ? "" : "::" + _kind)));
 
     const size_t numDatabaseEntries = _databaseCache.getCacheInfo().size();
     const size_t numCollectionEntries = _collectionCache.getCacheInfo().size();

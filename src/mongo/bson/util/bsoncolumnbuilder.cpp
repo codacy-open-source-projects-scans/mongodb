@@ -351,6 +351,26 @@ BSONObj mergeObj(const BSONObj& reference, const BSONObj& obj) {
     return builder.obj();
 }
 
+// TODO (SERVER-87887): Remove this function.
+template <class BSONObjType, class Allocator>
+auto copyBufferedObjElements(
+    const std::vector<BSONObjType,
+                      typename std::allocator_traits<Allocator>::template rebind_alloc<
+                          BSONObjType>>& bufferedObjElements,
+    Allocator allocator) {
+    std::vector<BSONObjType,
+                typename std::allocator_traits<Allocator>::template rebind_alloc<BSONObjType>>
+        copy(allocator);
+    copy.reserve(bufferedObjElements.size());
+    std::transform(bufferedObjElements.begin(),
+                   bufferedObjElements.end(),
+                   std::back_inserter(copy),
+                   [allocator](const BSONObjType& obj) {
+                       return BSONObjType{TrackableBSONObj{obj.get().get()}, allocator};
+                   });
+    return copy;
+}
+
 }  // namespace
 
 template <class BufBuilderType, class BSONObjType, class Allocator>
@@ -439,6 +459,7 @@ private:
     BSONElement lastUncompressed;
     int64_t lastUncompressedEncoded64;
     int128_t lastUncompressedEncoded128;
+    bool lastLiteralUnencodable = false;
     ControlBlock current;
     ControlBlock last;
 };
@@ -454,7 +475,8 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::sc
     const char* end = binary + size;
 
     // Last encountered non-RLE block during binary scan
-    uint64_t lastNonRLE = 0xE;
+    uint64_t lastNonRLE = simple8b::kSingleZero;
+    int128_t lastNonZeroDeltaForUnencodable{0};
 
     while (pos != end) {
         uint8_t control = *pos;
@@ -462,6 +484,13 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::sc
         // Stop at end terminal
         if (control == 0) {
             ++pos;
+
+            // If the last literal was unencodable we need to adjust its last encoding. Unencodable
+            // string literals allow non-zero deltas to follow.
+            if (lastLiteralUnencodable && lastNonZeroDeltaForUnencodable != 0) {
+                lastUncompressedEncoded128 = lastNonZeroDeltaForUnencodable;
+            }
+
             return true;
         }
 
@@ -481,9 +510,10 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::sc
 
             // Uncompressed literal case
             lastUncompressed = element;
-            lastNonRLE = 0xE;
+            lastNonRLE = simple8b::kSingleZero;
             current.control = nullptr;
             last.control = nullptr;
+            lastLiteralUnencodable = false;
 
             if (!uses128bit(lastUncompressed.type())) {
                 auto& d64 = std::get<BSONColumn::Iterator::DecodingState::Decoder64>(state.decoder);
@@ -495,6 +525,14 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::sc
                 auto& d128 =
                     std::get<BSONColumn::Iterator::DecodingState::Decoder128>(state.decoder);
                 lastUncompressedEncoded128 = d128.lastEncodedValue;
+
+                // Check if the string literal is encodable or not.
+                if (lastUncompressed.type() == String || lastUncompressed.type() == Code) {
+                    lastLiteralUnencodable =
+                        !Simple8bTypeUtil::encodeString(lastUncompressed.valueStringData())
+                             .has_value();
+                    lastNonZeroDeltaForUnencodable = 0;
+                }
             }
 
             pos += element.size();
@@ -511,7 +549,9 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::sc
             d64.scaleIndex = scaleIndexForControlByte(control);
             uassert(8288100,
                     "Invalid control byte in BSON Column",
-                    d64.scaleIndex != kInvalidScaleIndex);
+                    d64.scaleIndex == Simple8bTypeUtil::kMemoryAsInteger ||
+                        (lastUncompressed.type() == NumberDouble &&
+                         d64.scaleIndex != kInvalidScaleIndex));
 
             // For doubles we need to remember the last value from the previous block (as
             // the scaling can change between blocks).
@@ -521,24 +561,80 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::sc
                 uassert(8288101, "Invalid double encoding in BSON Column", encoded);
                 d64.lastEncodedValue = *encoded;
             }
-            if (!usesDeltaOfDelta(lastUncompressed.type())) {
-                d64.lastEncodedValue = expandDelta(
-                    d64.lastEncodedValue, simple8b::sum<int64_t>(pos + 1, blocksSize, lastNonRLE));
-            } else {
+            if (usesDeltaOfDelta(lastUncompressed.type())) {
                 d64.lastEncodedValueForDeltaOfDelta =
                     expandDelta(d64.lastEncodedValueForDeltaOfDelta,
                                 simple8b::prefixSum<int64_t>(
                                     pos + 1, blocksSize, d64.lastEncodedValue, lastNonRLE));
+            } else if (onlyZeroDelta(lastUncompressed.type())) {
+                simple8b::visitAll<int64_t>(
+                    pos + 1,
+                    blocksSize,
+                    lastNonRLE,
+                    [](int64_t delta) {
+                        uassert(8819300, "Unexpected non-zero delta in BSON Column", delta == 0);
+                    },
+                    []() {});
+            } else {
+                d64.lastEncodedValue = expandDelta(
+                    d64.lastEncodedValue, simple8b::sum<int64_t>(pos + 1, blocksSize, lastNonRLE));
+
+                if (lastUncompressed.type() == NumberDouble) {
+                    current.lastAtEndOfBlock =
+                        Simple8bTypeUtil::decodeDouble(d64.lastEncodedValue, d64.scaleIndex);
+                }
             }
-            if (lastUncompressed.type() == NumberDouble) {
-                current.lastAtEndOfBlock =
-                    Simple8bTypeUtil::decodeDouble(d64.lastEncodedValue, d64.scaleIndex);
-            }
+
             current.scaleIndex = d64.scaleIndex;
         } else {
-            auto& d128 = std::get<BSONColumn::Iterator::DecodingState::Decoder128>(state.decoder);
-            d128.lastEncodedValue = expandDelta(
-                d128.lastEncodedValue, simple8b::sum<int128_t>(pos + 1, blocksSize, lastNonRLE));
+            uassert(8827801,
+                    "Invalid control byte in BSON Column",
+                    scaleIndexForControlByte(control) == Simple8bTypeUtil::kMemoryAsInteger);
+            // Helper to determine if we may only encode zero deltas
+            auto zeroDeltaOnly = [&]() {
+                if (lastUncompressed.type() == BinData) {
+                    int len;
+                    lastUncompressed.binData(len);
+                    if (len > 16) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            if (zeroDeltaOnly()) {
+                simple8b::visitAll<int128_t>(
+                    pos + 1,
+                    blocksSize,
+                    lastNonRLE,
+                    [](int128_t delta) {
+                        uassert(8819301, "Unexpected non-zero delta in BSON Column", delta == 0);
+                    },
+                    []() {});
+            } else {
+                auto& d128 =
+                    std::get<BSONColumn::Iterator::DecodingState::Decoder128>(state.decoder);
+                if (!lastLiteralUnencodable) {
+                    d128.lastEncodedValue =
+                        expandDelta(d128.lastEncodedValue,
+                                    simple8b::sum<int128_t>(pos + 1, blocksSize, lastNonRLE));
+                } else {
+                    // If our literal is unencodable we need to also maintain the last non-zero
+                    // value. So we cannot use the optimized sum() function and rather have to visit
+                    // all values.
+                    simple8b::visitAll<int128_t>(
+                        pos + 1,
+                        blocksSize,
+                        lastNonRLE,
+                        [&](int128_t delta) {
+                            if (delta != 0) {
+                                lastNonZeroDeltaForUnencodable = delta;
+                            }
+                            d128.lastEncodedValue = expandDelta(d128.lastEncodedValue, delta);
+                        },
+                        []() {});
+                }
+            }
         }
 
         // Remember control block and advance the position to next
@@ -551,10 +647,11 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::sc
 template <class BufBuilderType, class BSONObjType, class Allocator>
 void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::reopen(
     BSONColumnBuilder& builder, Allocator allocator) const {
+    auto& regular = std::get<typename InternalState::Regular>(builder._is.state);
     // When the binary ends with an uncompressed element it is simple to re-initialize the
     // compressor
     if (!current.control) {
-        auto& encoder = std::get<Encoder64>(builder._is.regular._encoder);
+        auto& encoder = std::get<Encoder64>(regular._encoder);
         // Set last double in previous block (if any).
         encoder.lastValueInPrevBlock = last.lastAtEndOfBlock;
 
@@ -569,21 +666,15 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::re
     }
 
     if (!uses128bit(lastUncompressed.type())) {
-        auto& encoder = std::get<Encoder64>(builder._is.regular._encoder);
+        auto& encoder = std::get<Encoder64>(regular._encoder);
         encoder.scaleIndex = current.scaleIndex;
 
-        _reopen64BitTypes(builder._is.regular,
-                          encoder,
-                          builder._bufBuilder,
-                          builder._is.offset,
-                          builder._is.lastControl);
+        _reopen64BitTypes(
+            regular, encoder, builder._bufBuilder, builder._is.offset, builder._is.lastControl);
     } else {
-        auto& encoder = builder._is.regular._encoder.template emplace<Encoder128>(allocator);
-        _reopen128BitTypes(builder._is.regular,
-                           encoder,
-                           builder._bufBuilder,
-                           builder._is.offset,
-                           builder._is.lastControl);
+        auto& encoder = regular._encoder.template emplace<Encoder128>(allocator);
+        _reopen128BitTypes(
+            regular, encoder, builder._bufBuilder, builder._is.offset, builder._is.lastControl);
     }
 
     builder._is.lastBufLength = builder._bufBuilder.len();
@@ -622,7 +713,7 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_r
     // Current overflow point
     int currIndex;
     // Pending RLE block in current control when overflow has not happened yet.
-    int pendingRle;
+    int pendingRle = -1;
     if (rle) {
         // If the last block ends with RLE we just need to look for the last non-RLE block to
         // discover the overflow point. The last value for RLE will be the actual last in this block
@@ -639,6 +730,12 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_r
         // When RLE is setup we append as many values as we can to detect when we overflow
         std::tie(currIndex, pendingRle) = _appendUntilOverflow(
             s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
+    }
+
+    // If we have pending RLE but no more control blocks to consider then set last for RLE to 0 as
+    // the binary begins with RLE.
+    if (!overflow && !last.control && pendingRle != -1) {
+        lastForS8b = 0;
     }
 
     // If we have not yet overflowed then continue the same operation from the previous
@@ -715,7 +812,7 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_r
                     Simple8b<uint64_t> rescale(
                         control + 1, currNumBlocks * sizeof(uint64_t), lastForS8b);
                     bool possible = true;
-                    // Iterate until we find a non-skipped value
+                    // See if next value can be scaled using the old scale factor
                     for (auto&& elem : rescale) {
                         if (elem) {
                             // See if this value is possible to scale using the old scale factor
@@ -725,8 +822,8 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_r
                                     last.scaleIndex)) {
                                 possible = false;
                             }
-                            break;
                         }
+                        break;
                     }
 
                     if (possible) {
@@ -911,7 +1008,7 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_r
 
     boost::optional<uint128_t> lastForS8b;
     int currIndex;
-    int pendingRle;
+    int pendingRle = -1;
     if (rle) {
         // If the last block ends with RLE we just need to look for the last non-RLE block to
         // discover the overflow point. The last value for RLE will be the actual last in this block
@@ -928,6 +1025,12 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_r
         // When RLE is setup we append as many values as we can to detect when we overflow
         std::tie(currIndex, pendingRle) = _appendUntilOverflow(
             s8bBuilder, encoder.simple8bBuilder, overflow, lastForS8b, control, currNumBlocks - 1);
+    }
+
+    // If we have pending RLE but no more control blocks to consider then set last for RLE to 0 as
+    // the binary begins with RLE.
+    if (!overflow && !last.control && pendingRle != -1) {
+        lastForS8b = 0;
     }
 
     // If we have not yet overflowed then continue the same operation from the previous
@@ -1044,8 +1147,11 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_r
     auto allocator = BSONColumn(nullptr, 1).release();
     regular._storePrevious([&]() {
         // Zero delta is repeat of last uncompressed literal, avoid materialization (which might
-        // not be possible depending on value of last uncompressed literal).
-        if (d128.lastEncodedValue == lastUncompressedEncoded128) {
+        // not be possible depending on value of last uncompressed literal). If our literal was
+        // unencodable we need to force materialization as zero delta may no longer mean repeat of
+        // last literal.
+        if (d128.lastEncodedValue == lastUncompressedEncoded128 &&
+            !(lastLiteralUnencodable && lastUncompressedEncoded128 != 0)) {
             return lastUncompressed;
         }
         return d128.materialize(*allocator, lastUncompressed, ""_sd);
@@ -1070,16 +1176,23 @@ boost::optional<T> BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::Bi
     _setupRLEForOverflowDetector(Simple8bBuilder<T>& overflowDetector,
                                  const char* s8bBlock,
                                  int index) {
-    for (; index >= 0; --index) {
+    // Limit the search for a non-skip value. If we go above 60 without overflow then we consider
+    // skip to be the last value for RLE as it would be the only one eligible for RLE.
+    constexpr int kMaxNumSkipInNonRLEBlock = 60;
+    for (int numSkips = 0; index >= 0 && numSkips < kMaxNumSkipInNonRLEBlock; --index) {
         const char* block = s8bBlock + sizeof(uint64_t) * index + 1;
         bool rle = (ConstDataView(block).read<LittleEndian<uint64_t>>() &
                     simple8b_internal::kBaseSelectorMask) == simple8b_internal::kRleSelector;
-        // Skip this operation for RLE blocks as they do not contain any distinct values.
+        // Abort this operation when an RLE block is found, they are handled in a separate code
+        // path.
         if (rle) {
-            continue;
+            break;
         }
         Simple8b<T> s8b(block, sizeof(uint64_t));
-        for (auto&& elem : s8b) {
+        for (auto it = s8b.begin(), end = s8b.end();
+             it != end && numSkips < kMaxNumSkipInNonRLEBlock;
+             ++it) {
+            const auto& elem = *it;
             if (elem) {
                 // We do not need to use the actual last value for RLE when determining overflow
                 // point later. We can use the first value we discover when performing this
@@ -1091,6 +1204,7 @@ boost::optional<T> BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::Bi
                 overflowDetector.setLastForRLE(elem);
                 return elem;
             }
+            ++numSkips;
         }
     }
     // We did not find any value, so use skip as RLE. It is important that we use 'none' to
@@ -1202,44 +1316,41 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BinaryReopen::_append
 template <class BufBuilderType, class BSONObjType, class Allocator>
 BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState::InternalState(Allocator a)
     : allocator(a),
-      regular(allocator),
-      subobjStates(allocator),
-      referenceSubObj(TrackableBSONObj{BSONObj{}}, allocator),
-      bufferedObjElements(allocator),
+      state(std::in_place_type_t<Regular>{}, allocator),
       lastControl(bsoncolumn::kInvalidControlByte) {}
 
 template <class BufBuilderType, class BSONObjType, class Allocator>
-BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState::InternalState(
-    InternalState& other)
+BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState::Interleaved::Interleaved(
+    Allocator a)
+    : allocator(a),
+      subobjStates(allocator),
+      referenceSubObj(TrackableBSONObj{BSONObj{}}, allocator),
+      bufferedObjElements(allocator) {}
+
+template <class BufBuilderType, class BSONObjType, class Allocator>
+BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState::InternalState::
+    Interleaved::Interleaved(const Interleaved& other)
     : allocator(other.allocator),
       mode(other.mode),
-      regular(other.regular),
       subobjStates(other.subobjStates),
       referenceSubObj(TrackableBSONObj{other.referenceSubObj.get().get()}, allocator),
       referenceSubObjType(other.referenceSubObjType),
-      bufferedObjElements(other.bufferedObjElements),
-      offset(other.offset),
-      lastBufLength(other.lastBufLength),
-      lastControl(other.lastControl) {}
+      bufferedObjElements(copyBufferedObjElements(other.bufferedObjElements, allocator)) {}
 
 template <class BufBuilderType, class BSONObjType, class Allocator>
-typename BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState&
-BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState::operator=(
-    InternalState& other) {
+typename BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState::Interleaved&
+BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalState::Interleaved::operator=(
+    const Interleaved& other) {
     if (&other == this) {
         return *this;
     }
 
     allocator = other.allocator;
     mode = other.mode;
-    regular = other.regular;
     subobjStates = other.subobjStates;
     referenceSubObj = {TrackableBSONObj{other.referenceSubObj.get().get()}, allocator};
     referenceSubObjType = other.referenceSubObjType;
-    bufferedObjElements = other.bufferedObjElements;
-    offset = other.offset;
-    lastBufLength = other.lastBufLength;
-    lastControl = other.lastControl;
+    bufferedObjElements = copyBufferedObjElements(other.bufferedObjElements, allocator);
 
     return *this;
 }
@@ -1275,7 +1386,7 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::BSONColumnBuilder(con
     // decompress and append all data.
     if (!helper.scan(binary, size)) {
         _bufBuilder.reset();
-        _is.regular = EncodingState<BufBuilderType, Allocator>{allocator};
+        _is.state.template emplace<typename InternalState::Regular>(allocator);
 
         BSONColumn decompressor(binary, size);
         for (auto&& elem : decompressor) {
@@ -1299,10 +1410,11 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::append(BSONElement el
 
     if ((type != Object && type != Array) || elem.Obj().isEmpty()) {
         // Flush previous sub-object compression when non-object is appended
-        if (_is.mode != Mode::kRegular) {
+        if (std::holds_alternative<typename InternalState::Interleaved>(_is.state)) {
             _flushSubObjMode();
         }
-        _is.regular.append(elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
+        std::get<typename InternalState::Regular>(_is.state).append(
+            elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
         return *this;
     }
 
@@ -1328,9 +1440,9 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendObj(Element el
     auto obj = elem.value.Obj();
     bool containsScalars = _containsScalars(obj);
 
-    if (_is.mode == Mode::kRegular) {
+    if (auto* regular = std::get_if<typename InternalState::Regular>(&_is.state)) {
         if (!containsScalars) {
-            _is.regular.append(elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
+            regular->append(elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
         } else {
             _startDetermineSubObjReference(obj, type);
         }
@@ -1338,14 +1450,18 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendObj(Element el
         return *this;
     }
 
+    // Use a pointer here so that it can get reassigned below in case we need to restart subobj
+    // compression.
+    auto* interleaved = &std::get<typename InternalState::Interleaved>(_is.state);
+
     // Different types on root is not allowed
-    if (type != _is.referenceSubObjType) {
+    if (type != interleaved->referenceSubObjType) {
         _flushSubObjMode();
         _startDetermineSubObjReference(obj, type);
         return *this;
     }
 
-    if (_is.mode == Mode::kSubObjDeterminingReference) {
+    if (interleaved->mode == InternalState::Interleaved::Mode::kDeterminingReference) {
         // We are in DeterminingReference mode, check if this current object is compatible and merge
         // in any new fields that are discovered.
         uint32_t numElementsReferenceObj = 0;
@@ -1353,9 +1469,9 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendObj(Element el
                                                                    const BSONElement& elem) {
             ++numElementsReferenceObj;
         };
-        if (!traverseLockStep(_is.referenceSubObj.get().get(), obj, perElementLockStep)) {
+        if (!traverseLockStep(interleaved->referenceSubObj.get().get(), obj, perElementLockStep)) {
             BSONObj merged = [&] {
-                return mergeObj(_is.referenceSubObj.get().get(), obj);
+                return mergeObj(interleaved->referenceSubObj.get().get(), obj);
             }();
             if (merged.isEmptyPrototype()) {
                 // If merge failed, flush current sub-object compression and start over.
@@ -1364,22 +1480,27 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendObj(Element el
                 // If we only contain empty subobj (no value elements) then append in regular mode
                 // instead of re-starting subobj compression.
                 if (!containsScalars) {
-                    _is.regular.append(elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
+                    std::get<typename InternalState::Regular>(_is.state).append(
+                        elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
                     return *this;
                 }
 
-                _is.referenceSubObj = {TrackableBSONObj{obj.getOwned()}, _is.allocator};
-                _is.bufferedObjElements.push_back(_is.referenceSubObj.get().get());
-                _is.mode = Mode::kSubObjDeterminingReference;
+                interleaved =
+                    &_is.state.template emplace<typename InternalState::Interleaved>(_is.allocator);
+                interleaved->referenceSubObj = {TrackableBSONObj{obj.getOwned()}, _is.allocator};
+                interleaved->referenceSubObjType = type;
+                interleaved->bufferedObjElements.emplace_back(
+                    TrackableBSONObj{interleaved->referenceSubObj.get().get()}, _is.allocator);
                 return *this;
             }
-            _is.referenceSubObj = {TrackableBSONObj{merged}, _is.allocator};
+            interleaved->referenceSubObj = {TrackableBSONObj{merged}, _is.allocator};
         }
 
         // If we've buffered twice as many objects as we have sub-elements we will achieve good
         // compression so use the currently built reference.
-        if (numElementsReferenceObj * 2 >= _is.bufferedObjElements.size()) {
-            _is.bufferedObjElements.push_back(obj.getOwned());
+        if (numElementsReferenceObj * 2 >= interleaved->bufferedObjElements.size()) {
+            interleaved->bufferedObjElements.emplace_back(TrackableBSONObj{obj.getOwned()},
+                                                          _is.allocator);
             return *this;
         }
 
@@ -1391,7 +1512,8 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendObj(Element el
         // If we were not compatible restart subobj compression unless our object contain no value
         // fields (just empty subobjects)
         if (!containsScalars) {
-            _is.regular.append(elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
+            std::get<typename InternalState::Regular>(_is.state).append(
+                elem, _bufBuilder, NoopControlBlockWriter{}, _is.allocator);
         } else {
             _startDetermineSubObjReference(obj, type);
         }
@@ -1402,22 +1524,24 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendObj(Element el
 template <class BufBuilderType, class BSONObjType, class Allocator>
 BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>&
 BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::skip() {
-    if (_is.mode == Mode::kRegular) {
-        _is.regular.skip(_bufBuilder, NoopControlBlockWriter{});
+    if (auto* regular = std::get_if<typename InternalState::Regular>(&_is.state)) {
+        regular->skip(_bufBuilder, NoopControlBlockWriter{});
         return *this;
     }
 
+    auto& interleaved = std::get<typename InternalState::Interleaved>(_is.state);
+
     // If the reference object contain any empty subobjects we need to end interleaved mode as
     // skipping in all substreams would not be encoded as skipped root object.
-    if (_hasEmptyObj(_is.referenceSubObj.get().get())) {
+    if (_hasEmptyObj(interleaved.referenceSubObj.get().get())) {
         _flushSubObjMode();
         return skip();
     }
 
-    if (_is.mode == Mode::kSubObjDeterminingReference) {
-        _is.bufferedObjElements.push_back(BSONObj());
+    if (interleaved.mode == InternalState::Interleaved::Mode::kDeterminingReference) {
+        interleaved.bufferedObjElements.emplace_back(TrackableBSONObj{BSONObj()}, _is.allocator);
     } else {
-        for (auto&& subobj : _is.subobjStates) {
+        for (auto&& subobj : interleaved.subobjStates) {
             subobj.state.skip(subobj.buffer, subobj.controlBlockWriter());
         }
     }
@@ -1440,7 +1564,14 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::intermediate() {
     int identicalBytes = 0;
     // Save some state related to last control byte so we can see how it changes after finalize() is
     // called.
-    ptrdiff_t controlOffset = _is.regular._controlByteOffset;
+    ptrdiff_t controlOffset =
+        visit(OverloadedVisitor{[](const typename InternalState::Regular& regular) {
+                                    return regular._controlByteOffset;
+                                },
+                                [](const typename InternalState::Interleaved&) {
+                                    return kNoSimple8bControl;
+                                }},
+              _is.state);
     uint8_t lastControlByte =
         controlOffset != kNoSimple8bControl ? *(_bufBuilder.buf() + controlOffset) : 0;
 
@@ -1466,7 +1597,7 @@ BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::intermediate() {
         auto buffer = BufBuilderType{_is.allocator, static_cast<size_t>(length - controlOffset)};
         buffer.appendChar(lastControlByte);
         buffer.appendBuf(_bufBuilder.buf() + controlOffset + 1, length - controlOffset - 1);
-        newState.regular._controlByteOffset = 0;
+        std::get<typename InternalState::Regular>(newState.state)._controlByteOffset = 0;
         newState.offset += controlOffset;
         newState.lastBufLength = length - controlOffset;
 
@@ -1509,8 +1640,8 @@ BSONBinData BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::finalize(
     // We may only finalize when we have the full binary
     invariant(_is.offset == 0);
 
-    if (_is.mode == Mode::kRegular) {
-        _is.regular.flush(_bufBuilder, NoopControlBlockWriter{});
+    if (auto* regular = std::get_if<typename InternalState::Regular>(&_is.state)) {
+        regular->flush(_bufBuilder, NoopControlBlockWriter{});
     } else {
         _flushSubObjMode();
     }
@@ -1535,14 +1666,17 @@ int BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::numInterleavedSta
 
 template <class BufBuilderType, class BSONObjType, class Allocator>
 BSONElement BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::last() const {
-    if (_is.mode != Mode::kRegular) {
-        return {};
-    }
-
-    return BSONElement(_is.regular._prev.data(),
-                       /*field name size including null terminator*/ 1,
-                       /*total size*/ _is.regular._prev.size(),
-                       BSONElement::TrustedInitTag{});
+    return visit(OverloadedVisitor{[](const typename InternalState::Regular& regular) {
+                                       return BSONElement{
+                                           regular._prev.data(),
+                                           /*field name size including null terminator*/ 1,
+                                           /*total size*/ static_cast<int>(regular._prev.size()),
+                                           BSONElement::TrustedInitTag{}};
+                                   },
+                                   [](const typename InternalState::Interleaved&) {
+                                       return BSONElement{};
+                                   }},
+                 _is.state);
 }
 
 namespace bsoncolumn {
@@ -2253,6 +2387,8 @@ typename BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::InternalStat
 template <class BufBuilderType, class BSONObjType, class Allocator>
 bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendSubElements(
     const BSONObj& obj) {
+    auto& interleaved = std::get<typename InternalState::Interleaved>(_is.state);
+
     // Check if added object is compatible with selected reference object. Collect a flat vector of
     // all elements while we are doing this.
     std::vector<BSONElement> flattenedAppendedObj;
@@ -2260,15 +2396,15 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_appendSubElemen
     auto perElement = [&flattenedAppendedObj](const BSONElement& ref, const BSONElement& elem) {
         flattenedAppendedObj.push_back(elem);
     };
-    if (!traverseLockStep(_is.referenceSubObj.get().get(), obj, perElement)) {
+    if (!traverseLockStep(interleaved.referenceSubObj.get().get(), obj, perElement)) {
         _flushSubObjMode();
         return false;
     }
 
     // We should have received one callback for every sub-element in reference object. This should
     // match number of encoding states setup previously.
-    invariant(flattenedAppendedObj.size() == _is.subobjStates.size());
-    auto statesIt = _is.subobjStates.begin();
+    invariant(flattenedAppendedObj.size() == interleaved.subobjStates.size());
+    auto statesIt = interleaved.subobjStates.begin();
     auto subElemIt = flattenedAppendedObj.begin();
     auto subElemEnd = flattenedAppendedObj.end();
 
@@ -2289,38 +2425,42 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_startDetermineS
     const BSONObj& obj, BSONType type) {
     // Start sub-object compression. Enter DeterminingReference mode, we use this first Object
     // as the first reference
-    _is.regular.flush(_bufBuilder, NoopControlBlockWriter{});
-    _is.regular = bsoncolumn::EncodingState<BufBuilderType, Allocator>{_is.allocator};
+    std::get<typename InternalState::Regular>(_is.state).flush(_bufBuilder,
+                                                               NoopControlBlockWriter{});
 
-    _is.referenceSubObj = {TrackableBSONObj{obj.getOwned()}, _is.allocator};
-    _is.referenceSubObjType = type;
-    _is.bufferedObjElements.push_back(_is.referenceSubObj.get().get());
-    _is.mode = Mode::kSubObjDeterminingReference;
+    auto& interleaved =
+        _is.state.template emplace<typename InternalState::Interleaved>(_is.allocator);
+    interleaved.referenceSubObj = {TrackableBSONObj{obj.getOwned()}, _is.allocator};
+    interleaved.referenceSubObjType = type;
+    interleaved.bufferedObjElements.emplace_back(
+        TrackableBSONObj{interleaved.referenceSubObj.get().get()}, _is.allocator);
 }
 
 template <class BufBuilderType, class BSONObjType, class Allocator>
 void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_finishDetermineSubObjReference() {
+    auto& interleaved = std::get<typename InternalState::Interleaved>(_is.state);
+
     // Done determining reference sub-object. Write this control byte and object to stream.
     const char interleavedStartControlByte = [&] {
-        return _is.referenceSubObjType == Object
+        return interleaved.referenceSubObjType == Object
             ? bsoncolumn::kInterleavedStartControlByte
             : bsoncolumn::kInterleavedStartArrayRootControlByte;
     }();
     _bufBuilder.appendChar(interleavedStartControlByte);
-    _bufBuilder.appendBuf(_is.referenceSubObj.get().get().objdata(),
-                          _is.referenceSubObj.get().get().objsize());
+    _bufBuilder.appendBuf(interleaved.referenceSubObj.get().get().objdata(),
+                          interleaved.referenceSubObj.get().get().objsize());
     ++_numInterleavedStartWritten;
 
     // Initialize all encoding states. We do this by traversing in lock-step between the reference
     // object and first buffered element. We can use the fact if sub-element exists in reference to
     // determine if we should start with a zero delta or skip.
-    auto perElement = [this](const BSONElement& ref, const BSONElement& elem) {
+    auto perElement = [this, &interleaved](const BSONElement& ref, const BSONElement& elem) {
         // Set a valid 'previous' into the encoding state to avoid a full
         // literal to be written when we append the first element. We want this
         // to be a zero delta as the reference object already contain this
         // literal.
-        _is.subobjStates.emplace_back(_is.allocator);
-        auto& subobj = _is.subobjStates.back();
+        interleaved.subobjStates.emplace_back(_is.allocator);
+        auto& subobj = interleaved.subobjStates.back();
         subobj.state._storePrevious(ref);
         subobj.state._initializeFromPrevious(_is.allocator);
         if (!elem.eoo()) {
@@ -2330,30 +2470,33 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_finishDetermine
         }
     };
 
-    invariant(traverseLockStep(
-        _is.referenceSubObj.get().get(), _is.bufferedObjElements.front(), perElement));
-    _is.mode = Mode::kSubObjAppending;
+    invariant(traverseLockStep(interleaved.referenceSubObj.get().get(),
+                               interleaved.bufferedObjElements.front().get().get(),
+                               perElement));
+    interleaved.mode = InternalState::Interleaved::Mode::kAppending;
 
     // Append remaining buffered objects.
-    auto it = _is.bufferedObjElements.begin() + 1;
-    auto end = _is.bufferedObjElements.end();
+    auto it = interleaved.bufferedObjElements.begin() + 1;
+    auto end = interleaved.bufferedObjElements.end();
     for (; it != end; ++it) {
         // The objects we append here should always be compatible with our reference object. If they
         // are not then there is a bug somewhere.
-        invariant(_appendSubElements(*it));
+        invariant(_appendSubElements(it->get().get()));
     }
-    _is.bufferedObjElements.clear();
+    interleaved.bufferedObjElements.clear();
 }
 
 template <class BufBuilderType, class BSONObjType, class Allocator>
 void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_flushSubObjMode() {
-    if (_is.mode == Mode::kSubObjDeterminingReference) {
+    auto& interleaved = std::get<typename InternalState::Interleaved>(_is.state);
+
+    if (interleaved.mode == InternalState::Interleaved::Mode::kDeterminingReference) {
         _finishDetermineSubObjReference();
     }
 
     // Flush all EncodingStates, this will cause them to write out all their elements that is
     // captured by the controlBlockWriter.
-    for (auto&& subobj : _is.subobjStates) {
+    for (auto&& subobj : interleaved.subobjStates) {
         subobj.state.flush(subobj.buffer, subobj.controlBlockWriter());
     }
 
@@ -2375,7 +2518,7 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_flushSubObjMode
         }
     };
     std::vector<HeapElement> heap;
-    for (uint32_t i = 0; i < _is.subobjStates.size(); ++i) {
+    for (uint32_t i = 0; i < interleaved.subobjStates.size(); ++i) {
         heap.emplace_back(i);
     }
 
@@ -2388,7 +2531,7 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_flushSubObjMode
         std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
         // And we take out control blocks in FIFO order from this encoding state
         auto& top = heap.back();
-        auto& slot = _is.subobjStates[top.encoderIndex];
+        auto& slot = interleaved.subobjStates[top.encoderIndex];
         const char* controlBlock =
             slot.buffer.buf() + slot.controlBlocks.at(top.controlBlockIndex).first;
         size_t size = slot.controlBlocks.at(top.controlBlockIndex).second;
@@ -2411,83 +2554,27 @@ void BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::_flushSubObjMode
     }
     // All control blocks written, write EOO to end the interleaving and cleanup.
     _bufBuilder.appendChar(EOO);
-    _is.subobjStates.clear();
-    _is.mode = Mode::kRegular;
+    _is.state.template emplace<typename InternalState::Regular>(_is.allocator);
 }
 
 template <class BufBuilderType, class BSONObjType, class Allocator>
 bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::isInternalStateIdentical(
     const BSONColumnBuilder& other) const {
-    // Verify that buffers are identical
-    if (_bufBuilder.len() != other._bufBuilder.len()) {
-        return false;
-    }
-    if (_bufBuilder.len() > 0) {
-        if (memcmp(_bufBuilder.buf(), other._bufBuilder.buf(), _bufBuilder.len()) != 0) {
-            return false;
-        }
-    }
-
-    // Validate internal state of regular mode
-    if (_is.mode != other._is.mode) {
-        return false;
-    }
-    if (_is.regular._controlByteOffset != other._is.regular._controlByteOffset) {
-        return false;
-    }
-    if (auto encoder = std::get_if<Encoder64>(&_is.regular._encoder)) {
-        auto encoderOther = std::get_if<Encoder64>(&other._is.regular._encoder);
-        if (!encoderOther) {
+    auto areBufBuildersIdentical = [](const BufBuilderType& bufBuilder,
+                                      const BufBuilderType& otherBufBuilder) {
+        if (bufBuilder.len() != otherBufBuilder.len()) {
             return false;
         }
 
-        if (encoder->scaleIndex != encoderOther->scaleIndex) {
+        if (bufBuilder.len() > 0 &&
+            std::memcmp(bufBuilder.buf(), otherBufBuilder.buf(), bufBuilder.len()) != 0) {
             return false;
         }
 
-        // Our mac toolchain does not have std::bit_cast yet.
-        auto bit_cast = [](double from) {
-            uint64_t to;
-            memcpy(&to, &from, sizeof(uint64_t));
-            return to;
-        };
-        // NaN does not compare equal to itself, so we bit cast and perform this comparison as
-        // interger
-        if (bit_cast(encoder->lastValueInPrevBlock) !=
-            bit_cast(encoderOther->lastValueInPrevBlock)) {
-            return false;
-        }
+        return true;
+    };
 
-        if (encoder->prevDelta != encoderOther->prevDelta) {
-            return false;
-        }
-        if (encoder->prevEncoded64 != encoderOther->prevEncoded64) {
-            return false;
-        }
-
-        if (!encoder->simple8bBuilder.isInternalStateIdentical(encoderOther->simple8bBuilder)) {
-            return false;
-        }
-
-
-    } else if (auto encoder = std::get_if<Encoder128>(&_is.regular._encoder)) {
-        auto encoderOther = std::get_if<Encoder128>(&other._is.regular._encoder);
-        if (!encoderOther) {
-            return false;
-        }
-
-        if (encoder->prevEncoded128 != encoderOther->prevEncoded128) {
-            return false;
-        }
-
-        if (!encoder->simple8bBuilder.isInternalStateIdentical(encoderOther->simple8bBuilder)) {
-            return false;
-        }
-    } else {
-        return false;
-    }
-
-    if (_is.regular._prev != other._is.regular._prev) {
+    if (!areBufBuildersIdentical(_bufBuilder, other._bufBuilder)) {
         return false;
     }
 
@@ -2501,7 +2588,131 @@ bool BSONColumnBuilder<BufBuilderType, BSONObjType, Allocator>::isInternalStateI
     if (_is.lastControl != other._is.lastControl) {
         return false;
     }
-    return true;
+
+    if (_is.state.index() != other._is.state.index()) {
+        return false;
+    }
+
+    auto areEncodingStatesIdentical =
+        [](const bsoncolumn::EncodingState<BufBuilderType, Allocator>& encodingState,
+           const bsoncolumn::EncodingState<BufBuilderType, Allocator>& otherEncodingState) {
+            if (encodingState._controlByteOffset != otherEncodingState._controlByteOffset) {
+                return false;
+            }
+
+            if (encodingState._prev != otherEncodingState._prev) {
+                return false;
+            }
+
+            if (encodingState._encoder.index() != otherEncodingState._encoder.index()) {
+                return false;
+            }
+
+            return visit(OverloadedVisitor{
+                             [&](const Encoder64& encoder) {
+                                 auto& otherEncoder =
+                                     std::get<Encoder64>(otherEncodingState._encoder);
+
+                                 if (encoder.scaleIndex != otherEncoder.scaleIndex) {
+                                     return false;
+                                 }
+
+                                 // NaN does not compare equal to itself, so we bit cast and perform
+                                 // this comparison as interger
+                                 if (absl::bit_cast<uint64_t>(encoder.lastValueInPrevBlock) !=
+                                     absl::bit_cast<uint64_t>(otherEncoder.lastValueInPrevBlock)) {
+                                     return false;
+                                 }
+
+                                 if (encoder.prevDelta != otherEncoder.prevDelta) {
+                                     return false;
+                                 }
+
+                                 if (encoder.prevEncoded64 != otherEncoder.prevEncoded64) {
+                                     return false;
+                                 }
+
+                                 return encoder.simple8bBuilder.isInternalStateIdentical(
+                                     otherEncoder.simple8bBuilder);
+                             },
+                             [&](const Encoder128& encoder) {
+                                 auto& otherEncoder =
+                                     std::get<Encoder128>(otherEncodingState._encoder);
+
+                                 if (encoder.prevEncoded128 != otherEncoder.prevEncoded128) {
+                                     return false;
+                                 }
+
+                                 return encoder.simple8bBuilder.isInternalStateIdentical(
+                                     otherEncoder.simple8bBuilder);
+                             },
+                         },
+                         encodingState._encoder);
+        };
+
+    return visit(
+        OverloadedVisitor{
+            [&](const typename InternalState::Regular& regular) {
+                return areEncodingStatesIdentical(
+                    regular, std::get<typename InternalState::Regular>(other._is.state));
+            },
+            [&](const typename InternalState::Interleaved& interleaved) {
+                auto& otherInterleaved =
+                    std::get<typename InternalState::Interleaved>(other._is.state);
+
+                if (interleaved.mode != otherInterleaved.mode) {
+                    return false;
+                }
+
+                if (interleaved.subobjStates.size() != otherInterleaved.subobjStates.size()) {
+                    return false;
+                }
+
+                for (size_t i = 0; i < interleaved.subobjStates.size(); ++i) {
+                    auto& subObjState = interleaved.subobjStates[i];
+                    auto& otherSubObjState = otherInterleaved.subobjStates[i];
+
+                    if (!areEncodingStatesIdentical(subObjState.state, otherSubObjState.state)) {
+                        return false;
+                    }
+
+                    if (!areBufBuildersIdentical(subObjState.buffer, otherSubObjState.buffer)) {
+                        return false;
+                    }
+
+                    if (subObjState.controlBlocks != otherSubObjState.controlBlocks) {
+                        return false;
+                    }
+                }
+
+                if (!interleaved.referenceSubObj.get().get().binaryEqual(
+                        otherInterleaved.referenceSubObj.get().get())) {
+                    return false;
+                }
+
+                if (interleaved.referenceSubObjType != otherInterleaved.referenceSubObjType) {
+                    return false;
+                }
+
+                if (interleaved.bufferedObjElements.size() !=
+                    otherInterleaved.bufferedObjElements.size()) {
+                    return false;
+                }
+
+                for (size_t i = 0; i < interleaved.bufferedObjElements.size(); ++i) {
+                    auto& bufferedObjElement = interleaved.bufferedObjElements[i];
+                    auto& otherBufferedObjElement = otherInterleaved.bufferedObjElements[i];
+
+                    if (!bufferedObjElement.get().get().binaryEqual(
+                            otherBufferedObjElement.get().get())) {
+                        return false;
+                    }
+                }
+
+                return true;
+            },
+        },
+        _is.state);
 }
 
 template class BSONColumnBuilder<UntrackedBufBuilder, UntrackedBSONObj, std::allocator<void>>;

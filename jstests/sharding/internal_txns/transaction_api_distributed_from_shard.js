@@ -1,7 +1,10 @@
 /**
  * Tests that the transaction API can be used for distributed transactions initiated from a shard.
  *
- * @tags: [requires_fcv_60]
+ * @tags: [
+ *   requires_fcv_60,
+ *   temp_disabled_embedded_router_known_issues,
+ * ]
  */
 // The test command is meant to test the "no session" transaction API case.
 TestData.disableImplicitSessions = true;
@@ -87,7 +90,7 @@ function runTestFailure(sessionOpts) {
     let testCmd = Object.merge(
         {testInternalTransactions: 1, commandInfos: commands, useClusterClient: true}, sessionOpts);
 
-    // TODO (SERVER-73632): Simplify this path once 8.0 becomes last LTS.
+    // TODO (SERVER-88107): Simplify this path once 8.0 becomes last LTS.
     const binVersion = assert.commandWorked(shard0Primary.adminCommand({serverStatus: 1}));
     let errorCode = MongoRunner.compareBinVersions(binVersion.version, "8.0") >= 0
         ? ErrorCodes.OperationNotSupportedInTransaction
@@ -136,7 +139,7 @@ function runTestGetMore(sessionOpts) {
     // Verify getMores were used by checking serverStatus metrics.
     const commandMetricsAfter = shard0Primary.getDB(kDbName).serverStatus().metrics.commands;
 
-    // TODO (SERVER-73632): Simplify this path once 8.0 becomes last LTS.
+    // TODO (SERVER-88107): Simplify this path once 8.0 becomes last LTS.
     const binVersion = assert.commandWorked(shard0Primary.adminCommand({serverStatus: 1}));
     if (MongoRunner.compareBinVersions(binVersion.version, "8.0") >= 0) {
         assert.gt(commandMetricsAfter.find.total, commandMetricsBefore.find.total);

@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include <memory>
 #include <string>
 #include <utility>
@@ -35,7 +34,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -59,15 +57,12 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_options.h"
-#include "mongo/rpc/op_msg.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
-
 
 namespace mongo {
 namespace {
@@ -89,18 +84,16 @@ bool isAlwaysUntracked(OperationContext* opCtx,
     bool isFromCreateCommand = !request.getIsFromCreateUnsplittableCollectionTestCommand();
     bool isTimeseries = request.getTimeseries().has_value();
     bool isView = request.getViewOn().has_value();
-    bool hasCustomCollation = request.getCollation().has_value();
     bool isEncryptedCollection =
         request.getEncryptedFields().has_value() || nss.isFLE2StateCollection();
     bool hasApiParams = APIParameters::get(opCtx).getParamsPassed();
 
     // TODO SERVER-83878 Remove isFromCreateCommand && isTimeseries
-    // TODO SERVER-81936 Remove hasCustomCollation
     // TODO SERVER-79248 or SERVER-79254 remove isEncryptedCollection once we both cleanup
     // and compaction coordinator work on unsplittable collections
     // TODO SERVER-86018 Remove hasApiParams
     return isView || nss.isNamespaceAlwaysUntracked() || (isFromCreateCommand && isTimeseries) ||
-        hasCustomCollation || isEncryptedCollection || hasApiParams;
+        isEncryptedCollection || hasApiParams;
 }
 
 class ShardsvrCreateCollectionCommand final : public TypedCommand<ShardsvrCreateCollectionCommand> {
@@ -137,6 +130,8 @@ public:
             ShardingState::get(opCtx)->assertCanAcceptShardedCommands();
             opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
             bool isUnsplittable = request().getUnsplittable();
+            bool isTrackCollectionIfExists =
+                request().getRegisterExistingCollectionInGlobalCatalog();
             bool isFromCreateUnsplittableCommand =
                 request().getIsFromCreateUnsplittableCollectionTestCommand();
             bool hasShardKey = request().getShardKey().has_value();
@@ -150,6 +145,11 @@ public:
                 runCreateCommandDirectClient(opCtx, ns(), cmd);
                 return CreateCollectionResponse{ShardVersion::UNSHARDED()};
             }
+
+            tassert(ErrorCodes::InvalidOptions,
+                    "Expected `unsplittable=true` when trying to register an existing unsharded "
+                    "collection",
+                    !isTrackCollectionIfExists || isUnsplittable);
 
             uassert(ErrorCodes::NotImplemented,
                     "Create Collection path has not been implemented",
@@ -169,28 +169,24 @@ public:
             while (true) {
                 boost::optional<FixedFCVRegion> optFixedFcvRegion{boost::in_place_init, opCtx};
                 // In case of "unsplittable" collections, create the collection locally if either
-                // the feature flag is disabled or the nss identifies a collection which should
-                // always be local
-                // TODO (SERVER-86295) change this check according to the "trackCollectionIfExists"
-                // coordinator parameter
+                // the feature flags are disabled or the request is for a collection type that is
+                // not tracked yet or must always be local
                 if (isUnsplittable && !isFromCreateUnsplittableCommand) {
-                    bool isTrackUnshardedUponCreationDisabled =
-                        !feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(
+                    if (isAlwaysUntracked(opCtx, ns(), request())) {
+                        return _createUntrackedCollection(opCtx);
+                    }
+
+                    bool isTrackUnshardedUponCreationEnabled =
+                        feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(
                             (*optFixedFcvRegion)->acquireFCVSnapshot());
-                    if (isTrackUnshardedUponCreationDisabled ||
-                        isAlwaysUntracked(opCtx, ns(), request())) {
-                        // Acquire the DDL lock to serialize with other DDL operations.
-                        // A parallel coordinator for an unsplittable collection will attempt to
-                        // access the collection outside of the critical section on the local
-                        // catalog to check the options. We need to serialize any create
-                        // collection/view to prevent wrong results
-                        static constexpr StringData lockReason{"CreateCollectionUntracked"_sd};
-                        const DDLLockManager::ScopedCollectionDDLLock collDDLLock{
-                            opCtx, ns(), lockReason, MODE_X};
-                        auto cmd = create_collection_util::makeCreateCommand(
-                            opCtx, ns(), request().getShardsvrCreateCollectionRequest());
-                        runCreateCommandDirectClient(opCtx, ns(), cmd);
-                        return CreateCollectionResponse{ShardVersion::UNSHARDED()};
+
+                    bool mustTrackOnMoveCollection =
+                        feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabled(
+                            (*optFixedFcvRegion)->acquireFCVSnapshot()) &&
+                        request().getRegisterExistingCollectionInGlobalCatalog();
+
+                    if (!isTrackUnshardedUponCreationEnabled && !mustTrackOnMoveCollection) {
+                        return _createUntrackedCollection(opCtx);
                     }
                 }
 
@@ -268,6 +264,21 @@ public:
         }
 
     private:
+        CreateCollectionResponse _createUntrackedCollection(OperationContext* opCtx) {
+            // Acquire the DDL lock to serialize with other DDL operations.
+            // A parallel coordinator for an unsplittable collection will attempt to
+            // access the collection outside of the critical section on the local
+            // catalog to check the options. We need to serialize any create
+            // collection/view to prevent wrong results
+            static constexpr StringData lockReason{"CreateCollectionUntracked"_sd};
+            const DDLLockManager::ScopedCollectionDDLLock collDDLLock{
+                opCtx, ns(), lockReason, MODE_X};
+            auto cmd = create_collection_util::makeCreateCommand(
+                opCtx, ns(), request().getShardsvrCreateCollectionRequest());
+            runCreateCommandDirectClient(opCtx, ns(), cmd);
+            return CreateCollectionResponse{ShardVersion::UNSHARDED()};
+        }
+
         NamespaceString ns() const override {
             return request().getNamespace();
         }

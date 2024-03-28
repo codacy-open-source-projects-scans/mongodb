@@ -113,7 +113,7 @@ class QueryStageCachedPlan : public unittest::Test {
 public:
     QueryStageCachedPlan() : _client(&_opCtx) {}
 
-    void setUp() {
+    void setUp() override {
         // If collection exists already, we need to drop it.
         dropCollection();
 
@@ -193,7 +193,6 @@ public:
                 .canonicalQuery = canonicalQuery,
                 .collections = collections,
                 .plannerOptions = QueryPlannerParams::DEFAULT,
-                .ignoreQuerySettings = true,
             },
         };
     }

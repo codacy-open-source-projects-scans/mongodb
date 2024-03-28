@@ -9,6 +9,7 @@ ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
 ADDR
 ADDRs
 AJ
+ANDed
 APIs
 ARG
 ARGS
@@ -368,7 +369,6 @@ Su
 Subdirectory
 Subprocess
 TAILQ
-TCMalloc
 TESTUTIL
 TID
 TMP
@@ -448,7 +448,6 @@ WiredTigerTmplog
 WithSeeds
 Wmissing
 WriteFile
-Wundef
 Wuninitialized
 Wunused
 XP
@@ -518,6 +517,7 @@ blk
 blkcache
 blkincr
 blkmod
+blkmods
 bm
 bnd
 bool
@@ -607,7 +607,6 @@ cookiep
 copydoc
 countp
 cp
-cplusplus
 cpp
 cppsuite
 cpuid
@@ -746,9 +745,14 @@ fclose
 fcntl
 fd
 fdatasync
+fe
+feffff
 fextend
 ffc
 fff
+fffff
+ffffff
+ffffffff
 ffffffffffffffff
 fflush
 ffs
@@ -1087,6 +1091,7 @@ packv
 pageref
 pagesize
 param
+params
 pareto
 parserp
 patchp
@@ -1181,6 +1186,7 @@ risc
 rl
 rle
 rmw
+rnd
 rng
 rotN
 rotn

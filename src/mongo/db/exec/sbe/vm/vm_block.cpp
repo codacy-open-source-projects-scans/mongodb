@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#include <algorithm>
+
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/exec/sbe/vm/vm_printer.h"
@@ -117,6 +119,25 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockTypeMa
             }
             return {value::TypeTags::Boolean,
                     value::bitcastFrom<bool>(static_cast<bool>(getBSONTypeMask(tag) & typeMask))};
+        },
+        [&](value::TypeTags inTag,
+            const value::Value* inVals,
+            value::TypeTags* outTags,
+            value::Value* outVals,
+            size_t count) {
+            auto [outTag, outVal] = [&]() -> std::pair<value::TypeTags, value::Value> {
+                if (inTag == value::TypeTags::Nothing) {
+                    return {value::TypeTags::Nothing, 0};
+                }
+                return {
+                    value::TypeTags::Boolean,
+                    value::bitcastFrom<bool>(static_cast<bool>(getBSONTypeMask(inTag) & typeMask))};
+            }();
+
+            for (size_t index = 0; index < count; index++) {
+                outTags[index] = outTag;
+                outVals[index] = outVal;
+            }
         });
 
     auto valueBlockOut = valueBlockIn->map(cmpOp);
@@ -314,6 +335,23 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::valueBlockAggMinMaxImpl
             bitsetTag == value::TypeTags::valueBlock);
     auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
 
+    // If there is a valid accumulated value and the min(/max) value of the entire block is
+    // greater(/less) than the accumulated value then we can directly return the accumulated value
+    if (accTag != value::TypeTags::Nothing) {
+        auto [minOrMaxTag, minOrMaxVal] = less ? valueBlockIn->tryMin() : valueBlockIn->tryMax();
+        if (minOrMaxTag != value::TypeTags::Nothing) {
+            auto [cmpTag, cmpVal] = value::compare3way(minOrMaxTag, minOrMaxVal, accTag, accVal);
+            if (cmpTag == value::TypeTags::NumberInt32) {
+                int32_t cmp = value::bitcastTo<int32_t>(cmpVal);
+                if (less ? cmp >= 0 : cmp <= 0) {
+                    guard.reset();
+                    return {true, accTag, accVal};
+                }
+            }
+        }
+    }
+
+    // Evaluate the min/max value in the block taking into account the bitmap
     auto [resultOwned, resultTag, resultVal] =
         valueBlockMinMaxImpl<less>(valueBlockIn, bitsetBlock);
 
@@ -447,16 +485,16 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggSum
     tassert(8625707,
             "Expected input argument to be of valueBlock type",
             inputTag == value::TypeTags::valueBlock);
-    auto* inputBlock = value::bitcastTo<value::ValueBlock*>(inputVal);
+    value::ValueBlock* inputBlock = value::bitcastTo<value::ValueBlock*>(inputVal);
 
     auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(1);
     tassert(8625708,
             "Expected bitset argument to be of valueBlock type",
             bitsetTag == value::TypeTags::valueBlock);
-    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+    value::ValueBlock* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
 
-    value::DeblockedTagVals block = inputBlock->extract();
-    value::DeblockedTagVals bitset = bitsetBlock->extract();
+    const value::DeblockedTagVals block = inputBlock->extract();
+    const value::DeblockedTagVals bitset = bitsetBlock->extract();
 
     tassert(
         8151801, "Expected block and bitset to be the same size", block.count() == bitset.count());
@@ -510,6 +548,474 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggSum
 
     // Return 'result' as the updated accumulator state.
     return {true, resultTag, resultVal};
+}  // builtinValueBlockAggSum
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggDoubleDoubleSum(
+    ArityType arity) {
+    invariant(arity == 3);
+
+    // Input: next block to accumulate.
+    auto [blockOwned, blockTag, blockVal] = getFromStack(2);
+    tassert(8695107,
+            "Expected input argument to be of valueBlock type",
+            blockTag == value::TypeTags::valueBlock);
+    value::ValueBlock* inputBlock = value::bitcastTo<value::ValueBlock*>(blockVal);
+
+    // Input: bitset matching 'inputBlock'.
+    auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(1);
+    tassert(8695108,
+            "Expected bitset argument to be of valueBlock type",
+            bitsetTag == value::TypeTags::valueBlock);
+    value::ValueBlock* inputBitset = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+
+    // Input-output: running accumulator result. moveOwnedFromStack() takes ownership by our local
+    // copy so we can do in-place updates to it.
+    auto [accTag, accValue] = moveOwnedFromStack(0);
+
+    // Initialize the accumulator if this is the first use of it.
+    if (accTag == value::TypeTags::Nothing) {
+        std::tie(accTag, accValue) = initializeDoubleDoubleSumState();
+    }
+
+    value::ValueGuard guard{accTag, accValue};
+    tassert(8695109, "The result slot must be Array-typed", accTag == value::TypeTags::Array);
+    value::Array* accumulator = value::getArrayView(accValue);
+
+    const value::DeblockedTagVals block = inputBlock->extract();
+    const value::DeblockedTagVals bitset = inputBitset->extract();
+    tassert(
+        8695110, "Expected block and bitset to be the same size", block.count() == bitset.count());
+
+    for (size_t i = 0; i < block.count(); ++i) {
+        if (value::bitcastTo<bool>(bitset[i].second)) {
+            aggDoubleDoubleSumImpl(accumulator, block.tags()[i], block.vals()[i]);
+        }
+    }
+
+    guard.reset();
+    return {true, accTag, accValue};
+}  // builtinValueBlockAggDoubleDoubleSum
+
+template <typename Less>
+void ByteCode::combineBlockNativeAggTopBottomN(value::TypeTags stateTag,
+                                               value::Value stateVal,
+                                               std::vector<SortKeyAndIdx> newArr,
+                                               value::ValueBlock* valBlock,
+                                               Less less) {
+    auto memAdded = [](std::pair<value::TypeTags, value::Value> key,
+                       std::pair<value::TypeTags, value::Value> output) {
+        return value::getApproximateSize(key.first, key.second) +
+            value::getApproximateSize(output.first, output.second);
+    };
+
+    auto [state, mergeArr, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
+        getMultiAccState(stateTag, stateVal);
+
+    invariant(mergeArr->size() <= maxSize);
+    auto& mergeHeap = mergeArr->values();
+
+    boost::optional<value::DeblockedTagVals> deblocked;
+    auto keyLess = PairKeyComp(less);
+
+    // Once a value is inserted into mergeArr, it must be owned by mergeArr.
+    for (const auto& newPair : newArr) {
+        // This is an unowned view on the sort key, so it will need to be copied if it makes it into
+        // the merge heap.
+        auto [newSortKeyTag, newSortKeyVal] = newPair.sortKey;
+
+        // Get the index of the corresponding output value.
+        size_t outIdx = newPair.outIdx;
+
+        if (mergeArr->size() < maxSize) {
+            // Extract if we haven't done so yet.
+            if (!deblocked) {
+                deblocked = valBlock->extract();
+            }
+            invariant(outIdx < deblocked->count());
+
+            memUsage = updateAndCheckMemUsage(
+                state, memUsage, memAdded(newPair.sortKey, (*deblocked)[outIdx]), memLimit);
+
+            auto [pairArrTag, pairArrVal] = value::makeNewArray();
+            value::ValueGuard pairArrGuard{pairArrTag, pairArrVal};
+            auto* pairArr = value::getArrayView(pairArrVal);
+            pairArr->reserve(2);
+
+            // Update the sortKey with a copy.
+            auto [sortKeyCpyTag, sortKeyCpyVal] = value::copyValue(newSortKeyTag, newSortKeyVal);
+            pairArr->push_back(sortKeyCpyTag, sortKeyCpyVal);
+
+            // Add the output value to the SBE pair array. We will need to make a copy since the
+            // value is owned by the input block of output vals.
+            auto [outCpyTag, outCpyVal] =
+                value::copyValue(deblocked->tags()[outIdx], deblocked->vals()[outIdx]);
+            pairArr->push_back(outCpyTag, outCpyVal);
+
+            // The merge arr will now take ownership of the SBE pair array.
+            pairArrGuard.reset();
+
+            mergeArr->push_back(pairArrTag, pairArrVal);
+            std::push_heap(mergeHeap.begin(), mergeHeap.end(), keyLess);
+        } else {
+            tassert(8794901,
+                    "Heap should contain same number of elements as maxSize",
+                    mergeArr->size() == maxSize);
+
+            auto [worstTag, worstVal] = mergeHeap.front();
+            auto worst = value::getArrayView(worstVal);
+            auto worstKey = worst->getAt(0);
+
+            if (less(std::pair(newSortKeyTag, newSortKeyVal), worstKey)) {
+                std::pop_heap(mergeHeap.begin(), mergeHeap.end(), keyLess);
+
+                // Extract if we haven't done so yet.
+                if (!deblocked) {
+                    deblocked = valBlock->extract();
+                }
+                invariant(outIdx < deblocked->count());
+
+                memUsage =
+                    updateAndCheckMemUsage(state,
+                                           memUsage,
+                                           -memAdded(worst->getAt(0), worst->getAt(1)) +
+                                               memAdded(newPair.sortKey, (*deblocked)[outIdx]),
+                                           memLimit);
+
+                // Update the sort key. It is owned by the input sort key block so we will need to
+                // make a copy.
+                auto [newSortKeyCpyTag, newSortKeyCpyVal] =
+                    value::copyValue(newSortKeyTag, newSortKeyVal);
+                // The sort key from the merge heap is owned by the heap so we can safely use setAt
+                // which will release the value being replaced.
+                worst->setAt(0, newSortKeyCpyTag, newSortKeyCpyVal);
+
+                // Update the output value. We will need to make a copy since the value is owned by
+                // the input block of output vals.
+                auto [outCpyTag, outCpyVal] =
+                    value::copyValue(deblocked->tags()[outIdx], deblocked->vals()[outIdx]);
+                // The current output val is owned by the merge heap, so we can safely use setAt
+                // which will release the value being replaced.
+                worst->setAt(1, outCpyTag, outCpyVal);
+
+                std::push_heap(mergeHeap.begin(), mergeHeap.end(), keyLess);
+            }
+        }
+    }
+}
+
+// Currently, this is a specialized implementation for the single sort key, single output field case
+// of $top[N]/$bottom[N].
+template <TopBottomSense Sense, bool ValueIsDecomposedArray>
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::blockNativeAggTopBottomNImpl(
+    value::TypeTags stateTag,
+    value::Value stateVal,
+    value::ValueBlock* bitsetBlock,
+    SortSpec* sortSpec,
+    size_t numKeysBlocks,
+    size_t numValuesBlocks) {
+    using Less =
+        std::conditional_t<Sense == TopBottomSense::kTop, SortPatternLess, SortPatternGreater>;
+
+    invariant(!ValueIsDecomposedArray);
+    invariant(numKeysBlocks == 1);
+    invariant(numValuesBlocks == 1);
+
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    // We already read numKeysBlocks (stack position 3) in builtinValueBlockAggTopBottomNImpl before
+    // calling into this function.
+
+    constexpr size_t keysBlocksStartOffset = 4;
+    const size_t valuesBlocksStartOffset = keysBlocksStartOffset + numKeysBlocks;
+
+    auto [sortKeyBlockOwned, sortKeyBlockTag, sortKeyBlockVal] =
+        getFromStack(keysBlocksStartOffset);
+    tassert(8794906,
+            "Expected key argument to be of valueBlock type",
+            sortKeyBlockTag == value::TypeTags::valueBlock);
+    auto* sortKeyBlock = value::getValueBlock(sortKeyBlockVal);
+
+    auto [valBlockOwned, valBlockTag, valBlockVal] = getFromStack(valuesBlocksStartOffset);
+    tassert(8794905,
+            "Expected key argument to be of valueBlock type",
+            valBlockTag == value::TypeTags::valueBlock);
+    auto* valBlock = value::getValueBlock(valBlockVal);
+
+    auto [state, mergeArr, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
+        getMultiAccState(stateTag, stateVal);
+    invariant(maxSize > 0);
+
+    auto bitset = bitsetBlock->extract();
+    tassert(8794903, "Expected bitset to be all bools", allBools(bitset.tags(), bitset.count()));
+
+    auto sortKeys = sortKeyBlock->extract();
+    auto [sortKeyTags, sortKeyVals] = sortKeys.tagsValsView();
+    auto bitsetVals = bitset.valsSpan();
+
+    invariant(sortKeyTags.size() == valBlock->count() && sortKeyTags.size() == bitsetVals.size());
+
+    // We will use a std::vector of SortKeyAndIdx structs instead of a nested SBE array for the
+    // intermediate heap representation to capture the semantics that these containers are views on
+    // values that they do not own.
+    std::vector<SortKeyAndIdx> newArr;
+    // The heap cannot be bigger than the min of the number of inputs and n/maxSize.
+    newArr.reserve(std::min(sortKeys.count(), maxSize));
+    auto less = Less(sortSpec);
+    auto keyLess = SortKeyAndIdxComp(less);
+
+    for (size_t i = 0; i < sortKeyVals.size(); ++i) {
+        if (!value::bitcastTo<bool>(bitsetVals[i])) {
+            continue;
+        }
+        if (newArr.size() < maxSize) {
+            // We will copy the sortKey if it ever makes it into the merge heap in the combine
+            // phase.
+            SortKeyAndIdx newPair{std::pair{sortKeyTags[i], sortKeyVals[i]} /* sortKey */,
+                                  i /* outIdx */};
+
+            newArr.push_back(newPair);
+            std::push_heap(newArr.begin(), newArr.end(), keyLess);
+        } else {
+            tassert(8794902,
+                    "Heap should contain same number of elements as maxSize",
+                    newArr.size() == maxSize);
+
+            if (less(std::pair{sortKeyTags[i], sortKeyVals[i]}, newArr.front().sortKey)) {
+                std::pop_heap(newArr.begin(), newArr.end(), keyLess);
+
+                auto& worstPair = newArr.back();
+
+                // We will copy the sort key if it ever makes it into the final heap in the combine
+                // phase.
+                worstPair.sortKey = std::pair{sortKeyTags[i], sortKeyVals[i]};
+                worstPair.outIdx = i;
+
+                std::push_heap(newArr.begin(), newArr.end(), keyLess);
+            }
+        }
+    }
+
+    // Update mergeArr in-place.
+    combineBlockNativeAggTopBottomN(stateTag, stateVal, newArr, valBlock, less);
+
+    // Return the input state since mergeArr was updated in-place.
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+class ByteCode::TopBottomArgsFromBlocks final : public ByteCode::TopBottomArgs {
+public:
+    TopBottomArgsFromBlocks(TopBottomSense sense,
+                            SortSpec* sortSpec,
+                            bool decomposedKey,
+                            bool decomposedValue,
+                            std::vector<value::DeblockedTagVals> keys,
+                            std::vector<value::DeblockedTagVals> values)
+        : TopBottomArgs(sense, sortSpec, decomposedKey, decomposedValue),
+          _keys(std::move(keys)),
+          _values(std::move(values)) {}
+
+    ~TopBottomArgsFromBlocks() final = default;
+
+    bool keySortsBeforeImpl(std::pair<value::TypeTags, value::Value> item) final {
+        tassert(8448705, "Expected item to be an Array", item.first == value::TypeTags::Array);
+
+        const SortPattern& sortPattern = _sortSpec->getSortPattern();
+        tassert(8448706,
+                "Expected numKeys to be equal to number of sort pattern parts",
+                sortPattern.size() == _keys.size());
+
+        auto itemArray = value::getArrayView(item.second);
+        tassert(8448707,
+                "Expected size of item array to be equal to number of sort pattern parts",
+                sortPattern.size() == itemArray->size());
+
+        if (_sense == TopBottomSense::kTop) {
+            for (size_t i = 0; i < sortPattern.size(); i++) {
+                auto [keyTag, keyVal] = _keys[i][_blockIndex];
+                auto [itemTag, itemVal] = itemArray->getAt(i);
+                int32_t cmp = compare<TopBottomSense::kTop>(keyTag, keyVal, itemTag, itemVal);
+
+                if (cmp != 0) {
+                    return sortPattern[i].isAscending ? cmp < 0 : cmp > 0;
+                }
+            }
+        } else {
+            for (size_t i = 0; i < sortPattern.size(); i++) {
+                auto [keyTag, keyVal] = _keys[i][_blockIndex];
+                auto [itemTag, itemVal] = itemArray->getAt(i);
+                int32_t cmp = compare<TopBottomSense::kBottom>(keyTag, keyVal, itemTag, itemVal);
+
+                if (cmp != 0) {
+                    return sortPattern[i].isAscending ? cmp < 0 : cmp > 0;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    std::pair<value::TypeTags, value::Value> getOwnedKeyImpl() final {
+        auto [keysArrTag, keysArrVal] = value::makeNewArray();
+        value::ValueGuard keysArrGuard{keysArrTag, keysArrVal};
+        auto keysArr = value::getArrayView(keysArrVal);
+
+        for (size_t i = 0; i < _keys.size(); ++i) {
+            auto [keyTag, keyVal] = _keys[i][_blockIndex];
+            std::tie(keyTag, keyVal) = value::copyValue(keyTag, keyVal);
+            keysArr->push_back(keyTag, keyVal);
+        }
+
+        keysArrGuard.reset();
+        return std::pair{keysArrTag, keysArrVal};
+    }
+
+    std::pair<value::TypeTags, value::Value> getOwnedValueImpl() final {
+        auto [valuesArrTag, valuesArrVal] = value::makeNewArray();
+        value::ValueGuard valuesArrGuard{valuesArrTag, valuesArrVal};
+        auto valuesArr = value::getArrayView(valuesArrVal);
+
+        for (size_t i = 0; i < _values.size(); ++i) {
+            auto [valueTag, valueVal] = _values[i][_blockIndex];
+            std::tie(valueTag, valueVal) = value::copyValue(valueTag, valueVal);
+            valuesArr->push_back(valueTag, valueVal);
+        }
+
+        valuesArrGuard.reset();
+        return std::pair{valuesArrTag, valuesArrVal};
+    }
+
+    void initForBlockIndex(size_t blockIdx) {
+        _blockIndex = blockIdx;
+
+        if (!_decomposedKey) {
+            setDirectKeyArg({false, _keys[0].tags()[blockIdx], _keys[0].vals()[blockIdx]});
+        }
+        if (!_decomposedValue) {
+            setDirectValueArg({false, _values[0].tags()[blockIdx], _values[0].vals()[blockIdx]});
+        }
+    }
+
+    std::vector<value::DeblockedTagVals> _keys;
+    std::vector<value::DeblockedTagVals> _values;
+    size_t _blockIndex = 0;
+};
+
+template <TopBottomSense Sense, bool ValueIsDecomposedArray>
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTopBottomNImpl(
+    ArityType arity) {
+
+    auto [bitsetOwned, bitsetTag, bitsetVal] = getFromStack(1);
+    tassert(8448708,
+            "Expected bitset argument to be of valueBlock type",
+            bitsetTag == value::TypeTags::valueBlock);
+
+    auto [sortSpecOwned, sortSpecTag, sortSpecVal] = getFromStack(2);
+    tassert(8448709, "Argument must be of sortSpec type", sortSpecTag == value::TypeTags::sortSpec);
+
+    size_t numKeysBlocks = 1;
+    bool keyIsDecomposed = false;
+    auto [_, numKeysBlocksTag, numKeysBlocksVal] = getFromStack(3);
+    if (numKeysBlocksTag == value::TypeTags::NumberInt32) {
+        numKeysBlocks = static_cast<size_t>(value::bitcastTo<int32_t>(numKeysBlocksVal));
+        keyIsDecomposed = true;
+    } else {
+        tassert(8448710,
+                "Expected numKeys to be Null or Int32",
+                numKeysBlocksTag == value::TypeTags::Null);
+    }
+
+    constexpr size_t keysBlocksStartOffset = 4;
+    const size_t valuesBlocksStartOffset = keysBlocksStartOffset + numKeysBlocks;
+    const size_t numValuesBlocks = ValueIsDecomposedArray ? arity - valuesBlocksStartOffset : 1;
+
+    auto [stateTag, stateVal] = moveOwnedFromStack(0);
+    value::ValueGuard stateGuard{stateTag, stateVal};
+
+    auto* bitsetBlock = value::bitcastTo<value::ValueBlock*>(bitsetVal);
+    auto ss = value::getSortSpecView(sortSpecVal);
+
+    if (!keyIsDecomposed && !ValueIsDecomposedArray) {
+        stateGuard.reset();
+        return blockNativeAggTopBottomNImpl<Sense, ValueIsDecomposedArray>(
+            stateTag, stateVal, bitsetBlock, ss, numKeysBlocks, numValuesBlocks);
+    }
+
+    auto [state, array, startIdx, maxSize, memUsage, memLimit, isGroupAccum] =
+        getMultiAccState(stateTag, stateVal);
+    invariant(maxSize > 0);
+
+    value::DeblockedTagVals bitset = bitsetBlock->extract();
+
+    tassert(8448711, "Expected bitset to be all bools", allBools(bitset.tags(), bitset.count()));
+
+    std::vector<value::DeblockedTagVals> keys;
+    std::vector<value::DeblockedTagVals> values;
+    keys.reserve(numKeysBlocks);
+    values.reserve(numValuesBlocks);
+
+    for (size_t i = 0; i < numKeysBlocks; ++i) {
+        auto [_, keysBlockTag, keysBlockVal] = getFromStack(keysBlocksStartOffset + i);
+        tassert(8448712,
+                "Expected argument to be of valueBlock type",
+                keysBlockTag == value::TypeTags::valueBlock);
+
+        keys.emplace_back(value::getValueBlock(keysBlockVal)->extract());
+
+        tassert(8448713,
+                "Expected block and bitset to be the same size",
+                keys.back().count() == bitset.count());
+    }
+
+    for (size_t i = 0; i < numValuesBlocks; ++i) {
+        auto [_, valuesBlockTag, valuesBlockVal] = getFromStack(valuesBlocksStartOffset + i);
+        tassert(8448714,
+                "Expected argument to be of valueBlock type",
+                valuesBlockTag == value::TypeTags::valueBlock);
+
+        values.emplace_back(value::getValueBlock(valuesBlockVal)->extract());
+
+        tassert(8448715,
+                "Expected block and bitset to be the same size",
+                values.back().count() == bitset.count());
+    }
+
+    TopBottomArgsFromBlocks topBottomArgs{
+        Sense, ss, keyIsDecomposed, ValueIsDecomposedArray, std::move(keys), std::move(values)};
+
+    for (size_t blockIndex = 0; blockIndex < bitset.count(); ++blockIndex) {
+        if (value::bitcastTo<bool>(bitset[blockIndex].second)) {
+            topBottomArgs.initForBlockIndex(blockIndex);
+
+            if constexpr (Sense == TopBottomSense::kTop) {
+                memUsage = aggTopNAdd(state, array, maxSize, memUsage, memLimit, topBottomArgs);
+            } else {
+                memUsage = aggBottomNAdd(state, array, maxSize, memUsage, memLimit, topBottomArgs);
+            }
+        }
+    }
+
+    stateGuard.reset();
+    return {true, stateTag, stateVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTopN(ArityType arity) {
+    return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kTop, false>(arity);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggBottomN(
+    ArityType arity) {
+    return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kBottom, false>(arity);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggTopNArray(
+    ArityType arity) {
+    return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kTop, true>(arity);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockAggBottomNArray(
+    ArityType arity) {
+    return builtinValueBlockAggTopBottomNImpl<TopBottomSense::kBottom, true>(arity);
 }
 
 enum class ArithmeticOp { Addition, Subtraction, Multiplication, Division };
@@ -1817,4 +2323,39 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockConver
         true, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(res.release())};
 }
 
+template <bool IsAscending>
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGetSortKey(
+    ArityType arity) {
+    invariant(arity == 1 || arity == 2);
+
+    CollatorInterface* collator = nullptr;
+    if (arity == 2) {
+        auto [_, collTag, collVal] = getFromStack(1);
+        if (collTag == value::TypeTags::collator) {
+            collator = value::getCollatorView(collVal);
+        }
+    }
+
+    auto [_, blockTag, blockVal] = getFromStack(0);
+    tassert(8448716, "Expected argument to be valueBlock", blockTag == value::TypeTags::valueBlock);
+
+    auto block = value::getValueBlock(blockVal);
+
+    auto outBlock = IsAscending ? block->map(getSortKeyAscOp.bindParams(collator))
+                                : block->map(getSortKeyDescOp.bindParams(collator));
+
+    return {true,
+            value::TypeTags::valueBlock,
+            value::bitcastFrom<value::ValueBlock*>(outBlock.release())};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGetSortKeyAsc(
+    ArityType arity) {
+    return builtinValueBlockGetSortKey<true /*IsAscending*/>(arity);
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockGetSortKeyDesc(
+    ArityType arity) {
+    return builtinValueBlockGetSortKey<false /*IsAscending*/>(arity);
+}
 }  // namespace mongo::sbe::vm

@@ -143,7 +143,6 @@ public:
                 .canonicalQuery = *cq,
                 .collections = collectionsAccessor,
                 .plannerOptions = QueryPlannerParams::DEFAULT,
-                .ignoreQuerySettings = true,
             },
         };
 
@@ -232,7 +231,7 @@ public:
         internalQueryPlanEvaluationMaxResults.store(100);
     }
 
-    ~PlanRankingPreferNonFailed() {
+    ~PlanRankingPreferNonFailed() override {
         internalQueryMaxBlockingSortMemoryUsageBytes.store(
             _internalQueryMaxBlockingSortMemoryUsageBytes);
         internalQueryPlanEvaluationMaxResults.store(_internalQueryPlanEvaluationMaxResults);
@@ -721,7 +720,7 @@ class All : public unittest::OldStyleSuiteSpecification {
 public:
     All() : OldStyleSuiteSpecification("query_plan_ranking") {}
 
-    void setupTests() {
+    void setupTests() override {
         add<PlanRankingIntersectOverride>();
         add<PlanRankingIntersectWithBackup>();
         add<PlanRankingPreferCovered>();

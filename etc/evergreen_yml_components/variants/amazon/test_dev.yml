@@ -76,6 +76,7 @@ buildvariants:
 - <<: *linux-arm64-dynamic-compile-params
   name: &amazon-linux2-arm64-crypt-compile amazon-linux2-arm64-crypt-compile
   display_name: "! Amazon Linux 2 arm64 Crypt Compile"
+  tags: ["bazel_check"]
   expansions:
     <<: *linux-arm64-dynamic-enterprise-compile-expansions
     compile_variant: *amazon-linux2-arm64-crypt-compile
@@ -86,30 +87,54 @@ buildvariants:
 - <<: *linux-arm64-dynamic-compile-params
   name: &amazon-linux2-arm64-dynamic-compile amazon-linux2-arm64-dynamic-compile
   display_name: "! Amazon Linux 2 arm64 Enterprise Shared Library Compile & Static Analysis"
+  tags: ["bazel_check"]
   expansions:
     <<: *linux-arm64-dynamic-enterprise-compile-expansions
     clang_tidy_toolchain: v4
     compile_variant: *amazon-linux2-arm64-dynamic-compile
   tasks:
-    - name: clang_tidy
-      distros:
-        - amazon2-arm64-xlarge
     - name: compile_ninja_quick_TG
     - name: compile_test_parallel_unittest_stream_TG
     - name: compile_test_parallel_core_stream_TG
     - name: compile_test_parallel_dbtest_stream_TG
     - name: compile_integration_and_test_parallel_stream_TG
-    - name: generate_buildid_to_debug_symbols_mapping
-    - name: iwyu_self_test
-    - name: .lint
-    - name: resmoke_validation_tests
-    - name: server_discovery_and_monitoring_json_test
-    - name: server_selection_json_test
-    - name: run_pretty_printer_tests
+    - name: .development_critical_single_variant !.requires_large_host
+    - name: .development_critical_single_variant .requires_large_host
+      distros:
+      - amazon2-arm64-xlarge
+    - name: .release_critical .requires_compile_variant !.incompatible_development_variant !.stitch !.crypt
+    - name: .default .requires_compile_variant !.incompatible_development_variant
+
+- &enterprise-amazon-linux2-arm64-template
+  <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
+  name: &enterprise-amazon-linux2-arm64 enterprise-amazon-linux2-arm64
+  display_name: "* Amazon Linux 2 arm64 Enterprise"
+  cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
+  run_on:
+    - amazon2-arm64-small
+  stepback: true
+  expansions: &enterprise-amazon-linux2-arm64-all-feature-flags-expansions
+    <<: *amazon_linux2_arm64_dynamic_expansions
+    scons_cache_scope: shared
+    scons_cache_mode: all
+    has_packages: false
+    jstestfuzz_num_generated_files: 40
+    jstestfuzz_concurrent_num_files: 10
+    target_resmoke_time: 10
+    max_sub_suites: 5
+    idle_timeout_factor: 1.5
+    exec_timeout_factor: 1.5
+    test_flags: >-
+      --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source
+  tasks:
+  - name: .development_critical !.requires_compile_variant !.incompatible_development_variant !.requires_all_feature_flags
+  - name: .release_critical !.requires_compile_variant !.incompatible_development_variant !.requires_all_feature_flags
+  - name: .default !.requires_compile_variant !.incompatible_development_variant !.requires_all_feature_flags
 
 - name: &commit-queue commit-queue
   display_name: "~ Commit Queue"
   cron: "0 4 * * 0" # From the ${project_weekly_cron} parameter
+  tags: ["bazel_check"]
   run_on:
     - amazon2-arm64-small
   stepback: false
@@ -145,16 +170,10 @@ buildvariants:
   - name: compile_test_parallel_dbtest_stream_TG
     distros:
     - amazon2-arm64-xlarge-commitqueue
-  - name: jsCore
+  - name: .development_critical_single_variant !.requires_large_host !clang_tidy !libdeps_graph_linting
+  - name: .development_critical .requires_large_host_commit_queue
     distros:
     - amazon2-arm64-large
-  - name: .lint
-  - name: test_api_version_compatibility
-  - name: validate_commit_message
-  - name: lint_large_files_check
-  - name: check_feature_flag_tags
-  - name: resmoke_validation_tests
-  - name: version_gen_validation
 
 - <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
   name: amazon-linux2-arm64-try-sbe-engine

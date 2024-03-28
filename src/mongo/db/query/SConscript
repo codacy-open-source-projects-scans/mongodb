@@ -534,6 +534,7 @@ env.CppUnitTest(
         'shard_filterer_factory_mock.cpp',
         'sort_pattern_test.cpp',
         'util/deferred_test.cpp',
+        'util/hash_roaring_set_test.cpp',
         'util/memory_util_test.cpp',
         'view_response_formatter_test.cpp',
     ],
@@ -616,5 +617,16 @@ env.Benchmark(
         '$BUILD_DIR/mongo/db/query_exec',
         '$BUILD_DIR/mongo/db/query_expressions',
         '$BUILD_DIR/mongo/db/service_context_non_d',
+    ],
+)
+
+env.Benchmark(
+    target='query_planner_bm',
+    source=[
+        'query_planner_bm.cpp',
+    ],
+    LIBDEPS=[
+        'query_planner',
+        'query_test_service_context',
     ],
 )

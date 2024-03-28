@@ -256,7 +256,10 @@ std::vector<MetadataInconsistencyItem> _checkInconsistenciesBetweenBothCatalogs(
     }
 
     // Check shardKey index inconsistencies.
-    if (catalogUUID == localUUID) {
+    // Skip the check in case of unsplittable collections as we don't strictly require an index on
+    // the shard key for unsplittable collections.
+    const bool isSharded = !catalogColl.getUnsplittable();
+    if (catalogUUID == localUUID && isSharded) {
         _checkShardKeyIndexInconsistencies(
             opCtx, nss, shardId, catalogColl.getKeyPattern().toBSON(), localColl, inconsistencies);
     }
@@ -528,9 +531,7 @@ std::vector<MetadataInconsistencyItem> checkCollectionMetadataConsistency(
             // Case where we have found a local collection that is not in the sharding catalog.
             const auto& nss = localNss;
 
-            // TODO SERVER-59957 use function introduced in this ticket to decide if a namespace
-            // should be ignored and stop using isNamepsaceAlwaysUntracked().
-            if (!nss.isNamespaceAlwaysUntracked() && shardId != primaryShardId) {
+            if (!nss.isShardLocalNamespace() && shardId != primaryShardId) {
                 inconsistencies.emplace_back(
                     makeInconsistency(MetadataInconsistencyTypeEnum::kMisplacedCollection,
                                       MisplacedCollectionDetails{nss, shardId, localColl->uuid()}));
@@ -544,9 +545,7 @@ std::vector<MetadataInconsistencyItem> checkCollectionMetadataConsistency(
         // hidden unsharded collection inconsistency if we are not the db primary shard.
         while (itLocalCollections != localCatalogCollections.end()) {
             const auto localColl = itLocalCollections->get();
-            // TODO SERVER-59957 use function introduced in this ticket to decide if a namespace
-            // should be ignored and stop using isNamepsaceAlwaysUntracked().
-            if (!localColl->ns().isNamespaceAlwaysUntracked()) {
+            if (!localColl->ns().isShardLocalNamespace()) {
                 inconsistencies.emplace_back(makeInconsistency(
                     MetadataInconsistencyTypeEnum::kMisplacedCollection,
                     MisplacedCollectionDetails{localColl->ns(), shardId, localColl->uuid()}));

@@ -36,6 +36,7 @@
 #include <string>
 #include <vector>
 
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/concurrency/cond_var_lock_grant_notification.h"
 #include "mongo/db/concurrency/fast_map_noalloc.h"
 #include "mongo/db/concurrency/flow_control_ticketholder.h"
@@ -112,7 +113,8 @@ public:
     ClientState getClientState() const;
 
     bool shouldWaitForTicket(OperationContext* opCtx) const {
-        return AdmissionContext::get(opCtx).getPriority() != AdmissionContext::Priority::kExempt;
+        return ExecutionAdmissionContext::get(opCtx).getPriority() !=
+            AdmissionContext::Priority::kExempt;
     }
 
     /**
@@ -555,12 +557,12 @@ public:
         return getLockMode(resourceIdReplicationStateTransitionLock) == MODE_X;
     }
 
-    void setTicketQueueTime(Milliseconds queueTime) {
-        _timeQueuedForTicketMicros = duration_cast<Microseconds>(queueTime);
+    void addTicketQueueTime(Milliseconds queueTime) {
+        _timeQueuedForTicketMicros += duration_cast<Microseconds>(queueTime);
     }
 
-    void setFlowControlTicketQueueTime(Milliseconds queueTime) {
-        _flowControlStats.timeAcquiringMicros =
+    void addFlowControlTicketQueueTime(Milliseconds queueTime) {
+        _flowControlStats.timeAcquiringMicros +=
             durationCount<Microseconds>(duration_cast<Microseconds>(queueTime));
     }
 

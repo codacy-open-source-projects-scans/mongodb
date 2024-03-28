@@ -88,6 +88,7 @@
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/bulk_write_command_modifier.h"
+#include "mongo/s/write_ops/coordinate_multi_update_util.h"
 #include "mongo/s/write_ops/write_op.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
 #include "mongo/util/assert_util.h"
@@ -117,7 +118,6 @@ void executeChildBatches(OperationContext* opCtx,
                          boost::optional<bool> allowShardKeyUpdatesWithoutFullShardKeyInQuery) {
     // We are starting a new round of execution and so this should have been reset to false.
     invariant(!bulkWriteOp.shouldStopCurrentRound());
-
     std::vector<AsyncRequestsSender::Request> requests;
     for (auto& childBatch : childBatches) {
         bulkWriteOp.noteTargetedShard(*childBatch.second);
@@ -532,16 +532,7 @@ void executeRetryableTimeseriesUpdate(OperationContext* opCtx,
     }
     if (!responseStatus.isOK()) {
         // Set an error for the operation.
-        bulkWriteResponse.setCursor(BulkWriteCommandResponseCursor(
-            0,  // cursorId
-            std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0, responseStatus)},
-            NamespaceString::makeBulkWriteNSS(boost::none)));
-        bulkWriteResponse.setNErrors(1);
-        bulkWriteResponse.setNInserted(0);
-        bulkWriteResponse.setNMatched(0);
-        bulkWriteResponse.setNModified(0);
-        bulkWriteResponse.setNUpserted(0);
-        bulkWriteResponse.setNDeleted(0);
+        bulkWriteResponse = createEmulatedErrorReply(responseStatus, 1, boost::none);
     }
 
     // We should only get back one reply item for the single update, unless we are in errorsOnly
@@ -591,7 +582,7 @@ void executeWriteWithoutShardKey(
         opCtx->isRetryableWrite() || opCtx->inMultiDocumentTransaction();
 
     // If there is only 1 targetable shard, we can skip using the two phase write protocol.
-    if (targeter->getNShardsOwningChunks() == 1) {
+    if (childBatches.size() == 1) {
         executeChildBatches(opCtx,
                             targeters,
                             childBatches,
@@ -672,16 +663,7 @@ void executeWriteWithoutShardKey(
 
         if (!responseStatus.isOK()) {
             // Set an error for the operation.
-            bulkWriteResponse.setCursor(BulkWriteCommandResponseCursor(
-                0,  // cursorId
-                std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0, responseStatus)},
-                NamespaceString::makeBulkWriteNSS(boost::none)));
-            bulkWriteResponse.setNErrors(1);
-            bulkWriteResponse.setNInserted(0);
-            bulkWriteResponse.setNMatched(0);
-            bulkWriteResponse.setNModified(0);
-            bulkWriteResponse.setNUpserted(0);
-            bulkWriteResponse.setNDeleted(0);
+            bulkWriteResponse = createEmulatedErrorReply(responseStatus, 1, boost::none);
         }
 
         // We should get back just one reply item for the single update we are running.
@@ -715,7 +697,6 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
     TargetedBatchMap& childBatches,
     BulkWriteOp& bulkWriteOp,
     stdx::unordered_map<NamespaceString, TrackedErrors>& errorsPerNamespace) {
-
     executeChildBatches(opCtx,
                         targeters,
                         childBatches,
@@ -723,7 +704,33 @@ void executeNonTargetedSingleWriteWithoutShardKeyWithId(
                         errorsPerNamespace,
                         /*allowShardKeyUpdatesWithoutFullShardKeyInQuery=*/boost::none);
 
-    bulkWriteOp.finishExecutingWriteWithoutShardKeyWithId(childBatches);
+    // We need to know if the targeters encountered a Stale Shard Response
+    // to determine whether to parse the _deferredResponses.
+    bulkWriteOp.noteStaleResponses(targeters, errorsPerNamespace);
+    bulkWriteOp.finishExecutingWriteWithoutShardKeyWithId();
+}
+
+void coordinateMultiUpdate(OperationContext* opCtx,
+                           TargetedBatchMap& childBatches,
+                           BulkWriteOp& bulkWriteOp) {
+    auto bulkWriteResponse = coordinate_multi_update_util::executeCoordinateMultiUpdate(
+        opCtx, childBatches, bulkWriteOp);
+
+    const auto& replyItems = bulkWriteResponse.getCursor().getFirstBatch();
+    tassert(8127600,
+            "Unexpected reply for coordinateMultiUpdate",
+            replyItems.size() == 1 || replyItems.size() == 0);
+    boost::optional<BulkWriteReplyItem> replyItem = boost::none;
+    if (replyItems.size() == 1) {
+        replyItem = replyItems[0];
+    }
+
+    bulkWriteOp.noteWriteOpFinalResponse(
+        coordinate_multi_update_util::getWriteOpIndex(childBatches),
+        replyItem,
+        bulkWriteResponse,
+        ShardWCError(childBatches.begin()->first, WriteConcernErrorDetail{}),
+        bulkWriteResponse.getRetriedStmtIds());
 }
 
 BulkWriteReplyInfo execute(OperationContext* opCtx,
@@ -780,6 +787,8 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
             } else if (targetStatus.getValue() == WriteType::WithoutShardKeyWithId) {
                 executeNonTargetedSingleWriteWithoutShardKeyWithId(
                     opCtx, targeters, childBatches, bulkWriteOp, errorsPerNamespace);
+            } else if (targetStatus.getValue() == WriteType::MultiWriteBlockingMigrations) {
+                coordinateMultiUpdate(opCtx, childBatches, bulkWriteOp);
             } else {
                 // Send the child batches and wait for responses.
                 executeChildBatches(opCtx,
@@ -792,7 +801,9 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
 
             // If we saw any staleness errors, tell the targeters to invalidate their cache
             // so that they may be refreshed.
-            bulkWriteOp.noteStaleResponses(targeters, errorsPerNamespace);
+            // The staleness errors for WithoutShardKeyWithId writes have been evaluated earlier.
+            if (targetStatus.getValue() != WriteType::WithoutShardKeyWithId)
+                bulkWriteOp.noteStaleResponses(targeters, errorsPerNamespace);
         }
 
         rounds++;
@@ -839,7 +850,7 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
             numRoundsWithoutProgress = 0;
         }
         numCompletedOps = currCompletedOps;
-
+        bulkWriteOp.setTargeterHasStaleShardResponse(false);
         LOGV2_DEBUG(7934202,
                     2,
                     "Completed a round of bulkWrite execution",
@@ -866,6 +877,28 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
     return bulkWriteOp.generateReplyInfo();
 }
 
+BulkWriteCommandReply createEmulatedErrorReply(const Status& error,
+                                               int errorCount,
+                                               const boost::optional<TenantId>& tenantId) {
+    std::vector<BulkWriteReplyItem> emulatedReplies;
+    emulatedReplies.reserve(errorCount);
+
+    for (int i = 0; i < errorCount; i++) {
+        emulatedReplies.emplace_back(i, error);
+    }
+
+    BulkWriteCommandReply emulatedReply;
+    emulatedReply.setCursor(BulkWriteCommandResponseCursor(
+        0, emulatedReplies, NamespaceString::makeBulkWriteNSS(tenantId)));
+    emulatedReply.setNErrors(errorCount);
+    emulatedReply.setNDeleted(0);
+    emulatedReply.setNModified(0);
+    emulatedReply.setNInserted(0);
+    emulatedReply.setNUpserted(0);
+    emulatedReply.setNMatched(0);
+    return emulatedReply;
+}
+
 BulkWriteOp::BulkWriteOp(OperationContext* opCtx, const BulkWriteCommandRequest& clientRequest)
     : _opCtx(opCtx),
       _clientRequest(clientRequest),
@@ -874,6 +907,7 @@ BulkWriteOp::BulkWriteOp(OperationContext* opCtx, const BulkWriteCommandRequest&
       _inTransaction(static_cast<bool>(TransactionRouter::get(opCtx))),
       _isRetryableWrite(opCtx->isRetryableWrite()) {
     _writeOps.reserve(_clientRequest.getOps().size());
+    _retriedStmtIds = stdx::unordered_set<StmtId>();
     for (size_t i = 0; i < _clientRequest.getOps().size(); ++i) {
         _writeOps.emplace_back(BatchItemRef(&_clientRequest, i), _inTransaction);
     }
@@ -1212,11 +1246,10 @@ void BulkWriteOp::processChildBatchResponseFromRemote(
 void BulkWriteOp::noteWriteOpResponse(const std::unique_ptr<TargetedWrite>& targetedWrite,
                                       WriteOp& op,
                                       const BulkWriteCommandReply& commandReply,
+                                      size_t numOps,
                                       const boost::optional<const BulkWriteReplyItem&> replyItem) {
     if (op.getWriteType() == WriteType::WithoutShardKeyWithId) {
-        // Since WithoutShardKeyWithId is always sent in its own batch, the top-level summary fields
-        // give us information for that specific write.
-        // Here, we have to extract the fields that are equivalent to 'n' in 'update' and 'delete'
+        // We have to extract the fields that are equivalent to 'n' in 'update' and 'delete'
         // command replies:
         // - For an update, this is 'nMatched' (rather than 'nUpdated', as it is possible the update
         // matches a document but the update modification is a no-op, e.g. it sets a field to its
@@ -1225,7 +1258,8 @@ void BulkWriteOp::noteWriteOpResponse(const std::unique_ptr<TargetedWrite>& targ
         // Since the write is either an update or a delete, summing these two values gives us the
         // correct value of 'n'.
         auto n = commandReply.getNMatched() + commandReply.getNDeleted();
-        op.noteWriteWithoutShardKeyWithIdResponse(*targetedWrite, n, 1, replyItem);
+        op.noteWriteWithoutShardKeyWithIdResponse(*targetedWrite, n, numOps, replyItem);
+
         if (op.getWriteState() == WriteOpState_Completed) {
             _shouldStopCurrentRound = true;
         }
@@ -1238,6 +1272,11 @@ void BulkWriteOp::noteChildBatchResponse(
     const TargetedWriteBatch& targetedBatch,
     const BulkWriteCommandReply& commandReply,
     boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace) {
+    int firstTargetedWriteOpIdx = targetedBatch.getWrites().front()->writeOpRef.first;
+    bool isWithoutShardKeyWithIdWrite =
+        (_writeOps[firstTargetedWriteOpIdx].getWriteType() == WriteType::WithoutShardKeyWithId);
+    bool shouldDeferWriteWithoutShardKeyReponse =
+        isWithoutShardKeyWithIdWrite && targetedBatch.getNumOps() > 1;
 
     const auto& replyItems = exhaustCursorForReplyItems(_opCtx, targetedBatch, commandReply);
 
@@ -1270,7 +1309,15 @@ void BulkWriteOp::noteChildBatchResponse(
             tassert(8266001,
                     "bulkWrite should always get replies when not in errorsOnly",
                     _clientRequest.getErrorsOnly());
-            noteWriteOpResponse(write, writeOp, commandReply, boost::none);
+            if (shouldDeferWriteWithoutShardKeyReponse) {
+                if (!_deferredResponses) {
+                    _deferredResponses.emplace();
+                }
+                _deferredResponses->push_back(
+                    std::make_tuple(&targetedBatch, commandReply, boost::none));
+            }
+            noteWriteOpResponse(
+                write, writeOp, commandReply, targetedBatch.getNumOps(), boost::none);
             continue;
         }
 
@@ -1320,7 +1367,8 @@ void BulkWriteOp::noteChildBatchResponse(
             tassert(8516601,
                     "bulkWrite received more replies than writes",
                     _clientRequest.getErrorsOnly());
-            noteWriteOpResponse(write, writeOp, commandReply, boost::none);
+            noteWriteOpResponse(
+                write, writeOp, commandReply, targetedBatch.getNumOps(), boost::none);
             continue;
         }
 
@@ -1338,7 +1386,8 @@ void BulkWriteOp::noteChildBatchResponse(
                     "bulkWrite should get a reply for every write op when not in errorsOnly mode",
                     _clientRequest.getErrorsOnly());
 
-            noteWriteOpResponse(write, writeOp, commandReply, boost::none);
+            noteWriteOpResponse(
+                write, writeOp, commandReply, targetedBatch.getNumOps(), boost::none);
             // We need to keep the replyIndex where it is until we see the op matching its index.
             replyIndex--;
             continue;
@@ -1346,8 +1395,16 @@ void BulkWriteOp::noteChildBatchResponse(
 
         _approximateSize += reply.getApproximateSize();
 
+        if (shouldDeferWriteWithoutShardKeyReponse) {
+            if (!_deferredResponses) {
+                _deferredResponses.emplace();
+            }
+            auto newReply = BulkWriteReplyItem::parse(reply.toBSON());
+            _deferredResponses->push_back(std::make_tuple(&targetedBatch, commandReply, newReply));
+        }
+
         if (reply.getStatus().isOK()) {
-            noteWriteOpResponse(write, writeOp, commandReply, reply);
+            noteWriteOpResponse(write, writeOp, commandReply, targetedBatch.getNumOps(), reply);
         } else {
             lastError.emplace(write->writeOpRef.first, reply.getStatus());
             writeOp.noteWriteError(*write, *lastError);
@@ -1382,11 +1439,8 @@ void BulkWriteOp::noteChildBatchResponse(
 
     if (auto retriedStmtIds = commandReply.getRetriedStmtIds();
         retriedStmtIds && !retriedStmtIds->empty()) {
-        if (_retriedStmtIds) {
-            _retriedStmtIds->insert(
-                _retriedStmtIds->end(), retriedStmtIds->begin(), retriedStmtIds->end());
-        } else {
-            _retriedStmtIds = retriedStmtIds;
+        for (auto retriedStmtId : *retriedStmtIds) {
+            _retriedStmtIds->insert(retriedStmtId);
         }
     }
 }
@@ -1474,23 +1528,8 @@ void BulkWriteOp::noteChildBatchError(const TargetedWriteBatch& targetedBatch,
                                       const Status& status) {
     // Treat an error to get a batch response as failures of the contained write(s).
     const int numErrors = _clientRequest.getOrdered() ? 1 : targetedBatch.getWrites().size();
-
-    std::vector<BulkWriteReplyItem> emulatedReplies;
-    emulatedReplies.reserve(numErrors);
-
-    for (int i = 0; i < numErrors; i++) {
-        emulatedReplies.emplace_back(i, status);
-    }
-
-    auto emulatedReply = BulkWriteCommandReply();
-    emulatedReply.setCursor(BulkWriteCommandResponseCursor(
-        0, emulatedReplies, NamespaceString::makeBulkWriteNSS(_clientRequest.getDollarTenant())));
-    emulatedReply.setNErrors(numErrors);
-    emulatedReply.setNDeleted(0);
-    emulatedReply.setNModified(0);
-    emulatedReply.setNInserted(0);
-    emulatedReply.setNUpserted(0);
-    emulatedReply.setNMatched(0);
+    auto emulatedReply =
+        createEmulatedErrorReply(status, numErrors, _clientRequest.getDollarTenant());
 
     // This error isn't actually specific to any namespaces and so we do not want to track it.
     noteChildBatchResponse(targetedBatch,
@@ -1535,11 +1574,8 @@ void BulkWriteOp::noteWriteOpFinalResponse(
     }
 
     if (retriedStmtIds && !retriedStmtIds->empty()) {
-        if (_retriedStmtIds) {
-            _retriedStmtIds->insert(
-                _retriedStmtIds->end(), retriedStmtIds->begin(), retriedStmtIds->end());
-        } else {
-            _retriedStmtIds = retriedStmtIds;
+        for (auto retriedStmtId : *retriedStmtIds) {
+            _retriedStmtIds->insert(retriedStmtId);
         }
     }
 }
@@ -1650,11 +1686,16 @@ BulkWriteReplyInfo BulkWriteOp::generateReplyInfo() {
                 break;
         }
     }
-
+    std::vector<StmtId> retriedStmtIds;
+    if (_retriedStmtIds.has_value()) {
+        for (auto stmtId : *_retriedStmtIds) {
+            retriedStmtIds.emplace_back(stmtId);
+        }
+    }
     return {std::move(replyItems),
             summary,
             generateWriteConcernError(),
-            _retriedStmtIds,
+            retriedStmtIds,
             std::move(_stats)};
 }
 
@@ -1669,11 +1710,9 @@ void BulkWriteOp::saveWriteConcernError(ShardId shardId,
     auto opIdx = writeBatch.getWrites().front()->writeOpRef.first;
     if (_writeOps[opIdx].getWriteType() == WriteType::WithoutShardKeyWithId) {
         if (!_deferredWCErrors) {
-            _deferredWCErrors = std::make_pair(opIdx, std::vector{ShardWCError(shardId, wce)});
-        } else {
-            invariant(_deferredWCErrors->first == opIdx);
-            _deferredWCErrors->second.push_back(ShardWCError(shardId, wce));
+            _deferredWCErrors.emplace();
         }
+        (*_deferredWCErrors)[opIdx].push_back(ShardWCError(shardId, wce));
     } else {
         _wcErrors.push_back(ShardWCError(shardId, wce));
     }
@@ -1715,6 +1754,7 @@ void BulkWriteOp::noteStaleResponses(
                             "status"_attr = error.error.getStatus());
                 targeter->noteStaleShardResponse(
                     _opCtx, error.endpoint, *error.error.getStatus().extraInfo<StaleConfigInfo>());
+                setTargeterHasStaleShardResponse(true);
             }
             for (const auto& error : errors->second.getErrors(ErrorCodes::StaleDbVersion)) {
                 LOGV2_DEBUG(7279202,
@@ -1726,6 +1766,7 @@ void BulkWriteOp::noteStaleResponses(
                     _opCtx,
                     error.endpoint,
                     *error.error.getStatus().extraInfo<StaleDbRoutingVersion>());
+                setTargeterHasStaleShardResponse(true);
             }
             for (const auto& error :
                  errors->second.getErrors(ErrorCodes::CannotImplicitlyCreateCollection)) {
@@ -1741,19 +1782,51 @@ void BulkWriteOp::noteStaleResponses(
     }
 }
 
-void BulkWriteOp::finishExecutingWriteWithoutShardKeyWithId(TargetedBatchMap& childBatches) {
+void BulkWriteOp::finishExecutingWriteWithoutShardKeyWithId() {
+    if (_deferredResponses) {
+        for (unsigned long idx = 0; idx < _deferredResponses->size(); idx++) {
+            auto [targetedWriteBatch, response, replyItem] = _deferredResponses->at(idx);
+            LOGV2_DEBUG(864041,
+                        4,
+                        "Processing deferred response for WithoutShardKeyWithId: ",
+                        "idx"_attr = idx,
+                        "shardId"_attr = targetedWriteBatch->getShardId().toString(),
+                        "responseN"_attr = response.getNModified());
+            const auto& write =
+                targetedWriteBatch->getWrites()[idx % targetedWriteBatch->getWrites().size()];
+            WriteOp& writeOp = _writeOps[write->writeOpRef.first];
+            if (targeterHasStaleShardResponse()) {
+                if (writeOp.getWriteState() != WriteOpState_Ready) {
+                    writeOp.resetWriteToReady();
+                    _shouldStopCurrentRound = false;
+                }
+            } else if (writeOp.getWriteState() != WriteOpState_Error) {
+                auto nVal = response.getNModified() + response.getNDeleted();
+                auto repl = replyItem.has_value()
+                    ? boost::optional<const BulkWriteReplyItem&>(replyItem.value())
+                    : boost::optional<const BulkWriteReplyItem&>(boost::none);
+                writeOp.noteWriteWithoutShardKeyWithIdResponse(
+                    *write, nVal, targetedWriteBatch->getNumOps(), repl);
+            }
+        }
+        _deferredResponses = boost::none;
+    }
+
     // See _deferredWCErrors for details.
     if (_deferredWCErrors) {
-        auto& [opIdx, wcErrors] = _deferredWCErrors.value();
-        auto& op = _writeOps[opIdx];
-        invariant(op.getWriteType() == WriteType::WithoutShardKeyWithId);
-        if (op.getWriteState() >= WriteOpState_Completed) {
-            _wcErrors.insert(_wcErrors.end(), wcErrors.begin(), wcErrors.end());
+        for (auto& it : *_deferredWCErrors) {
+            auto& op = _writeOps[it.first];
+            invariant(op.getWriteType() == WriteType::WithoutShardKeyWithId);
+            auto& wcErrors = it.second;
+            if (op.getWriteState() >= WriteOpState_Completed) {
+                _wcErrors.insert(_wcErrors.end(), wcErrors.begin(), wcErrors.end());
+            } else {
+                // If we are here for any op it means that the whole batch is retried.
+                break;
+            }
         }
         _deferredWCErrors = boost::none;
     }
-    // See _shouldStopCurrentRound for details.
-    _shouldStopCurrentRound = false;
 }
 
 int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {

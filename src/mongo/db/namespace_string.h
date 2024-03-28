@@ -109,6 +109,10 @@ public:
     // Prefix for temporary resharding collection.
     static constexpr StringData kTemporaryReshardingCollectionPrefix = "system.resharding."_sd;
 
+    // Prefix for temporary timeseries resharding collection.
+    static constexpr StringData kTemporaryTimeseriesReshardingCollectionPrefix =
+        "system.buckets.resharding."_sd;
+
     // Prefix for time-series buckets collection.
     static constexpr StringData kTimeseriesBucketsCollectionPrefix = "system.buckets."_sd;
 
@@ -512,6 +516,12 @@ public:
      * the local catalog but not tracked by the sharding catalog.
      */
     bool isNamespaceAlwaysUntracked() const;
+
+    /**
+     * Returns whether the specified namespace is shard-local, meaning it exists independently on
+     * each shard.
+     */
+    bool isShardLocalNamespace() const;
 
     /**
      * Returns whether the specified namespace is config.cache.chunks.<>.

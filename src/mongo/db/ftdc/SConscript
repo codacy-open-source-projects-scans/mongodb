@@ -20,6 +20,7 @@ ftdcEnv.Library(
         'file_manager.cpp',
         'file_reader.cpp',
         'file_writer.cpp',
+        'metadata_compressor.cpp',
         'util.cpp',
         'varint.cpp',
     ],
@@ -31,9 +32,9 @@ ftdcEnv.Library(
         '$BUILD_DIR/third_party/shim_zlib',
     ],
     LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/admission/execution_admission_context',
         '$BUILD_DIR/mongo/db/server_base',
         '$BUILD_DIR/mongo/db/shard_role_api',
-        '$BUILD_DIR/mongo/util/concurrency/admission_context',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
     ],
 )
@@ -114,8 +115,10 @@ env.CppUnitTest(
         'controller_test.cpp',
         'file_manager_test.cpp',
         'file_writer_test.cpp',
+        'ftdc_prctl_test.cpp',
         'ftdc_test.cpp',
         'ftdc_util_test.cpp',
+        'metadata_compressor_test.cpp',
         'varint_test.cpp',
     ],
     LIBDEPS=[

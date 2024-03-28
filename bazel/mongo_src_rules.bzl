@@ -560,6 +560,12 @@ FLOATING_POINT_COPTS = select({
     "//bazel/config:compiler_type_msvc": ["/fp:strict"],
 })
 
+IMPLICIT_FALLTHROUGH_COPTS = select({
+    "//bazel/config:compiler_type_clang": ["-Wimplicit-fallthrough"],
+    "//bazel/config:compiler_type_gcc": ["-Wimplicit-fallthrough=5"],
+    "//conditions:default": [],
+})
+
 EXTRA_GLOBAL_LIBS_LINKFLAGS = select({
     "@platforms//os:linux": [
         "-lm",
@@ -599,12 +605,17 @@ DEBUG_DEFINES = select({
     "//conditions:default": ["NDEBUG"],
 })
 
+PCRE2_DEFINES = ["PCRE2_STATIC"]
+
+SAFEINT_DEFINES = ["SAFEINT_USE_INTRINSICS=0"]
+
 LINKER_ERROR_MESSAGE = (
     "\nError:\n" +
     "    --//bazel/config:linker=lld is not supported on s390x"
 )
 
 LINKER_LINKFLAGS = select({
+    "//bazel/config:linker_default": [],
     "//bazel/config:linker_gold": ["-fuse-ld=gold"],
     "//bazel/config:linker_lld_valid_settings": ["-fuse-ld=lld"],
 }, no_match_error = LINKER_ERROR_MESSAGE)
@@ -880,7 +891,7 @@ DEBUG_TYPES_SECTION_FLAGS = select({
 })
 
 GCC_OR_CLANG_LINKFLAGS = select({
-    "//bazel/config:gcc_or_clang": [
+    "//bazel/config:linux_gcc_or_clang": [
         # Explicitly enable GNU build id's if the linker supports it.
         "-Wl,--build-id",
 
@@ -896,6 +907,9 @@ GCC_OR_CLANG_LINKFLAGS = select({
 
         # If possible with the current linker, mark relocations as read-only.
         "-Wl,-z,relro",
+
+        # Disable TBAA optimization
+        "-fno-strict-aliasing",
     ],
     "//conditions:default": [],
 })
@@ -927,14 +941,15 @@ DEDUPE_SYMBOL_LINKFLAGS = select({
 MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES + \
                        THREAD_SANITIZER_DEFINES + UNDEFINED_SANITIZER_DEFINES + GLIBCXX_DEBUG_DEFINES + \
                        WINDOWS_DEFINES + TCMALLOC_DEFINES + LINUX_DEFINES + GCC_OPT_DEFINES + BOOST_DEFINES + \
-                       ABSEIL_DEFINES
+                       ABSEIL_DEFINES + PCRE2_DEFINES + SAFEINT_DEFINES
 
-MONGO_GLOBAL_COPTS = ["-Isrc"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS + \
+MONGO_GLOBAL_COPTS = ["-Isrc", "-Isrc/third_party/boost"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS + \
                      MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + UNDEFINED_SANITIZER_COPTS + \
                      THREAD_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS + LINUX_OPT_COPTS + \
                      GCC_OR_CLANG_WARNINGS_COPTS + GCC_OR_CLANG_GENERAL_COPTS + \
                      FLOATING_POINT_COPTS + MACOS_WARNINGS_COPTS + CLANG_WARNINGS_COPTS + \
-                     CLANG_FNO_LIMIT_DEBUG_INFO + COMPRESS_DEBUG_COPTS + DEBUG_TYPES_SECTION_FLAGS
+                     CLANG_FNO_LIMIT_DEBUG_INFO + COMPRESS_DEBUG_COPTS + DEBUG_TYPES_SECTION_FLAGS + \
+                     IMPLICIT_FALLTHROUGH_COPTS
 
 MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS + \
                          UNDEFINED_SANITIZER_LINKFLAGS + THREAD_SANITIZER_LINKFLAGS + \
@@ -943,6 +958,8 @@ MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAG
                          EXTRA_GLOBAL_LIBS_LINKFLAGS + ANY_SANITIZER_AVAILABLE_LINKFLAGS + ANY_SANITIZER_GCC_LINKFLAGS + \
                          GCC_OR_CLANG_LINKFLAGS + COMPRESS_DEBUG_LINKFLAGS + DEDUPE_SYMBOL_LINKFLAGS + \
                          DEBUG_TYPES_SECTION_FLAGS
+
+MONGO_GLOBAL_ACCESSIBLE_HEADERS = ["//src/third_party/boost:headers"]
 
 MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES
 
@@ -1080,7 +1097,7 @@ def mongo_cc_library(
     })
 
     linux_rpath_flags = ["-Wl,-z,origin", "-Wl,--enable-new-dtags", "-Wl,-rpath,\\$ORIGIN/../lib", "-Wl,-h,lib" + name + ".so"]
-    macos_rpath_flags = ["-Wl,-rpath,\\$ORIGIN/../lib", "-Wl,-install_name,@rpath/lib" + name + ".so"]
+    macos_rpath_flags = ["-Wl,-rpath,\\$ORIGIN/../lib", "-Wl,-install_name,@rpath/lib" + name + ".dylib"]
 
     rpath_flags = select({
         "//bazel/config:linux_aarch64": linux_rpath_flags,
@@ -1096,7 +1113,7 @@ def mongo_cc_library(
     native.cc_library(
         name = name + SHARED_ARCHIVE_SUFFIX,
         srcs = srcs,
-        hdrs = hdrs + fincludes_hdr,
+        hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
         deps = deps,
         visibility = visibility,
         testonly = testonly,
@@ -1111,13 +1128,13 @@ def mongo_cc_library(
         target_compatible_with = select({
             "//bazel/config:shared_archive_enabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
-        }),
+        }) + target_compatible_with,
     )
 
     native.cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs,
-        hdrs = hdrs + fincludes_hdr,
+        hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
         deps = deps,
         visibility = visibility,
         testonly = testonly,
@@ -1148,7 +1165,7 @@ def mongo_cc_library(
         target_compatible_with = select({
             "//bazel/config:linkstatic_disabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
-        }),
+        }) + target_compatible_with,
         dynamic_deps = deps,
     )
 
@@ -1226,7 +1243,7 @@ def mongo_cc_binary(
 
     native.cc_binary(
         name = name + WITH_DEBUG_SUFFIX,
-        srcs = srcs + fincludes_hdr,
+        srcs = srcs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
         deps = all_deps,
         visibility = visibility,
         testonly = testonly,

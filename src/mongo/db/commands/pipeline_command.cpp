@@ -83,7 +83,7 @@ class PipelineCommand final : public Command {
 public:
     PipelineCommand() : Command("aggregate") {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return kApiVersions1;
     }
 
@@ -115,7 +115,7 @@ public:
 
         const auto aggregationRequest = aggregation_request_helper::parseFromBSON(
             opCtx,
-            opMsgRequest.getDbName(),
+            opMsgRequest.parseDbName(),
             opMsgRequest.body,
             explainVerbosity,
             APIParameters::get(opCtx).getAPIStrict().value_or(false),
@@ -170,7 +170,7 @@ public:
                    PrivilegeVector privileges)
             : CommandInvocation(cmd),
               _request(request),
-              _dbName(request.getDbName()),
+              _dbName(aggregationRequest.getDbName()),
               _aggregationRequest(std::move(aggregationRequest)),
               _liteParsedPipeline(_aggregationRequest),
               _privileges(std::move(privileges)) {
@@ -295,6 +295,10 @@ public:
             return _aggregationRequest.getNamespace();
         }
 
+        const DatabaseName& db() const override {
+            return _dbName;
+        }
+
         void explain(OperationContext* opCtx,
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* result) override {
@@ -335,7 +339,7 @@ public:
     bool maintenanceOk() const override {
         return false;
     }
-    ReadWriteType getReadWriteType() const {
+    ReadWriteType getReadWriteType() const override {
         return ReadWriteType::kRead;
     }
 

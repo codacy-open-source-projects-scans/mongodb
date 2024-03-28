@@ -147,38 +147,38 @@ public:
                     const IndexDescriptor* desc,
                     bool isLogged);
 
-    virtual Status insert(
-        OperationContext* opCtx,
-        const key_string::Value& keyString,
-        bool dupsAllowed,
-        IncludeDuplicateRecordId includeDuplicateRecordId = IncludeDuplicateRecordId::kOff);
+    Status insert(OperationContext* opCtx,
+                  const key_string::Value& keyString,
+                  bool dupsAllowed,
+                  IncludeDuplicateRecordId includeDuplicateRecordId =
+                      IncludeDuplicateRecordId::kOff) override;
 
-    virtual void unindex(OperationContext* opCtx,
-                         const key_string::Value& keyString,
-                         bool dupsAllowed);
+    void unindex(OperationContext* opCtx,
+                 const key_string::Value& keyString,
+                 bool dupsAllowed) override;
 
-    virtual boost::optional<RecordId> findLoc(OperationContext* opCtx,
-                                              const key_string::Value& keyString) const override;
+    boost::optional<RecordId> findLoc(OperationContext* opCtx,
+                                      const key_string::Value& keyString) const override;
 
-    virtual IndexValidateResults validate(OperationContext* opCtx, bool full) const;
+    IndexValidateResults validate(OperationContext* opCtx, bool full) const override;
 
-    virtual bool appendCustomStats(OperationContext* opCtx,
-                                   BSONObjBuilder* output,
-                                   double scale) const;
-    virtual Status dupKeyCheck(OperationContext* opCtx, const key_string::Value& keyString);
+    bool appendCustomStats(OperationContext* opCtx,
+                           BSONObjBuilder* output,
+                           double scale) const override;
+    Status dupKeyCheck(OperationContext* opCtx, const key_string::Value& keyString) override;
 
-    virtual bool isEmpty(OperationContext* opCtx);
+    bool isEmpty(OperationContext* opCtx) override;
 
-    virtual int64_t numEntries(OperationContext* opCtx) const;
+    int64_t numEntries(OperationContext* opCtx) const override;
 
-    virtual long long getSpaceUsedBytes(OperationContext* opCtx) const;
+    long long getSpaceUsedBytes(OperationContext* opCtx) const override;
 
-    virtual long long getFreeStorageBytes(OperationContext* opCtx) const;
+    long long getFreeStorageBytes(OperationContext* opCtx) const override;
 
-    virtual Status initAsEmpty(OperationContext* opCtx);
+    Status initAsEmpty(OperationContext* opCtx) override;
 
-    virtual void printIndexEntryMetadata(OperationContext* opCtx,
-                                         const key_string::Value& keyString) const;
+    void printIndexEntryMetadata(OperationContext* opCtx,
+                                 const key_string::Value& keyString) const override;
 
     StatusWith<int64_t> compact(OperationContext* opCtx, const CompactOptions& options) override;
 
@@ -350,9 +350,9 @@ protected:
                   bool dupsAllowed) override;
 
     /**
-     * This function continues to exist in order to support v4.0 unique partial index format: the
-     * format changed in v4.2 and onward. _unindex will call this if an index entry in the new
-     * format cannot be found, and this function will check for the old format.
+     * This function continues to exist in order to support v4.0 unique index format: the format
+     * changed in v4.2 and onward. _unindex will call this if an index entry in the new format
+     * cannot be found, and this function will check for the old format.
      */
     void _unindexTimestampUnsafe(OperationContext* opCtx,
                                  WT_CURSOR* c,
@@ -363,8 +363,6 @@ private:
     Status _insertOldFormatKey(OperationContext* opCtx,
                                WT_CURSOR* c,
                                const key_string::Value& keyString);
-
-    bool _partial;
 };
 
 class WiredTigerIdIndex : public WiredTigerIndex {

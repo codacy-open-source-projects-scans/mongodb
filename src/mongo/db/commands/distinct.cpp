@@ -304,7 +304,7 @@ public:
                    const OpMsgRequest& request,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* replyBuilder) const override {
-        const DatabaseName dbName = request.getDbName();
+        const DatabaseName dbName = request.parseDbName();
         const BSONObj& cmdObj = request.body;
         // Acquire locks. The RAII object is optional, because in the case of a view, the locks
         // need to be released.
@@ -540,7 +540,7 @@ public:
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
-             BSONObjBuilder& result) {
+             BSONObjBuilder& result) override {
         tasserted(8687400, "distinct command should have not invoked this method");
         return true;
     }

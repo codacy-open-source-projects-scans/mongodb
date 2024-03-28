@@ -276,6 +276,14 @@ SbExpr SbExprBuilder::makeFail(ErrorCodes::Error error, StringData errorMessage)
     return abt::wrap(stage_builder::makeABTFail(error, errorMessage));
 }
 
+SbExpr SbExprBuilder::makeFillEmpty(SbExpr expr, SbExpr altExpr) {
+    if (hasABT(expr) && hasABT(altExpr)) {
+        return abt::wrap(stage_builder::makeFillEmpty(extractABT(expr), extractABT(altExpr)));
+    } else {
+        return stage_builder::makeFillEmpty(extractExpr(expr), extractExpr(altExpr));
+    }
+}
+
 SbExpr SbExprBuilder::makeFillEmptyFalse(SbExpr expr) {
     if (hasABT(expr)) {
         return abt::wrap(stage_builder::makeFillEmptyFalse(extractABT(expr)));
@@ -505,13 +513,11 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
     bool allowDiskUse,
     SbExprSbSlotVector mergingExprs,
     PlanYieldPolicy* yieldPolicy) {
-    using BlockAggExprPair = sbe::BlockHashAggStage::BlockRowAccumulators;
-
     tassert(8448607, "Expected at least one group by slot to be provided", gbs.size() > 0);
 
     const auto selectivityBitmapSlotId = selectivityBitmapSlot.getId();
 
-    sbe::BlockHashAggStage::BlockAndRowAggs blockRowAggs;
+    sbe::AggExprTupleVector aggs;
     SbSlotVector aggOutSlots;
 
     for (auto& [sbAggExpr, optSbSlot] : sbAggExprs) {
@@ -520,14 +526,28 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
 
         aggOutSlots.emplace_back(sbSlot);
 
-        auto exprPair = BlockAggExprPair{sbAggExpr.blockAgg.extractExpr(_state, varTypes),
-                                         sbAggExpr.agg.extractExpr(_state, varTypes)};
-        blockRowAggs.emplace_back(sbSlot.getId(), std::move(exprPair));
+        std::unique_ptr<sbe::EExpression> init, blockAgg, agg;
+        if (sbAggExpr.init) {
+            init = sbAggExpr.init.extractExpr(_state, varTypes);
+        }
+        if (sbAggExpr.blockAgg) {
+            blockAgg = sbAggExpr.blockAgg.extractExpr(_state, varTypes);
+        }
+        agg = sbAggExpr.agg.extractExpr(_state, varTypes);
+
+        aggs.emplace_back(sbSlot.getId(),
+                          sbe::AggExprTuple{std::move(init), std::move(blockAgg), std::move(agg)});
     }
 
+    // Copy unique slot IDs from 'gbs' to 'groupBySlots'.
     sbe::value::SlotVector groupBySlots;
+    absl::flat_hash_set<sbe::value::SlotId> dedupedGbs;
     for (size_t i = 0; i < gbs.size(); ++i) {
-        groupBySlots.push_back(gbs[i].getId());
+        auto slotId = gbs[i].getId();
+
+        if (dedupedGbs.insert(slotId).second) {
+            groupBySlots.emplace_back(gbs[i].getId());
+        }
     }
 
     sbe::value::SlotVector blockAccArgSlots;
@@ -555,7 +575,7 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
                                                std::move(blockAccArgSlots),
                                                std::move(accumulatorDataSlots),
                                                bitmapInternalSlot.getId(),
-                                               std::move(blockRowAggs),
+                                               std::move(aggs),
                                                allowDiskUse,
                                                std::move(mergingExprsVec),
                                                yieldPolicy,

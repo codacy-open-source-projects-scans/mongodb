@@ -58,6 +58,7 @@
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
+#include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/sort_spec.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -2218,8 +2219,8 @@ public:
     void aggregateAndAssertResults(BSONArray inputs,
                                    BSONArray expected,
                                    const sbe::vm::CodeFragment* code) {
-        auto [inputTag, inputVal] = makeArray(inputs);
-        auto [expectedTag, expectedVal] = makeArray(expected);
+        auto [inputTag, inputVal] = sbe::makeArray(inputs);
+        auto [expectedTag, expectedVal] = sbe::makeArray(expected);
         return aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, code);
     }
 
@@ -2336,8 +2337,8 @@ public:
             auto partialAggArr = sbe::value::getArrayView(partialAggVal);
 
             auto [pushedValsTag, pushedValsVal] = accumType == Accumulator::kPush
-                ? makeArray(partialBsonArr)
-                : makeArraySet(partialBsonArr);
+                ? sbe::makeArray(partialBsonArr)
+                : sbe::makeArraySet(partialBsonArr);
             partialAggArr->push_back(pushedValsTag, pushedValsVal);
 
             partialAggArr->push_back(sbe::value::TypeTags::NumberInt64,
@@ -2792,21 +2793,6 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMergeObjects) {
         BSON_ARRAY(BSONObj{} << BSONObj{} << BSON("a" << 1) << BSON("a" << 1) << BSON("a" << 1)
                              << BSON("a" << 2 << "b" << 3 << "c" << 4)
                              << BSON("a" << 2 << "b" << 3 << "c" << 4));
-    aggregateAndAssertResults(inputValues, expectedAggStates, compiledExpr.get());
-}
-
-TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsSimpleCount) {
-    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum" << 1)));
-    auto compiledExpr = compileSingleInputNoCollator(accStatement);
-
-    // $sum:1 is a simple count of the incoming documents, however, we cannot use a simple sum to
-    // combine partial counts. This is because we want unified behavior when merging across a
-    // sharded cluster along with merging partial counts spilled to disk. As such, we expect that
-    // the intermediate states will be a sequence of DoubleDoubleSummation arrays.
-    auto inputValues = BSON_ARRAY(5 << 8 << 0 << 4);
-    auto expectedAggStates =
-        BSON_ARRAY(BSON_ARRAY(0 << 5 << 0) << BSON_ARRAY(0 << 13 << 0) << BSON_ARRAY(0 << 13 << 0)
-                                           << BSON_ARRAY(0 << 17 << 0));
     aggregateAndAssertResults(inputValues, expectedAggStates, compiledExpr.get());
 }
 

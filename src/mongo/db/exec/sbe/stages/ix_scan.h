@@ -42,6 +42,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/plan_stats.h"
@@ -198,7 +199,7 @@ protected:
     IndexScanStats _specificStats;
 
     bool _lowPriority;
-    boost::optional<ScopedAdmissionPriority> _priority;
+    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> _priority;
 };
 
 /**
@@ -321,5 +322,7 @@ protected:
     IndexSeekPoint _seekPoint;
     std::unique_ptr<vm::CodeFragment> _indexBoundsCode;
     boost::optional<IndexBoundsChecker> _checker;
+    // The end position for current range, empty if currently not in a valid range.
+    key_string::Builder _endKey;
 };
 }  // namespace mongo::sbe

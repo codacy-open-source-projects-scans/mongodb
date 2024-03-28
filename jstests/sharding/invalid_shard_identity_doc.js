@@ -4,8 +4,8 @@
  * mixed_cluster_roles.js.
  *
  * @tags: [
- *   requires_fcv_70,
  *   featureFlagTransitionToCatalogShard,
+ *   requires_fcv_70,
  * ]
  */
 const st = new ShardingTest({shards: 2, configShard: true});

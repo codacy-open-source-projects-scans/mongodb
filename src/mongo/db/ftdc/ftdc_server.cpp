@@ -52,6 +52,7 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/transport/transport_layer_ftdc_collector.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
@@ -294,8 +295,17 @@ private:
 };
 
 void registerServerCollectorsForRole(FTDCController* controller, ClusterRole clusterRole) {
-    controller->addPeriodicCollector(std::make_unique<FTDCServerStatusCommandCollector>(),
-                                     clusterRole);
+    // TODO (SERVER-88268): Add ServerStatus collector as a router collector for every MongoD part
+    // of a sharded cluster.
+
+    // Includes the ServerStatus Collector if this node is:
+    // - If MongoS, only as a router collector.
+    // - If MongoD, only as a shard collector.
+    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
+        clusterRole.hasExclusively(ClusterRole::ShardServer)) {
+        controller->addPeriodicCollector(std::make_unique<FTDCServerStatusCommandCollector>(),
+                                         ClusterRole::None);
+    }
 }
 
 // Register the FTDC system
@@ -306,7 +316,7 @@ void startFTDC(ServiceContext* serviceContext,
                boost::filesystem::path& path,
                FTDCStartMode startupMode,
                std::vector<RegisterCollectorsFunction> registerCollectorsFns,
-               UseMultiserviceSchema multiserviceSchema) {
+               UseMultiServiceSchema multiServiceSchema) {
     FTDCConfig config;
     config.period = Milliseconds(ftdcStartupParams.periodMillis.load());
     // Only enable FTDC if our caller says to enable FTDC, MongoS may not have a valid path to write
@@ -317,7 +327,8 @@ void startFTDC(ServiceContext* serviceContext,
     config.maxFileSizeBytes = ftdcStartupParams.maxFileSizeMB.load() * 1024 * 1024;
 
     const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    if (feature_flags::gEmbeddedRouter.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot) &&
+    if (feature_flags::gMultiServiceLogAndFTDCFormat.isEnabledUseLatestFCVWhenUninitialized(
+            fcvSnapshot) &&
         serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         // By embedding the router in MongoD, the FTDC machinery will produce diagnostic data for
         // router and shard services, requiring extra space for retention. If that is the case and
@@ -336,11 +347,14 @@ void startFTDC(ServiceContext* serviceContext,
 
     ftdcDirectoryPathParameter = path;
 
-    auto controller = std::make_unique<FTDCController>(path, config, multiserviceSchema);
+    auto controller = std::make_unique<FTDCController>(path, config, multiServiceSchema);
 
     for (auto&& fn : registerCollectorsFns) {
         fn(controller.get());
     }
+
+    controller->addPeriodicCollector(std::make_unique<transport::TransportLayerFTDCCollector>(),
+                                     ClusterRole::None);
 
     // Install System Metric Collector as a periodic collector
     installSystemMetricsCollector(controller.get());
@@ -353,7 +367,7 @@ void startFTDC(ServiceContext* serviceContext,
         // - Replica set.
         // - Standalone router (mongoS).
         // - Config server.
-        // - Shard server with embedded outer.
+        // - Shard server with embedded router.
         // It should NOT be added in these cases:
         // - Standalone server (no replica set).
         // - Shard server without embedded router or config server.

@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <absl/container/inlined_vector.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
@@ -79,7 +80,7 @@ public:
      * expected to only be useful in those cases.
      */
     WiredTigerRecoveryUnit(WiredTigerSessionCache* sc, WiredTigerOplogManager* oplogManager);
-    ~WiredTigerRecoveryUnit();
+    ~WiredTigerRecoveryUnit() override;
 
     void prepareUnitOfWork() override;
 
@@ -150,7 +151,7 @@ public:
 
     bool isReadSourcePinned() const override;
 
-    virtual void setOrderedCommit(bool orderedCommit) override {
+    void setOrderedCommit(bool orderedCommit) override {
         _orderedCommit = orderedCommit;
     }
 
@@ -166,7 +167,7 @@ public:
 
     std::unique_ptr<StorageStats> computeOperationStatisticsSinceLastCall() override;
 
-    void ignoreAllMultiTimestampConstraints() {
+    void ignoreAllMultiTimestampConstraints() override {
         _multiTimestampConstraintTracker.ignoreAllMultiTimestampConstraints = true;
     }
 
@@ -231,25 +232,25 @@ private:
      * Starts a transaction at the current all_durable timestamp.
      * Returns the timestamp the transaction was started at.
      */
-    Timestamp _beginTransactionAtAllDurableTimestamp(WT_SESSION* session);
+    Timestamp _beginTransactionAtAllDurableTimestamp();
 
     /**
      * Starts a transaction at the no-overlap timestamp. Returns the timestamp the transaction
      * was started at.
      */
-    Timestamp _beginTransactionAtNoOverlapTimestamp(WT_SESSION* session);
+    Timestamp _beginTransactionAtNoOverlapTimestamp();
 
     /**
      * Starts a transaction at the lastApplied timestamp stored in '_readAtTimestamp'. Sets
      * '_readAtTimestamp' to the actual timestamp used by the storage engine in case rounding
      * occured.
      */
-    void _beginTransactionAtLastAppliedTimestamp(WT_SESSION* session);
+    void _beginTransactionAtLastAppliedTimestamp();
 
     /**
      * Returns the timestamp at which the current transaction is reading.
      */
-    Timestamp _getTransactionReadTimestamp(WT_SESSION* session);
+    Timestamp _getTransactionReadTimestamp();
 
     /**
      * Keeps track of constraint violations on multi timestamp transactions. If a transaction sets
@@ -261,7 +262,8 @@ private:
 
     WiredTigerSessionCache* _sessionCache;  // not owned
     WiredTigerOplogManager* _oplogManager;  // not owned
-    UniqueWiredTigerSession _session;
+    UniqueWiredTigerSession _unique_session;
+    WiredTigerSession* _session = nullptr;
     bool _isTimestamped = false;
     bool _prefetchingSet = false;
 
@@ -270,7 +272,11 @@ private:
         bool isTxnModified = false;
         bool txnHasNonTimestampedWrite = false;
         bool ignoreAllMultiTimestampConstraints = false;
-        std::stack<Timestamp> timestampOrder = {};
+
+        // Most operations only use one timestamp.
+        static constexpr auto kDefaultInit = 1;
+        std::stack<Timestamp, absl::InlinedVector<Timestamp, kDefaultInit>> timestampOrder;
+
     } _multiTimestampConstraintTracker;
 
     // Specifies which external source to use when setting read timestamps on transactions.

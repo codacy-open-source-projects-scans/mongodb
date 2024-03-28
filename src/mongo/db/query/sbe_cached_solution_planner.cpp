@@ -229,8 +229,11 @@ plan_ranker::CandidatePlan CachedSolutionPlanner::collectExecutionStatsForCached
                 MONGO_UNREACHABLE;
         }
     };
-    candidate.data.tracker = std::make_unique<TrialRunTracker>(
-        std::move(onMetricReached), maxNumResults, maxTrialPeriodNumReads);
+    candidate.data.tracker =
+        std::make_unique<TrialRunTracker>(std::move(onMetricReached),
+                                          maxNumResults,
+                                          maxTrialPeriodNumReads,
+                                          size_t{0} /*kNumPlanningResults - used only in crp_sbe*/);
     candidate.root->attachToTrialRunTracker(candidate.data.tracker.get());
     _trialRuntimeExecutor.executeCachedCandidateTrial(&candidate, maxNumResults);
 
@@ -258,6 +261,10 @@ CandidatePlans CachedSolutionPlanner::replan(const QueryPlannerParams& plannerPa
         data.replanReason.emplace(reason);
         return std::make_pair(std::move(root), std::move(data));
     };
+
+    // The trial run might have allowed DDL commands to be executed during yields. Check if the
+    // provided planner parameters still match the current view of the index catalog.
+    _indexExistenceChecker.check(_opCtx, _collections);
 
     // Use the query planning module to plan the whole query.
     auto statusWithMultiPlanSolns = QueryPlanner::plan(_cq, plannerParams);

@@ -3,7 +3,9 @@
  *
  * This test cannot be run on ephemeral storage engines because it requires the users to persist
  * across a restart.
- * @tags: [requires_persistence]
+ * @tags: [
+ *   requires_persistence,
+ * ]
  */
 
 // The following checks involve talking to the config server primary, which is shut down in this
@@ -41,7 +43,7 @@ assert.eq('world', res.hello);
 
 // Test authenticate through new mongos.
 var otherMongos =
-    MongoRunner.runMongos({keyFile: "jstests/libs/key1", configdb: st.s.savedOptions.configdb});
+    MongoRunner.runMongos({keyFile: "jstests/libs/key1", configdb: st.configRS.getURL()});
 
 assert.commandFailedWithCode(otherMongos.getDB('test').runCommand({find: 'user'}),
                              ErrorCodes.Unauthorized);

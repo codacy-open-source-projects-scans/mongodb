@@ -765,6 +765,7 @@ SlotBasedStageBuilder::SlotBasedStageBuilder(OperationContext* opCtx,
              _cq.getExpCtx()->allowDiskUse) {
     // Initialize '_data->queryCollator'.
     _data->queryCollator = cq.getCollatorShared();
+    _data->runtimePlanningRootNodeId = solution.unextendedRootId();
 
     // SERVER-52803: In the future if we need to gather more information from the QuerySolutionNode
     // tree, rather than doing one-off scans for each piece of information, we should add a formal
@@ -999,8 +1000,12 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     inputGuard.reset();
-    auto [scanSlots, stage] = generateVirtualScanMulti(
-        &_slotIdGenerator, vsn->hasRecordId ? 2 : 1, inputTag, inputVal, _yieldPolicy);
+    auto [scanSlots, stage] = generateVirtualScanMulti(&_slotIdGenerator,
+                                                       vsn->hasRecordId ? 2 : 1,
+                                                       inputTag,
+                                                       inputVal,
+                                                       _yieldPolicy,
+                                                       vsn->nodeId());
 
     sbe::value::SlotId resultSlot;
     if (vsn->hasRecordId) {
@@ -1172,6 +1177,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         collection->getIndexCatalog()->getEntry(indexDescriptor)->accessMethod()->asSortedData();
 
     std::unique_ptr<key_string::Value> lowKey, highKey;
+    bool isPointInterval = false;
     if (csn->iets.empty()) {
         std::tie(lowKey, highKey) =
             makeKeyStringPair(csn->startKey,
@@ -1181,22 +1187,26 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                               indexAccessMethod->getSortedDataInterface()->getKeyStringVersion(),
                               indexAccessMethod->getSortedDataInterface()->getOrdering(),
                               true /* forward */);
+        isPointInterval = *lowKey == *highKey;
+    } else {
+        isPointInterval = ietsArePointInterval(csn->iets);
     }
 
     auto [stage, planStageSlots, indexScanBoundsSlots] =
-        generateSingleIntervalIndexScan(_state,
-                                        collection,
-                                        indexName,
-                                        indexDescriptor->keyPattern(),
-                                        true /* forward */,
-                                        std::move(lowKey),
-                                        std::move(highKey),
-                                        {} /* indexKeysToInclude */,
-                                        {} /* indexKeySlots */,
-                                        reqs,
-                                        _yieldPolicy,
-                                        csn->nodeId(),
-                                        false /* lowPriority */);
+        generateSingleIntervalIndexScanAndSlots(_state,
+                                                collection,
+                                                indexName,
+                                                indexDescriptor->keyPattern(),
+                                                true /* forward */,
+                                                std::move(lowKey),
+                                                std::move(highKey),
+                                                {} /* indexKeysToInclude */,
+                                                {} /* indexKeySlots */,
+                                                reqs,
+                                                _yieldPolicy,
+                                                csn->nodeId(),
+                                                false /* lowPriority */,
+                                                isPointInterval);
 
     if (!csn->iets.empty()) {
         tassert(7681500,

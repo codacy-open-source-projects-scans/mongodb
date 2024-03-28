@@ -86,6 +86,9 @@
 #include "mongo/util/hierarchical_acquisition.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+#include "mongo/util/testing_proctor.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo::timeseries::bucket_catalog::internal {
 namespace {
@@ -480,7 +483,24 @@ StatusWith<unique_tracked_ptr<Bucket>> rehydrateBucket(OperationContext* opCtx,
         // Initialize BSONColumnBuilders from the compressed bucket data fields.
         try {
             bucket->measurementMap.initBuilders(dataObj, bucket->numCommittedMeasurements);
-        } catch (const AssertionException& ex) {
+        } catch (const DBException& ex) {
+            LOGV2_WARNING(
+                8830601,
+                "Failed to decompress bucket for time-series insert upon reopening, will retry "
+                "insert on a new bucket",
+                "error"_attr = ex,
+                "bucketId"_attr = bucket->bucketId.oid,
+                "collectionUUID"_attr = bucket->bucketId.collectionUUID);
+
+            LOGV2_WARNING_OPTIONS(8852900,
+                                  logv2::LogTruncation::Disabled,
+                                  "Failed to decompress bucket for time-series insert upon "
+                                  "reopening, will retry insert on a new bucket",
+                                  "bucket"_attr =
+                                      base64::encode(bucketDoc.objdata(), bucketDoc.objsize()));
+
+            invariant(!TestingProctor::instance().isEnabled());
+            timeseries::bucket_catalog::freeze(catalog, collectionUUID, bucketId.oid);
             return Status(BucketCompressionFailure(collectionUUID, bucketId.oid), ex.reason());
         }
     }

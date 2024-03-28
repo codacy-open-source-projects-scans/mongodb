@@ -259,6 +259,7 @@
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/resource_yielders.h"
+#include "mongo/s/routing_information_cache.h"
 #include "mongo/s/service_entry_point_mongos.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
@@ -910,7 +911,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
                     "Initialize the sharding components for a config server",
                     &startupTimeElapsedBuilder);
 
-                initializeGlobalShardingStateForMongoD(startupOpCtx.get());
+                initializeGlobalShardingStateForConfigServer(startupOpCtx.get());
             }
 
             // TODO: SERVER-82965 We shouldn't need to read the doc multiple times once we are in
@@ -1148,7 +1149,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
     }
 
     auto cacheLoader = std::make_unique<stats::StatsCacheLoaderImpl>();
-    auto catalog = std::make_unique<stats::StatsCatalog>(serviceContext, std::move(cacheLoader));
+    auto catalog = std::make_unique<stats::StatsCatalog>(
+        serviceContext->getService(ClusterRole::ShardServer), std::move(cacheLoader));
     stats::StatsCatalog::set(serviceContext, std::move(catalog));
 
     // Startup options are written to the audit log at the end of startup so that cluster server
@@ -1993,6 +1995,12 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
         LOGV2_OPTIONS(4784922, {LogComponent::kSharding}, "Shutting down the CatalogCacheLoader");
         CatalogCacheLoader::get(serviceContext).shutDown();
+    }
+
+    if (auto configServerRoutingInfoCache = RoutingInformationCache::get(serviceContext)) {
+        LOGV2_OPTIONS(
+            8778000, {LogComponent::kSharding}, "Shutting down the RoutingInformationCache");
+        configServerRoutingInfoCache->shutDownAndJoin();
     }
 
     // Finish shutting down the TransportLayers

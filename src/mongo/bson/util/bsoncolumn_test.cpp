@@ -60,9 +60,7 @@
 #include "mongo/util/base64.h"
 #include "mongo/util/time_support.h"
 
-using namespace mongo::bsoncolumn;
-
-namespace mongo {
+namespace mongo::bsoncolumn {
 namespace {
 
 void assertBinaryEqual(BSONBinData finalizedColumn, const BufBuilder& buffer) {
@@ -73,6 +71,10 @@ void assertBinaryEqual(BSONBinData finalizedColumn, const BufBuilder& buffer) {
 
 class BSONColumnTest : public unittest::Test {
 public:
+    ~BSONColumnTest() override {
+        ASSERT_EQ(_trackingContext.allocated(), 0);
+    }
+
     BSONElement createBSONColumn(const char* buffer, int size) {
         BSONObjBuilder ob;
         ob.appendBinData(""_sd, size, BinDataType::Column, buffer);
@@ -238,7 +240,9 @@ public:
     }
 
     static uint64_t deltaInt64(BSONElement val, BSONElement prev) {
-        return Simple8bTypeUtil::encodeInt64(val.Long() - prev.Long());
+        return Simple8bTypeUtil::encodeInt64(
+            static_cast<long long>(static_cast<unsigned long long>(val.Long()) -
+                                   static_cast<unsigned long long>(prev.Long())));
     }
 
     static uint64_t deltaDouble(BSONElement val, BSONElement prev, double scaleFactor) {
@@ -307,8 +311,12 @@ public:
     static std::vector<boost::optional<uint64_t>> deltaInt64(It begin, It end, BSONElement prev) {
         std::vector<boost::optional<uint64_t>> deltas;
         for (; begin != end; ++begin) {
-            deltas.push_back(deltaInt64(*begin, prev));
-            prev = *begin;
+            if (!begin->eoo()) {
+                deltas.push_back(deltaInt64(*begin, prev));
+                prev = *begin;
+            } else {
+                deltas.push_back(boost::none);
+            }
         }
         return deltas;
     }
@@ -331,11 +339,31 @@ public:
     }
 
     template <typename It>
+    static std::vector<boost::optional<uint64_t>> deltaDoubleMemory(It begin,
+                                                                    It end,
+                                                                    BSONElement prev) {
+        std::vector<boost::optional<uint64_t>> deltas;
+        for (; begin != end; ++begin) {
+            if (!begin->eoo()) {
+                deltas.push_back(deltaDoubleMemory(*begin, prev));
+                prev = *begin;
+            } else {
+                deltas.push_back(boost::none);
+            }
+        }
+        return deltas;
+    }
+
+    template <typename It>
     static std::vector<boost::optional<uint128_t>> deltaString(It begin, It end, BSONElement prev) {
         std::vector<boost::optional<uint128_t>> deltas;
         for (; begin != end; ++begin) {
-            deltas.push_back(deltaString(*begin, prev));
-            prev = *begin;
+            if (!begin->eoo()) {
+                deltas.push_back(deltaString(*begin, prev));
+                prev = *begin;
+            } else {
+                deltas.push_back(boost::none);
+            }
         }
         return deltas;
     }
@@ -768,22 +796,17 @@ public:
         }
     }
 
-    // testBlockBased is a temporary option; it will be removed once all
-    // functionality for block based decompression is in place and all
-    // relevant tests are onboarded
     static void verifyDecompression(const BufBuilder& columnBinary,
-                                    const std::vector<BSONElement>& expected,
-                                    bool testBlockBased = true) {
+                                    const std::vector<BSONElement>& expected) {
         BSONBinData bsonBinData;
         bsonBinData.data = columnBinary.buf();
         bsonBinData.length = columnBinary.len();
         bsonBinData.type = Column;
-        verifyDecompression(bsonBinData, expected, testBlockBased);
+        verifyDecompression(bsonBinData, expected);
     }
 
     static void verifyDecompression(BSONBinData columnBinary,
-                                    const std::vector<BSONElement>& expected,
-                                    bool testBlockBased = true) {
+                                    const std::vector<BSONElement>& expected) {
         BSONObjBuilder obj;
         obj.append(""_sd, columnBinary);
         BSONElement columnElement = obj.done().firstElement();
@@ -914,8 +937,7 @@ public:
             }
         }
 
-        // TODO(SERVER-87861): Remove this gate once all types are onboarded and bugs are fixed
-        if (testBlockBased) {
+        {
             boost::intrusive_ptr<ElementStorage> allocator = new ElementStorage();
             std::vector<BSONElement> collection;
             BSONColumnBlockBased c((const char*)columnBinary.data, columnBinary.length);
@@ -947,12 +969,15 @@ public:
     const boost::optional<uint128_t> kDeltaForBinaryEqualValues128 =
         Simple8bTypeUtil::encodeInt128(0);
 
+protected:
+    TrackingContext _trackingContext;
+
 private:
     std::forward_list<BSONObj> _elementMemory;
 };
 
 TEST_F(BSONColumnTest, Empty) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     BufBuilder expected;
     appendEOO(expected);
@@ -963,7 +988,7 @@ TEST_F(BSONColumnTest, Empty) {
 }
 
 TEST_F(BSONColumnTest, ContainsScalarInt32SimpleCompressed) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Column should have several scalar values of same type
     // -> 32-bit Ints
@@ -999,7 +1024,7 @@ TEST_F(BSONColumnTest, ContainsScalarInt32SimpleCompressed) {
 }
 
 TEST_F(BSONColumnTest, ContainsScalarInt64SimpleCompressed) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Column should have several scalar values of same type
     // -> 64-bit Ints
@@ -1035,7 +1060,7 @@ TEST_F(BSONColumnTest, ContainsScalarInt64SimpleCompressed) {
 }
 
 TEST_F(BSONColumnTest, ContainsScalarDoubleSimpleCompressed) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Column should have several scalar values of same type
     // -> Double
@@ -1072,7 +1097,7 @@ TEST_F(BSONColumnTest, ContainsScalarDoubleSimpleCompressed) {
 }
 
 TEST_F(BSONColumnTest, ContainsScalarTimestampSimpleCompressed) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Column should have several scalar values of same type
     // -> Timestamp
@@ -1109,7 +1134,7 @@ TEST_F(BSONColumnTest, ContainsScalarTimestampSimpleCompressed) {
 }
 
 TEST_F(BSONColumnTest, ContainsScalarStringSimpleCompressed) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Column should have several scalar values of same type
     // -> String
@@ -1142,7 +1167,7 @@ TEST_F(BSONColumnTest, ContainsScalarStringSimpleCompressed) {
 }
 
 TEST_F(BSONColumnTest, ContainsScalarObjectIDSimpleCompressed) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Column should have several scalar values of same type
     // -> ObjectID
@@ -1184,7 +1209,7 @@ TEST_F(BSONColumnTest, ContainsScalarObjectIDSimpleCompressed) {
 }
 
 TEST_F(BSONColumnTest, ContainsScalarBoolSimpleCompressed) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Column should have several scalar values of same type
     // -> Bool
@@ -1220,7 +1245,7 @@ TEST_F(BSONColumnTest, ContainsScalarBoolSimpleCompressed) {
 }
 
 TEST_F(BSONColumnTest, BasicValue) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementInt32(1);
     cb.append(elem);
@@ -1238,7 +1263,7 @@ TEST_F(BSONColumnTest, BasicValue) {
 }
 
 TEST_F(BSONColumnTest, BasicSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementInt32(1);
     cb.append(elem);
@@ -1256,7 +1281,7 @@ TEST_F(BSONColumnTest, BasicSkip) {
 }
 
 TEST_F(BSONColumnTest, BasicSkipRepeat) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementInt32(1);
     cb.append(elem);
@@ -1272,11 +1297,11 @@ TEST_F(BSONColumnTest, BasicSkipRepeat) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {elem, BSONElement(), elem}, true);
+    verifyDecompression(binData, {elem, BSONElement(), elem});
 }
 
 TEST_F(BSONColumnTest, OnlySkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     cb.skip();
 
@@ -1291,7 +1316,7 @@ TEST_F(BSONColumnTest, OnlySkip) {
 }
 
 TEST_F(BSONColumnTest, OnlySkipMany) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test checks that we can setup the correct RLE state when reopening BSONColumnBuilder in
     // the case that the RLE blocks contain skip.
@@ -1304,7 +1329,7 @@ TEST_F(BSONColumnTest, OnlySkipMany) {
 }
 
 TEST_F(BSONColumnTest, ValueAfterSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementInt32(1);
     cb.skip();
@@ -1322,7 +1347,7 @@ TEST_F(BSONColumnTest, ValueAfterSkip) {
 }
 
 TEST_F(BSONColumnTest, MultipleSimple8bBlocksAfterControl) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     for (int i = 0; i < 100; ++i) {
@@ -1346,7 +1371,7 @@ TEST_F(BSONColumnTest, MultipleSimple8bBlocksAfterControl) {
 }
 
 TEST_F(BSONColumnTest, MultipleSimple8bBlocksAfterControl128) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     for (int i = 0; i < 100; ++i) {
@@ -1372,7 +1397,7 @@ TEST_F(BSONColumnTest, MultipleSimple8bBlocksAfterControl128) {
 }
 
 TEST_F(BSONColumnTest, MultipleSimple8bBlockRewriteAtEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This data set uncovered an interesting edge case. Appending 75 elements, call intermediate()
     // appending the remaining 20 and call intermediate again. This results in the total binary
@@ -1455,7 +1480,7 @@ TEST_F(BSONColumnTest, MultipleSimple8bBlockRewriteAtEnd) {
 }
 
 TEST_F(BSONColumnTest, LargeDeltaIsLiteral) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createElementInt64(1);
     cb.append(first);
@@ -1474,7 +1499,7 @@ TEST_F(BSONColumnTest, LargeDeltaIsLiteral) {
 }
 
 TEST_F(BSONColumnTest, LargeDeltaIsLiteralAfterSimple8b) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto zero = createElementInt64(0);
     cb.append(zero);
@@ -1499,7 +1524,7 @@ TEST_F(BSONColumnTest, LargeDeltaIsLiteralAfterSimple8b) {
 }
 
 TEST_F(BSONColumnTest, OverBlockCount) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     int64_t val = 0xFFFFFFFFFFFF;
@@ -1532,7 +1557,7 @@ TEST_F(BSONColumnTest, OverBlockCount) {
 }
 
 TEST_F(BSONColumnTest, TypeChangeAfterLiteral) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elemInt32 = createElementInt32(0);
     auto elemInt64 = createElementInt64(0);
@@ -1551,7 +1576,7 @@ TEST_F(BSONColumnTest, TypeChangeAfterLiteral) {
 }
 
 TEST_F(BSONColumnTest, TypeChangeAfterSimple8b) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elemInt32 = createElementInt32(0);
     auto elemInt64 = createElementInt64(0);
@@ -1573,7 +1598,7 @@ TEST_F(BSONColumnTest, TypeChangeAfterSimple8b) {
 }
 
 TEST_F(BSONColumnTest, Simple8bAfterTypeChange) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elemInt32 = createElementInt32(0);
     auto elemInt64 = createElementInt64(0);
@@ -1595,7 +1620,7 @@ TEST_F(BSONColumnTest, Simple8bAfterTypeChange) {
 }
 
 TEST_F(BSONColumnTest, BasicDouble) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto d1 = createElementDouble(1.0);
     auto d2 = createElementDouble(2.0);
@@ -1614,7 +1639,7 @@ TEST_F(BSONColumnTest, BasicDouble) {
 }
 
 TEST_F(BSONColumnTest, DoubleIdenticalDeltas) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test is using identical deltas for the double type. During binary reopen it will lead to
     // a belief we can pack all these into an RLE block due to how overflow detection works (no
@@ -1651,7 +1676,7 @@ TEST_F(BSONColumnTest, DoubleIdenticalDeltas) {
 }
 
 TEST_F(BSONColumnTest, DoubleOverflowEndsWithSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Simple8b block that cause overflow when running the binary reopen constructor ends with a
     // skip
@@ -1680,11 +1705,11 @@ TEST_F(BSONColumnTest, DoubleOverflowEndsWithSkip) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected, true);
-    verifyDecompression(binData, elems, true);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, DoubleSameScale) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.0));
@@ -1708,7 +1733,7 @@ TEST_F(BSONColumnTest, DoubleSameScale) {
 }
 
 TEST_F(BSONColumnTest, DoubleIncreaseScaleFromLiteral) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto d1 = createElementDouble(1.0);
     auto d2 = createElementDouble(1.1);
@@ -1727,7 +1752,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromLiteral) {
 }
 
 TEST_F(BSONColumnTest, DoubleLiteralAndScaleAfterSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto d1 = createElementDouble(1.0);
     auto d2 = createElementDouble(1.1);
@@ -1749,7 +1774,7 @@ TEST_F(BSONColumnTest, DoubleLiteralAndScaleAfterSkip) {
 }
 
 TEST_F(BSONColumnTest, DoubleIncreaseScaleFromLiteralAfterSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto d1 = createElementDouble(1);
     auto d2 = createElementDouble(1.1);
@@ -1773,7 +1798,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromLiteralAfterSkip) {
 }
 
 TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaWithRescale) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.0));
@@ -1798,7 +1823,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaWithRescale) {
 }
 
 TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaNoRescale) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.1));
@@ -1830,7 +1855,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleFromDeltaNoRescale) {
 }
 
 TEST_F(BSONColumnTest, DoubleIncreaseScaleNotPossible) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementDouble(-153764908544737.4),
                                       createElementDouble(-85827904635132.83)};
@@ -1850,8 +1875,67 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleNotPossible) {
     verifyDecompression(binData, elems);
 }
 
+TEST_F(BSONColumnTest, DoubleRescaleFirstRescaledIsSkip) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    // This test writes a simple8b of doubles where one skip is left in pending. The next value need
+    // a different scale factor and the test verifies we can handle this when the first rescaled
+    // value is a skip.
+    std::vector<BSONElement> elems = {createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      BSONElement(),
+                                      createElementDouble(-0.0001),
+                                      BSONElement(),
+                                      createElementDouble(-0.0001),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      createElementDouble(0.0),
+                                      BSONElement(),
+                                      createElementDouble(std::numeric_limits<double>::infinity())};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1100, 0b0000);
+    appendSimple8bBlocks64(
+        expected, deltaDouble(elems.begin() + 1, elems.begin() + 31, elems.front(), 10000.0), 1);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(
+        expected, deltaDoubleMemory(elems.begin() + 31, elems.end(), elems[30]), 1);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
 TEST_F(BSONColumnTest, DoubleIncreaseScaleWithoutOverflow) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test needs to rescale doubles but can do so where there's no overflow in the new control
     std::vector<BSONElement> elems = {createElementDouble(314159264193.46228),
@@ -1882,7 +1966,7 @@ TEST_F(BSONColumnTest, DoubleIncreaseScaleWithoutOverflow) {
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlock) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.12345671));
@@ -1913,7 +1997,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlock) {
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockContinueAppend) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // The values below should result in two Simple8b blocks, one scaled with 10.0 and the second
     // scaled to 1.0. This tests that we can scale down doubles after writing a Simple8b block and
@@ -1953,7 +2037,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockContinueAppend) {
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.12345671));
@@ -1985,7 +2069,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkip) {
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockThenScaleBackUp) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.12345671));
@@ -2011,7 +2095,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockThenScaleBackUp) {
 }
 
 TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkipThenScaleBackUp) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.12345671));
@@ -2037,7 +2121,7 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkipThenScaleBackUp) {
 }
 
 TEST_F(BSONColumnTest, DoubleUnscalable) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.0));
@@ -2064,7 +2148,7 @@ TEST_F(BSONColumnTest, DoubleUnscalable) {
 }
 
 TEST_F(BSONColumnTest, DoubleMultiplePendingAfterWritingBlock) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This tests that we properly set '_lastValueInPrevBlock' after writing out a full Simple8b
     // block. In this test the last value in the first block will be '99.0' but the block will not
@@ -2100,7 +2184,7 @@ TEST_F(BSONColumnTest, DoubleMultiplePendingAfterWritingBlock) {
 }
 
 TEST_F(BSONColumnTest, DoubleSignalingNaN) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementDouble(0.0);
     auto nan = createElementDouble(std::numeric_limits<double>::signaling_NaN());
@@ -2126,7 +2210,7 @@ TEST_F(BSONColumnTest, DoubleSignalingNaN) {
 }
 
 TEST_F(BSONColumnTest, DoubleQuietNaN) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementDouble(0.0);
     auto nan = createElementDouble(std::numeric_limits<double>::quiet_NaN());
@@ -2150,7 +2234,7 @@ TEST_F(BSONColumnTest, DoubleQuietNaN) {
 }
 
 TEST_F(BSONColumnTest, DoubleInfinity) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementDouble(0.0);
     auto inf = createElementDouble(std::numeric_limits<double>::infinity());
@@ -2174,7 +2258,7 @@ TEST_F(BSONColumnTest, DoubleInfinity) {
 }
 
 TEST_F(BSONColumnTest, DoubleDenorm) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elem = createElementDouble(0.0);
     auto denorm = createElementDouble(std::numeric_limits<double>::denorm_min());
@@ -2198,7 +2282,7 @@ TEST_F(BSONColumnTest, DoubleDenorm) {
 }
 
 TEST_F(BSONColumnTest, DoubleIntegerOverflow) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // std::numeric_limits<int64_t>::min() - 0x1000 will cause an overflow if performed as signed,
     // make sure it is handled correctly
@@ -2222,7 +2306,7 @@ TEST_F(BSONColumnTest, DoubleIntegerOverflow) {
 }
 
 TEST_F(BSONColumnTest, DoubleZerosSignDifference) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // 0.0 compares equal to -0.0 when compared as double. Make sure we can handle this case without
     // data loss.
@@ -2246,7 +2330,7 @@ TEST_F(BSONColumnTest, DoubleZerosSignDifference) {
 }
 
 TEST_F(BSONColumnTest, DoubleRle) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems;
 
     // This test uses RLE in doubles and make sure we can track lastValueInPrevBlock properly
@@ -2271,7 +2355,7 @@ TEST_F(BSONColumnTest, DoubleRle) {
 }
 
 TEST_F(BSONColumnTest, Decimal128Base) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elemDec128 = createElementDecimal128(Decimal128());
 
@@ -2287,7 +2371,7 @@ TEST_F(BSONColumnTest, Decimal128Base) {
 }
 
 TEST_F(BSONColumnTest, Decimal128Delta) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elemDec128 = createElementDecimal128(Decimal128(1));
 
@@ -2306,7 +2390,7 @@ TEST_F(BSONColumnTest, Decimal128Delta) {
 }
 
 TEST_F(BSONColumnTest, DecimalNonZeroDelta) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elemDec128Max = createElementDecimal128(Decimal128(100));
     auto elemDec128Zero = createElementDecimal128(Decimal128(1));
@@ -2325,7 +2409,7 @@ TEST_F(BSONColumnTest, DecimalNonZeroDelta) {
 }
 
 TEST_F(BSONColumnTest, DecimalMaxMin) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto elemDec128Max = createElementDecimal128(std::numeric_limits<Decimal128>::max());
     auto elemDec128Zero = createElementDecimal128(std::numeric_limits<Decimal128>::min());
@@ -2344,7 +2428,7 @@ TEST_F(BSONColumnTest, DecimalMaxMin) {
 }
 
 TEST_F(BSONColumnTest, DecimalMultiElement) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elemDec128Max = createElementDecimal128(std::numeric_limits<Decimal128>::max());
     auto elemDec128Zero = createElementDecimal128(std::numeric_limits<Decimal128>::min());
     auto elemDec128One = createElementDecimal128(Decimal128(1));
@@ -2372,7 +2456,7 @@ TEST_F(BSONColumnTest, DecimalMultiElement) {
 }
 
 TEST_F(BSONColumnTest, DecimalMultiElementSkips) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elemDec128Max = createElementDecimal128(std::numeric_limits<Decimal128>::max());
     auto elemDec128Zero = createElementDecimal128(std::numeric_limits<Decimal128>::min());
     auto elemDec128One = createElementDecimal128(Decimal128(1));
@@ -2410,7 +2494,7 @@ TEST_F(BSONColumnTest, DecimalMultiElementSkips) {
 }
 
 TEST_F(BSONColumnTest, BasicObjectId) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createObjectId(OID("112233445566778899AABBCC"));
     // Increment the lower byte for timestamp and counter.
@@ -2439,7 +2523,7 @@ TEST_F(BSONColumnTest, BasicObjectId) {
 }
 
 TEST_F(BSONColumnTest, ObjectIdDifferentProcessUnique) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createObjectId(OID("112233445566778899AABBCC"));
     auto second = createObjectId(OID("112233445566FF8899AABBCC"));
@@ -2458,7 +2542,7 @@ TEST_F(BSONColumnTest, ObjectIdDifferentProcessUnique) {
 }
 
 TEST_F(BSONColumnTest, ObjectIdAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createObjectId(OID("112233445566778899AABBCC"));
     // Increment the lower byte for timestamp and counter.
@@ -2490,7 +2574,7 @@ TEST_F(BSONColumnTest, ObjectIdAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, Simple8bTimestamp) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createTimestamp(Timestamp(0));
     auto second = createTimestamp(Timestamp(1));
@@ -2513,7 +2597,7 @@ TEST_F(BSONColumnTest, Simple8bTimestamp) {
 }
 
 TEST_F(BSONColumnTest, Simple8bTimestampNegativeDeltaOfDelta) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createTimestamp(Timestamp(3));
     auto second = createTimestamp(Timestamp(5));
@@ -2537,7 +2621,7 @@ TEST_F(BSONColumnTest, Simple8bTimestampNegativeDeltaOfDelta) {
 }
 
 TEST_F(BSONColumnTest, Simple8bTimestampAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createTimestamp(Timestamp(0));
     auto second = createTimestamp(Timestamp(1));
@@ -2568,7 +2652,7 @@ TEST_F(BSONColumnTest, Simple8bTimestampAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, LargeDeltaOfDeltaTimestamp) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createTimestamp(Timestamp(0));
     cb.append(first);
@@ -2587,7 +2671,7 @@ TEST_F(BSONColumnTest, LargeDeltaOfDeltaTimestamp) {
 }
 
 TEST_F(BSONColumnTest, LargeDeltaOfDeltaIsLiteralAfterSimple8bTimestamp) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto zero = createTimestamp(Timestamp(0));
     cb.append(zero);
@@ -2618,7 +2702,7 @@ TEST_F(BSONColumnTest, LargeDeltaOfDeltaIsLiteralAfterSimple8bTimestamp) {
 }
 
 TEST_F(BSONColumnTest, DateBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createDate(Date_t::fromMillisSinceEpoch(1));
     auto second = createDate(Date_t::fromMillisSinceEpoch(2));
@@ -2640,7 +2724,7 @@ TEST_F(BSONColumnTest, DateBasic) {
 }
 
 TEST_F(BSONColumnTest, DateAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto date = createDate(Date_t::fromMillisSinceEpoch(1));
     auto elemInt32 = createElementInt32(0);
@@ -2663,7 +2747,7 @@ TEST_F(BSONColumnTest, DateAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, DateLargeDelta) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createDate(Date_t::fromMillisSinceEpoch(1));
     cb.append(first);
@@ -2682,7 +2766,7 @@ TEST_F(BSONColumnTest, DateLargeDelta) {
 }
 
 TEST_F(BSONColumnTest, BoolBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto trueBson = createBool(true);
     auto falseBson = createBool(false);
@@ -2706,7 +2790,7 @@ TEST_F(BSONColumnTest, BoolBasic) {
 }
 
 TEST_F(BSONColumnTest, BoolAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto trueBson = createBool(true);
     auto elemInt32 = createElementInt32(0);
@@ -2729,7 +2813,7 @@ TEST_F(BSONColumnTest, BoolAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, UndefinedBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createUndefined();
     cb.append(first);
@@ -2747,7 +2831,7 @@ TEST_F(BSONColumnTest, UndefinedBasic) {
 }
 
 TEST_F(BSONColumnTest, UndefinedAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto undefined = createUndefined();
     auto elemInt32 = createElementInt32(0);
@@ -2770,7 +2854,7 @@ TEST_F(BSONColumnTest, UndefinedAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, NullBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createNull();
     cb.append(first);
@@ -2788,7 +2872,7 @@ TEST_F(BSONColumnTest, NullBasic) {
 }
 
 TEST_F(BSONColumnTest, NullAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto null = createNull();
     auto elemInt32 = createElementInt32(0);
@@ -2811,7 +2895,7 @@ TEST_F(BSONColumnTest, NullAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, RegexBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createRegex();
     auto second = createRegex("regex");
@@ -2832,7 +2916,7 @@ TEST_F(BSONColumnTest, RegexBasic) {
 }
 
 TEST_F(BSONColumnTest, RegexAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto regex = createRegex();
     auto elemInt32 = createElementInt32(0);
@@ -2855,7 +2939,7 @@ TEST_F(BSONColumnTest, RegexAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, DBRefBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto oid = OID("112233445566778899AABBCC");
     auto first = createDBRef("ns", oid);
@@ -2877,7 +2961,7 @@ TEST_F(BSONColumnTest, DBRefBasic) {
 }
 
 TEST_F(BSONColumnTest, DBRefAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto oid = OID("112233445566778899AABBCC");
     auto dbRef = createDBRef("ns", oid);
@@ -2901,7 +2985,7 @@ TEST_F(BSONColumnTest, DBRefAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, CodeWScopeBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createCodeWScope("code", BSONObj());
     auto second = createCodeWScope("diffCode", BSONObj());
@@ -2922,7 +3006,7 @@ TEST_F(BSONColumnTest, CodeWScopeBasic) {
 }
 
 TEST_F(BSONColumnTest, CodeWScopeAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto codeWScope = createCodeWScope("code", BSONObj());
     auto elemInt32 = createElementInt32(0);
@@ -2945,7 +3029,7 @@ TEST_F(BSONColumnTest, CodeWScopeAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, SymbolBasic) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto first = createSymbol("symbol");
     auto second = createSymbol("diffSymbol");
@@ -2966,7 +3050,7 @@ TEST_F(BSONColumnTest, SymbolBasic) {
 }
 
 TEST_F(BSONColumnTest, SymbolAfterChangeBack) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     auto symbol = createSymbol("symbol");
     auto elemInt32 = createElementInt32(0);
@@ -2989,7 +3073,7 @@ TEST_F(BSONColumnTest, SymbolAfterChangeBack) {
 }
 
 TEST_F(BSONColumnTest, BinDataBase) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{'1', '2', '3', '4'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
 
@@ -3005,7 +3089,7 @@ TEST_F(BSONColumnTest, BinDataBase) {
 }
 
 TEST_F(BSONColumnTest, BinDataOdd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{'\n', '2', '\n', '4'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
 
@@ -3021,7 +3105,7 @@ TEST_F(BSONColumnTest, BinDataOdd) {
 }
 
 TEST_F(BSONColumnTest, BinDataDelta) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{'1', '2', '3', '4'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
 
@@ -3040,7 +3124,7 @@ TEST_F(BSONColumnTest, BinDataDelta) {
 }
 
 TEST_F(BSONColumnTest, BinDataDeltaCountDifferenceShouldFail) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{'1', '2', '3', '4'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
 
@@ -3061,7 +3145,7 @@ TEST_F(BSONColumnTest, BinDataDeltaCountDifferenceShouldFail) {
 }
 
 TEST_F(BSONColumnTest, BinDataDeltaTypeDifferenceShouldFail) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{'1', '2', '3', '4'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
 
@@ -3081,7 +3165,7 @@ TEST_F(BSONColumnTest, BinDataDeltaTypeDifferenceShouldFail) {
 }
 
 TEST_F(BSONColumnTest, BinDataDeltaCheckSkips) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{'1', '2', '3', '4'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
 
@@ -3109,7 +3193,7 @@ TEST_F(BSONColumnTest, BinDataDeltaCheckSkips) {
 }
 
 TEST_F(BSONColumnTest, BinDataLargerThan16) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7', '8'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
@@ -3132,7 +3216,7 @@ TEST_F(BSONColumnTest, BinDataLargerThan16) {
 }
 
 TEST_F(BSONColumnTest, BinDataEqualTo16) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
@@ -3156,7 +3240,7 @@ TEST_F(BSONColumnTest, BinDataEqualTo16) {
 }
 
 TEST_F(BSONColumnTest, BinDataLargerThan16SameValue) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7', '8'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
@@ -3176,7 +3260,7 @@ TEST_F(BSONColumnTest, BinDataLargerThan16SameValue) {
 }
 
 TEST_F(BSONColumnTest, BinDataLargerThan16SameValueWithSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<uint8_t> input{
         '1', '2', '3', '4', '5', '6', '7', '8', '9', '1', '2', '3', '4', '5', '6', '7', '8'};
     auto elemBinData = createElementBinData(BinDataGeneral, input);
@@ -3199,7 +3283,7 @@ TEST_F(BSONColumnTest, BinDataLargerThan16SameValueWithSkip) {
 }
 
 TEST_F(BSONColumnTest, StringBase) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elem = createElementString("test");
     cb.append(elem);
 
@@ -3213,7 +3297,7 @@ TEST_F(BSONColumnTest, StringBase) {
 }
 
 TEST_F(BSONColumnTest, StringDeltaSame) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elemString = createElementString("test");
     cb.append(elemString);
     cb.append(elemString);
@@ -3230,7 +3314,7 @@ TEST_F(BSONColumnTest, StringDeltaSame) {
 }
 
 TEST_F(BSONColumnTest, StringDeltaDiff) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elemString = createElementString("mongo");
     cb.append(elemString);
     auto elemString2 = createElementString("tests");
@@ -3248,7 +3332,7 @@ TEST_F(BSONColumnTest, StringDeltaDiff) {
 }
 
 TEST_F(BSONColumnTest, StringDeltaLarge) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elemString = createElementString("mongoaaaaaaa");
     cb.append(elemString);
     // Need to make sure we have a significant overlap in delta so we can have a trailingZeroCount
@@ -3268,7 +3352,7 @@ TEST_F(BSONColumnTest, StringDeltaLarge) {
 }
 
 TEST_F(BSONColumnTest, StringAfterInvalid) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elem = createElementString("mongo");
     cb.append(elem);
 
@@ -3293,7 +3377,7 @@ TEST_F(BSONColumnTest, StringAfterInvalid) {
 }
 
 TEST_F(BSONColumnTest, StringEmptyAfterLarge) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto large = createElementString(std::string(32, 'a'));
     cb.append(large);
     auto empty = createElementString("");
@@ -3313,7 +3397,7 @@ TEST_F(BSONColumnTest, StringEmptyAfterLarge) {
 }
 
 TEST_F(BSONColumnTest, RepeatInvalidString) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elem = createElementString("mongo");
     cb.append(elem);
 
@@ -3333,8 +3417,92 @@ TEST_F(BSONColumnTest, RepeatInvalidString) {
     verifyDecompression(binData, {elem, elemInvalid, elemInvalid});
 }
 
+TEST_F(BSONColumnTest, EmptyStringAfterUnencodable) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    std::vector<BSONElement> elems = {createElementString("\0"_sd), createElementString(""_sd)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems[0]);
+    appendLiteral(expected, elems[1]);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, UnencodableStringWithZeroDelta) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    std::vector<BSONElement> elems = {createElementString("\0"_sd), createElementString("\0"_sd)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems[0]);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock128(expected, uint128_t(0));
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, EmptyStringAfterUnencodableDelta) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    std::vector<BSONElement> elems = {
+        createElementString("\0"_sd), createElementString("\0"_sd), createElementString(""_sd)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems[0]);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock128(expected, uint128_t(0));
+    appendLiteral(expected, elems[2]);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, EmptyStringAfterUnencodableLiteralAndDelta) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    std::vector<BSONElement> elems = {
+        createElementString("\0"_sd), createElementString("a"_sd), createElementString(""_sd)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    // As the literal is unencodable it will be considered to have a 0 encoding. We take this from
+    // the last element that is empty string.
+    appendSimple8bBlocks128(expected, deltaString(elems.begin() + 1, elems.end(), elems.back()), 1);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
 TEST_F(BSONColumnTest, StringMultiType) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     // Add decimals first
     auto elemDec128Max = createElementDecimal128(std::numeric_limits<Decimal128>::max());
     auto elemDec128Zero = createElementDecimal128(std::numeric_limits<Decimal128>::min());
@@ -3380,7 +3548,7 @@ TEST_F(BSONColumnTest, StringMultiType) {
 }
 
 TEST_F(BSONColumnTest, Int64FullControlWithPendingAtFinalize) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test completely fills up a control byte with 16 simple8b blocks with the append calls
     // while leaving the last element in pending. Finalizing will create a new control byte for this
@@ -3423,7 +3591,7 @@ TEST_F(BSONColumnTest, Int64FullControlWithPendingAtFinalize) {
 }
 
 TEST_F(BSONColumnTest, StringFullControlWithPendingAtFinalize) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test completely fills up a control byte with 16 simple8b blocks with the append calls
     // while leaving the last element in pending. Finalizing will create a new control byte for this
@@ -3466,7 +3634,7 @@ TEST_F(BSONColumnTest, StringFullControlWithPendingAtFinalize) {
 }
 
 TEST_F(BSONColumnTest, CodeBase) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elem = createElementCode("test");
     cb.append(elem);
 
@@ -3480,7 +3648,7 @@ TEST_F(BSONColumnTest, CodeBase) {
 }
 
 TEST_F(BSONColumnTest, CodeDeltaSame) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elemCode = createElementCode("test");
     cb.append(elemCode);
     cb.append(elemCode);
@@ -3497,7 +3665,7 @@ TEST_F(BSONColumnTest, CodeDeltaSame) {
 }
 
 TEST_F(BSONColumnTest, CodeDeltaDiff) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     auto elemCode = createElementCode("mongo");
     cb.append(elemCode);
     auto elemCode2 = createElementCode("tests");
@@ -3597,7 +3765,7 @@ TEST_F(BSONColumnTest, DeltasWithNoUncompressedByte) {
 }
 
 TEST_F(BSONColumnTest, OnlySkipManyTwoControlBytes) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test validates handling when we have so many consecutive skips that they span over two
     // control blocks. We need to write at least 17 simple8b blocks for this to be the case. As all
@@ -3625,7 +3793,7 @@ TEST_F(BSONColumnTest, OnlySkipManyTwoControlBytes) {
 
 TEST_F(BSONColumnTest, SimpleOneValueRLE) {
     // This test produces an RLE block after a literal.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems;
 
     for (size_t i = 0; i < 121; ++i) {
@@ -3645,11 +3813,39 @@ TEST_F(BSONColumnTest, SimpleOneValueRLE) {
     auto binData = cb.finalize();
 
     verifyBinary(binData, expected, true);
-    verifyDecompression(binData, elems, true);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, SkipRLEWithMoreSkips) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    // This test is creating skips that's encoded as RLE where the first non-skip value is before
+    // the RLE block.
+    std::vector<BSONElement> elems = {createElementInt64(38), createElementInt64(40)};
+    for (int i = 0; i < 140; ++i) {
+        elems.push_back(BSONElement());
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0010);
+    appendSimple8bBlocks64(
+        expected, deltaInt64(elems.begin() + 1, elems.begin() + 21, elems.front()), 1);
+    appendSimple8bRLE(expected, 120);
+    appendSimple8bBlock64(expected, boost::none);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, DateAllIdenticalRLENoOverflow) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // All identical values using date. Encoded as RLE that never overflow.
     std::vector<BSONElement> elems(simple8b_internal::kRleMultiplier + 1,
@@ -3670,9 +3866,37 @@ TEST_F(BSONColumnTest, DateAllIdenticalRLENoOverflow) {
     verifyDecompression(binData, elems);
 }
 
+TEST_F(BSONColumnTest, RLEBeginningWithDifferentValAfterNoOverflow) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    BSONElement e = createElementInt64(37);
+
+    // Add enough elements to fill an RLE block
+    std::vector<BSONElement> elems(simple8b_internal::kRleMultiplier + 1, e);
+
+    // Add a different value after RLE.
+    elems.push_back(createElementInt64(38));
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0001);
+    appendSimple8bRLE(expected, simple8b_internal::kRleMultiplier);
+    appendSimple8bBlock64(expected, deltaInt64(elems[elems.size() - 1], elems[elems.size() - 2]));
+    appendEOO(expected);
+
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
 
 TEST_F(BSONColumnTest, NonZeroRLETwoControlBlocks) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test validates handling when we have so many consecutive values with RLE blocks that
     // they span over two control blocks. We need to write at least 17 simple8b blocks for this to
@@ -3711,7 +3935,7 @@ TEST_F(BSONColumnTest, RLEAfterMixedValueBlock) {
     // This test produces an RLE block after a simple8b block with different values. We test that we
     // can properly handle when the value to use for RLE is at the end of this block and not the
     // beginning.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems = {createElementInt64(64), createElementInt64(128)};
 
     for (size_t i = 0; i < 128; ++i) {
@@ -3734,14 +3958,14 @@ TEST_F(BSONColumnTest, RLEAfterMixedValueBlock) {
     auto binData = cb.finalize();
 
     verifyBinary(binData, expected, true);
-    verifyDecompression(binData, elems, true);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, RLEAfterMixedValueBlock128) {
     // This test produces an RLE block after a simple8b block with different values. We test that we
     // can properly handle when the value to use for RLE is at the end of this block and not the
     // beginning.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Generate strings from integer to make it easier to control the delta values
     auto createStringFromInt = [&](int64_t val) {
@@ -3771,7 +3995,7 @@ TEST_F(BSONColumnTest, RLEAfterMixedValueBlock128) {
     auto binData = cb.finalize();
 
     verifyBinary(binData, expected, true);
-    verifyDecompression(binData, elems, true);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock) {
@@ -3779,7 +4003,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock) {
     // is located as the first block after a control byte. We test that we can properly handle when
     // the value to use for RLE is at the end of the last block in the previous control byte and not
     // at the beginning of this block.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems = {createElementInt64(0),
                                       createElementInt64(0xFFFFFFFFFFFFFF),
                                       createElementInt64(0),
@@ -3821,7 +4045,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected, true);
-    verifyDecompression(binData, elems, true);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock128) {
@@ -3829,7 +4053,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock128) {
     // is located as the first block after a control byte. We test that we can properly handle when
     // the value to use for RLE is at the end of the last block in the previous control byte and not
     // at the beginning of this block.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Generate strings from integer to make it easier to control the delta values
     auto createStringFromInt = [&](int64_t val) {
@@ -3878,7 +4102,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlock128) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected, true);
-    verifyDecompression(binData, elems, true);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreIdentical) {
@@ -3887,7 +4111,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreIdentical) {
     // the RLE block after that got written during finalize. We test that we can properly handle
     // when we have not yet overflowed in the RLE and must continue to search in the previous
     // control.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems = {createElementInt64(0),
                                       createElementInt64(0xFFFFFFFFFFFFFF),
                                       createElementInt64(0),
@@ -3939,7 +4163,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreIdentical128
     // the RLE block after that got written during finalize. We test that we can properly handle
     // when we have not yet overflowed in the RLE and must continue to search in the previous
     // control.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Generate strings from integer to make it easier to control the delta values
     auto createStringFromInt = [&](int64_t val) {
@@ -3989,8 +4213,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreIdentical128
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected, true);
-    // TODO(SERVER-87305): block-based testing fails with a testing assertion binaryEqualValues
-    verifyDecompression(binData, elems, false);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreDifferent) {
@@ -3999,7 +4222,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreDifferent) {
     // the RLE block after that got written during finalize. We test that we can properly handle
     // when we have not yet overflowed in the RLE and must continue to search in the previous
     // control.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems = {createElementInt64(0),
                                       createElementInt64(0xFFFFFFFFFFFFFF),
                                       createElementInt64(0),
@@ -4053,7 +4276,7 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreDifferent128
     // the RLE block after that got written during finalize. We test that we can properly handle
     // when we have not yet overflowed in the RLE and must continue to search in the previous
     // control.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Generate strings from integer to make it easier to control the delta values
     auto createStringFromInt = [&](int64_t val) {
@@ -4105,12 +4328,66 @@ TEST_F(BSONColumnTest, RLEFirstInControlAfterMixedValueBlockWithMoreDifferent128
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected, true);
-    // TODO(SERVER-87305): block-based testing fails with a testing assertion binaryEqualValues
-    verifyDecompression(binData, elems, false);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, RLELargeValueExtendedSelector) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    // This test creates an RLE block containing large values that do not fit in the base selector.
+    // Ensure the correct selector states are set for binary reopen of this binary.
+    uint64_t val = 0;
+    uint64_t delta = 0x3F00000000000000;
+    std::vector<BSONElement> elems;
+    // Add extra value so they are not all the same
+    elems.push_back(createElementInt64(val));
+    for (int i = 0; i < 125; ++i, val += delta) {
+        elems.push_back(createElementInt64(val));
+    }
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0001);
+    appendSimple8bBlocks64(
+        expected, deltaInt64(elems.begin() + 1, elems.begin() + 6, elems.front()), 1);
+    appendSimple8bRLE(expected, 120);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, DefaultSelectorAfterExtended) {
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
+
+    // This test is having a large delta that must be stored in the extended selectors, after comes
+    // a small value. We need to properly adjust selector state when reopening.
+    std::vector<BSONElement> elems = {
+        createElementString("core"_sd), createElementString("Singapore"_sd), BSONElement()};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0001);
+    appendSimple8bBlocks128(
+        expected, deltaString(elems.begin() + 1, elems.end(), elems.front()), 2);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, Interleaved) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1 << "y" << 2)),
                                       createElementObj(BSON("x" << 1 << "y" << 3)),
@@ -4186,7 +4463,7 @@ TEST_F(BSONColumnTest, InterleavedLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedArray) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << BSON_ARRAY(1 << 2))),
                                       createElementObj(BSON("x" << BSON_ARRAY(2 << 3)))};
 
@@ -4217,7 +4494,7 @@ TEST_F(BSONColumnTest, InterleavedArray) {
 }
 
 TEST_F(BSONColumnTest, InterleavedArrayRoot) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems = {createElementArray(BSON_ARRAY(1 << 2)),
                                       createElementArray(BSON_ARRAY(2 << 3))};
 
@@ -4246,7 +4523,7 @@ TEST_F(BSONColumnTest, InterleavedArrayRoot) {
 }
 
 TEST_F(BSONColumnTest, InterleavedArrayRootTypeChange) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     std::vector<BSONElement> elems = {createElementArray(BSON_ARRAY(1 << 2)),
                                       createElementArrayAsObject(BSON_ARRAY(2 << 3))};
 
@@ -4277,7 +4554,7 @@ TEST_F(BSONColumnTest, InterleavedArrayRootTypeChange) {
 }
 
 TEST_F(BSONColumnTest, InterleavedAfterNonInterleaved) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementInt32(1),
                                       createElementObj(BSON("x" << 1 << "y" << 2)),
@@ -4339,7 +4616,7 @@ TEST_F(BSONColumnTest, InterleavedAfterNonInterleavedLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedLevels) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("root" << BSON("x" << 1) << "y" << 2)),
                                       createElementObj(BSON("root" << BSON("x" << 2) << "y" << 5)),
@@ -4401,7 +4678,7 @@ TEST_F(BSONColumnTest, InterleavedLevelsLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedDoubleDifferentScale) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1.0 << "y" << 2.0)),
                                       createElementObj(BSON("x" << 1.1 << "y" << 3.0)),
@@ -4471,7 +4748,7 @@ TEST_F(BSONColumnTest, InterleavedDoubleDifferentScaleLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedDoubleIncreaseScaleFromDeltaNoRescale) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementObj(BSON("x" << 1.1)));
@@ -4533,7 +4810,7 @@ TEST_F(BSONColumnTest, InterleavedDoubleIncreaseScaleFromDeltaNoRescaleLegacyDec
 }
 
 TEST_F(BSONColumnTest, InterleavedScalarToObject) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1)),
                                       createElementObj(BSON("x" << 2)),
@@ -4637,8 +4914,7 @@ TEST_F(BSONColumnTest, DecodeInterleavedObjectAsScalar) {
         binData.data = expected.buf();
         binData.length = expected.len();
         binData.type = BinDataType::Column;
-        // TODO(SERVER-87303): turning this on for block-based testing causes a segfault
-        verifyDecompression(binData, elems, false);
+        verifyDecompression(binData, elems);
     };
 
     test(appendInterleavedStartLegacy);
@@ -4646,7 +4922,7 @@ TEST_F(BSONColumnTest, DecodeInterleavedObjectAsScalar) {
 }
 
 TEST_F(BSONColumnTest, InterleavedMix64And128Bit) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1 << "y"
                                                                 << "count0")),
@@ -4724,7 +5000,7 @@ TEST_F(BSONColumnTest, InterleavedMix64And128BitLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedWithEmptySubObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSONObjBuilder().obj())),
@@ -4772,7 +5048,7 @@ TEST_F(BSONColumnTest, InterleavedWithEmptySubObjLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedRemoveEmptySubObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSONObjBuilder().obj())),
@@ -4830,7 +5106,7 @@ TEST_F(BSONColumnTest, InterleavedRemoveEmptySubObjLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedAddEmptySubObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 3)),
@@ -4881,7 +5157,7 @@ TEST_F(BSONColumnTest, InterleavedAddEmptySubObjLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedAddEmptySubArray) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 3)),
@@ -4910,7 +5186,7 @@ TEST_F(BSONColumnTest, InterleavedAddEmptySubArray) {
 }
 
 TEST_F(BSONColumnTest, InterleavedSchemaChange) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1 << "y" << 2)),
                                       createElementObj(BSON("x" << 1 << "y" << 3)),
@@ -4978,7 +5254,7 @@ TEST_F(BSONColumnTest, InterleavedSchemaChangeLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectSchemaChange) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1 << "y" << BSON("z" << 2))),
                                       createElementObj(BSON("x" << 1 << "y" << BSON("z" << 3))),
@@ -5048,7 +5324,7 @@ TEST_F(BSONColumnTest, InterleavedObjectSchemaChangeLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNameChange) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1 << "y" << BSON("z" << 2))),
                                       createElementObj(BSON("x" << 1 << "y2" << BSON("z" << 3)))};
@@ -5102,7 +5378,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNameChangeLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectEmptyObjChange) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSON("z" << 2))),
@@ -5170,7 +5446,7 @@ TEST_F(BSONColumnTest, InterleavedObjectEmptyObjChangeLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectEmptyArrayChange) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSON("z" << 2))),
@@ -5208,7 +5484,7 @@ TEST_F(BSONColumnTest, InterleavedObjectEmptyArrayChange) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjMiddle) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "z" << 2)),
@@ -5280,7 +5556,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjMiddleLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayMiddle) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "z" << 2)),
@@ -5320,7 +5596,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayMiddle) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjUnderObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "z" << 2)),
@@ -5394,7 +5670,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjUnderObjLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayUnderObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "z" << 2)),
@@ -5435,7 +5711,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayUnderObj) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2)),
@@ -5507,7 +5783,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjEndLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2)),
@@ -5547,7 +5823,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayEnd) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjUnderObjEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2)),
@@ -5621,7 +5897,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyObjUnderObjEndLegacyDecompress) 
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayUnderObjEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2)),
@@ -5662,7 +5938,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayUnderObjEnd) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayUnderArrayEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2)),
@@ -5703,7 +5979,7 @@ TEST_F(BSONColumnTest, InterleavedObjectNewEmptyArrayUnderArrayEnd) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjMiddle) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSONObjBuilder().obj() << "z" << 2)),
@@ -5775,7 +6051,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjMiddleLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayMiddle) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSONArrayBuilder().arr() << "z" << 2)),
@@ -5815,7 +6091,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayMiddle) {
 }
 
 TEST_F(BSONColumnTest, InterleavedArrayMissingEmptyObjMiddle) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementArray(BSON_ARRAY(1 << BSONObjBuilder().obj() << 2)),
@@ -5855,7 +6131,7 @@ TEST_F(BSONColumnTest, InterleavedArrayMissingEmptyObjMiddle) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjUnderObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSON("y1" << BSONObjBuilder().obj()) << "z" << 2)),
@@ -5927,7 +6203,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjUnderObjLegacyDecompress)
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayUnderObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(
@@ -5969,7 +6245,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayUnderObj) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayUnderArray) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << BSON_ARRAY(BSONArrayBuilder().arr()) << "z" << 2)),
@@ -6009,7 +6285,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayUnderArray) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2 << "z" << BSONObjBuilder().obj())),
@@ -6081,7 +6357,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjEndLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2 << "z" << BSONArrayBuilder().arr())),
@@ -6121,7 +6397,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayEnd) {
 }
 
 TEST_F(BSONColumnTest, InterleavedArrayMissingEmptyArrayEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementArray(BSON_ARRAY(1 << 2 << BSONArrayBuilder().arr())),
@@ -6161,7 +6437,7 @@ TEST_F(BSONColumnTest, InterleavedArrayMissingEmptyArrayEnd) {
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjUnderObjEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2 << "z" << BSON("z1" << BSONObjBuilder().obj()))),
@@ -6233,7 +6509,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyObjUnderObjEndLegacyDecompre
 }
 
 TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayUnderObjEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(
@@ -6275,7 +6551,7 @@ TEST_F(BSONColumnTest, InterleavedObjectMissingEmptyArrayUnderObjEnd) {
 }
 
 TEST_F(BSONColumnTest, InterleavedArrayMissingEmptyObjUnderObjEnd) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementArray(BSON_ARRAY(1 << 2 << BSON("z1" << BSONObjBuilder().obj()))),
@@ -6315,7 +6591,7 @@ TEST_F(BSONColumnTest, InterleavedArrayMissingEmptyObjUnderObjEnd) {
 }
 
 TEST_F(BSONColumnTest, ReenterInterleaved) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1 << "y" << 2)),
                                       createElementObj(BSON("x" << 1 << "y" << 3)),
@@ -6409,7 +6685,7 @@ TEST_F(BSONColumnTest, ReenterInterleavedLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, ReenterInterleavedArrayRootToObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementArray(BSON_ARRAY(1 << 2)),
                                       createElementArray(BSON_ARRAY(1 << 3)),
@@ -6460,7 +6736,7 @@ TEST_F(BSONColumnTest, ReenterInterleavedArrayRootToObj) {
 }
 
 TEST_F(BSONColumnTest, InterleavedAlternatingMergeRight) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1)),
                                       createElementObj(BSON("y" << 2)),
@@ -6560,7 +6836,7 @@ TEST_F(BSONColumnTest, InterleavedAlternatingMergeRightLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedAlternatingMergeLeftThenRight) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("z" << 1)),
                                       createElementObj(BSON("y" << 2 << "z" << 2)),
@@ -6620,7 +6896,7 @@ TEST_F(BSONColumnTest, InterleavedAlternatingMergeLeftThenRightLegacyDecompress)
 }
 
 TEST_F(BSONColumnTest, InterleavedMergeWithUnrelatedArray) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("a" << BSON_ARRAY(1 << 2) << "z" << 1)),
@@ -6665,7 +6941,7 @@ TEST_F(BSONColumnTest, InterleavedMergeWithUnrelatedArray) {
 }
 
 TEST_F(BSONColumnTest, InterleavedMergeWithScalarObjectMismatch) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Test that we can successfully build reference object when there are unrelated fields with
     // object and scalar mismatch.
@@ -6719,7 +6995,7 @@ TEST_F(BSONColumnTest, InterleavedMergeWithScalarObjectMismatchLegacyDecompress)
 }
 
 TEST_F(BSONColumnTest, InterleavedArrayAppend) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementArray(BSONArrayBuilder().arr()),
@@ -6767,7 +7043,7 @@ TEST_F(BSONColumnTest, InterleavedArrayAppend) {
 }
 
 TEST_F(BSONColumnTest, InterleavedIncompatibleMerge) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1)),
                                       createElementObj(BSON("x" << 2 << "y" << 2)),
@@ -6831,7 +7107,7 @@ TEST_F(BSONColumnTest, InterleavedIncompatibleMergeLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedIncompatibleMergeMiddle) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("a" << 1 << "x" << 2 << "y" << 2 << "b" << 2)),
@@ -6907,7 +7183,7 @@ TEST_F(BSONColumnTest, InterleavedIncompatibleMergeMiddleLegacyDecompress) {
 }
 
 TEST_F(BSONColumnTest, InterleavedIncompatibleAfterDeterminedReference) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1)),
                                       createElementObj(BSON("x" << 2)),
@@ -6981,7 +7257,7 @@ TEST_F(BSONColumnTest, InterleavedIncompatibleAfterDeterminedReferenceLegacyDeco
 }
 
 TEST_F(BSONColumnTest, InterleavedSkipAfterEmptySubObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(BSON("x" << 1 << "y" << 2 << "z" << BSON("z1" << BSONObjBuilder().obj()))),
@@ -7005,8 +7281,7 @@ TEST_F(BSONColumnTest, InterleavedSkipAfterEmptySubObj) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    // TODO(SERVER-87304): "unexpected control" when turning on block based testing here
-    verifyDecompression(binData, elems, false);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, InterleavedSkipAfterEmptySubObjLegacyDecompression) {
@@ -7026,12 +7301,11 @@ TEST_F(BSONColumnTest, InterleavedSkipAfterEmptySubObjLegacyDecompression) {
     appendSimple8bBlock64(expected, boost::none);
     appendEOO(expected);
 
-    // TODO(SERVER-87304): "unexpected control" when turning on block based testing here
-    verifyDecompression(expected, elems, false);
+    verifyDecompression(expected, elems);
 }
 
 TEST_F(BSONColumnTest, InterleavedSkipAfterEmptySubArray) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {
         createElementObj(
@@ -7056,12 +7330,11 @@ TEST_F(BSONColumnTest, InterleavedSkipAfterEmptySubArray) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    // TODO(SERVER-87304): "unexpected control" when turning on block based testing here
-    verifyDecompression(binData, elems, false);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, ObjectEmpty) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSONObjBuilder().obj()),
                                       createElementObj(BSONObjBuilder().obj())};
@@ -7082,7 +7355,7 @@ TEST_F(BSONColumnTest, ObjectEmpty) {
 }
 
 TEST_F(BSONColumnTest, ObjectEmptyAfterNonEmpty) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1)),
                                       createElementObj(BSONObjBuilder().obj())};
@@ -7120,7 +7393,7 @@ TEST_F(BSONColumnTest, ObjectEmptyAfterNonEmptyLegacyDecompression) {
 }
 
 TEST_F(BSONColumnTest, ObjectWithOnlyEmptyObjsDoesNotStartInterleaving) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     std::vector<BSONElement> elems;
     elems.push_back(createElementObj(BSON("a" << BSONObjBuilder().obj())));
@@ -7141,7 +7414,7 @@ TEST_F(BSONColumnTest, ObjectWithOnlyEmptyObjsDoesNotStartInterleaving) {
 }
 
 TEST_F(BSONColumnTest, ObjectWithOnlyEmptyObjsDoesNotStartInterleavingFromDetermine) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Append elements so we are in kSubObjDeterminingReference state when element with 'b'
     // field is appended. Make sure this does not re-start subobj compression as it only contain
@@ -7192,7 +7465,7 @@ TEST_F(BSONColumnTest,
 
 
 TEST_F(BSONColumnTest, ObjectWithOnlyEmptyObjsDoesNotStartInterleavingFromAppending) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // Append enough elements so we are in kSubObjAppending state when element with 'b' field is
     // appended. Make sure this does not re-start subobj compression as it only contain empty
@@ -7265,7 +7538,7 @@ TEST_F(BSONColumnTest,
 }
 
 TEST_F(BSONColumnTest, InterleavedFullSkipAfterObjectSkip) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     // This test makes sure we're not leaking the skip from the 'yyyyyy' field into the next
     // measurement. 'yyyyyy' will be written into the buffer for the second item before we realize
@@ -7299,7 +7572,7 @@ TEST_F(BSONColumnTest, InterleavedFullSkipAfterObjectSkip) {
 }
 
 TEST_F(BSONColumnTest, NonZeroRLEInFirstBlockAfterSimple8bBlocks) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     int64_t value = 1;
 
@@ -7353,7 +7626,7 @@ TEST_F(BSONColumnTest, NonZeroRLEInFirstBlockAfterSimple8bBlocks) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, elems, true);
+    verifyDecompression(binData, elems);
 }
 
 TEST_F(BSONColumnTest, NonZeroRLEInLastBlock) {
@@ -7361,7 +7634,7 @@ TEST_F(BSONColumnTest, NonZeroRLEInLastBlock) {
     // block is RLE containing a non-zero value. Verify that we can handle that correctly,
     // especially when instantiating a BSONColumnBuilder from an already compressed binary, in that
     // case we need to put the values in the RLE block back to pending.
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     int64_t value = 1;
 
@@ -7434,8 +7707,7 @@ TEST_F(BSONColumnTest, ZeroDeltaAfterInterleaved) {
     appendSimple8bBlock64(expected, kDeltaForBinaryEqualValues);
     appendEOO(expected);
 
-    // TODO(SERVER-87304): "unexpected control" when turning on block based testing here
-    verifyDecompression(expected, elems, false);
+    verifyDecompression(expected, elems);
 }
 
 TEST_F(BSONColumnTest, InvalidControlByte) {
@@ -7547,7 +7819,7 @@ TEST_F(BSONColumnTest, InvalidInterleavedCount) {
     // This test sets up an interleaved reference object with two fields but only provides one
     // interleaved substream.
     auto test = [&](auto appendInterleavedStartFunc) {
-        BSONColumnBuilder cb;
+        TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
         BufBuilder expected;
         appendInterleavedStartFunc(expected, BSON("a" << 1 << "b" << 1));
         appendSimple8bControl(expected, 0b1000, 0b0000);
@@ -7562,7 +7834,7 @@ TEST_F(BSONColumnTest, InvalidInterleavedCount) {
     test(appendInterleavedStartLegacy);
     test(appendInterleavedStart);
 
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     BufBuilder expected;
     appendInterleavedStartArrayRoot(expected, BSON_ARRAY(1 << 1));
     appendSimple8bControl(expected, 0b1000, 0b0000);
@@ -7577,7 +7849,7 @@ TEST_F(BSONColumnTest, InvalidInterleavedCount) {
 TEST_F(BSONColumnTest, InvalidInterleavedWhenAlreadyInterleaved) {
     // This tests that we handle the interleaved start byte when already in interleaved mode.
     auto test = [&](auto appendInterleavedStartFunc) {
-        BSONColumnBuilder cb;
+        TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
         BufBuilder expected;
         appendInterleavedStartFunc(expected, BSON("a" << 1 << "b" << 1));
         appendSimple8bControl(expected, 0b1000, 0b0000);
@@ -7593,7 +7865,7 @@ TEST_F(BSONColumnTest, InvalidInterleavedWhenAlreadyInterleaved) {
     test(appendInterleavedStartLegacy);
     test(appendInterleavedStart);
 
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     BufBuilder expected;
     appendInterleavedStart(expected, BSON("a" << 1 << "b" << 1));
     appendSimple8bControl(expected, 0b1000, 0b0000);
@@ -7648,7 +7920,7 @@ TEST_F(BSONColumnTest, InvalidDelta) {
 }
 
 TEST_F(BSONColumnTest, AppendMinKey) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     cb.append(createElementMinKey());
 
     BufBuilder expected;
@@ -7657,11 +7929,11 @@ TEST_F(BSONColumnTest, AppendMinKey) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {createElementMinKey()}, true);
+    verifyDecompression(binData, {createElementMinKey()});
 }
 
 TEST_F(BSONColumnTest, AppendMaxKey) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     cb.append(createElementMaxKey());
 
     BufBuilder expected;
@@ -7670,11 +7942,11 @@ TEST_F(BSONColumnTest, AppendMaxKey) {
 
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
-    verifyDecompression(binData, {createElementMaxKey()}, true);
+    verifyDecompression(binData, {createElementMaxKey()});
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     BSONObjBuilder obj;
     {
@@ -7698,7 +7970,7 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObj) {
 }
 
 TEST_F(BSONColumnTest, AppendMaxKeyInSubObj) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     BSONObjBuilder obj;
     {
@@ -7722,7 +7994,7 @@ TEST_F(BSONColumnTest, AppendMaxKeyInSubObj) {
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStart) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     BSONObjBuilder obj;
     {
@@ -7751,7 +8023,7 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStart) {
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStartInAppendMode) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     BSONObjBuilder obj;
     {
@@ -7788,7 +8060,7 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterInterleaveStartInAppendMode) {
 }
 
 TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterMerge) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
 
     BSONObjBuilder obj;
     {
@@ -7958,7 +8230,7 @@ TEST_F(BSONColumnTest, DecompressMinKeyInSubObjAfterMerge) {
 }
 
 TEST_F(BSONColumnTest, AppendObjDirectly) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     BSONColumnBuilder cb2;
 
     std::vector<BSONElement> elems = {createElementObj(BSON("x" << 1)),
@@ -7976,7 +8248,7 @@ TEST_F(BSONColumnTest, AppendObjDirectly) {
 }
 
 TEST_F(BSONColumnTest, AppendArrayDirectly) {
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     BSONColumnBuilder cb2;
 
     std::vector<BSONElement> elems = {createElementArray(BSON_ARRAY(1 << 2 << 3)),
@@ -7995,7 +8267,7 @@ TEST_F(BSONColumnTest, AppendArrayDirectly) {
 
 TEST_F(BSONColumnTest, Intermediate) {
     // Verify that the intermediate function works as expected
-    BSONColumnBuilder cb;
+    TrackedBSONColumnBuilder cb{_trackingContext.makeAllocator<void>()};
     BSONColumnBuilder reference;
 
     // Various elements
@@ -8332,4 +8604,4 @@ TEST_F(BSONColumnTest, TestCollector) {
 
 
 }  // namespace
-}  // namespace mongo
+}  // namespace mongo::bsoncolumn

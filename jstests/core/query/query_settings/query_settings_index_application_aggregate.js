@@ -80,8 +80,7 @@ function testAggregateQuerySettingsApplicationWithoutSecondaryCollections(collOr
     });
     qstests.assertQuerySettingsIndexApplication(aggregateCmd, mainNs);
     qstests.assertQuerySettingsIgnoreCursorHints(aggregateCmd, mainNs);
-    // TODO SERVER-85242 Re-enable once the fallback mechanism is reimplemented.
-    // qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
+    qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
 }
 
@@ -133,8 +132,7 @@ function testAggregateQuerySettingsApplicationWithLookupEquiJoin(
     // NOTE: The fallback is not tested when hinting secondary collections, as instead of fallback,
     // hash join or nlj will be used.
     // TODO: SERVER-86400 Add support for $natural hints on secondary collections.
-    // TODO SERVER-85242 Re-enable once the fallback mechanism is reimplemented.
-    // qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
+    qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
 
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, secondaryNs);
@@ -176,9 +174,52 @@ function testAggregateQuerySettingsApplicationWithLookupPipeline(collOrViewName,
     // different pipelines.
     qstests.assertQuerySettingsWithCursorHints(aggregateCmd, mainNs, secondaryNs);
 
-    // TODO SERVER-85242 Re-enable once the fallback mechanism is reimplemented.
-    // qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
-    // qstests.assertQuerySettingsFallback(aggregateCmd, secondaryNs);
+    qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
+    qstests.assertQuerySettingsFallback(aggregateCmd, secondaryNs);
+
+    qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
+    qstests.assertQuerySettingsCommandValidation(aggregateCmd, secondaryNs);
+}
+
+function testAggregateQuerySettingsApplicationWithGraphLookup(collOrViewName,
+                                                              secondaryCollOrViewName) {
+    const qsutils = new QuerySettingsUtils(db, collOrViewName);
+    const qstests = new QuerySettingsIndexHintsTests(qsutils);
+
+    // Set indexes on both collections.
+    setIndexes(coll, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+    setIndexes(secondaryColl, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+
+    // Ensure that query settings cluster parameter is empty.
+    qsutils.assertQueryShapeConfiguration([]);
+
+    const filter = {a: {$ne: "Bond"}, b: {$ne: "James"}};
+    const pipeline = [{
+        $match: filter
+        }, {
+        $graphLookup: {
+        from: secondaryCollOrViewName,
+        startWith: "$a",
+        connectFromField: "b",
+        connectToField: "a",
+        as: "children",
+        maxDepth: 4,
+        depthField: "depth",
+        restrictSearchWithMatch: filter
+        }
+    }];
+    const aggregateCmd = qsutils.makeAggregateQueryInstance({pipeline});
+
+    // Ensure query settings index application for 'mainNs'.
+    // TODO SERVER-88561: Ensure query settings index application for 'secondaryNs' after
+    // 'indexesUsed' is added to the 'explain' command output for the $graphLookup operation.
+    qstests.assertQuerySettingsIndexApplication(aggregateCmd, mainNs);
+    qstests.assertGraphLookupQuerySettingsInCache(aggregateCmd, secondaryNs);
+
+    // Ensure query settings ignore cursor hints when being set on main collection.
+    qstests.assertQuerySettingsIgnoreCursorHints(aggregateCmd, mainNs);
+
+    qstests.assertQuerySettingsFallback(aggregateCmd, mainNs);
 
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, mainNs);
     qstests.assertQuerySettingsCommandValidation(aggregateCmd, secondaryNs);
@@ -186,6 +227,11 @@ function testAggregateQuerySettingsApplicationWithLookupPipeline(collOrViewName,
 
 testAggregateQuerySettingsApplicationWithoutSecondaryCollections(coll.getName());
 testAggregateQuerySettingsApplicationWithoutSecondaryCollections(viewName);
+
+testAggregateQuerySettingsApplicationWithGraphLookup(coll.getName(), secondaryColl.getName());
+testAggregateQuerySettingsApplicationWithGraphLookup(viewName, secondaryColl.getName());
+testAggregateQuerySettingsApplicationWithGraphLookup(coll.getName(), secondaryViewName);
+testAggregateQuerySettingsApplicationWithGraphLookup(viewName, secondaryViewName);
 
 testAggregateQuerySettingsApplicationWithLookupEquiJoin(
     coll.getName(), secondaryColl.getName(), false);

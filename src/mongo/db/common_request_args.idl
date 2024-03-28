@@ -51,6 +51,9 @@ structs:
       OperationSessionInfoFromClientBase: OperationSessionInfoFromClientBase
       GossipedVectorClockComponents: GossipedVectorClockComponents
     fields:
+      $db:
+        type: database_name
+        cpp_name: "dbName"
       readConcern:
         type: object
         optional: true
@@ -70,9 +73,6 @@ structs:
       $client:
         type: IDLAnyType
         cpp_name: clientMetadata
-        optional: true
-      tracking_info:
-        type: IDLAnyType
         optional: true
       $audit:
         type: IDLAnyType

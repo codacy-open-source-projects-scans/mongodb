@@ -509,6 +509,15 @@ bool handleError(OperationContext* opCtx,
             oss.setShardingOperationFailedStatus(ex.toStatus());
         }
 
+        // Fail the write for direct shard operations so that a RetryableWriteError label
+        // can be returned and the write can be retried by the driver. The retry should succeed
+        // because a command failing with StaleConfig triggers sharding metadata refresh in the
+        // ScopedOperationCompletionShardingActions destructor.
+        if (!OperationShardingState::isComingFromRouter(opCtx) &&
+            ex.code() == ErrorCodes::StaleConfig && opCtx->isRetryableWrite()) {
+            throw;
+        }
+
         // For routing errors, it is guaranteed that all subsequent operations will fail
         // with the same cause, so don't try doing any more operations. The command reply serializer
         // will handle repeating this error for unordered writes.
@@ -1688,6 +1697,36 @@ WriteResult performUpdates(OperationContext* opCtx,
                 updateManyCount.increment(1);
                 collectMultiUpdateDeleteMetrics(timer->elapsed(), reply.getNModified());
             }
+        } catch (const ExceptionFor<ErrorCodes::TimeseriesBucketCompressionFailed>& ex) {
+            // Do not handle errors for time-series bucket compressions. They need to be transparent
+            // to users to not interfere with any decisions around operation retry. It is OK to
+            // leave bucket uncompressed in these edge cases. We just record the status to the
+            // result vector so we can keep track of statistics for failed bucket compressions.
+            if (source == OperationSource::kTimeseriesBucketCompression) {
+                out.results.emplace_back(ex.toStatus());
+                break;
+            } else if (source == OperationSource::kTimeseriesInsert) {
+                // Special case for failed attempt to compress a reopened bucket.
+                throw;
+            } else if (source == OperationSource::kTimeseriesUpdate) {
+                auto& bucketCatalog = timeseries::bucket_catalog::BucketCatalog::get(opCtx);
+                timeseries::bucket_catalog::freeze(
+                    bucketCatalog, ex->collectionUUID(), ex->bucketId());
+                LOGV2_WARNING(8793901,
+                              "Encountered corrupt bucket while performing update",
+                              "bucketId"_attr = ex->bucketId());
+            }
+
+            out.canContinue = handleError(opCtx,
+                                          ex,
+                                          ns,
+                                          wholeOp.getOrdered(),
+                                          singleOp.getMulti(),
+                                          singleOp.getSampleId(),
+                                          &out);
+            if (!out.canContinue) {
+                break;
+            }
         } catch (const DBException& ex) {
             // Do not handle errors for time-series bucket compressions. They need to be transparent
             // to users to not interfere with any decisions around operation retry. It is OK to
@@ -1696,12 +1735,7 @@ WriteResult performUpdates(OperationContext* opCtx,
             if (source == OperationSource::kTimeseriesBucketCompression) {
                 out.results.emplace_back(ex.toStatus());
                 break;
-            } else if (source == OperationSource::kTimeseriesInsert &&
-                       ex.code() == ErrorCodes::TimeseriesBucketCompressionFailed) {
-                // Special case for failed attempt to compress a reopened bucket.
-                throw;
             }
-
             out.canContinue = handleError(opCtx,
                                           ex,
                                           ns,
@@ -2113,6 +2147,10 @@ Status performAtomicTimeseriesWrites(
     lastOpFixer.finishedOpSuccessfully();
 
     return Status::OK();
+} catch (const ExceptionFor<ErrorCodes::TimeseriesBucketCompressionFailed>&) {
+    // If we encounter a TimeseriesBucketCompressionFailure, we should throw to
+    // a higher level (write_ops_exec::performUpdates) so that we can freeze the corrupt bucket.
+    throw;
 } catch (const DBException& ex) {
     return ex.toStatus();
 }
@@ -2627,6 +2665,11 @@ bool commitTimeseriesBucketsAtomically(OperationContext* opCtx,
             tryPerformTimeseriesBucketCompression(opCtx, request, *closedBucket);
         }
     } catch (const ExceptionFor<ErrorCodes::TimeseriesBucketCompressionFailed>& ex) {
+        timeseries::bucket_catalog::freeze(bucketCatalog, ex->collectionUUID(), ex->bucketId());
+        LOGV2_WARNING(
+            8793900,
+            "Encountered corrupt bucket while performing insert, will retry on a new bucket",
+            "bucketId"_attr = ex->bucketId());
         abortStatus = ex.toStatus();
         return false;
     } catch (const DBException& ex) {

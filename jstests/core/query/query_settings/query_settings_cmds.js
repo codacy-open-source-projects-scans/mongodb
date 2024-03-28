@@ -19,15 +19,6 @@ const ns = {
 };
 const qsutils = new QuerySettingsUtils(db, coll.getName());
 
-// TODO SERVER-85242 Remove once the fallback mechanism is re-implemented.
-for (const indexKeyPattern
-         of [{a: 1, b: 1}, {b: 1, a: 1}, {groupID: 1, matchKey: 1}, {matchKey: 1, groupID: 1}]) {
-    assert.commandWorked(coll.createIndex(indexKeyPattern));
-}
-for (let i = 0; i < 10; i++) {
-    coll.insert({a: i, b: i, groupID: i, matchKey: i});
-}
-
 /**
  * Tests query settings setQuerySettings and removeQuerySettings commands as well as $querySettings
  * agg stage.
@@ -272,7 +263,7 @@ testQuerySettingsParameterized({
     }
 
     const query = qsutils.makeFindQueryInstance({filter: {b: 1}});
-    const queryShapeHash = "258FB48FDF9262600FC7CF932BB7DC6082121B469CE6BD9C9C43BAE84621AA61";
+    const queryShapeHash = "7F312F79FC0C37F532CBB024677C8D15641A290DA4F122B05BC5AE077CB314A7";
     const initialSettings = {queryFramework: "classic"};
     const finalSettings = {...initialSettings, reject: true};
 

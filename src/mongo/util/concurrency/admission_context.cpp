@@ -38,30 +38,12 @@ namespace {
 static constexpr StringData kLowString = "low"_sd;
 static constexpr StringData kNormalString = "normal"_sd;
 static constexpr StringData kExemptString = "exempt"_sd;
-
-const auto admissionContextDecoration = OperationContext::declareDecoration<AdmissionContext>();
 }  // namespace
 
-AdmissionContext& AdmissionContext::get(OperationContext* opCtx) {
-    return admissionContextDecoration(opCtx);
-}
-
-void AdmissionContext::copyTo(OperationContext* opCtx,
-                              boost::optional<AdmissionContext::Priority> newPriority) {
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
-    if (newPriority) {
-        AdmissionContext newContext(*this);
-        newContext._priority = *newPriority;
-        admissionContextDecoration(opCtx) = newContext;
-        return;
-    }
-
-    admissionContextDecoration(opCtx) = *this;
-}
-
-ScopedAdmissionPriority::ScopedAdmissionPriority(OperationContext* opCtx,
-                                                 AdmissionContext::Priority priority)
-    : _opCtx(opCtx), _originalPriority(AdmissionContext::get(opCtx).getPriority()) {
+ScopedAdmissionPriorityBase::ScopedAdmissionPriorityBase(OperationContext* opCtx,
+                                                         AdmissionContext& admCtx,
+                                                         AdmissionContext::Priority priority)
+    : _opCtx(opCtx), _admCtx(&admCtx), _originalPriority(admCtx.getPriority()) {
     uassert(ErrorCodes::IllegalOperation,
             "It is illegal for an operation to demote a high priority to a lower priority "
             "operation",
@@ -69,12 +51,12 @@ ScopedAdmissionPriority::ScopedAdmissionPriority(OperationContext* opCtx,
                 priority == AdmissionContext::Priority::kExempt);
 
     stdx::lock_guard<Client> lk(*_opCtx->getClient());
-    admissionContextDecoration(opCtx)._priority = priority;
+    _admCtx->_priority = priority;
 }
 
-ScopedAdmissionPriority::~ScopedAdmissionPriority() {
+ScopedAdmissionPriorityBase::~ScopedAdmissionPriorityBase() {
     stdx::lock_guard<Client> lk(*_opCtx->getClient());
-    admissionContextDecoration(_opCtx)._priority = _originalPriority;
+    _admCtx->_priority = _originalPriority;
 }
 
 StringData toString(AdmissionContext::Priority priority) {

@@ -19,9 +19,17 @@ import "jstests/libs/sbe_assert_error_override.js";
 import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {getEngine, getQueryPlanner, getSingleNodeExplain} from "jstests/libs/analyze_plan.js";
-import {blockProcessingTestCases} from "jstests/libs/block_processing_test_cases.js";
+import {
+    blockProcessingTestCases,
+    generateMetaVals
+} from "jstests/libs/block_processing_test_cases.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js"
-import {checkSbeStatus, kSbeDisabled, kSbeFullyEnabled} from "jstests/libs/sbe_util.js";
+import {
+    checkSbeFullFeatureFlagEnabled,
+    checkSbeStatus,
+    kSbeDisabled,
+    kSbeFullyEnabled
+} from "jstests/libs/sbe_util.js";
 
 TimeseriesTest.run((insert) => {
     const datePrefix = 1680912440;
@@ -30,7 +38,7 @@ TimeseriesTest.run((insert) => {
     let collNotTs = db.timeseries_group_not_ts;
 
     const timeFieldName = 'time';
-    const metaFieldName = 'measurement';
+    const metaFieldName = 'meta';
 
     coll.drop();
     collNotTs.drop();
@@ -44,18 +52,21 @@ TimeseriesTest.run((insert) => {
     // Populate 'coll' and 'collNotTs' with the same set of documents.
     const Inf = Infinity;
     const str = "a somewhat long string";
-    const metaVals = ["foo", "bar", "baz"];
+    const metaVals = generateMetaVals();
     const xVals = [null, undefined, 42, -12.345, NaN, "789", "antidisestablishmentarianism"];
     const yVals = [0, 73.73, -Inf, "blah", str, undefined, null];
-    const zVals = [0, 1, 2, 8, 23.9, 67, 247.8, -23, -456.7, -8e9, undefined];
-    const wVals = [0, 1, -2, 4, 7, -8.8, 9, 46, -99, 1e40, Inf, -Inf, NaN, str, [], {}, undefined];
+
+    const zSpecialVals = [undefined, 10e10, -10e10];
+    const wSpecialVals = [Inf, -Inf, NaN, str, [], {}, undefined];
 
     let nextId = 0;
     let nextDateOffset = 0;
-    let zIdx = 0;
-    let wIdx = 1;
+    let zSeed = 1234;
+    let wSeed = 5767;
+    let p = 0;
+    let q = 0;
 
-    for (let i = 0; i < 10; ++i) {
+    for (let i = 0; i < 5; ++i) {
         const documents = [];
 
         for (let meta of metaVals) {
@@ -63,8 +74,21 @@ TimeseriesTest.run((insert) => {
                 for (let y of yVals) {
                     let id = nextId;
                     let t = new Date(datePrefix + nextDateOffset);
-                    let z = zVals[zIdx];
-                    let w = wVals[wIdx];
+                    let z = zSeed;
+                    let w = wSeed;
+
+                    z = z % 2 == 0 ? z / 2 : -(z + 1) / 2;
+                    w = w % 2 == 0 ? w / 2 : -(w + 1) / 2;
+
+                    if (zSeed % 26 == 1 && zSpecialVals.length > 0) {
+                        z = zSpecialVals[0];
+                        zSpecialVals.shift();
+                    }
+
+                    if (wSeed % 26 == 1 && wSpecialVals.length > 0) {
+                        w = wSpecialVals[0];
+                        wSpecialVals.shift();
+                    }
 
                     let doc = {_id: id, [timeFieldName]: t, [metaFieldName]: meta};
 
@@ -80,13 +104,19 @@ TimeseriesTest.run((insert) => {
                     if (w !== undefined) {
                         doc.w = w;
                     }
+                    doc.p = p;
+                    doc.q = q;
 
                     documents.push(doc);
 
                     nextId = nextId + 1;
                     nextDateOffset = (nextDateOffset + 5) % 199;
-                    zIdx = (zIdx + 2) % zVals.length;
-                    wIdx = (wIdx + 3) % wVals.length;
+                    zSeed = (zSeed + 997) % 9967;
+                    wSeed = (wSeed + 991) % 9973;
+                    q = (q + 1) % 20;
+                    if (q == 0) {
+                        p = p + 1;
+                    }
                 }
             }
         }
@@ -97,6 +127,8 @@ TimeseriesTest.run((insert) => {
 
     // Block based $group is guarded behind (SbeFull || SbeBlockHashAgg) && TimeSeriesInSbe.
     const sbeStatus = checkSbeStatus(db);
+
+    const sbeFullyEnabled = checkSbeFullFeatureFlagEnabled(db);
     const featureFlagsAllowBlockHashAgg =
         // SBE can't be disabled altogether.
         (sbeStatus != kSbeDisabled) &&
@@ -128,7 +160,8 @@ TimeseriesTest.run((insert) => {
                                                    datePrefix,
                                                    dateUpperBound,
                                                    dateLowerBound,
-                                                   featureFlagsAllowBlockHashAgg);
+                                                   featureFlagsAllowBlockHashAgg,
+                                                   sbeFullyEnabled);
 
         for (let testcase of testcases) {
             const name = testcase.name + " (allowDiskUse=" + allowDiskUseStr + ")";
@@ -137,7 +170,7 @@ TimeseriesTest.run((insert) => {
             const usesBlockProcessing = testcase.usesBlockProcessing;
 
             if (expectedErrorCode) {
-                assertErrorCode(coll, pipeline, expectedErrorCode);
+                assertErrorCode(coll, pipeline, expectedErrorCode, "Test case failed: " + name);
             } else {
                 // Issue the aggregate() query and collect the results.
                 const results = coll.aggregate(pipeline, options).toArray();
@@ -181,7 +214,7 @@ TimeseriesTest.run((insert) => {
             if (usesBlockProcessing) {
                 // Verify that we have an SBE plan, and verify that "block_group" appears in the
                 // plan.
-                assert.eq(engineUsed, "sbe");
+                assert.eq(engineUsed, "sbe", testcaseAndExplainFn("Expected to use SBE"));
 
                 assert(sbePlan.includes("block_group"),
                        testcaseAndExplainFn("Expected explain to use block processing"));

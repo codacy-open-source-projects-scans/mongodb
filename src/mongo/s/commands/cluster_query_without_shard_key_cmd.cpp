@@ -270,7 +270,7 @@ ParsedCommandInfo parseWriteRequest(OperationContext* opCtx, const OpMsgRequest&
     // For bulkWrite request, we set the nss when we parse the bulkWrite command.
     if (commandName != BulkWriteCommandRequest::kCommandName) {
         parsedInfo.nss =
-            CommandHelpers::parseNsCollectionRequired(writeReq.getDbName(), writeCmdObj);
+            CommandHelpers::parseNsCollectionRequired(writeReq.parseDbName(), writeCmdObj);
     }
 
     if (commandName == BulkWriteCommandRequest::kCommandName) {
@@ -651,7 +651,7 @@ public:
     // compliant, when they technically should not be. To satisfy this requirement,
     // this command is marked as part of the Stable API, but is not truly a part of
     // it, since it is an internal-only command.
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return kApiVersions1;
     }
 };

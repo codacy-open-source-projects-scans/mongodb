@@ -77,6 +77,7 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/query/util/deferred.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/basic.h"
 #include "mongo/platform/compiler.h"
@@ -342,7 +343,7 @@ public:
         };
     };
 
-    virtual ~DocumentSource() {}
+    ~DocumentSource() override {}
 
     /**
      * Makes a deep clone of the DocumentSource by serializing and re-parsing it. DocumentSources
@@ -391,7 +392,7 @@ public:
         auto serviceCtx = pExpCtx->opCtx->getServiceContext();
         dassert(serviceCtx);
 
-        ScopedTimer timer(_commonStats.executionTime.get_ptr(), serviceCtx->getFastClockSource());
+        auto timer = getOptTimer(serviceCtx);
 
         ++_commonStats.works;
 
@@ -549,6 +550,13 @@ public:
      */
     virtual BSONObj getQuery() const;
 
+    /**
+     * Utility which allows for accessing and computing a ShardId to act as a merger.
+     */
+    boost::optional<ShardId> getMergeShardId() const {
+        return mergeShardId.get();
+    }
+
 private:
     /**
      * itr is pointing to some stage `A`. Fetch stage `B`, the stage after A in itr. If B is a
@@ -589,6 +597,29 @@ private:
 
         return pushMatchBefore(itr, container) || pushSampleBefore(itr, container) ||
             pushSingleDocumentTransformOrRedactBefore(itr, container);
+    }
+
+    /**
+     * Returns an optional timer which is used to collect the execution time.
+     * May return boost::none if it is not necessary to collect timing info.
+     */
+    boost::optional<ScopedTimer> getOptTimer(ServiceContext* serviceCtx) {
+        if (serviceCtx &&
+            _commonStats.executionTime.precision != QueryExecTimerPrecision::kNoTiming) {
+            if (MONGO_likely(_commonStats.executionTime.precision ==
+                             QueryExecTimerPrecision::kMillis)) {
+                return boost::optional<ScopedTimer>(
+                    boost::in_place_init,
+                    &_commonStats.executionTime.executionTimeEstimate,
+                    serviceCtx->getFastClockSource());
+            } else {
+                return boost::optional<ScopedTimer>(
+                    boost::in_place_init,
+                    &_commonStats.executionTime.executionTimeEstimate,
+                    serviceCtx->getTickSource());
+            }
+        }
+        return boost::none;
     }
 
 public:
@@ -820,6 +851,13 @@ protected:
      */
     virtual void doDispose() {}
 
+    /**
+     * Utility which describes when a stage needs to nominate a merging shard.
+     */
+    virtual boost::optional<ShardId> computeMergeShardId() const {
+        return boost::none;
+    }
+
     /*
       Most DocumentSources have an underlying source they get their data
       from.  This is a convenience for them.
@@ -831,6 +869,13 @@ protected:
     DocumentSource* pSource;
 
     boost::intrusive_ptr<ExpressionContext> pExpCtx;
+
+    /**
+     * Tracks this stage's merge ShardId, if one exists.
+     */
+    DeferredFn<boost::optional<ShardId>> mergeShardId{[this]() -> boost::optional<ShardId> {
+        return this->computeMergeShardId();
+    }};
 
 private:
     CommonStats _commonStats;

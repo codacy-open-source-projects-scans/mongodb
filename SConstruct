@@ -2,7 +2,6 @@
 
 import atexit
 import copy
-import distro
 import errno
 import functools
 import json
@@ -965,23 +964,6 @@ def fatal_error(env, msg, *args):
     Exit(1)
 
 
-def bazel_by_default():
-    try:
-        distro_name = distro.name()
-        distro_version = distro.version()
-        arch = platform.machine()
-
-        is_ubuntu_22_arm = distro_name == "Ubuntu" and distro_version.split(
-            ".")[0] == "22" and arch == "aarch64"
-        is_amazon_linux_2_arm = distro_name == "Amazon Linux" and distro_version == "2" and arch == "aarch64"
-
-        return is_ubuntu_22_arm or is_amazon_linux_2_arm
-    except Exception as e:
-        print(f"Error determining if Bazel should be enabled by default: {e}")
-        print("Defaulting to disable Bazel")
-        return False
-
-
 # Apply the default variables files, and walk the provided
 # arguments. Interpret any falsy argument (like the empty string) as
 # resetting any prior state. This makes the argument
@@ -1110,7 +1092,7 @@ env_vars.Add(
     help=
     'Enables/disables building with bazel. Note that this project is in flight, and thus subject to breaking changes. See https://jira.mongodb.org/browse/PM-3332 for details.',
     converter=functools.partial(bool_var_converter, var='BAZEL_BUILD_ENABLED'),
-    default="1" if bazel_by_default() else "0",
+    default="1",
 )
 
 env_vars.Add(
@@ -2183,6 +2165,7 @@ else:
 
 if env['MONGO_ALLOCATOR'] == "tcmalloc-google":
     env.Append(CPPDEFINES=["ABSL_ALLOCATOR_NOTHROW"])
+    env.Append(CXXFLAGS=['-faligned-new=8'])
 
 if has_option("cache"):
     if has_option("gcov"):
@@ -4674,6 +4657,9 @@ def doConfigure(myenv):
                 env.FatalError(
                     'The --detect-odr-violations flag is expected to only be reliable with --opt=off'
                 )
+            if linker_ld != "gold":
+                myenv.FatalError(
+                    "The --detect-odr-violations flag currently only works with --linker=gold")
             myenv.AddToLINKFLAGSIfSupported('-Wl,--detect-odr-violations')
 
         # Disallow an executable stack. Also, issue a warning if any files are found that would
@@ -6167,6 +6153,18 @@ env.AddPackageNameAlias(
 )
 
 env.AddPackageNameAlias(
+    component="benchmarks",
+    role="runtime",
+    name="benchmarks",
+)
+
+env.AddPackageNameAlias(
+    component="benchmarks",
+    role="debug",
+    name="benchmarks-debugsymbols",
+)
+
+env.AddPackageNameAlias(
     component="mh",
     role="runtime",
     # TODO: we should be able to move this to where the mqlrun binary is
@@ -6190,6 +6188,13 @@ env.AutoInstall(
     AIB_ROLE='runtime',
     AIB_COMPONENT='pretty-printer-tests',
     AIB_COMPONENTS_EXTRA=['dist-test'],
+)
+
+env.AutoInstall(
+    ".",
+    "$BENCHMARK_LIST",
+    AIB_COMPONENT="benchmarks",
+    AIB_ROLE='runtime',
 )
 
 if 'SANITIZER_RUNTIME_LIBS' in env:
@@ -6678,6 +6683,9 @@ if has_option("cache"):
 # load the tool late to make sure we can copy over any new
 # emitters/scanners we may have created in the SConstruct when
 # we go to make stand in bazel builders for the various scons builders
+# TODO SERVER-86052 After thin targets are implemented we should
+# be able to load this tool much earlier (before configure checks!)
+# and start the bazel build thread as early as possible.
 env.Tool('integrate_bazel')
 
 env.SConscript(
@@ -6810,12 +6818,16 @@ libdeps.generate_libdeps_graph(env)
 # We put this next section at the end of the SConstruct since all the targets
 # have been declared, and we know all possible bazel targets so
 # we can now generate this info into a file for the ninja build to consume.
-if env.get("BAZEL_BUILD_ENABLED") and env.GetOption('ninja') != "disabled":
+if env.get("BAZEL_BUILD_ENABLED"):
+    if env.GetOption('ninja') != "disabled":
 
-    # convert the SCons FunctioAction into a format that ninja can understand
-    env.NinjaRegisterFunctionHandler("bazel_builder_action", env.NinjaBazelBuilder)
+        # convert the SCons FunctioAction into a format that ninja can understand
+        env.NinjaRegisterFunctionHandler("bazel_builder_action", env.NinjaBazelBuilder)
 
-    # we generate the list of all targets that were labeled Bazel* builder targets
-    # via the emitter, this outputs a json file which will be read during the ninja
-    # build.
-    env.GenerateBazelInfoForNinja()
+        # we generate the list of all targets that were labeled Bazel* builder targets
+        # via the emitter, this outputs a json file which will be read during the ninja
+        # build.
+        env.GenerateBazelInfoForNinja()
+
+    else:
+        env.WaitForBazel()

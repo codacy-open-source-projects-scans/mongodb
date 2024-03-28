@@ -50,6 +50,7 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/admission/execution_control_feature_flags_gen.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
@@ -78,7 +79,6 @@
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
-#include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/diagnostic_info.h"
@@ -194,7 +194,7 @@ private:
         if (_top) {
             auto locker = shard_role_details::getLocker(opCtx());
             curOp->_lockStatsBase = locker->getLockerInfo(boost::none).stats;
-            curOp->_ticketWaitTimeAtStart = locker->getTimeQueuedForTicketMicros();
+            curOp->_ticketWaitBase = locker->getTimeQueuedForTicketMicros();
         }
 
         _top = curOp;
@@ -307,6 +307,10 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
         // reportState is used to generate a command reply
         auto sc = SerializationContext::stateCommandReply(expCtx->serializationCtxt);
         CurOp::get(clientOpCtx)->reportState(infoBuilder, sc, truncateOps);
+
+        if (const auto& queryShapeHash = CurOp::get(clientOpCtx)->debug().queryShapeHash) {
+            infoBuilder->append("queryShapeHash", queryShapeHash->toHexString());
+        }
     }
 
     if (expCtx->opCtx->routedByReplicaSetEndpoint()) {
@@ -420,6 +424,31 @@ ProgressMeter& CurOp::setProgress_inlock(StringData message,
     return _progressMeter.value();
 }
 
+void CurOp::updateStatsOnTransactionUnstash() {
+    // Store lock stats and ticket wait times from the locker after unstashing. These stats have
+    // accrued outside of this CurOp instance so we will ignore/subtract them when reporting on this
+    // operation.
+    auto locker = shard_role_details::getLocker(opCtx());
+    _lockStatsBase = locker->getLockerInfo(boost::none).stats;
+    _ticketWaitBase = locker->getTimeQueuedForTicketMicros() +
+        Microseconds(locker->getFlowControlStats().timeAcquiringMicros);
+}
+
+void CurOp::updateStatsOnTransactionStash() {
+    // Store lock stats and ticket wait times that happened during this operation before locker is
+    // stashed. We take the delta of locker stats before stashing and the base stats which includes
+    // the snapshot of locker stats when it was unstashed. This stats delta on stashing is added
+    // when reporting on this operation.
+    auto locker = shard_role_details::getLocker(opCtx());
+
+    _lockStatsOnceStashed = locker->getLockerInfo(_lockStatsBase).stats;
+    _lockStatsBase = boost::none;
+
+    _ticketWaitWhenStashed = locker->getTimeQueuedForTicketMicros() +
+        Microseconds(locker->getFlowControlStats().timeAcquiringMicros) - _ticketWaitBase;
+    _ticketWaitBase = Microseconds(0);
+}
+
 void CurOp::setNS_inlock(NamespaceString nss) {
     _nss = std::move(nss);
 }
@@ -440,6 +469,9 @@ TickSource::Tick CurOp::startTime() {
         _cpuTimer->start();
     }
 
+    _debug.waitForTicketDurationMillis = duration_cast<Milliseconds>(
+        shard_role_details::getLocker(opCtx())->getTimeQueuedForTicketMicros() - _ticketWaitBase +
+        _ticketWaitWhenStashed);
     _blockedTimeAtStart = _sumBlockedTimeTotal();
 
     // The '_start' value is initialized to 0 and gets assigned on demand the first time it gets
@@ -474,12 +506,18 @@ Microseconds CurOp::computeElapsedTimeTotal(TickSource::Tick startTime,
 }
 
 Milliseconds CurOp::_sumBlockedTimeTotal() {
-    auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(_lockStatsBase);
+    auto locker = shard_role_details::getLocker(opCtx());
+    auto lockStats = locker->getLockerInfo(_lockStatsBase).stats;
+
     auto waitForTickets = _debug.waitForTicketDurationMillis +
-        duration_cast<Milliseconds>(Microseconds(
-            shard_role_details::getLocker(opCtx())->getFlowControlStats().timeAcquiringMicros));
+        duration_cast<Milliseconds>(
+                              Microseconds(locker->getFlowControlStats().timeAcquiringMicros));
+
+    if (_lockStatsOnceStashed)
+        lockStats.append(_lockStatsOnceStashed.get());
+
     auto waitForLocks =
-        duration_cast<Milliseconds>(Microseconds(lockerInfo.stats.getCumulativeWaitTimeMicros()));
+        duration_cast<Milliseconds>(Microseconds(lockStats.getCumulativeWaitTimeMicros()));
 
     return waitForTickets + waitForLocks;
 }
@@ -545,13 +583,14 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
     // CurOpStack. The precise time queued for tickets of a sub-operation is the ticket wait time
     // from the locker minus the ticket wait time taken when this operation started.
     _debug.waitForTicketDurationMillis = duration_cast<Milliseconds>(
-        shard_role_details::getLocker(opCtx)->getTimeQueuedForTicketMicros() -
-        _ticketWaitTimeAtStart);
+        shard_role_details::getLocker(opCtx)->getTimeQueuedForTicketMicros() - _ticketWaitBase +
+        _ticketWaitWhenStashed);
 
     auto totalBlockedTime = _sumBlockedTimeTotal() - _blockedTimeAtStart;
-    // TODO SERVER-86069: Uncomment the below invariant
-    // invariant(Milliseconds(executionTimeMillis) >= totalBlockedTime);
-    _debug.workingTimeMillis = Milliseconds(executionTimeMillis) - totalBlockedTime;
+    auto workingMillis = Milliseconds(executionTimeMillis) - totalBlockedTime;
+    // Round up to zero if necessary to allow precision errors from FastClockSource used by flow
+    // control ticketholder.
+    _debug.workingTimeMillis = (workingMillis < Milliseconds(0) ? Milliseconds(0) : workingMillis);
 
     bool shouldLogSlowOp, shouldProfileAtLevel1;
 
@@ -592,6 +631,8 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
 
     if (forceLog || shouldLogSlowOp) {
         auto lockerInfo = shard_role_details::getLocker(opCtx)->getLockerInfo(_lockStatsBase);
+        if (_lockStatsOnceStashed)
+            lockerInfo.stats.append(_lockStatsOnceStashed.get());
         if (_debug.storageStats == nullptr &&
             shard_role_details::getLocker(opCtx)->wasGlobalLockTaken() &&
             opCtx->getServiceContext()->getStorageEngine()) {
@@ -606,8 +647,8 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
                 // acquisition. Slow queries can happen for various reasons; however, if queries
                 // are slower due to ticket exhaustion, queueing in order to log can compound
                 // the issue.
-                ScopedAdmissionPriority skipAdmissionControl(opCtx,
-                                                             AdmissionContext::Priority::kExempt);
+                ScopedAdmissionPriority<ExecutionAdmissionContext> skipAdmissionControl(
+                    opCtx, AdmissionContext::Priority::kExempt);
                 Lock::GlobalLock lk(opCtx,
                                     MODE_IS,
                                     Date_t::now() + Milliseconds(500),
@@ -921,10 +962,15 @@ void CurOp::reportState(BSONObjBuilder* builder,
     // FCV to keep consistent behavior.
     if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
             .isEnabledAndIgnoreFCVUnsafe()) {
-        auto admissionPriority = AdmissionContext::get(opCtx).getPriority();
+        auto admissionPriority = ExecutionAdmissionContext::get(opCtx).getPriority();
         if (admissionPriority < AdmissionContext::Priority::kNormal) {
             builder->append("admissionPriority", toString(admissionPriority));
         }
+    }
+
+    // (Ignore FCV check): This feature flag is not FCV gated (shouldBeFCVGated is false)
+    if (gFeatureFlagIngressAdmissionControl.isEnabledAndIgnoreFCVUnsafe()) {
+        builder->append("waitingForIngressAdmission", _waitingForIngressAdmission);
     }
 
     if (auto start = _waitForWriteConcernStart.load(); start > 0) {
@@ -963,9 +1009,10 @@ StringData getProtoString(int op) {
 #define OPDEBUG_TOATTR_HELP(x) \
     if (x >= 0)                \
     pAttrs->add(#x, x)
-#define OPDEBUG_TOATTR_HELP_BOOL(x) \
-    if (x)                          \
-    pAttrs->add(#x, x)
+#define OPDEBUG_TOATTR_HELP_BOOL_NAMED(name, x) \
+    if (x)                                      \
+    pAttrs->add(name, x)
+#define OPDEBUG_TOATTR_HELP_BOOL(x) OPDEBUG_TOATTR_HELP_BOOL_NAMED(#x, x)
 #define OPDEBUG_TOATTR_HELP_ATOMIC(x, y) \
     if (auto __y = y.load(); __y > 0)    \
     pAttrs->add(x, __y)
@@ -1002,6 +1049,9 @@ void OpDebug::report(OperationContext* opCtx,
 
     auto query = appendCommentField(opCtx, curop.opDescription());
     if (!query.isEmpty()) {
+        if (const auto shapeHash = CurOp::get(opCtx)->debug().queryShapeHash) {
+            pAttrs->addDeepCopy("queryShapeHash", shapeHash->toHexString());
+        }
         if (iscommand) {
             const Command* curCommand = curop.getCommand();
             if (curCommand) {
@@ -1090,10 +1140,11 @@ void OpDebug::report(OperationContext* opCtx,
 
     OPDEBUG_TOATTR_HELP_OPTIONAL("keysExamined", additiveMetrics.keysExamined);
     OPDEBUG_TOATTR_HELP_OPTIONAL("docsExamined", additiveMetrics.docsExamined);
-    OPDEBUG_TOATTR_HELP_BOOL(hasSortStage);
-    OPDEBUG_TOATTR_HELP_BOOL(usedDisk);
-    OPDEBUG_TOATTR_HELP_BOOL(fromMultiPlanner);
-    OPDEBUG_TOATTR_HELP_BOOL(fromPlanCache);
+
+    OPDEBUG_TOATTR_HELP_BOOL_NAMED("hasSortStage", additiveMetrics.hasSortStage);
+    OPDEBUG_TOATTR_HELP_BOOL_NAMED("usedDisk", additiveMetrics.usedDisk);
+    OPDEBUG_TOATTR_HELP_BOOL_NAMED("fromMultiPlanner", additiveMetrics.fromMultiPlanner);
+    OPDEBUG_TOATTR_HELP_BOOL_NAMED("fromPlanCache", additiveMetrics.fromPlanCache.value_or(false));
     if (replanReason) {
         bool replanned = true;
         OPDEBUG_TOATTR_HELP_BOOL(replanned);
@@ -1158,7 +1209,7 @@ void OpDebug::report(OperationContext* opCtx,
     // FCV to keep consistent behavior.
     if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
             .isEnabledAndIgnoreFCVUnsafe()) {
-        auto admissionPriority = AdmissionContext::get(opCtx).getPriority();
+        auto admissionPriority = ExecutionAdmissionContext::get(opCtx).getPriority();
         if (admissionPriority < AdmissionContext::Priority::kNormal) {
             pAttrs->add("admissionPriority", admissionPriority);
         }
@@ -1251,6 +1302,12 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("workingMillis", workingTimeMillis.count());
     }
 
+    // (Ignore FCV check): This feature flag is not FCV gated (shouldBeFCVGated is false)
+    if (gFeatureFlagIngressAdmissionControl.isEnabledAndIgnoreFCVUnsafe() &&
+        waitForIngressAdmissionTicketDurationMicros > Microseconds::zero()) {
+        pAttrs->add("ingressAdmissionDuration", waitForIngressAdmissionTicketDurationMicros);
+    }
+
     // durationMillis should always be present for any operation
     pAttrs->add(
         "durationMillis",
@@ -1311,10 +1368,11 @@ void OpDebug::append(OperationContext* opCtx,
 
     OPDEBUG_APPEND_OPTIONAL(b, "keysExamined", additiveMetrics.keysExamined);
     OPDEBUG_APPEND_OPTIONAL(b, "docsExamined", additiveMetrics.docsExamined);
-    OPDEBUG_APPEND_BOOL(b, hasSortStage);
-    OPDEBUG_APPEND_BOOL(b, usedDisk);
-    OPDEBUG_APPEND_BOOL(b, fromMultiPlanner);
-    OPDEBUG_APPEND_BOOL(b, fromPlanCache);
+
+    OPDEBUG_APPEND_BOOL2(b, "hasSortStage", additiveMetrics.hasSortStage);
+    OPDEBUG_APPEND_BOOL2(b, "usedDisk", additiveMetrics.usedDisk);
+    OPDEBUG_APPEND_BOOL2(b, "fromMultiPlanner", additiveMetrics.fromMultiPlanner);
+    OPDEBUG_APPEND_BOOL2(b, "fromPlanCache", additiveMetrics.fromPlanCache.value_or(false));
     if (replanReason) {
         bool replanned = true;
         OPDEBUG_APPEND_BOOL(b, replanned);
@@ -1346,6 +1404,9 @@ void OpDebug::append(OperationContext* opCtx,
     }
     if (planCacheKey) {
         b.append("planCacheKey", zeroPaddedHex(*planCacheKey));
+    }
+    if (const auto shapeHash = CurOp::get(opCtx)->debug().queryShapeHash) {
+        b.append("queryShapeHash", shapeHash->toHexString());
     }
 
     switch (queryFramework) {
@@ -1572,16 +1633,16 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
         OPDEBUG_APPEND_OPTIONAL(b, field, args.op.additiveMetrics.docsExamined);
     });
     addIfNeeded("hasSortStage", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.hasSortStage);
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.hasSortStage);
     });
     addIfNeeded("usedDisk", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.usedDisk);
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.usedDisk);
     });
     addIfNeeded("fromMultiPlanner", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.fromMultiPlanner);
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.fromMultiPlanner);
     });
     addIfNeeded("fromPlanCache", [](auto field, auto args, auto& b) {
-        OPDEBUG_APPEND_BOOL2(b, field, args.op.fromPlanCache);
+        OPDEBUG_APPEND_BOOL2(b, field, args.op.additiveMetrics.fromPlanCache.value_or(false));
     });
     addIfNeeded("replanned", [](auto field, auto args, auto& b) {
         if (args.op.replanReason) {
@@ -1655,6 +1716,11 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
             b.append(field, zeroPaddedHex(*args.op.planCacheKey));
         }
     });
+    addIfNeeded("queryShapeHash", [](auto field, auto args, auto& b) {
+        if (args.op.queryShapeHash) {
+            b.append(field, args.op.queryShapeHash->toHexString());
+        }
+    });
 
     addIfNeeded("queryFramework", [](auto field, auto args, auto& b) {
         switch (args.op.queryFramework) {
@@ -1677,6 +1743,7 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
     addIfNeeded("locks", [](auto field, auto args, auto& b) {
         auto lockerInfo =
             shard_role_details::getLocker(args.opCtx)->getLockerInfo(args.curop.getLockStatsBase());
+        // TODO SERVER-88195: Account for _lockStatsOnceStashed
         BSONObjBuilder locks(b.subobjStart(field));
         lockerInfo.stats.report(&locks);
     });
@@ -1833,16 +1900,29 @@ std::function<BSONObj(ProfileFilter::Args)> OpDebug::appendStaged(StringSet requ
 }
 
 void OpDebug::setPlanSummaryMetrics(const PlanSummaryStats& planSummaryStats) {
-    additiveMetrics.keysExamined = planSummaryStats.totalKeysExamined;
-    additiveMetrics.docsExamined = planSummaryStats.totalDocsExamined;
-    hasSortStage = planSummaryStats.hasSortStage;
-    usedDisk = planSummaryStats.usedDisk;
+    // Data-bearing node metrics need to be aggregated here rather than just assigned.
+    // Certain operations like $mergeCursors may have already accumulated metrics from remote
+    // data-bearing nodes, and we need to add in the work done locally.
+    additiveMetrics.keysExamined =
+        additiveMetrics.keysExamined.value_or(0) + planSummaryStats.totalKeysExamined;
+    additiveMetrics.docsExamined =
+        additiveMetrics.docsExamined.value_or(0) + planSummaryStats.totalDocsExamined;
+    additiveMetrics.hasSortStage = additiveMetrics.hasSortStage || planSummaryStats.hasSortStage;
+    additiveMetrics.usedDisk = additiveMetrics.usedDisk || planSummaryStats.usedDisk;
+    additiveMetrics.fromMultiPlanner =
+        additiveMetrics.fromMultiPlanner || planSummaryStats.fromMultiPlanner;
+    // Note that fromPlanCache is an AND of all operations rather than an OR like the other metrics.
+    // This is to ensure we register when any part of the query _missed_ the cache, which is thought
+    // to be the more interesting event.
+    if (!additiveMetrics.fromPlanCache.has_value()) {
+        additiveMetrics.fromPlanCache = true;
+    }
+    *additiveMetrics.fromPlanCache =
+        *additiveMetrics.fromPlanCache && planSummaryStats.fromPlanCache;
+
     sortSpills = planSummaryStats.sortSpills;
     sortTotalDataSizeBytes = planSummaryStats.sortTotalDataSizeBytes;
     keysSorted = planSummaryStats.keysSorted;
-    fromMultiPlanner = planSummaryStats.fromMultiPlanner;
-    // Don't clobber flag which may have been set directly.
-    fromPlanCache = fromPlanCache || planSummaryStats.fromPlanCache;
     replanReason = planSummaryStats.replanReason;
     collectionScans = planSummaryStats.collectionScans;
     collectionScansNonTailable = planSummaryStats.collectionScansNonTailable;
@@ -1928,23 +2008,12 @@ CursorMetrics OpDebug::getCursorMetrics() const {
     metrics.setKeysExamined(additiveMetrics.keysExamined.value_or(0));
     metrics.setDocsExamined(additiveMetrics.docsExamined.value_or(0));
 
-    metrics.setHasSortStage(hasSortStage);
-    metrics.setUsedDisk(usedDisk);
-    metrics.setFromMultiPlanner(fromMultiPlanner);
-    metrics.setFromPlanCache(fromPlanCache);
+    metrics.setHasSortStage(additiveMetrics.hasSortStage);
+    metrics.setUsedDisk(additiveMetrics.usedDisk);
+    metrics.setFromMultiPlanner(additiveMetrics.fromMultiPlanner);
+    metrics.setFromPlanCache(additiveMetrics.fromPlanCache.value_or(false));
 
     return metrics;
-}
-
-void OpDebug::aggregateCursorMetrics(const CursorMetrics& metrics) {
-    additiveMetrics.keysExamined =
-        additiveMetrics.keysExamined.value_or(0) + metrics.getKeysExamined();
-    additiveMetrics.docsExamined =
-        additiveMetrics.docsExamined.value_or(0) + metrics.getDocsExamined();
-    hasSortStage = hasSortStage || metrics.getHasSortStage();
-    usedDisk = usedDisk || metrics.getUsedDisk();
-    fromMultiPlanner = fromMultiPlanner || metrics.getFromMultiPlanner();
-    fromPlanCache = fromPlanCache || metrics.getFromPlanCache();
 }
 
 BSONArray OpDebug::getResolvedViewsInfo() const {
@@ -2033,6 +2102,50 @@ void OpDebug::AdditiveMetrics::add(const AdditiveMetrics& otherMetrics) {
     writeConflicts.fetchAndAdd(otherMetrics.writeConflicts.load());
     temporarilyUnavailableErrors.fetchAndAdd(otherMetrics.temporarilyUnavailableErrors.load());
     executionTime = addOptionals(executionTime, otherMetrics.executionTime);
+
+    hasSortStage = hasSortStage || otherMetrics.hasSortStage;
+    usedDisk = usedDisk || otherMetrics.usedDisk;
+    fromMultiPlanner = fromMultiPlanner || otherMetrics.fromMultiPlanner;
+    // Note that fromPlanCache is an AND of all operations rather than an OR like the other metrics.
+    // This is to ensure we register when any part of the query _missed_ the cache, which is thought
+    // to be the more interesting event.
+    if (!fromPlanCache.has_value()) {
+        fromPlanCache = true;
+    }
+    *fromPlanCache = *fromPlanCache && otherMetrics.fromPlanCache.value_or(true);
+}
+
+void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
+    const query_stats::DataBearingNodeMetrics& metrics) {
+    keysExamined = keysExamined.value_or(0) + metrics.keysExamined;
+    docsExamined = docsExamined.value_or(0) + metrics.docsExamined;
+    hasSortStage = hasSortStage || metrics.hasSortStage;
+    usedDisk = usedDisk || metrics.usedDisk;
+    fromMultiPlanner = fromMultiPlanner || metrics.fromMultiPlanner;
+    // Note that fromPlanCache is an AND of all operations rather than an OR like the other metrics.
+    // This is to ensure we register when any part of the query _missed_ the cache, which is thought
+    // to be the more interesting event.
+    if (!fromPlanCache.has_value()) {
+        fromPlanCache = true;
+    }
+    *fromPlanCache = *fromPlanCache && metrics.fromPlanCache;
+}
+
+void OpDebug::AdditiveMetrics::aggregateDataBearingNodeMetrics(
+    const boost::optional<query_stats::DataBearingNodeMetrics>& metrics) {
+    if (metrics) {
+        aggregateDataBearingNodeMetrics(*metrics);
+    }
+}
+
+void OpDebug::AdditiveMetrics::aggregateCursorMetrics(const CursorMetrics& metrics) {
+    aggregateDataBearingNodeMetrics(
+        query_stats::DataBearingNodeMetrics{static_cast<uint64_t>(metrics.getKeysExamined()),
+                                            static_cast<uint64_t>(metrics.getDocsExamined()),
+                                            metrics.getHasSortStage(),
+                                            metrics.getUsedDisk(),
+                                            metrics.getFromMultiPlanner(),
+                                            metrics.getFromPlanCache()});
 }
 
 void OpDebug::AdditiveMetrics::reset() {

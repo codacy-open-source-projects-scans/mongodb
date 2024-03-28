@@ -58,6 +58,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(enableTestOnlyFlagforRSTL);
 MONGO_FAIL_POINT_DEFINE(failNonIntentLocksIfWaitNeeded);
+MONGO_FAIL_POINT_DEFINE(hangTicketRelease);
 
 /**
  * Tracks global (across all clients) lock acquisition statistics, partitioned into multiple
@@ -199,7 +200,8 @@ Locker::ClientState Locker::getClientState() const {
 void Locker::getFlowControlTicket(OperationContext* opCtx, LockMode lockMode) {
     auto ticketholder = FlowControlTicketholder::get(opCtx);
     if (ticketholder && lockMode == LockMode::MODE_IX && _clientState.load() == kInactive &&
-        AdmissionContext::get(opCtx).getPriority() != AdmissionContext::Priority::kExempt &&
+        ExecutionAdmissionContext::get(opCtx).getPriority() !=
+            AdmissionContext::Priority::kExempt &&
         !_uninterruptibleLocksRequested) {
         // FlowControl only acts when a MODE_IX global lock is being taken. The clientState is only
         // being modified here to change serverStatus' `globalLock.currentQueue` metrics. This
@@ -999,7 +1001,7 @@ bool Locker::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadl
 
         if (auto ticket = holder->waitForTicketUntil(
                 _uninterruptibleLocksRequested ? *Interruptible::notInterruptible() : *opCtx,
-                &AdmissionContext::get(opCtx),
+                &ExecutionAdmissionContext::get(opCtx),
                 deadline,
                 _timeQueuedForTicketMicros)) {
             _ticket = std::move(*ticket);
@@ -1036,6 +1038,15 @@ bool Locker::_unlockImpl(LockRequestsMap::Iterator* it) {
 }
 
 void Locker::_releaseTicket() {
+    if (MONGO_unlikely(hangTicketRelease.shouldFail())) {
+        if (_ticket && _ticket->getPriority() != AdmissionContext::Priority::kExempt) {
+            LOGV2(8435300,
+                  "Hanging hangTicketRelease in _releaseTicket() due to 'hangTicketRelease' "
+                  "failpoint");
+            hangTicketRelease.pauseWhileSet();
+        }
+    }
+
     _ticket.reset();
     _clientState.store(kInactive);
 }

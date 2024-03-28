@@ -70,16 +70,16 @@ Vectorizer::Tree Vectorizer::vectorize(optimizer::ABT& node,
         _activeMasks.push_back(getABTVariableName(*externalBitmapSlot));
     }
     auto result = node.visit(*this);
-    foldIfNecessary(result);
+    foldIfNecessary(result, _purpose == Purpose::Filter);
     return result;
 }
 
-void Vectorizer::foldIfNecessary(Tree& tree) {
+void Vectorizer::foldIfNecessary(Tree& tree, bool useFoldF) {
     if (tree.sourceCell.has_value()) {
         tassert(7946501,
                 "Expansion of a cell should generate a block of values",
                 TypeSignature::kBlockType.isSubset(tree.typeSignature));
-        if (_purpose == Purpose::Filter) {
+        if (useFoldF) {
             tree.expr = makeABTFunction(
                 "cellFoldValues_F"_sd, std::move(*tree.expr), makeVariable(*tree.sourceCell));
             // The output of a folding in this case is a block of boolean values.
@@ -336,7 +336,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             }
             // An And/Or operation between two blocks has to work at the level of measures, not on
             // the expanded arrays.
-            foldIfNecessary(lhs);
+            foldIfNecessary(lhs, true);
 
             if (TypeSignature::kBlockType.isSubset(lhs.typeSignature)) {
                 // Treat the result of the left side as the mask to be applied on the right side.
@@ -354,7 +354,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                 if (!rhs.expr.has_value()) {
                     return rhs;
                 }
-                foldIfNecessary(rhs);
+                foldIfNecessary(rhs, true);
 
                 if (TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
                     return {op.op() == optimizer::Operations::And
@@ -574,13 +574,6 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
                         TypeSignature::kBlockType.include(TypeSignature::kBooleanType),
                         args[0].sourceCell};
             }
-
-            if (op.name() == "coerceToBool"s) {
-                return {makeABTFunction("valueBlockCoerceToBool"_sd, std::move(*args[0].expr)),
-                        TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
-                            .include(args[0].typeSignature.intersect(TypeSignature::kNothingType)),
-                        args[0].sourceCell};
-            }
         }
 
         if (arity == 6 && op.name() == "dateTrunc"s &&
@@ -652,6 +645,19 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
                     TypeSignature::kBlockType.include(TypeSignature::kDateTimeType)
                         .include(TypeSignature::kNothingType),
                     args[1].sourceCell};
+        }
+
+        if (arity == 1 && (op.name() == "getSortKeyAsc"s || op.name() == "getSortKeyDesc"s) &&
+            TypeSignature::kBlockType.isSubset(args[0].typeSignature)) {
+            StringData blockFnName = op.name() == "getSortKeyAsc"s ? "valueBlockGetSortKeyAsc"_sd
+                                                                   : "valueBlockGetSortKeyDesc"_sd;
+
+            optimizer::ABTVector functionArgs;
+            functionArgs.emplace_back(std::move(*args[0].expr));
+
+            return {makeABTFunction(blockFnName, std::move(functionArgs)),
+                    args[0].typeSignature.include(TypeSignature::kNothingType),
+                    args[0].sourceCell};
         }
 
         if (arity == 2 && op.name() == "isMember"s &&
@@ -809,7 +815,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
     if (!test.expr.has_value()) {
         return test;
     }
-    foldIfNecessary(test);
+    foldIfNecessary(test, true);
 
     auto blockify = [](Tree& tree, const std::list<optimizer::ProjectionName>& bitmapVars) {
         if (!TypeSignature::kBlockType.isSubset(tree.typeSignature)) {

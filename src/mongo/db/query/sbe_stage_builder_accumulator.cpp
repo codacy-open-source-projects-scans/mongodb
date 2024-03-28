@@ -80,6 +80,8 @@ const StringData kSortSpec = "sortSpec"_sd;
 const StringData kUnit = "unit"_sd;
 const StringData kValue = "value"_sd;
 
+const StringData kAccumulatorCountName = "$count"_sd;
+
 Inputs::~Inputs() {}
 
 template <typename... Ts>
@@ -298,7 +300,11 @@ struct OpInfo {
 };
 
 namespace {
-SbExpr wrapMinMaxArg(SbExpr arg, StageBuilderState& state) {
+/**
+ * Wraps an SbExpr in a let-if that resolves null, missing, and undefined values all to a
+ * TypeTags::Nothing constant, else retains the original value.
+ */
+SbExpr nullMissingUndefinedToNothing(SbExpr arg, StageBuilderState& state) {
     SbExprBuilder b(state);
 
     auto frameId = state.frameIdGenerator->generate();
@@ -310,10 +316,14 @@ SbExpr wrapMinMaxArg(SbExpr arg, StageBuilderState& state) {
     return b.makeLet(frameId, std::move(binds), std::move(e));
 }
 
+/**
+ * Used to create buildAccumExprs values for $min and $max, as these otherwise won't handle all the
+ * null, missing, undefined cases correctly.
+ */
 InputsPtr buildAccumExprsMinMax(const Op& acc,
                                 std::unique_ptr<AccumSingleInput> inputs,
                                 StageBuilderState& state) {
-    inputs->inputExpr = wrapMinMaxArg(std::move(inputs->inputExpr), state);
+    inputs->inputExpr = nullMissingUndefinedToNothing(std::move(inputs->inputExpr), state);
     return inputs;
 }
 
@@ -332,25 +342,6 @@ SbExpr::Vector buildAccumAggsMin(const Op& acc,
     }
 }
 
-boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsMin(
-    const Op& acc,
-    std::unique_ptr<AccumSingleInput> inputs,
-    StageBuilderState& state,
-    SbSlot bitmapInternalSlot) {
-    SbExprBuilder b(state);
-
-    auto blockAgg =
-        b.makeFunction("valueBlockAggMin"_sd, bitmapInternalSlot, inputs->inputExpr.clone());
-
-    auto rowAgg = b.makeFunction("min"_sd, std::move(inputs->inputExpr));
-
-    boost::optional<std::vector<BlockAggAndRowAgg>> pairs;
-    pairs.emplace();
-    pairs->emplace_back(BlockAggAndRowAgg{std::move(blockAgg), std::move(rowAgg)});
-
-    return pairs;
-}
-
 SbExpr::Vector buildCombineAggsMin(const Op& acc,
                                    StageBuilderState& state,
                                    const SbSlotVector& inputSlots) {
@@ -360,9 +351,9 @@ SbExpr::Vector buildCombineAggsMin(const Op& acc,
 
     SbExprBuilder b(state);
 
-    auto arg = wrapMinMaxArg(SbExpr{inputSlots[0]}, state);
+    SbExpr arg = nullMissingUndefinedToNothing(SbExpr{inputSlots[0]}, state);
 
-    auto collatorSlot = state.getCollatorSlot();
+    boost::optional<sbe::value::SlotId> collatorSlot = state.getCollatorSlot();
 
     if (collatorSlot) {
         return SbExpr::makeSeq(b.makeFunction("collMin"_sd, SbVar{*collatorSlot}, std::move(arg)));
@@ -399,25 +390,6 @@ SbExpr::Vector buildAccumAggsMax(const Op& acc,
     }
 }
 
-boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsMax(
-    const Op& acc,
-    std::unique_ptr<AccumSingleInput> inputs,
-    StageBuilderState& state,
-    SbSlot bitmapInternalSlot) {
-    SbExprBuilder b(state);
-
-    auto blockAgg =
-        b.makeFunction("valueBlockAggMax"_sd, bitmapInternalSlot, inputs->inputExpr.clone());
-
-    auto rowAgg = b.makeFunction("max"_sd, std::move(inputs->inputExpr));
-
-    boost::optional<std::vector<BlockAggAndRowAgg>> pairs;
-    pairs.emplace();
-    pairs->emplace_back(BlockAggAndRowAgg{std::move(blockAgg), std::move(rowAgg)});
-
-    return pairs;
-}
-
 SbExpr::Vector buildCombineAggsMax(const Op& acc,
                                    StageBuilderState& state,
                                    const SbSlotVector& inputSlots) {
@@ -427,9 +399,9 @@ SbExpr::Vector buildCombineAggsMax(const Op& acc,
 
     SbExprBuilder b(state);
 
-    auto arg = wrapMinMaxArg(SbExpr{inputSlots[0]}, state);
+    SbExpr arg = nullMissingUndefinedToNothing(SbExpr{inputSlots[0]}, state);
 
-    auto collatorSlot = state.getCollatorSlot();
+    boost::optional<sbe::value::SlotId> collatorSlot = state.getCollatorSlot();
 
     if (collatorSlot) {
         return SbExpr::makeSeq(b.makeFunction("collMax"_sd, SbVar{*collatorSlot}, std::move(arg)));
@@ -589,13 +561,25 @@ SbExpr::Vector buildAccumAggsSum(const Op& acc,
                                  std::unique_ptr<AccumSingleInput> inputs,
                                  StageBuilderState& state) {
     SbExprBuilder b(state);
+    return SbExpr::makeSeq(b.makeFunction("aggDoubleDoubleSum", std::move(inputs->inputExpr)));
+}
 
-    if (acc.countAddendIsIntegerOrDouble()) {
-        // Optimize for a count-like accumulator like {$sum: 1}.
-        return SbExpr::makeSeq(b.makeFunction("sum", std::move(inputs->inputExpr)));
-    } else {
-        return SbExpr::makeSeq(b.makeFunction("aggDoubleDoubleSum", std::move(inputs->inputExpr)));
-    }
+boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsSum(
+    const Op& acc,
+    std::unique_ptr<AccumSingleInput> inputs,
+    StageBuilderState& state,
+    SbSlot bitmapInternalSlot) {
+    SbExprBuilder b(state);
+
+    SbExpr blockAgg = b.makeFunction(
+        "valueBlockAggDoubleDoubleSum"_sd, bitmapInternalSlot, inputs->inputExpr.clone());
+    SbExpr rowAgg = b.makeFunction("aggDoubleDoubleSum"_sd, std::move(inputs->inputExpr));
+
+    boost::optional<std::vector<BlockAggAndRowAgg>> pairs;
+    pairs.emplace();
+    pairs->emplace_back(BlockAggAndRowAgg{std::move(blockAgg), std::move(rowAgg)});
+
+    return pairs;
 }
 
 SbExpr::Vector buildCombineAggsSum(const Op& acc,
@@ -608,14 +592,7 @@ SbExpr::Vector buildCombineAggsSum(const Op& acc,
             inputSlots.size() == 1);
     auto arg = inputSlots[0];
 
-    // Optimize for a count-like accumulator like {$sum: 1}. In particular, we will spill the
-    // constant sum, and we need to convert it to a 4 element array that can be used to initialize a
-    // DoubleDoubleSummation.
-    if (acc.countAddendIsIntegerOrDouble()) {
-        return SbExpr::makeSeq(b.makeFunction("convertSimpleSumToDoubleDoubleSum", std::move(arg)));
-    } else {
-        return SbExpr::makeSeq(b.makeFunction("aggMergeDoubleDoubleSums", std::move(arg)));
-    }
+    return SbExpr::makeSeq(b.makeFunction("aggMergeDoubleDoubleSums", std::move(arg)));
 }
 
 SbExpr buildFinalizeSum(const Op& acc, StageBuilderState& state, const SbSlotVector& sumSlots) {
@@ -627,29 +604,65 @@ SbExpr buildFinalizeSum(const Op& acc, StageBuilderState& state, const SbSlotVec
             sumSlots.size() == 1);
 
     if (state.needsMerge) {
-        // Serialize the full state of the partial sum result to avoid incorrect results for certain
-        // data set which are composed of 'NumberDecimal' values which cancel each other when being
-        // summed and other numeric type values which contribute mostly to sum result and a partial
-        // sum of some of 'NumberDecimal' values and other numeric type values happen to lose
-        // precision because 'NumberDecimal' can't represent the partial sum precisely, or the other
-        // way around.
-        //
-        // For example, [{n: 1e+34}, {n: NumberDecimal("0,1")}, {n: NumberDecimal("0.11")}, {n:
-        // -1e+34}].
-        //
-        // More fundamentally, addition is neither commutative nor associative on computer. So, it's
-        // desirable to keep the full state of the partial sum along the way to maintain the result
-        // as close to the real truth as possible until all additions are done.
+        // To support the sharding behavior, the mongos splits "{$group: {..$sum..}}" into two
+        // separate "{$group: {..$sum..}}" stages, one at the mongos-side and the other at the
+        // shard-side. This stage builder builds the shard-side plan. The shard-side $sum
+        // accumulator is responsible to return the partial sum in one of the following forms:
+        //   {nonDecimalTag: val, nonDecimalTotal: val, nonDecimalAddend: val}
+        //     -OR-
+        //   {nonDecimalTag: val, nonDecimalTotal: val, nonDecimalAddend: val, decimalTotal: val}
         return b.makeFunction("doubleDoublePartialSumFinalize", sumSlots[0]);
-    }
-
-    if (acc.countAddendIsIntegerOrDouble()) {
-        auto var = makeVariable(sumSlots[0]);
-        return sbe::makeE<sbe::EIf>(makeFunction("isNumber", var->clone()),
-                                    var->clone(),
-                                    makeFunction("doubleDoubleSumFinalize", var->clone()));
     } else {
         return b.makeFunction("doubleDoubleSumFinalize", sumSlots[0]);
+    }
+}
+
+SbExpr::Vector buildAccumAggsCount(const Op& acc, StageBuilderState& state) {
+    SbExprBuilder b(state);
+    return SbExpr::makeSeq(b.makeFunction("count"));
+}
+
+SbExpr::Vector buildCombineAggsCount(const Op& acc,
+                                     StageBuilderState& state,
+                                     const SbSlotVector& inputSlots) {
+    SbExprBuilder b(state);
+
+    tassert(8448800,
+            "partial agg combiner for $count should have exactly one input slot",
+            inputSlots.size() == 1);
+
+    auto arg = inputSlots[0];
+
+    return SbExpr::makeSeq(b.makeFunction("sum", std::move(arg)));
+}
+
+SbExpr buildFinalizeCount(const Op& acc, StageBuilderState& state, const SbSlotVector& sumSlots) {
+    SbExprBuilder b(state);
+
+    tassert(8448801,
+            str::stream() << "Expected one input slot for finalization of $count, got: "
+                          << sumSlots.size(),
+            sumSlots.size() == 1);
+
+    // If the final result fits in a 32-bit integer then convert it to a 32-bit int, otherwise
+    // leave it as-is.
+    auto finalResultExpr =
+        b.makeFillEmpty(b.makeNumericConvert(SbVar{sumSlots[0]}, sbe::value::TypeTags::NumberInt32),
+                        SbVar{sumSlots[0]});
+
+    if (state.needsMerge) {
+        // To support the sharding behavior, the mongos splits "{$group: {..$count..}}" into two
+        // separate "{$group: {..$count..}}" stages, one at the mongos-side and the other at the
+        // shard-side. This stage builder builds the shard-side plan. The shard-side $count
+        // accumulator is responsible to return the partial count in one of the following forms:
+        //   {nonDecimalTag: val, nonDecimalTotal: val, nonDecimalAddend: val}
+        //     -OR-
+        //   {nonDecimalTag: val, nonDecimalTotal: val, nonDecimalAddend: val, decimalTotal: val}
+        return b.makeFunction(
+            "doubleDoublePartialSumFinalize",
+            b.makeFunction("convertSimpleSumToDoubleDoubleSum", std::move(finalResultExpr)));
+    } else {
+        return finalResultExpr;
     }
 }
 
@@ -1019,9 +1032,10 @@ SbExpr::Vector buildAccumAggsTopBottomN(const Op& acc,
     auto sortSpec = std::move(inputs->sortSpec);
 
     return SbExpr::makeSeq(b.makeFunction(isAccumulatorTopN(acc) ? "aggTopN" : "aggBottomN",
+                                          std::move(sortSpec),
+                                          b.makeNullConstant(),
                                           std::move(key),
-                                          std::move(value),
-                                          std::move(sortSpec)));
+                                          std::move(value)));
 }
 
 SbExpr::Vector buildCombineAggsTopBottomN(const Op& acc,
@@ -1422,7 +1436,7 @@ boost::optional<Accum::AccumBlockExprs> buildAccumBlockExprsSingleInput(
     // result type of buildAccumExprs() is not AccumSingleInput.
     auto inputs = castInputsTo<AccumSingleInput>(acc.buildAccumExprs(state, std::move(inputsIn)));
 
-    // Try to vectorize 'inputs->inputExpr' and return the result.
+    // Try to vectorize 'inputs->inputExpr'.
     auto expr = buildVectorizedExpr(state, std::move(inputs->inputExpr), outputs, false);
 
     if (expr) {
@@ -1435,15 +1449,190 @@ boost::optional<Accum::AccumBlockExprs> buildAccumBlockExprsSingleInput(
         SbSlot internalSlot = SbSlot{state.slotId()};
         inputs->inputExpr = SbExpr{internalSlot};
 
-        accumBlockExprs->inputs = std::move(inputs);
         accumBlockExprs->exprs.emplace_back(std::move(expr));
         accumBlockExprs->slots.emplace_back(internalSlot);
+
+        accumBlockExprs->inputs = std::move(inputs);
 
         return accumBlockExprs;
     }
 
     // If vectorization failed, return boost::none.
     return boost::none;
+}
+
+boost::optional<Accum::AccumBlockExprs> buildAccumBlockExprsNoInputs(
+    const Op& acc, StageBuilderState& state, const PlanStageSlots& outputs) {
+    // Initialize 'accumBlockExprs' to be an empty vector and return it.
+    boost::optional<Accum::AccumBlockExprs> accumBlockExprs;
+    accumBlockExprs.emplace();
+    return accumBlockExprs;
+}
+
+boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsMin(
+    const Op& acc,
+    std::unique_ptr<AccumSingleInput> inputs,
+    StageBuilderState& state,
+    SbSlot bitmapInternalSlot) {
+    SbExprBuilder b(state);
+
+    auto blockAgg =
+        b.makeFunction("valueBlockAggMin"_sd, bitmapInternalSlot, inputs->inputExpr.clone());
+
+    auto rowAgg = b.makeFunction("min"_sd, std::move(inputs->inputExpr));
+
+    boost::optional<std::vector<BlockAggAndRowAgg>> pairs;
+    pairs.emplace();
+    pairs->emplace_back(BlockAggAndRowAgg{std::move(blockAgg), std::move(rowAgg)});
+
+    return pairs;
+}
+
+boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsMax(
+    const Op& acc,
+    std::unique_ptr<AccumSingleInput> inputs,
+    StageBuilderState& state,
+    SbSlot bitmapInternalSlot) {
+    SbExprBuilder b(state);
+
+    auto blockAgg =
+        b.makeFunction("valueBlockAggMax"_sd, bitmapInternalSlot, inputs->inputExpr.clone());
+
+    auto rowAgg = b.makeFunction("max"_sd, std::move(inputs->inputExpr));
+
+    boost::optional<std::vector<BlockAggAndRowAgg>> pairs;
+    pairs.emplace();
+    pairs->emplace_back(BlockAggAndRowAgg{std::move(blockAgg), std::move(rowAgg)});
+
+    return pairs;
+}
+
+boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsCount(
+    const Op& acc, StageBuilderState& state, SbSlot bitmapInternalSlot) {
+    SbExprBuilder b(state);
+
+    auto blockAgg = b.makeFunction("valueBlockAggCount", bitmapInternalSlot);
+    auto rowAgg = b.makeFunction("count");
+
+    boost::optional<std::vector<BlockAggAndRowAgg>> pairs;
+    pairs.emplace();
+    pairs->emplace_back(BlockAggAndRowAgg{std::move(blockAgg), std::move(rowAgg)});
+
+    return pairs;
+}
+
+boost::optional<Accum::AccumBlockExprs> buildAccumBlockExprsTopBottomN(
+    const Op& acc,
+    std::unique_ptr<AccumBlockTopBottomNInputs> inputs,
+    StageBuilderState& state,
+    const PlanStageSlots& outputs) {
+    // Try to vectorize each element of 'inputs->values'.
+    SbExpr::Vector valueExprs;
+    for (size_t i = 0; i < inputs->values.size(); ++i) {
+        auto valueExpr = buildVectorizedExpr(state, std::move(inputs->values[i]), outputs, false);
+        if (!valueExpr) {
+            // If vectorization failed, return boost::none.
+            return boost::none;
+        }
+
+        valueExprs.emplace_back(std::move(valueExpr));
+    }
+
+    // Try to vectorize each element of 'inputs->sortBy'.
+    SbExpr::Vector keyExprs;
+    for (size_t i = 0; i < inputs->sortBy.size(); ++i) {
+        auto keyExpr = buildVectorizedExpr(state, std::move(inputs->sortBy[i]), outputs, false);
+        if (!keyExpr) {
+            // If vectorization failed, return boost::none.
+            return boost::none;
+        }
+
+        keyExprs.emplace_back(std::move(keyExpr));
+    }
+
+    // If vectorization succeeded, allocate K+1 slots and update 'inputs->values' and
+    // 'inputs->sortBy' to refer to these slots. Then put 'inputs', the vectorized
+    // expressions, and the K+1 internal slots into an AccumBlockExprs struct and return it.
+    boost::optional<Accum::AccumBlockExprs> accumBlockExprs;
+    accumBlockExprs.emplace();
+
+    inputs->values = SbExpr::Vector{};
+    for (size_t i = 0; i < valueExprs.size(); ++i) {
+        SbSlot valueInternalSlot = SbSlot{state.slotId()};
+        inputs->values.emplace_back(SbExpr{valueInternalSlot});
+        accumBlockExprs->exprs.emplace_back(std::move(valueExprs[i]));
+        accumBlockExprs->slots.emplace_back(valueInternalSlot);
+    }
+
+    inputs->sortBy = SbExpr::Vector{};
+    for (size_t i = 0; i < keyExprs.size(); ++i) {
+        SbSlot keyInternalSlot = SbSlot{state.slotId()};
+        inputs->sortBy.emplace_back(SbExpr{keyInternalSlot});
+        accumBlockExprs->exprs.emplace_back(std::move(keyExprs[i]));
+        accumBlockExprs->slots.emplace_back(keyInternalSlot);
+    }
+
+    accumBlockExprs->inputs = std::move(inputs);
+
+    return accumBlockExprs;
+}
+
+boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsTopBottomN(
+    const Op& acc,
+    std::unique_ptr<AccumBlockTopBottomNInputs> inputs,
+    StageBuilderState& state,
+    SbSlot bitmapInternalSlot) {
+    SbExprBuilder b(state);
+
+    boost::optional<std::vector<BlockAggAndRowAgg>> pairs;
+    pairs.emplace();
+
+    tassert(8448717,
+            "Expected single sortBy when 'useMK' is false",
+            inputs->useMK || inputs->sortBy.size() == 1);
+
+    tassert(8448718,
+            "Expected single value when 'valueIsArray' is false",
+            inputs->valueIsArray || inputs->values.size() == 1);
+
+    bool isTopN = isAccumulatorTopN(acc);
+    auto [fnName, blockFnName] = inputs->valueIsArray
+        ? std::pair(isTopN ? "aggTopNArray"_sd : "aggBottomNArray"_sd,
+                    isTopN ? "valueBlockAggTopNArray"_sd : "valueBlockAggBottomNArray"_sd)
+        : std::pair(isTopN ? "aggTopN"_sd : "aggBottomN"_sd,
+                    isTopN ? "valueBlockAggTopN"_sd : "valueBlockAggBottomN"_sd);
+
+    auto blockArgs = SbExpr::makeSeq(bitmapInternalSlot, inputs->sortSpec.clone());
+    auto args = SbExpr::makeSeq(std::move(inputs->sortSpec));
+
+    auto numKeysExpr =
+        inputs->useMK ? b.makeInt32Constant(inputs->sortBy.size()) : b.makeNullConstant();
+
+    blockArgs.emplace_back(numKeysExpr.clone());
+    args.emplace_back(std::move(numKeysExpr));
+
+    for (auto& keyExpr : inputs->sortBy) {
+        blockArgs.emplace_back(keyExpr.clone());
+        args.emplace_back(std::move(keyExpr));
+    }
+
+    if (!inputs->valueIsArray) {
+        auto valueExpr = std::move(inputs->values[0]);
+        blockArgs.emplace_back(valueExpr.clone());
+        args.emplace_back(std::move(valueExpr));
+    } else {
+        for (auto& valueExpr : inputs->values) {
+            blockArgs.emplace_back(valueExpr.clone());
+            args.emplace_back(std::move(valueExpr));
+        }
+    }
+
+    auto blockAgg = b.makeFunction(blockFnName, std::move(blockArgs));
+    auto rowAgg = b.makeFunction(fnName, std::move(args));
+
+    pairs->emplace_back(BlockAggAndRowAgg{std::move(blockAgg), std::move(rowAgg)});
+
+    return pairs;
 }
 
 static const StringDataMap<OpInfo> accumOpInfoMap = {
@@ -1463,17 +1652,29 @@ static const StringDataMap<OpInfo> accumOpInfoMap = {
 
     // Bottom
     {AccumulatorBottom::getName(),
-     OpInfo{.buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+     OpInfo{.buildAccumBlockExprs = makeBuildFn(&buildAccumBlockExprsTopBottomN),
+            .buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+            .buildAccumBlockAggs = makeBuildFn(&buildAccumBlockAggsTopBottomN),
             .buildInit = makeBuildFn(&buildInitializeAccumN),
             .buildFinalize = makeBuildFn(&buildFinalizeTopBottom),
             .buildCombineAggs = makeBuildFn(&buildCombineAggsTopBottomN)}},
 
     // BottomN
     {AccumulatorBottomN::getName(),
-     OpInfo{.buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+     OpInfo{.buildAccumBlockExprs = makeBuildFn(&buildAccumBlockExprsTopBottomN),
+            .buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+            .buildAccumBlockAggs = makeBuildFn(&buildAccumBlockAggsTopBottomN),
             .buildInit = makeBuildFn(&buildInitializeAccumN),
             .buildFinalize = makeBuildFn(&buildFinalizeTopBottomN),
             .buildCombineAggs = makeBuildFn(&buildCombineAggsTopBottomN)}},
+
+    // Count
+    {kAccumulatorCountName,
+     OpInfo{.buildAccumBlockExprs = makeBuildFn(&buildAccumBlockExprsNoInputs),
+            .buildAccumAggs = makeBuildFn(&buildAccumAggsCount),
+            .buildAccumBlockAggs = makeBuildFn(&buildAccumBlockAggsCount),
+            .buildFinalize = makeBuildFn(&buildFinalizeCount),
+            .buildCombineAggs = makeBuildFn(&buildCombineAggsCount)}},
 
     // CovariancePop
     {AccumulatorCovariancePop::kName,
@@ -1601,7 +1802,9 @@ static const StringDataMap<OpInfo> accumOpInfoMap = {
 
     // Sum
     {AccumulatorSum::kName,
-     OpInfo{.buildAccumAggs = makeBuildFn(&buildAccumAggsSum),
+     OpInfo{.buildAccumBlockExprs = makeBuildFn(&buildAccumBlockExprsSingleInput),
+            .buildAccumAggs = makeBuildFn(&buildAccumAggsSum),
+            .buildAccumBlockAggs = makeBuildFn(&buildAccumBlockAggsSum),
             .buildFinalize = makeBuildFn(&buildFinalizeSum),
             .buildCombineAggs = makeBuildFn(&buildCombineAggsSum)}},
 
@@ -1619,46 +1822,44 @@ static const StringDataMap<OpInfo> accumOpInfoMap = {
 
     // Top
     {AccumulatorTop::getName(),
-     OpInfo{.buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+     OpInfo{.buildAccumBlockExprs = makeBuildFn(&buildAccumBlockExprsTopBottomN),
+            .buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+            .buildAccumBlockAggs = makeBuildFn(&buildAccumBlockAggsTopBottomN),
             .buildInit = makeBuildFn(&buildInitializeAccumN),
             .buildFinalize = makeBuildFn(&buildFinalizeTopBottom),
             .buildCombineAggs = makeBuildFn(&buildCombineAggsTopBottomN)}},
 
     // TopN
     {AccumulatorTopN::getName(),
-     OpInfo{.buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+     OpInfo{.buildAccumBlockExprs = makeBuildFn(&buildAccumBlockExprsTopBottomN),
+            .buildAccumAggs = makeBuildFn(&buildAccumAggsTopBottomN),
+            .buildAccumBlockAggs = makeBuildFn(&buildAccumBlockAggsTopBottomN),
             .buildInit = makeBuildFn(&buildInitializeAccumN),
             .buildFinalize = makeBuildFn(&buildFinalizeTopBottomN),
             .buildCombineAggs = makeBuildFn(&buildCombineAggsTopBottomN)}},
 };
+
+std::string getOpNameForAccStmt(const AccumulationStatement& accStmt) {
+    std::string opName = accStmt.expr.name.toString();
+
+    // The parser transforms "{$count: ..}" into "{$group: {..: {$sum: NumberInt(1)}}}".
+    // We pattern match for "{$sum: 1}" here to reverse the transform performed by the parser.
+    if (auto constArg = dynamic_cast<ExpressionConstant*>(accStmt.expr.argument.get())) {
+        mongo::Value value = constArg->getValue();
+        if (opName == AccumulatorSum::kName && value.getType() == BSONType::NumberInt &&
+            value.coerceToInt() == 1) {
+            return kAccumulatorCountName.toString();
+        }
+    }
+
+    return opName;
+}
 }  // namespace
 
 Op::Op(std::string opName) : _opName(std::move(opName)), _opInfo(lookupOpInfo(_opName)) {}
 
 Op::Op(const AccumulationStatement& accStmt)
-    : _opName(accStmt.expr.name), _opInfo(lookupOpInfo(_opName)) {
-    if (_opName == AccumulatorSum::kName) {
-        auto constArg = dynamic_cast<ExpressionConstant*>(accStmt.expr.argument.get());
-
-        if (constArg) {
-            mongo::Value value = constArg->getValue();
-
-            switch (value.getType()) {
-                case BSONType::NumberInt:
-                case BSONType::NumberLong:
-                case BSONType::NumberDouble:
-                    _countAddendIsIntegerOrDouble = true;
-                    break;
-                default:
-                    // 'value' is NumberDecimal type in which case, 'sum' function may not be
-                    // efficient due to decimal data copying which involves memory allocation.
-                    // To avoid such inefficiency, does not support NumberDecimal type for this
-                    // optimization.
-                    break;
-            }
-        }
-    }
-}
+    : _opName(getOpNameForAccStmt(accStmt)), _opInfo(lookupOpInfo(_opName)) {}
 
 const OpInfo* Op::lookupOpInfo(const std::string& opName) {
     auto it = accumOpInfoMap.find(opName);

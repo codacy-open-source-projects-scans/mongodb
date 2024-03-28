@@ -46,6 +46,7 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection_options.h"
@@ -177,7 +178,7 @@ constexpr std::size_t kOplogApplyBufferSizeLegacy = 256 * 1024 * 1024;
 
 
 // The count of items in the oplog application buffer
-OplogBuffer::Counters& applyBufferGauge = *MetricBuilder<OplogBuffer::Counters>("repl.buffer");
+OplogBufferMetrics& oplogBufferMetrics = *MetricBuilder<OplogBufferMetrics>("repl.buffer");
 
 /**
  * Returns new thread pool for thread pool task executor.
@@ -271,8 +272,8 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
         useOplogWriter ? kOplogApplyBufferSize : kOplogApplyBufferSizeLegacy;
 
     if (useOplogWriter) {
-        // TODO (SERVER-85720): Add write buffer metrics to serverStatus.
-        _oplogWriteBuffer = std::make_unique<OplogBufferBatchedQueue>(kOplogWriteBufferSize);
+        _oplogWriteBuffer = std::make_unique<OplogBufferBatchedQueue>(
+            kOplogWriteBufferSize, oplogBufferMetrics.getWriteBufferCounter());
     }
 
     // When featureFlagReduceMajorityWriteLatency is enabled, we must drain the apply buffer on
@@ -282,7 +283,7 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     OplogBufferBlockingQueue::Options bufferOptions;
     bufferOptions.clearOnShutdown = !useOplogWriter;
     _oplogApplyBuffer = std::make_unique<OplogBufferBlockingQueue>(
-        applyBufferSize, &applyBufferGauge, bufferOptions);
+        applyBufferSize, oplogBufferMetrics.getApplyBufferCounter(), bufferOptions);
 
     // No need to log OplogBuffer::startup because the blocking queue and batched queue
     // implementations does not start any threads or access the storage layer.
@@ -589,7 +590,8 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
 
 void ReplicationCoordinatorExternalStateImpl::onDrainComplete(OperationContext* opCtx) {
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
-    invariant(AdmissionContext::get(opCtx).getPriority() == AdmissionContext::Priority::kExempt,
+    invariant(ExecutionAdmissionContext::get(opCtx).getPriority() ==
+                  AdmissionContext::Priority::kExempt,
               "Replica Set state changes are critical to the cluster and should not be throttled");
 
     if (_oplogWriteBuffer) {
@@ -601,7 +603,8 @@ void ReplicationCoordinatorExternalStateImpl::onDrainComplete(OperationContext* 
 
 OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationContext* opCtx) {
     invariant(shard_role_details::getLocker(opCtx)->isRSTLExclusive());
-    invariant(AdmissionContext::get(opCtx).getPriority() == AdmissionContext::Priority::kExempt,
+    invariant(ExecutionAdmissionContext::get(opCtx).getPriority() ==
+                  AdmissionContext::Priority::kExempt,
               "Replica Set state changes are critical to the cluster and should not be throttled");
 
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
@@ -843,7 +846,8 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
     OperationContext* opCtx, const LastVote& lastVote) {
     BSONObj lastVoteObj = lastVote.toBSON();
 
-    invariant(AdmissionContext::get(opCtx).getPriority() == AdmissionContext::Priority::kExempt,
+    invariant(ExecutionAdmissionContext::get(opCtx).getPriority() ==
+                  AdmissionContext::Priority::kExempt,
               "Writes that are part of elections should not be throttled");
 
     try {
@@ -985,11 +989,10 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
         if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             // Called earlier for config servers.
             TransactionCoordinatorService::get(_service)->onStepDown();
-            CatalogCacheLoader::get(_service).onStepDown();
-            // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
-        } else if (gFeatureFlagTransitionToCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            CatalogCacheLoader::get(_service).onStepDown();
         }
+
+        // TODO SERVER-84243: replace with cache for filtering metadata
+        CatalogCacheLoader::get(_service).onStepDown();
     }
     if (auto validator = LogicalTimeValidator::get(_service)) {
         auto opCtx = cc().getOperationContext();
@@ -1012,7 +1015,8 @@ void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTr
     // As opCtx does not expose a method to allow skipping flow control on purpose we mark the
     // operation as having Immediate priority. This will skip flow control and ticket acquisition.
     // It is fine to do this since the system is essentially shutting down at this point.
-    ScopedAdmissionPriority priority(opCtx, AdmissionContext::Priority::kExempt);
+    ScopedAdmissionPriority<ExecutionAdmissionContext> priority(
+        opCtx, AdmissionContext::Priority::kExempt);
 
     // Tell the system to stop updating the oplogTruncateAfterPoint asynchronously and to go
     // back to using last applied to update repl's durable timestamp instead of the truncate
@@ -1087,10 +1091,8 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepUp(_service);
         TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
 
-        // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
-        if (gFeatureFlagTransitionToCatalogShard.isEnabledAndIgnoreFCVUnsafe()) {
-            CatalogCacheLoader::get(_service).onStepUp();
-        }
+        // TODO SERVER-84243: replace with cache for filtering metadata
+        CatalogCacheLoader::get(_service).onStepUp();
     }
     if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         if (ShardingState::get(opCtx)->enabled()) {

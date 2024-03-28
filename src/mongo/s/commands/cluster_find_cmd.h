@@ -61,7 +61,7 @@ public:
 
     ClusterFindCmdBase() : Command(Impl::kName) {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return Impl::getApiVersions();
     }
 
@@ -91,11 +91,11 @@ public:
      * A find command does not increment the command counter, but rather increments the
      * query counter.
      */
-    bool shouldAffectCommandCounter() const override final {
+    bool shouldAffectCommandCounter() const final {
         return false;
     }
 
-    bool shouldAffectQueryCounter() const override final {
+    bool shouldAffectQueryCounter() const final {
         return true;
     }
 
@@ -110,7 +110,7 @@ public:
     class Invocation final : public CommandInvocation {
     public:
         Invocation(const ClusterFindCmdBase* definition, const OpMsgRequest& request)
-            : CommandInvocation(definition), _request(request), _dbName(request.getDbName()) {}
+            : CommandInvocation(definition), _request(request), _dbName(request.parseDbName()) {}
 
     private:
         bool supportsWriteConcern() const override {
@@ -126,6 +126,10 @@ public:
             // TODO get the ns from the parsed QueryRequest.
             return NamespaceString(
                 CommandHelpers::parseNsCollectionRequired(_dbName, _request.body));
+        }
+
+        const DatabaseName& db() const override {
+            return _dbName;
         }
 
         /**
@@ -220,7 +224,7 @@ public:
             }
         }
 
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) {
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
             Impl::checkCanRunHere(opCtx);
 
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);

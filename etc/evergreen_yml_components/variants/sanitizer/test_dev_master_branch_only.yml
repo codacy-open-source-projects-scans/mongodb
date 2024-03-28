@@ -160,8 +160,8 @@ buildvariants:
   - name: .change_streams !.no_debug_mode
   - name: .change_stream_fuzzer
   - name: .misc_js !.no_debug_mode
-  - name: .concurrency !.large !.no_txns !.no_debug_mode
-  - name: .concurrency .large !.no_txns !.no_debug_mode
+  - name: .concurrency !.large !.no_txns !.no_debug_mode !.feature_flag_guarded
+  - name: .concurrency .large !.no_txns !.no_debug_mode !.feature_flag_guarded
     distros:
     - rhel80-medium
   - name: .config_fuzzer !.large
@@ -294,52 +294,8 @@ buildvariants:
   - name: compile_integration_and_test_no_audit_parallel_stream_TG
     distros:
     - windows-vsCurrent-xlarge
-  - name: .aggregation !.auth !.encrypt !.feature_flag_guarded
-  - name: aggregation_expression_multiversion_fuzzer_gen
-  - name: aggregation_expression_optimization_fuzzer_gen
-  - name: auth_gen
-  - name: .causally_consistent !.sharding
-  - name: .change_streams
-  - name: .misc_js !.non_win_dbg
-  - name: .concurrency
-    distros:
-    - windows-vsCurrent-large
-  - name: .config_fuzzer !.large !.linux_only
-  - name: .config_fuzzer .large !.linux_only !.sharded
-    distros:
-    - windows-vsCurrent-large
-  - name: disk_wiredtiger
-  - name: initial_sync_fuzzer_gen
-  - name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
-  - name: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough_gen
-  - name: .jscore .common !.auth !.sharding
-  - name: jsCore_txns_large_txns_format
-  - name: json_schema
-  - name: multi_shard_multi_stmt_txn_jscore_passthrough_gen
-  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .read_write_concern !.large
-  - name: .read_write_concern .large
-    distros:
-    - windows-vsCurrent-large
-  - name: .read_only
-  - name: .rollbackfuzzer
-  - name: .replica_sets !.large !.encrypt !.auth !.fcbis
-  - name: .replica_sets .large !.fcbis
-    distros:
-    - windows-vsCurrent-large
-  - name: replica_sets_max_mirroring_large_txns_format_gen
-  - name: .resharding_fuzzer
-  - name: retryable_writes_jscore_passthrough_gen
-  - name: retryable_writes_jscore_stepdown_passthrough_gen
-    distros:
-    - windows-vsCurrent-large
-  - name: session_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
-  - name: .stitch
-  - name: server_discovery_and_monitoring_json_test
-  - name: server_selection_json_test
+  - name: .development_critical !.incompatible_development_variant !.incompatible_community !.incompatible_windows !.requires_all_feature_flags
+  - name: .release_critical !.incompatible_development_variant !.incompatible_community !.incompatible_windows !.requires_all_feature_flags
 
 - name: &enterprise-windows-debug-unoptimized enterprise-windows-debug-unoptimized
   display_name: "Enterprise Windows DEBUG (Unoptimized)"
@@ -413,14 +369,8 @@ buildvariants:
   tasks:
   - name: compile_test_serial_TG
   - name: compile_test_parallel_unittest_stream_TG
-  - name: aggregation !.feature_flag_guarded
-  - name: auth_gen
-  - name: disk_wiredtiger
-  - name: failpoints
-  - name: .jscore .common !.auth !.sharding
-  - name: mongosTest
-  - name: replica_sets_gen
-  - name: .ssl
+  - name: .development_critical !.incompatible_development_variant !.incompatible_community !.incompatible_mac !.requires_all_feature_flags
+  - name: .release_critical !.incompatible_development_variant !.incompatible_community !.incompatible_mac !.requires_all_feature_flags
 
 - name: &enterprise-macos enterprise-macos
   display_name: "Enterprise macOS DEBUG"
@@ -479,14 +429,13 @@ buildvariants:
       --sanitize=undefined
       --ssl
       --allocator=tcmalloc-gperf
-      --ocsp-stapling=off
       -j$(grep -c ^processor /proc/cpuinfo)
       --use-diagnostic-latches=on
     compile_variant: *rhel80-debug-ubsan-all-feature-flags
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits,all_feature_flags_incompatible
+      --excludeWithAnyTags=requires_increased_memlock_limits,all_feature_flags_incompatible
       --runAllFeatureFlagTests
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -512,7 +461,6 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --excludeWithAnyTags=requires_ocsp_stapling
       --runAllFeatureFlagTests
   tasks:
   - name: jsCore
@@ -529,7 +477,6 @@ buildvariants:
     # To force disable feature flags even on the all feature flags variant, please use this file:
     # buildscripts/resmokeconfig/fully_disabled_feature_flags.yml
     test_flags: >-
-      --excludeWithAnyTags=requires_ocsp_stapling
       --runAllFeatureFlagTests
   tasks:
   - name: audit
@@ -573,7 +520,8 @@ buildvariants:
   - name: .multi_shard .common
   - name: query_golden_classic
   - name: .query_fuzzer
-  - name: .read_write_concern
+  # read-after-majority-write is no longer guaranteed with featureFlagReduceMajorityWriteConcern.
+  - name: .read_write_concern !.secondary_read_after_majority_write
   - name: .recordids_replicated
   - name: replica_sets_large_txns_format_jscore_passthrough_gen
   - name: .replica_sets !.multi_oplog
@@ -665,8 +613,8 @@ buildvariants:
   - name: .change_streams
   - name: .change_stream_fuzzer
   - name: .misc_js
-  - name: .concurrency !.large !.no_txns
-  - name: .concurrency .large !.no_txns
+  - name: .concurrency !.large !.no_txns !.feature_flag_guarded
+  - name: .concurrency .large !.no_txns !.feature_flag_guarded
     distros:
     - rhel80-xlarge
   - name: disk_wiredtiger
@@ -747,6 +695,7 @@ buildvariants:
 - name: &enterprise-rhel80-unoptimized-64-bit enterprise-rhel80-unoptimized-64-bit
   display_name: "~ Enterprise RHEL 8.0 DEBUG (Unoptimized)"
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  tags: ["bazel_check"]
   expansions:
     compile_flags: >-
       MONGO_DISTMOD=rhel80
@@ -755,6 +704,7 @@ buildvariants:
       --opt=off
       --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
       --detect-odr-violations
+      --linker=gold
       --link-model=dynamic
       --use-diagnostic-latches=on
     scons_cache_mode: all

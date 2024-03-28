@@ -204,43 +204,6 @@ functions:
     - command: expansions.update
       params:
         updates: *_expansion_updates
-  f_run_dsi_workload:
-    - command: git.get_project
-      params:
-        directory: *src_dir
-        clone_depth: 1000
-        revisions:
-          dsi: ${dsi_rev}
-          genny: ${genny_rev}
-          linkbench: ${linkbench_rev}
-          linkbench2: ${linkbench2_rev}
-          tsbs: ${tsbs_rev}
-          workloads: ${workloads_rev}
-          mongo-perf: ${mongo-perf_rev}
-          YCSB: ${YCSB_rev}
-          py-tpcc: ${py-tpcc_rev}
-          flamegraph: ${flamegraph_rev}
-          # mongo: ${mongo_rev}
-          PrivateWorkloads: ${PrivateWorkloads_rev}
-    - command: expansions.write
-      params:
-        file: ./expansions.yml
-        redacted: true
-    - command: shell.exec
-      params:
-        script: ./src/dsi/run-dsi run_workload
-    - command: shell.exec
-      type: system
-      params:
-        script: ./src/dsi/run-dsi determine_failure -m SYSTEM
-    - command: shell.exec
-      type: setup
-      params:
-        script: ./src/dsi/run-dsi determine_failure -m SETUP
-    - command: shell.exec
-      type: test
-      params:
-        script: ./src/dsi/run-dsi determine_failure -m TEST
   f_dsi_post_run:
     - command: shell.exec
       params:
@@ -431,6 +394,8 @@ functions:
       remote_file: engflow/engflow.key
       bucket: serverengflow
       local_file: "src/engflow.key"
+      # Mark as optional to allow local-mode execution to succeed.
+      optional: true
   - command: s3.get
     display_name: "get engflow cert"
     params:
@@ -439,6 +404,8 @@ functions:
       remote_file: engflow/engflow.cert
       bucket: serverengflow
       local_file: "src/engflow.cert"
+      # Mark as optional to allow local-mode execution to succeed.
+      optional: true
   - command: shell.exec
     params:
       display_name: "generate evergreen engflow bazelrc"
@@ -924,111 +891,9 @@ tasks:
       - func: "get engflow creds perf"
       - func: "compile mongocrypt shlib"
 
-  - name: industry_benchmarks
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb"
-
-  - name: ycsb_60GB
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb-60GB"
-
-  - name: ycsb.load
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb.load"
-
-  - name: ycsb_60GB.long
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb-60GB.long"
-
-  - name: industry_benchmarks_secondary_reads
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb-secondary-reads"
-
-  - name: industry_benchmarks_w1
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb-w1.2023-02"
-
-  - name: industry_benchmarks_stepdowns
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb_stepdowns"
-
-  - name: industry_benchmarks_rolling_restarts
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb_rolling_restarts"
-
-  - name: industry_benchmarks_non_retryable_writes_stepdowns
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb_non_retryable_writes_stepdowns"
-
-  - name: industry_benchmarks_non_retryable_writes_rolling_restarts
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "ycsb_non_retryable_writes_rolling_restarts"
-
-  - name: genny_canaries
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "genny_canaries"
-
-  - name: retryable_writes_workloads
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          test_control: "retryable_writes"
-
-  # Named Pipes single concurrent query benchmarks
-  - name: external_data_source_1
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          mongodb_setup: "external_data_source"
-          test_control: "external_data_source_1"
-
-  # Named Pipes four concurrent query benchmarks
-  - name: external_data_source_4
-    priority: 5
-    commands:
-      - func: f_run_dsi_workload
-        vars:
-          mongodb_setup: "external_data_source"
-          test_control: "external_data_source_4"
-
 buildvariants:
   - name: task_generation
-    display_name: Task Generation
+    display_name: " * Task Generation"
     cron: "0 0 1 1 *" # Every year starting 1/1 at 00:00
     modules: *modules
     expansions:
@@ -1180,7 +1045,7 @@ buildvariants:
   ###
   # New compiles
   - name: amazon2-x86-compile
-    display_name: Compile for Amazon Linux 2 x86 NEW
+    display_name: "* Compile for Amazon Linux 2 x86 NEW"
     modules: *modules
     expansions:
       platform: linux
@@ -1205,7 +1070,7 @@ buildvariants:
             variant: amazon2-x86-compile
 
   - name: amazon2-x86-openssl111-compile
-    display_name: Compile for Amazon Linux 2 x86 OpenSSL 1.1.1
+    display_name: "* Compile for Amazon Linux 2 x86 OpenSSL 1.1.1"
     modules: *modules
     expansions:
       platform: linux
@@ -1230,7 +1095,7 @@ buildvariants:
             variant: amazon2-x86-openssl111-compile
 
   - name: amazon2-arm64-compile
-    display_name: Compile for Amazon Linux 2 arm64 NEW
+    display_name: "* Compile for Amazon Linux 2 arm64 NEW"
     modules: *modules
     expansions:
       platform: linux
@@ -1255,9 +1120,10 @@ buildvariants:
             variant: amazon2-arm64-compile
 
   - name: amazon2-arm64-mongocrypt-shlib-compile
-    display_name: Compile mongo_crypt_v1.so for Amazon Linux 2 arm64 NEW
+    display_name: "* Compile mongo_crypt_v1.so for Amazon Linux 2 arm64 NEW"
     modules: *modules
     cron: "0 0 * * 4" # 00:00 on Thursday
+    tags: ["bazel_check"]
     expansions:
       platform: linux
       project_dir: *project_dir
@@ -1287,7 +1153,7 @@ buildvariants:
       - name: compile_mongocrypt_shlib
 
   - name: amazon2-x86-streams-compile
-    display_name: Compile Streams for Amazon Linux 2 x86 NEW
+    display_name: "* Compile Streams for Amazon Linux 2 x86 NEW"
     modules: *modules
     expansions:
       platform: linux
@@ -1313,7 +1179,7 @@ buildvariants:
             variant: amazon2-x86-streams-compile
 
   - name: al2023-arm64-compile
-    display_name: Compile for Al2023 arm64 NEW
+    display_name: "* Compile for Al2023 arm64 NEW"
     modules: *modules
     expansions:
       platform: linux

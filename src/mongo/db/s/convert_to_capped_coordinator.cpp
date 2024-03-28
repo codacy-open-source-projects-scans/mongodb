@@ -196,14 +196,20 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
                 auto* opCtx = opCtxHolder.get();
                 getForwardableOpMetadata().setOn(opCtx);
 
-                const auto localCollUuid = [&]() {
+                _performNoopRetryableWriteOnAllShardsAndConfigsvr(
+                    opCtx, getNewSession(opCtx), **executor);
+
+                const auto [localCollUuid, defaultCollator] = [&]() {
                     auto collection = acquireCollectionMaybeLockFree(
                         opCtx,
                         CollectionAcquisitionRequest(nss(),
                                                      AcquisitionPrerequisites::kPretendUnsharded,
                                                      repl::ReadConcernArgs::get(opCtx),
                                                      AcquisitionPrerequisites::kRead));
-                    return collection.uuid();
+                    auto defaultCollator = collection.getCollectionPtr()->getDefaultCollator();
+                    return std::make_tuple(collection.uuid(),
+                                           defaultCollator ? defaultCollator->getSpec().toBSON()
+                                                           : BSONObj());
                 }();
 
                 if (_doc.getIsTrackedCollection()) {
@@ -227,7 +233,11 @@ ExecutorFuture<void> ConvertToCappedCoordinator::_runImpl(
 
                     auto createCollectionOnShardingCatalogOps = sharding_ddl_util::
                         getOperationsToCreateUnsplittableCollectionOnShardingCatalog(
-                            opCtx, nss(), localCollUuid, ShardingState::get(opCtx)->shardId());
+                            opCtx,
+                            nss(),
+                            localCollUuid,
+                            defaultCollator,
+                            ShardingState::get(opCtx)->shardId());
                     sharding_ddl_util::runTransactionWithStmtIdsOnShardingCatalog(
                         opCtx,
                         **executor,

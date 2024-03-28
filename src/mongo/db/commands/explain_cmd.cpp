@@ -79,7 +79,7 @@ class CmdExplain final : public Command {
 public:
     CmdExplain() : Command("explain") {}
 
-    const std::set<std::string>& apiVersions() const {
+    const std::set<std::string>& apiVersions() const override {
         return kApiVersions1;
     }
 
@@ -126,7 +126,7 @@ public:
                std::unique_ptr<CommandInvocation> innerInvocation)
         : CommandInvocation(explainCommand),
           _outerRequest{&request},
-          _dbName(request.getDbName()),
+          _dbName(request.parseDbName()),
           _verbosity{std::move(verbosity)},
           _innerRequest{std::move(innerRequest)},
           _innerInvocation{std::move(innerInvocation)} {}
@@ -150,6 +150,10 @@ public:
 
     NamespaceString ns() const override {
         return _innerInvocation->ns();
+    }
+
+    const DatabaseName& db() const override {
+        return _dbName;
     }
 
     bool supportsWriteConcern() const override {

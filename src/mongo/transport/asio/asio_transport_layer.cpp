@@ -118,7 +118,7 @@ public:
     explicit AsioReactorTimer(asio::io_context& ctx)
         : _timer(std::make_shared<TimerType>(asio::system_timer(ctx))) {}
 
-    ~AsioReactorTimer() {
+    ~AsioReactorTimer() override {
         // The underlying timer won't get destroyed until the last promise from _asyncWait
         // has been filled, so cancel the timer so our promises get fulfilled
         cancel();
@@ -261,7 +261,7 @@ private:
     class ReactorClockSource final : public ClockSource {
     public:
         explicit ReactorClockSource(AsioReactor* reactor) : _reactor(reactor) {}
-        ~ReactorClockSource() = default;
+        ~ReactorClockSource() override = default;
 
         Milliseconds getPrecision() override {
             MONGO_UNREACHABLE;
@@ -650,8 +650,9 @@ StatusWith<std::shared_ptr<Session>> AsioTransportLayer::connect(
         // TODO SERVER-62035: enable the following on Windows.
         if (timeout > Milliseconds(0)) {
             timer->waitUntil(_timerService->now() + timeout)
-                .getAsync([finishLine, session](Status status) {
+                .getAsync([finishLine, session, timeout](Status status) {
                     if (status.isOK() && finishLine->arriveStrongly()) {
+                        LOGV2(8524900, "Handshake timeout threshold hit", "timeout"_attr = timeout);
                         session->end();
                     }
                 });

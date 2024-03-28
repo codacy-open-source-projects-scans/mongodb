@@ -196,6 +196,9 @@ bool Simple8bBuilder<T, Allocator>::append(T value, F&& writeFn) {
     if (_rlePossible()) {
         if (_lastValueInPrevWord == value) {
             ++_rleCount;
+            // RLE does not use selectors, make sure they are reset.
+            _lastValidExtensionType = 0;
+            isSelectorPossible.fill(true);
             return true;
         }
         _handleRleTermination(writeFn);
@@ -208,12 +211,16 @@ template <typename T, class Allocator>
 template <class F>
 requires Simple8bBlockWriter<F>
 void Simple8bBuilder<T, Allocator>::skip(F&& writeFn) {
-    if (_rlePossible() && !_lastValueInPrevWord.has_value()) {
-        ++_rleCount;
-        return;
+    if (_rlePossible()) {
+        if (!_lastValueInPrevWord.has_value()) {
+            ++_rleCount;
+            // RLE does not use selectors, make sure they are reset.
+            _lastValidExtensionType = 0;
+            isSelectorPossible.fill(true);
+            return;
+        }
+        _handleRleTermination(writeFn);
     }
-
-    _handleRleTermination(writeFn);
     _appendSkip(true /* tryRle */, writeFn);
 }
 
@@ -236,15 +243,16 @@ void Simple8bBuilder<T, Allocator>::flush(F&& writeFn) {
         // However the _rleCount is 0 because we have not read any of the values in the next word.
         _rleCount = 0;
     }
-
-    // Always reset _lastValueInPrevWord. We may only start RLE after flush on 0 value.
-    _lastValueInPrevWord = 0;
-    _lastValidExtensionType = 0;
 }
 
 template <typename T, class Allocator>
 void Simple8bBuilder<T, Allocator>::setLastForRLE(boost::optional<T> val) {
     _lastValueInPrevWord = val;
+    if (val) {
+        auto pendingValue = _calculatePendingValue(*val);
+        invariant(pendingValue);
+        invariant(_doesIntegerFitInCurrentWord(*pendingValue));
+    }
 }
 
 template <typename T, class Allocator>
@@ -369,6 +377,9 @@ bool Simple8bBuilder<T, Allocator>::_appendValue(T value, bool tryRle, F&& write
             // word is the same as the new value. Therefore, start RLE.
             _rleCount = 1;
             _lastValueInPrevWord = lastPendingValue.val;
+            // RLE does not use selectors, make sure they are reset.
+            _lastValidExtensionType = 0;
+            isSelectorPossible.fill(true);
         } else {
             _pendingValues.push_back(*pendingValue);
             _updateSimple8bCurrentState(*pendingValue);
@@ -409,9 +420,6 @@ void Simple8bBuilder<T, Allocator>::_appendSkip(bool tryRle, F&& writeFn) {
 template <typename T, class Allocator>
 template <class F>
 void Simple8bBuilder<T, Allocator>::_handleRleTermination(F&& writeFn) {
-    if (_rleCount == 0)
-        return;
-
     // Try to create a RLE Simple8b word.
     _appendRleEncoding(writeFn);
     // Add any values that could not be encoded in RLE.
@@ -426,7 +434,12 @@ void Simple8bBuilder<T, Allocator>::_handleRleTermination(F&& writeFn) {
 
     // Reset last for RLE and which selectors are possible to use for next word
     _lastValueInPrevWord = 0;
-    isSelectorPossible.fill(true);
+    // Ensure that selector state is reset if we have nothing in pending. This will happen when RLE
+    // has been setup but nothing compatible was added later.
+    if (_pendingValues.empty()) {
+        _lastValidExtensionType = 0;
+        isSelectorPossible.fill(true);
+    }
 }
 
 template <typename T, class Allocator>

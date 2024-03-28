@@ -41,6 +41,7 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
@@ -347,11 +348,10 @@ void OplogBatcher::_run(StorageInterface* storageInterface) {
     BatchLimits batchLimits;
 
     while (true) {
-        globalFailPointRegistry().find("rsSyncApplyStop")->pauseWhileSet();
-
         // When featureFlagReduceMajorityWriteLatency is enabled, OplogWriter takes care of this.
         if (!feature_flags::gReduceMajorityWriteLatency.isEnabled(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            globalFailPointRegistry().find("rsSyncApplyStop")->pauseWhileSet();
             batchLimits.secondaryDelaySecsLatestTimestamp =
                 _calculateSecondaryDelaySecsLatestTimestamp();
         }
@@ -363,8 +363,8 @@ void OplogBatcher::_run(StorageInterface* storageInterface) {
         OplogApplierBatch ops;
         try {
             auto opCtx = cc().makeOperationContext();
-            ScopedAdmissionPriority admissionPriority(opCtx.get(),
-                                                      AdmissionContext::Priority::kExempt);
+            ScopedAdmissionPriority<ExecutionAdmissionContext> admissionPriority(
+                opCtx.get(), AdmissionContext::Priority::kExempt);
 
             // During storage change operations, we may shut down storage under a global lock
             // and wait for any storage-using opCtxs to exit.  This results in a deadlock with

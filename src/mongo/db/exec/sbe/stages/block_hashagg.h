@@ -54,22 +54,13 @@ namespace sbe {
  */
 class BlockHashAggStage final : public HashAggBaseStage<BlockHashAggStage> {
 public:
-    struct BlockRowAccumulators {
-        std::unique_ptr<EExpression> blockAgg;
-        std::unique_ptr<EExpression> rowAgg;
-    };
-
-    // List of pairs, where the first part of the pair is a slot and second part of the pair
-    // is a struct of the form {blockAgg, rowAgg} containing the corresponding accumulators.
-    using BlockAndRowAggs = std::vector<std::pair<value::SlotId, BlockRowAccumulators>>;
-
     BlockHashAggStage(std::unique_ptr<PlanStage> input,
                       value::SlotVector groupSlotIds,
                       value::SlotId blockBitsetInSlotId,
                       value::SlotVector blockDataInSlotIds,
                       value::SlotVector accumulatorDataSlotIds,
                       value::SlotId accumulatorBitsetSlotId,
-                      BlockAndRowAggs aggs,
+                      AggExprTupleVector aggs,
                       bool allowDiskUse,
                       SlotExprPairVector mergingExprs,
                       PlanYieldPolicy* yieldPolicy,
@@ -77,7 +68,7 @@ public:
                       bool participateInTrialRunTracking = true,
                       bool forceIncreasedSpilling = false);
 
-    ~BlockHashAggStage();
+    ~BlockHashAggStage() override;
 
     std::unique_ptr<PlanStage> clone() const final;
 
@@ -92,6 +83,11 @@ public:
     HashAggStats* getHashAggStats();
     std::vector<DebugPrinter::Block> debugPrint() const final;
     size_t estimateCompileTimeSize() const final;
+
+    void doSaveState(bool relinquishCursor) override {
+        // We don't need to store this across yields, as we resize it each time.
+        _compoundKeys.clear();
+    }
 
     /*
      * TODO SERVER-85731 tune this parameter.
@@ -123,16 +119,25 @@ private:
     };
 
     /**
-     * Take a vector of TokenizedBlocks and combine them into the actual keys that will be used for
-     * the hash table. These combined keys will then be tokenized again, so that we can identify the
-     * unique compound keys. Returns TokenizedKeys containing the actual materialized keys and a
-     * vector of indices where keys[idxs[i]] represents the materialized key of the ith element in
-     * the input. If the number of unique keys encountered exceeds
-     * kMaxNumPartitionsForTokenizedPath, return boost::none and use the element wise path.
+     * Given a 2d matrix of tokens, assigns a number to each row indicating which 'token', or
+     * unique value it is.
+     *
+     * Returns a 1d-vector of the assigned numbers (one value per row). E.g.
+     *
+     * Input matrix:     Output vector:
+     * ------------
+     * 1    2    3 |      0
+     * 1    2    4 |      1
+     * 2    3    4 |      2
+     * 1    2    4 |      1 // Second occurrence of row '1,2,4' which is assigned token ID 1.
+     * 2    3    5 |      3
+     * 2    3    4 |      2 // Second occurrence of row '2,3,4' which is assigned token ID 2.
+     *
+     * If it's discovered that there are more than kMaxNumPartitionsForTokenizedPath, returns
+     * boost::none, and we fall back to row-by-row processing.
      */
-    boost::optional<TokenizedKeys> tokenizeTokenInfos(
-        const std::vector<value::TokenizedBlock>& tokenInfos,
-        const std::vector<value::DeblockedTagVals>& deblockedTokens);
+    boost::optional<std::vector<size_t>> tokenizeTokenInfos(
+        const std::vector<value::TokenizedBlock>& tokenInfos);
 
     boost::optional<BlockHashAggStage::TokenizedKeys> tryTokenizeGbs();
 
@@ -150,8 +155,8 @@ private:
      */
     void runAccumulatorsElementWise();
 
-    // Returns the next accumulator key or boost::none if we've run out of spilled keys.
-    boost::optional<value::MaterializedRow> getNextSpilledHelper();
+    // Returns false if we've run out of spilled keys, otherwise returns true.
+    bool getNextSpilledHelper();
     PlanState getNextSpilled();
 
     /*
@@ -191,11 +196,11 @@ private:
      * input the block accumulator reads from, and is also the output that the row accumulator
      * writes to.
      */
-    BlockAndRowAggs _blockRowAggs;
+    AggExprTupleVector _aggs;
 
     SlotExprPairVector _mergingExprs;
 
-    HashAggStats _specificStats;
+    BlockHashAggStats _specificStats;
 
     value::SlotAccessorMap _outAccessorsMap;
 
@@ -206,7 +211,8 @@ private:
     std::vector<value::HeterogeneousBlock> _outAggBlocks;
 
     // Code for block and row accumulators.
-    std::vector<std::unique_ptr<vm::CodeFragment>> _blockLevelAggCodes;
+    std::vector<std::unique_ptr<vm::CodeFragment>> _initCodes;
+    std::vector<std::unique_ptr<vm::CodeFragment>> _blockAggCodes;
     std::vector<std::unique_ptr<vm::CodeFragment>> _aggCodes;
 
     // Bytecode for the merging expressions, executed if partial aggregates are spilled to a record
@@ -214,8 +220,11 @@ private:
     std::vector<std::unique_ptr<vm::CodeFragment>> _mergingExprCodes;
 
     std::vector<std::unique_ptr<HashAggAccessor>> _rowAggHtAccessors;
-    std::vector<std::unique_ptr<value::OwnedValueAccessor>> _rowAggRSAccessors;
+    value::MaterializedRow _outAggRowRecordStore{0};
+    std::vector<std::unique_ptr<value::MaterializedSingleRowAccessor>> _rowAggRSAccessors;
     std::vector<std::unique_ptr<value::SwitchAccessor>> _rowAggAccessors;
+
+    value::MaterializedRow _outKeyRowRecordStore{0};
 
     // Hash table where we'll map groupby key to the accumulators.
     std::vector<std::unique_ptr<HashKeyAccessor>> _idHtAccessors;
@@ -224,8 +233,6 @@ private:
     value::ValueBlock* _bitmapBlock = nullptr;
     std::vector<value::ValueBlock*> _gbBlocks;
     std::vector<value::ValueBlock*> _dataBlocks;
-    std::vector<value::TokenizedBlock> _tokenInfos;
-    std::vector<value::DeblockedTagVals> _deblockedTokens;
     std::deque<boost::optional<value::MonoBlock>> _monoBlocks;
 
     vm::ByteCode _bytecode;
@@ -236,7 +243,8 @@ private:
     // Partial aggregates that have been spilled and restored are passed into the bytecode in
     // '_mergingExprCodes' via '_spilledAccessors' so that they can be merged to compute the
     // final aggregate value.
-    std::vector<value::ViewOfValueAccessor> _spilledAccessors;
+    value::MaterializedRow _spilledAggRow{0};
+    std::vector<std::unique_ptr<value::MaterializedSingleRowAccessor>> _spilledAccessors;
     value::SlotAccessorMap _spilledAccessorMap;
 
     // Place to stash the next keys and values during the streaming phase. The record store cursor
@@ -245,6 +253,12 @@ private:
     BufBuilder _stashedBuffer;
     BufBuilder _currentBuffer;
     boost::optional<SpilledRow> _stashedNextRow;
+
+    // Table used for computing compound keys. Stored here to avoid repeated
+    // allocation/deallocation.
+    std::vector<value::TokenizedBlock> _tokenInfos;
+    std::vector<value::DeblockedTagVals> _deblockedTokens;
+    std::vector<size_t> _compoundKeys;
 };
 
 }  // namespace sbe

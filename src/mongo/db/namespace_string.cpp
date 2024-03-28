@@ -55,6 +55,21 @@ constexpr auto fle2EccSuffix = ".ecc"_sd;
 constexpr auto fle2EcocSuffix = ".ecoc"_sd;
 constexpr auto fle2EcocCompactSuffix = ".ecoc.compact"_sd;
 
+// The following are namespaces in the form of config.xxx for which only one instance exist globally
+// within the cluster.
+static const absl::flat_hash_set<NamespaceString> globallyUniqueConfigDbCollections = {
+    NamespaceString::kConfigsvrCollectionsNamespace,
+    NamespaceString::kConfigsvrChunksNamespace,
+    NamespaceString::kConfigDatabasesNamespace,
+    NamespaceString::kConfigsvrShardsNamespace,
+    NamespaceString::kConfigsvrIndexCatalogNamespace,
+    NamespaceString::kConfigsvrPlacementHistoryNamespace,
+    NamespaceString::kConfigChangelogNamespace,
+    NamespaceString::kConfigsvrTagsNamespace,
+    NamespaceString::kConfigVersionNamespace,
+    NamespaceString::kConfigMongosNamespace,
+    NamespaceString::kLogicalSessionsNamespace};
+
 }  // namespace
 
 bool NamespaceString::isListCollectionsCursorNS() const {
@@ -337,6 +352,25 @@ bool NamespaceString::isNamespaceAlwaysUntracked() const {
     return false;
 }
 
+bool NamespaceString::isShardLocalNamespace() const {
+    if (isLocalDB() || isAdminDB()) {
+        return true;
+    }
+
+    if (isConfigDB()) {
+        return !globallyUniqueConfigDbCollections.contains(*this);
+    }
+
+    if (isSystem()) {
+        // Only some db.system.xxx collections are cluster global.
+        const bool isUniqueInstanceSystemCollection =
+            isTemporaryReshardingCollection() || isTimeseriesBucketsCollection();
+        return !isUniqueInstanceSystemCollection;
+    }
+
+    return false;
+}
+
 bool NamespaceString::isConfigDotCacheDotChunks() const {
     return db_deprecated() == "config" && coll().startsWith("cache.chunks.");
 }
@@ -350,7 +384,8 @@ bool NamespaceString::isReshardingConflictStashCollection() const {
 }
 
 bool NamespaceString::isTemporaryReshardingCollection() const {
-    return coll().startsWith(kTemporaryReshardingCollectionPrefix);
+    return coll().startsWith(kTemporaryTimeseriesReshardingCollectionPrefix) ||
+        coll().startsWith(kTemporaryReshardingCollectionPrefix);
 }
 
 bool NamespaceString::isTimeseriesBucketsCollection() const {

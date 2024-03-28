@@ -52,7 +52,6 @@
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
-#include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
@@ -96,16 +95,16 @@ void readRequestMetadata(OperationContext* opCtx,
     if (requestArgs.getReadPreference()) {
         ReadPreferenceSetting::get(opCtx) = uassertStatusOK(
             ReadPreferenceSetting::fromInnerBSON(requestArgs.getReadPreference()->getElement()));
+    }
 
-        if (opCtx->routedByReplicaSetEndpoint()) {
-            ReadPreferenceSetting::get(opCtx).isPretargeted = true;
-        } else if (ReadPreferenceSetting::get(opCtx).isPretargeted) {
-            // '$_isPretargeted' is used exclusively by the replica set endpoint to mark commands
-            // that it forces to go through the router as needing to target the local mongod.
-            // Given that this request has been marked as pre-targeted, it must have originated from
-            // a request routed by the replica set endpoint. Mark the opCtx with this info.
-            opCtx->setRoutedByReplicaSetEndpoint(true);
-        }
+    if (opCtx->routedByReplicaSetEndpoint()) {
+        ReadPreferenceSetting::get(opCtx).isPretargeted = true;
+    } else if (ReadPreferenceSetting::get(opCtx).isPretargeted) {
+        // '$_isPretargeted' is used exclusively by the replica set endpoint to mark commands
+        // that it forces to go through the router as needing to target the local mongod.
+        // Given that this request has been marked as pre-targeted, it must have originated from
+        // a request routed by the replica set endpoint. Mark the opCtx with this info.
+        opCtx->setRoutedByReplicaSetEndpoint(true);
     }
 
     readImpersonatedUserMetadata(requestArgs.getImpersonation().value_or(IDLAnyType()).getElement(),
@@ -124,13 +123,6 @@ void readRequestMetadata(OperationContext* opCtx,
         // its own requests. This may or may not be relevant for SERVER-50804.
         ClientMetadata::setFromMetadataForOperation(opCtx,
                                                     requestArgs.getClientMetadata()->getElement());
-    }
-
-    if (auto ti = requestArgs.getTracking_info()) {
-        TrackingMetadata::get(opCtx) =
-            uassertStatusOK(TrackingMetadata::readFromMetadata(ti->getElement()));
-    } else {
-        TrackingMetadata::get(opCtx) = {};
     }
 
     VectorClock::get(opCtx)->gossipIn(

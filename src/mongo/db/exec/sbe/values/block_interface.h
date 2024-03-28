@@ -74,6 +74,10 @@ public:
         return std::span(_vals, _count);
     }
 
+    std::pair<std::span<const TypeTags>, std::span<const Value>> tagsValsView() const {
+        return std::pair{tagsSpan(), valsSpan()};
+    }
+
     size_t count() const {
         return _count;
     }
@@ -344,7 +348,7 @@ public:
         o._val = 0;
     }
 
-    ~MonoBlock() {
+    ~MonoBlock() override {
         releaseValue(_tag, _val);
     }
 
@@ -461,7 +465,7 @@ public:
     HeterogeneousBlock(std::vector<TypeTags> tags, std::vector<Value> vals, bool isDense = false)
         : _vals(std::move(vals)), _tags(std::move(tags)), _isDense(isDense) {}
 
-    ~HeterogeneousBlock() {
+    ~HeterogeneousBlock() override {
         release();
     }
 

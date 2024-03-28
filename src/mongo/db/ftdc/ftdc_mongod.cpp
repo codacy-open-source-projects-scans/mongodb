@@ -54,7 +54,6 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/transport/transport_layer_ftdc_collector.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/synchronized_value.h"
 
@@ -120,7 +119,7 @@ public:
 };
 
 
-void registerMongoDCollectors(FTDCController* controller) {
+void registerShardCollectors(FTDCController* controller) {
     registerServerCollectorsForRole(controller, ClusterRole::ShardServer);
 
     // These metrics are only collected if replication is enabled
@@ -151,9 +150,6 @@ void registerMongoDCollectors(FTDCController* controller) {
 
     controller->addPeriodicCollector(std::make_unique<FTDCCollectionStatsCollector>(),
                                      ClusterRole::ShardServer);
-
-    controller->addPeriodicCollector(std::make_unique<transport::TransportLayerFTDCCollector>(),
-                                     ClusterRole::ShardServer);
 }
 
 }  // namespace
@@ -167,20 +163,18 @@ void startMongoDFTDC(ServiceContext* serviceContext) {
     }
 
     std::vector<RegisterCollectorsFunction> registerFns{
-        registerMongoDCollectors,
+        registerShardCollectors,
     };
 
-    // (Ignore FCV check): these two feature flags are not FCV-gated.
-    const bool gEmbeddedRouter = feature_flags::gEmbeddedRouter.isEnabledAndIgnoreFCVUnsafe();
-    const bool gMultiserviceFTDCSchema =
-        feature_flags::gMultiserviceFTDCSchema.isEnabledAndIgnoreFCVUnsafe();
+    // (Ignore FCV check): this feature flag is not FCV-gated.
+    const bool multiServiceFTDCSchema =
+        feature_flags::gMultiServiceLogAndFTDCFormat.isEnabledAndIgnoreFCVUnsafe();
 
-    const UseMultiserviceSchema multiversionSchema{
-        serviceContext->getService(ClusterRole::RouterServer) && gEmbeddedRouter &&
-        gMultiserviceFTDCSchema};
+    const UseMultiServiceSchema multiversionSchema{
+        serviceContext->getService(ClusterRole::RouterServer) && multiServiceFTDCSchema};
 
     if (multiversionSchema) {
-        registerFns.emplace_back(registerMongoSCollectors);
+        registerFns.emplace_back(registerRouterCollectors);
     }
 
     startFTDC(

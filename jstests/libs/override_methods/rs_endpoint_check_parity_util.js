@@ -43,15 +43,6 @@ function checkCanRun(dbName, commandName, commandObj) {
                     "to inconsistent metadata and cause the CheckMetadataConsistencyInBackground " +
                     "hook to fail");
     }
-    if (typeof commandObj[commandName] === "string" &&
-        commandObj[commandName].includes("system.resharding.") &&
-        !readCommandNames.has(commandName)) {
-        // TODO (SERVER-86487): Writing to system.resharding.* collection is allowed when
-        // featureFlagTrackUnshardedCollectionsUponCreation is enabled and leads to
-        // incomplete placement metadata.
-        throw Error("Cannot write to a resharding temporary collection since it would result in " +
-                    "a collection with incomplete placement metadata");
-    }
 }
 
 /**
@@ -69,7 +60,7 @@ export function runCommandCompareResponsesBase(
     } catch (err) {
         err0 = err;
     }
-    // TODO (SERVER-87846): Add concurrency_replication suites with replica set endpoint enabled.
+    // TODO (SERVER-86834): Add response comparison to replica set endpoint jstestfuzz suites.
     // let resObj1, err1;
     // try {
     //     resObj1 = func.apply(conn1, makeFuncArgs(commandObj));

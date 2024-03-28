@@ -31,12 +31,9 @@
 
 #include <memory>
 
-#include "mongo/base/string_data.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/util/concurrency/ticketholder_test_fixture.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/tick_source.h"
 #include "mongo/util/tick_source_mock.h"
 
 namespace {
@@ -77,6 +74,7 @@ TEST_F(SemaphoreTicketHolderTest, PriorityBookkeeping) {
     priorityBookkeepingTest(
         _opCtx.get(),
         std::make_unique<SemaphoreTicketHolder>(&serviceContext, 1, false /* trackPeakUsed */),
+        AdmissionContext::Priority::kNormal,
         AdmissionContext::Priority::kExempt,
         [](auto statsWhileProcessing, auto statsWhenFinished) {
             ASSERT_EQ(statsWhileProcessing.getObjectField("normalPriority")

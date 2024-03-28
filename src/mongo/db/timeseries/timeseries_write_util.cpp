@@ -91,6 +91,7 @@
 #include "mongo/db/update/document_diff_applier.h"
 #include "mongo/db/update/document_diff_serialization.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
+#include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decimal_counter.h"
@@ -105,6 +106,158 @@
 
 namespace mongo::timeseries {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(timeseriesDataIntegrityCheckFailure);
+
+// Return a verifierFunction that is used to perform a data integrity check on inserts into
+// a compressed column.
+doc_diff::VerifierFunc makeVerifierFunction(std::vector<details::Measurement> sortedMeasurements,
+                                            std::shared_ptr<bucket_catalog::WriteBatch> batch) {
+    return [sortedMeasurements = std::move(sortedMeasurements), batch](const BSONObj& docToWrite) {
+        if (MONGO_unlikely(timeseriesDataIntegrityCheckFailure.shouldFail())) {
+            uasserted(
+                timeseries::BucketCompressionFailure(batch->bucketHandle.bucketId.collectionUUID,
+                                                     batch->bucketHandle.bucketId.oid),
+                "Failpoint-triggered data integrity check failure");
+        }
+
+        auto data = docToWrite.getObjectField(kBucketDataFieldName);
+
+        // Iterate through each key-value pair in the data. This is a mapping from String keys
+        // representing data field names to a tuple of an iterator on a BSONColumn, the column
+        // itself, and a size_t type counter. The iterator allows us to iterate across the
+        // BSONColumn as we inspect each element and compare it to the expected value in the actual
+        // measurement we inserted. The column is stored to prevent the iterator on it from going
+        // out of scope. The StringData representation of the binary allows us to log the binary in
+        // the case that we encounter an error. The size_t counter represents how many times the
+        // iterator has been advanced - this allows us to detect when we didn't have a value set for
+        // a field in a particular measurement, so that we can check the corresponding BSONColumn
+        // for a skip value.
+        StringDataMap<std::tuple<BSONColumn::Iterator, BSONColumn, StringData, size_t>>
+            fieldsToDataAndNextCountMap;
+
+        using AddAttrsFn = std::function<void(logv2::DynamicAttributes&)>;
+        auto failed = [&sortedMeasurements, &batch, &docToWrite](StringData reason,
+                                                                 AddAttrsFn addAttrsWithoutData,
+                                                                 AddAttrsFn addAttrsWithData) {
+            logv2::DynamicAttributes attrs;
+            attrs.add("bucketId", batch->bucketHandle.bucketId.oid);
+            attrs.add("collectionUUID", batch->bucketHandle.bucketId.collectionUUID);
+            addAttrsWithoutData(attrs);
+
+            LOGV2_WARNING(8807500,
+                          "Failed data verification inserting into compressed column",
+                          "reason"_attr = reason,
+                          "bucketId"_attr = batch->bucketHandle.bucketId.oid,
+                          "collectionUUID"_attr = batch->bucketHandle.bucketId.collectionUUID);
+
+            attrs = {};
+            auto seqLogDataFields = [](const details::Measurement& measurement) {
+                return logv2::seqLog(measurement.dataFields);
+            };
+            auto measurementsAttr = logv2::seqLog(
+                boost::make_transform_iterator(sortedMeasurements.begin(), seqLogDataFields),
+                boost::make_transform_iterator(sortedMeasurements.end(), seqLogDataFields));
+            attrs.add("measurements", measurementsAttr);
+            auto bucketAttr = base64::encode(docToWrite.objdata(), docToWrite.objsize());
+            attrs.add("bucket", bucketAttr);
+            addAttrsWithData(attrs);
+
+            LOGV2_WARNING_OPTIONS(8807501,
+                                  logv2::LogTruncation::Disabled,
+                                  "Failed data verification inserting into compressed column",
+                                  attrs);
+
+            invariant(!TestingProctor::instance().isEnabled());
+            tasserted(
+                timeseries::BucketCompressionFailure(batch->bucketHandle.bucketId.collectionUUID,
+                                                     batch->bucketHandle.bucketId.oid),
+                "Failed data verification inserting into compressed column");
+        };
+
+        // First, populate our map.
+        for (auto&& [key, columnValue] : data) {
+            int binLength = 0;
+            const char* binData = columnValue.binData(binLength);
+            // Decompress the binary data for this field.
+            try {
+                BSONColumn c(binData, binLength);
+                auto it = c.begin();
+                std::advance(it, batch->numPreviouslyCommittedMeasurements);
+                fieldsToDataAndNextCountMap.emplace(
+                    key, std::make_tuple(it, std::move(c), StringData(binData, binLength), 0));
+            } catch (const DBException& e) {
+                failed(
+                    "exception",
+                    [&e](logv2::DynamicAttributes& attrs) { attrs.add("error", e); },
+                    [&binData, binLength](logv2::DynamicAttributes& attrs) {
+                        auto columnAttr = base64::encode(binData, binLength);
+                        attrs.add("column", columnAttr);
+                    });
+            };
+        }
+        // Now, iterate through each measurement, and check if the value for each field of the
+        // measurement matches with what was compressed. numIterations will keep track of how many
+        // measurements we've gone through so far - this is useful because not every measurement
+        // necessarily has a value for each field, as this counter allows us to identify when
+        // a measurement skipped a value for a field.
+        size_t numIterations = 0;
+        for (const auto& measurement : sortedMeasurements) {
+            for (const BSONElement& elem : measurement.dataFields) {
+                auto measurementKey = elem.fieldNameStringData();
+                if (!fieldsToDataAndNextCountMap.contains(measurementKey)) {
+                    failed(
+                        "missing column",
+                        [](logv2::DynamicAttributes& attrs) {},
+                        [measurementKey](logv2::DynamicAttributes& attrs) {
+                            attrs.add("key", measurementKey);
+                        });
+                }
+                auto& [iterator, column, binaryString, nextCount] =
+                    fieldsToDataAndNextCountMap.at(measurementKey);
+                if (!iterator->binaryEqualValues(elem)) {
+                    failed(
+                        "value not matching expected",
+                        [](logv2::DynamicAttributes& attrs) {},
+                        [binaryString = binaryString, measurementKey, &iterator = iterator, elem](
+                            logv2::DynamicAttributes& attrs) {
+                            auto columnAttr = base64::encode(binaryString);
+                            attrs.add("column", columnAttr);
+                            attrs.add("key", measurementKey);
+                            attrs.add("value", *iterator);
+                            attrs.add("expected", elem);
+                        });
+                }
+                ++nextCount;
+                ++iterator;
+            }
+            ++numIterations;
+            // Advance the iterators for fields not present in this measurement.
+            for (auto& [key, value] : fieldsToDataAndNextCountMap) {
+                auto& [iterator, column, binaryString, nextCount] = value;
+                // If a value was not present for a field in a measurement, check that the
+                // corresponding element in the column is a skip value.
+                if (nextCount < numIterations) {
+                    invariant(nextCount == numIterations - 1);
+                    if (!iterator->eoo()) {
+                        failed(
+                            "value unexpectedly not EOO",
+                            [](logv2::DynamicAttributes& attrs) {},
+                            [binaryString = binaryString, key = key, &iterator = iterator](
+                                logv2::DynamicAttributes& attrs) {
+                                auto columnAttr = base64::encode(binaryString);
+                                attrs.add("column", columnAttr);
+                                attrs.add("key", key);
+                                attrs.add("value", *iterator);
+                            });
+                    }
+                    ++iterator;
+                    ++nextCount;
+                }
+            }
+        }
+    };
+};
 
 // Builds the data field of a bucket document. Computes the min and max fields if necessary.
 boost::optional<std::pair<BSONObj, BSONObj>> processTimeseriesMeasurements(
@@ -221,6 +374,14 @@ write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
     std::shared_ptr<bucket_catalog::WriteBatch> batch,
     bool changedToUnsorted,
     const std::vector<details::Measurement>& sortedMeasurements) {
+
+    // Verifier function that will be called when we apply the diff to our bucket and verify that
+    // the measurements we inserted appear correctly in the resulting bucket's BSONColumns.
+    doc_diff::VerifierFunc verifierFunction = nullptr;
+    if (gPerformTimeseriesCompressionIntermediateDataIntegrityCheck.load()) {
+        verifierFunction = makeVerifierFunction(sortedMeasurements, batch);
+    }
+
     BSONObjBuilder updateBuilder;
     {
         // Control builder.
@@ -243,88 +404,6 @@ write_ops::UpdateOpEntry makeTimeseriesCompressedDiffEntry(
                 controlBuilder.append(kMaxFieldNameDocDiff, batch->max);
             }
         }
-    }
-
-    // Verifier function that will be called when we apply the diff to our bucket and verify that
-    // the measurements we inserted appear correctly in the resulting bucket's BSONColumns.
-    doc_diff::VerifierFunc verifierFunction = nullptr;
-
-    if (TestingProctor::instance().isEnabled()) {
-        verifierFunction = [sortedMeasurements = std::move(sortedMeasurements),
-                            numPreviouslyCommittedMeasurements =
-                                batch->numPreviouslyCommittedMeasurements](
-                               const BSONObj& docToWrite) {
-            // Get the data
-            auto data = docToWrite.getObjectField(kBucketDataFieldName);
-            // Iterate through each key-value pair in the data. This is a mapping
-            // from String keys representing data field names to a tuple of an iterator
-            // on a BSONColumn, the column itself, and a size_t type counter.
-            // The iterator allows us to iterate across the BSONColumn as we inspect
-            // each element and compare it to the expected value in the actual measurement
-            // we inserted. The column is stored to prevent the iterator on it from going out
-            // of scope. The size_t counter represents how many times the iterator has been
-            // advanced - this allows us to detect when we didn't have a value set for a field
-            // in a particular measurement, so that we can check the corresponding BSONColumn
-            // for a skip value.
-            StringMap<std::tuple<BSONColumn::Iterator, BSONColumn, size_t>>
-                fieldsToDataAndNextCountMap;
-            // First, populate our map.
-            for (auto&& [key, columnValue] : data) {
-                int binLength = 0;
-                const char* binData = columnValue.binData(binLength);
-                // Decompress the binary data for this field.
-                try {
-                    BSONColumn c(binData, binLength);
-                    auto it = c.begin();
-                    std::advance(it, numPreviouslyCommittedMeasurements);
-                    fieldsToDataAndNextCountMap.emplace(key, std::make_tuple(it, std::move(c), 0));
-                } catch (const DBException& e) {
-                    invariant(false,
-                              str::stream() << "Encountered exception " << e.toString()
-                                            << " when iterating over BSONColumn binary "
-                                            << StringData(binData, binLength));
-                };
-            }
-            // Now, iterate through each measurement, and check if the value
-            // for each field of the measurement matches with what was compressed.
-            // numIterations will keep track of how many measurements we've gone through
-            // so far - this is useful because not every measurement necessarily has a value
-            // for each field, as this counter allows us to identify when a measurement skipped
-            // a value for a field.
-            size_t numIterations = 0;
-            for (const auto& measurement : sortedMeasurements) {
-                for (const BSONElement& elem : measurement.dataFields) {
-                    auto measurementKey = elem.fieldNameStringData();
-                    invariant(fieldsToDataAndNextCountMap.contains(measurementKey),
-                              str::stream() << "BSONColumn was missing key " << measurementKey);
-                    auto& [iterator, column, nextCount] =
-                        fieldsToDataAndNextCountMap.at(measurementKey);
-                    BSONElement columnValue = *iterator;
-                    invariant(columnValue.binaryEqualValues(elem),
-                              str::stream() << "BSONColumn value " << columnValue
-                                            << "was not equal to expected measurement value "
-                                            << elem << "for key " << measurementKey);
-                    ++nextCount;
-                    ++iterator;
-                }
-                ++numIterations;
-                // Advance the iterators for fields not present in this measurement. Check
-                // that the iterator sees a skip value.
-                for (auto& [key, value] : fieldsToDataAndNextCountMap) {
-                    auto& [iterator, column, nextCount] = value;
-                    if (nextCount < numIterations) {
-                        invariant(numIterations - 1 == nextCount);
-                        // If there was no value for a field in a measurement,
-                        // the column should have a skip value.
-                        BSONElement val = *iterator;
-                        invariant(val.eoo(),
-                                  str::stream() << "Column value" << val << "was not equal to EOO");
-                        ++iterator;
-                        ++nextCount;
-                    }
-                }
-            }
-        };
     }
 
     {

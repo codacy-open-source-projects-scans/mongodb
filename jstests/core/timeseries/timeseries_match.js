@@ -82,6 +82,22 @@ TimeseriesTest.run((insert) => {
     });
 
     const kTestCases = [
+        {
+            pred: {$and: [{"arrOfObj.x": {$gte: 104}}, {"arrOfObj.x": {$lt: 102}}]},
+            ids: [1, 4],
+            usesBlockProcessing: true
+        },
+        {pred: {$expr: {$multiply: "$topLevelScalar"}}, ids: [0, 1], usesBlockProcessing: false},
+        {
+            pred: {$expr: {$multiply: ["$topLevelScalar", 3]}},
+            ids: [0, 1],
+            usesBlockProcessing: false
+        },
+        {
+            pred: {$expr: {$gt: [{$multiply: ["$topLevelScalar", 2]}, 0.0]}},
+            ids: [0, 1],
+            usesBlockProcessing: true
+        },
         {pred: {"topLevelScalar": {$gt: 123}}, ids: [1], usesBlockProcessing: true},
         {pred: {"topLevelScalar": {$gte: 123}}, ids: [0, 1], usesBlockProcessing: true},
         {pred: {"topLevelScalar": {$lt: 456}}, ids: [0], usesBlockProcessing: true},

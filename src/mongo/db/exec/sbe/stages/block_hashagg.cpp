@@ -88,41 +88,6 @@ std::unique_ptr<value::ValueBlock> bitAnd(value::ValueBlock* bitset1, value::Val
     return std::make_unique<value::BoolBlock>(std::move(vecResult));
 }
 
-/*
- * Block that holds a view of a single value. It does not take ownership of the given value. This is
- * used because the block accumulators expect block inputs, but in some cases we may need to provide
- * is scalars that we do not own.
- * Used only for BlockHashAgg.
- */
-class SingletonViewBlock final : public value::ValueBlock {
-public:
-    SingletonViewBlock() {}
-
-    SingletonViewBlock(value::TypeTags tag, value::Value val) : _tag(tag), _val(val) {}
-
-    void setTagVal(std::pair<value::TypeTags, value::Value> tagVal) {
-        _tag = tagVal.first;
-        _val = tagVal.second;
-    }
-
-    std::unique_ptr<ValueBlock> clone() const override {
-        return std::make_unique<SingletonViewBlock>(_tag, _val);
-    }
-
-    boost::optional<size_t> tryCount() const override {
-        return 1;
-    }
-
-    value::DeblockedTagVals deblock(
-        boost::optional<value::DeblockedTagValStorage>& storage) override {
-        return {1, &_tag, &_val};
-    }
-
-private:
-    value::TypeTags _tag;
-    value::Value _val;
-};
-
 struct SpanHasher {
     SpanHasher() {}
 
@@ -147,6 +112,9 @@ struct SpanEq {
     }
 };
 
+// Map from <row of tokens> ---> finalToken
+using TokenizeTableType = stdx::unordered_map<std::span<size_t>, size_t, SpanHasher, SpanEq>;
+
 using KeyTableType = stdx::
     unordered_map<std::span<size_t>, std::pair<size_t, value::MaterializedRow>, SpanHasher, SpanEq>;
 }  // namespace
@@ -157,7 +125,7 @@ BlockHashAggStage::BlockHashAggStage(std::unique_ptr<PlanStage> input,
                                      value::SlotVector blockDataInSlotIds,
                                      value::SlotVector accumulatorDataSlotIds,
                                      value::SlotId accumulatorBitsetSlotId,
-                                     BlockAndRowAggs aggs,
+                                     AggExprTupleVector aggs,
                                      bool allowDiskUse,
                                      SlotExprPairVector mergingExprs,
                                      PlanYieldPolicy* yieldPolicy,
@@ -176,7 +144,7 @@ BlockHashAggStage::BlockHashAggStage(std::unique_ptr<PlanStage> input,
       _blockDataInSlotIds(std::move(blockDataInSlotIds)),
       _accumulatorBitsetSlotId(accumulatorBitsetSlotId),
       _accumulatorDataSlotIds(std::move(accumulatorDataSlotIds)),
-      _blockRowAggs(std::move(aggs)),
+      _aggs(std::move(aggs)),
       _mergingExprs(std::move(mergingExprs)) {
     tassert(8780600,
             "Expected 'blockDataInSlotIds' and 'accumulatorDataSlotIds' to have the same size",
@@ -185,7 +153,7 @@ BlockHashAggStage::BlockHashAggStage(std::unique_ptr<PlanStage> input,
     _children.emplace_back(std::move(input));
 
     _outIdBlocks.resize(_groupSlots.size());
-    _outAggBlocks.resize(_blockRowAggs.size());
+    _outAggBlocks.resize(_aggs.size());
     _blockDataInAccessors.resize(_blockDataInSlotIds.size());
     _accumulatorDataAccessors.resize(_accumulatorDataSlotIds.size());
     _gbBlocks.resize(_groupSlots.size());
@@ -197,7 +165,7 @@ BlockHashAggStage::BlockHashAggStage(std::unique_ptr<PlanStage> input,
     if (_allowDiskUse) {
         tassert(8780601,
                 "Disk use enabled for HashAggStage but incorrect number of merging expresssions",
-                _blockRowAggs.size() == _mergingExprs.size());
+                _aggs.size() == _mergingExprs.size());
     }
 }
 
@@ -208,10 +176,22 @@ BlockHashAggStage::~BlockHashAggStage() {
 }
 
 std::unique_ptr<PlanStage> BlockHashAggStage::clone() const {
-    BlockAndRowAggs blockRowAggs;
-    for (const auto& [slot, aggs] : _blockRowAggs) {
-        blockRowAggs.emplace_back(
-            slot, BlockRowAccumulators{aggs.blockAgg->clone(), aggs.rowAgg->clone()});
+    AggExprTupleVector blockRowAggs;
+    for (const auto& [slot, aggTuple] : _aggs) {
+        std::unique_ptr<sbe::EExpression> init;
+        std::unique_ptr<sbe::EExpression> blockAgg;
+        std::unique_ptr<sbe::EExpression> agg = aggTuple.agg->clone();
+
+        if (aggTuple.init) {
+            init = aggTuple.init->clone();
+        }
+        if (aggTuple.blockAgg) {
+            blockAgg = aggTuple.blockAgg->clone();
+        }
+
+        auto clonedAggTuple = AggExprTuple{std::move(init), std::move(blockAgg), std::move(agg)};
+
+        blockRowAggs.emplace_back(slot, std::move(clonedAggTuple));
     }
 
     SlotExprPairVector mergingExprs;
@@ -256,13 +236,9 @@ void BlockHashAggStage::prepare(CompileCtx& ctx) {
     }
     throwIfDupSlot(_blockBitsetInSlotId);
 
-    _outAccessorsMap.reserve(_groupSlots.size() + _blockRowAggs.size());
+    _outAccessorsMap.reserve(_groupSlots.size() + _aggs.size());
     _outIdBlockAccessors.resize(_groupSlots.size());
-    _outAggBlockAccessors.resize(_blockRowAggs.size());
-
-    if (_allowDiskUse) {
-        _spilledAccessors.resize(_blockRowAggs.size());
-    }
+    _outAggBlockAccessors.resize(_aggs.size());
 
     for (size_t i = 0; i < _groupSlots.size(); ++i) {
         auto& slot = _groupSlots[i];
@@ -283,12 +259,13 @@ void BlockHashAggStage::prepare(CompileCtx& ctx) {
             false, value::TypeTags::valueBlock, value::bitcastFrom<value::ValueBlock*>(&outBlock));
     }
 
-    for (size_t i = 0; i < _blockRowAggs.size(); ++i) {
-        auto& [slot, _] = _blockRowAggs[i];
+    for (size_t i = 0; i < _aggs.size(); ++i) {
+        auto& [slot, _] = _aggs[i];
         throwIfDupSlot(slot);
 
         _rowAggHtAccessors.emplace_back(std::make_unique<HashAggAccessor>(_htIt, i));
-        _rowAggRSAccessors.emplace_back(std::make_unique<value::OwnedValueAccessor>());
+        _rowAggRSAccessors.emplace_back(
+            std::make_unique<value::MaterializedSingleRowAccessor>(_outAggRowRecordStore, i));
         _rowAggAccessors.emplace_back(
             std::make_unique<value::SwitchAccessor>(std::vector<value::SlotAccessor*>{
                 _rowAggHtAccessors.back().get(), _rowAggRSAccessors.back().get()}));
@@ -298,7 +275,10 @@ void BlockHashAggStage::prepare(CompileCtx& ctx) {
             value::SlotId spillSlot = _mergingExprs[i].first;
             throwIfDupSlot(spillSlot);
 
-            _spilledAccessorMap[spillSlot] = &_spilledAccessors[i];
+            _spilledAccessors.push_back(
+                std::make_unique<value::MaterializedSingleRowAccessor>(_spilledAggRow, i));
+
+            _spilledAccessorMap[spillSlot] = _spilledAccessors[i].get();
         }
     }
 
@@ -311,15 +291,27 @@ void BlockHashAggStage::prepare(CompileCtx& ctx) {
     }
 
     // Compile 'blockAggs', 'rowAggs', and 'mergingExprs'.
-    for (size_t i = 0; i < _blockRowAggs.size(); ++i) {
-        auto& [_, aggs] = _blockRowAggs[i];
+    for (size_t i = 0; i < _aggs.size(); ++i) {
+        auto& [_, aggTuple] = _aggs[i];
 
         ctx.root = this;
+
+        std::unique_ptr<vm::CodeFragment> initCode;
+        if (aggTuple.init) {
+            initCode = aggTuple.init->compile(ctx);
+        }
+        _initCodes.emplace_back(std::move(initCode));
+
         ctx.aggExpression = true;
         ctx.accumulator = _rowAggAccessors[i].get();
 
-        _blockLevelAggCodes.emplace_back(aggs.blockAgg->compile(ctx));
-        _aggCodes.emplace_back(aggs.rowAgg->compile(ctx));
+        std::unique_ptr<vm::CodeFragment> blockAggCode;
+        if (aggTuple.blockAgg) {
+            blockAggCode = aggTuple.blockAgg->compile(ctx);
+        }
+        _blockAggCodes.emplace_back(std::move(blockAggCode));
+
+        _aggCodes.emplace_back(aggTuple.agg->compile(ctx));
 
         if (_allowDiskUse) {
             std::unique_ptr<EExpression>& mergingExpr = _mergingExprs[i].second;
@@ -359,6 +351,9 @@ value::SlotAccessor* BlockHashAggStage::getAccessor(CompileCtx& ctx, value::Slot
 }
 
 void BlockHashAggStage::executeBlockLevelAccumulatorCode(const value::MaterializedRow& key) {
+    // Track how many times we invoke the block accumulators.
+    _specificStats.blockAccumulatorTotalCalls++;
+
     // If all bits are false, there's no work to do. We don't want to make an erroneous
     // entry in our hash map.
     if (allFalse(_accumulatorBitsetAccessor.getViewOfValue())) {
@@ -375,11 +370,19 @@ void BlockHashAggStage::executeBlockLevelAccumulatorCode(const value::Materializ
         // Initialize accumulators.
         it->second.resize(_rowAggAccessors.size());
         _htIt = it;
+
+        // Run accumulator initializers if needed.
+        for (size_t i = 0; i < _initCodes.size(); ++i) {
+            if (_initCodes[i]) {
+                auto [owned, tag, val] = _bytecode.run(_initCodes[i].get());
+                _rowAggHtAccessors[i]->reset(owned, tag, val);
+            }
+        }
     }
 
     // Run the block level accumulators.
-    for (size_t i = 0; i < _blockLevelAggCodes.size(); ++i) {
-        auto [owned, tag, val] = _bytecode.run(_blockLevelAggCodes[i].get());
+    for (size_t i = 0; i < _blockAggCodes.size(); ++i) {
+        auto [owned, tag, val] = _bytecode.run(_blockAggCodes[i].get());
         _rowAggHtAccessors[i]->reset(owned, tag, val);
     }
 }
@@ -420,6 +423,14 @@ void BlockHashAggStage::executeRowLevelAccumulatorCode(
             // Initialize accumulators.
             it->second.resize(_rowAggAccessors.size());
             _htIt = it;
+
+            // Run accumulator initializers if needed.
+            for (size_t i = 0; i < _initCodes.size(); ++i) {
+                if (_initCodes[i]) {
+                    auto [owned, tag, val] = _bytecode.run(_initCodes[i].get());
+                    _rowAggHtAccessors[i]->reset(owned, tag, val);
+                }
+            }
         }
 
         // Set '_accumulatorDataAccessors' to the input values for the current 'blockIndex'.
@@ -437,6 +448,9 @@ void BlockHashAggStage::executeRowLevelAccumulatorCode(
 }
 
 void BlockHashAggStage::runAccumulatorsTokenized(const TokenizedKeys& tokenizedKeys) {
+    // We're using the block-based accumulator, so increment the corresponding metric.
+    _specificStats.blockAccumulations++;
+
     invariant(_blockBitsetInAccessor);
     auto [bitmapInTag, bitmapInVal] = _blockBitsetInAccessor->getViewOfValue();
     invariant(bitmapInTag == value::TypeTags::valueBlock);
@@ -477,6 +491,9 @@ void BlockHashAggStage::runAccumulatorsTokenized(const TokenizedKeys& tokenizedK
 }
 
 void BlockHashAggStage::runAccumulatorsElementWise() {
+    // We're using the element-wise accumulator, so increment the corresponding metric.
+    _specificStats.elementWiseAccumulations++;
+
     // Extract the bitmap.
     value::DeblockedTagVals extractedBitmap = _bitmapBlock->extract();
 
@@ -500,74 +517,153 @@ void BlockHashAggStage::runAccumulatorsElementWise() {
     _accumulatorBitsetAccessor.reset(false, value::TypeTags::Nothing, 0);
 }
 
-boost::optional<BlockHashAggStage::TokenizedKeys> BlockHashAggStage::tokenizeTokenInfos(
-    const std::vector<value::TokenizedBlock>& tokenInfos,
-    const std::vector<value::DeblockedTagVals>& deblockedTokens) {
+boost::optional<std::vector<size_t>> BlockHashAggStage::tokenizeTokenInfos(
+    const std::vector<value::TokenizedBlock>& tokenInfos) {
     invariant(!tokenInfos.empty());
 
-    // compoundKeys is an N x M vector, where N is the number of elements in the input blocks,
-    // and M is the number of input blocks.
-    std::vector<size_t> compoundKeys(tokenInfos[0].idxs.size() * tokenInfos.size());
+    // TODO SERVER-85739: Note that we could have a special path here for the case where
+    // 'tokenInfos' is size 1. We would not need to do the hashing in that case.  We can also have
+    // a path that quickly bails out and returns boost::none if _any_ of the inputs have more than
+    // kMaxNumPartitionsForTokenizedPath tokens.
+
+    // compoundKeys is a blockSize x numBlocks (row x column) vector.
+    const size_t blockSize = tokenInfos[0].idxs.size();
+    const size_t numBlocks = tokenInfos.size();
+    _compoundKeys.resize(blockSize * numBlocks, 0);
 
     // All input blocks must be the same size, enforced by an invariant in open().
     size_t ckIdx = 0;
-    for (size_t blockIdx = 0; blockIdx < tokenInfos[0].idxs.size(); ++blockIdx) {
-        for (size_t keyIdx = 0; keyIdx < tokenInfos.size(); ++keyIdx) {
-            compoundKeys[ckIdx++] = tokenInfos[keyIdx].idxs[blockIdx];
+    for (size_t blockIdx = 0; blockIdx < blockSize; ++blockIdx) {
+        for (size_t keyIdx = 0; keyIdx < numBlocks; ++keyIdx) {
+            _compoundKeys[ckIdx++] = tokenInfos[keyIdx].idxs[blockIdx];
         }
     }
 
-    auto keyMap = KeyTableType();
+    auto keyMap = TokenizeTableType();
     size_t uniqueCount = 0;
-    std::vector<value::MaterializedRow> keys;
-    std::vector<size_t> idxs(tokenInfos[0].idxs.size(), 0);
-    for (size_t blockIdx = 0; blockIdx < tokenInfos[0].idxs.size(); ++blockIdx) {
-        // Create an empty key that we will populate with the corresponding tokens for each element
-        // in the key.
-        value::MaterializedRow key{tokenInfos.size()};
-        std::span<size_t> htKey{&compoundKeys[blockIdx * tokenInfos.size()], tokenInfos.size()};
-        auto [it, inserted] = keyMap.emplace(htKey, std::pair(uniqueCount, key));
+    std::vector<size_t> idxs(blockSize, 0);
+    for (size_t blockIdx = 0; blockIdx < blockSize; ++blockIdx) {
+        std::span<size_t> htKey{&_compoundKeys[blockIdx * numBlocks], numBlocks};
+        auto [it, inserted] = keyMap.emplace(htKey, uniqueCount);
         if (inserted) {
             uniqueCount++;
+
             if (uniqueCount > kMaxNumPartitionsForTokenizedPath) {
                 // We've seen more "partitions" for this block than we are willing to process in
                 // the Tokenized path, so we will exit early and run the accumulators element
                 // wise.
                 return boost::none;
             }
-
-            for (size_t keyIdx = 0; keyIdx < tokenInfos.size(); ++keyIdx) {
-                size_t idx = (blockIdx * tokenInfos.size()) /* rowIdx */ + keyIdx /* colIdx */;
-                auto [tag, val] = deblockedTokens[keyIdx][compoundKeys[idx]];
-                // Update the key element at keyIdx with the corresponding token.
-                it->second.second.reset(keyIdx, false, tag, val);
-            }
-            // Now that the full key is materialized, insert it into the vector of keys.
-            keys.push_back(it->second.second);
         }
-        idxs[blockIdx] = it->second.first;
+        idxs[blockIdx] = it->second;
     }
 
-    return BlockHashAggStage::TokenizedKeys{std::move(keys), std::move(idxs)};
+    return idxs;
 }
 
 boost::optional<BlockHashAggStage::TokenizedKeys> BlockHashAggStage::tryTokenizeGbs() {
+    // First separate which gbBlocks are mono blocks and which are not.
+    std::vector<value::ValueBlock*> nonMonoGbBlocks;
+    nonMonoGbBlocks.reserve(_gbBlocks.size());
+    std::vector<value::MonoBlock*> monoGbBlocks;
+    monoGbBlocks.reserve(_gbBlocks.size());
+
+    std::vector<bool> isMonoBlock(_gbBlocks.size());
+    {
+        size_t i = 0;
+        for (auto* gbBlock : _gbBlocks) {
+            if (auto monoBlock = gbBlock->as<value::MonoBlock>()) {
+                isMonoBlock[i] = true;
+                monoGbBlocks.push_back(monoBlock);
+            } else {
+                isMonoBlock[i] = false;
+                nonMonoGbBlocks.push_back(gbBlock);
+            }
+            ++i;
+        }
+    }
+
+    TokenizedKeys out;
+
+    // Special case: we have only mono blocks.
+    if (nonMonoGbBlocks.empty()) {
+        value::MaterializedRow key{monoGbBlocks.size()};
+
+        // Go over each mono block and produce the output manually.
+        size_t idx = 0;
+        for (auto* mb : monoGbBlocks) {
+            key.reset(idx++, false, mb->getTag(), mb->getValue());
+        }
+
+        out.keys.push_back(std::move(key));
+        out.idxs.resize(_currentBlockSize, 0);
+        return out;
+    }
+
     // Populate '_tokenInfos' and '_deblockedTokens'.
     _tokenInfos.clear();
-
-    for (size_t i = 0; i < _gbBlocks.size(); ++i) {
-        _tokenInfos.push_back(_gbBlocks[i]->tokenize());
+    _deblockedTokens.clear();
+    for (size_t i = 0; i < nonMonoGbBlocks.size(); ++i) {
+        _tokenInfos.push_back(nonMonoGbBlocks[i]->tokenize());
 
         tassert(8608600,
                 "All input blocks must be the same size",
                 _tokenInfos[i].idxs.size() == _currentBlockSize);
-
-        _deblockedTokens[i] = _tokenInfos[i].tokens->extract();
     }
 
     // Combine the TokenizedBlocks for each input key, combine them into compound keys, tokenize
     // these compound keys, and then return the result.
-    return tokenizeTokenInfos(_tokenInfos, _deblockedTokens);
+    boost::optional<std::vector<size_t>> optFinalTokens = tokenizeTokenInfos(_tokenInfos);
+    if (!optFinalTokens) {
+        // Too many tokens, use the row path.
+        return boost::none;
+    }
+
+    // Now extract everything.
+    for (size_t i = 0; i < nonMonoGbBlocks.size(); ++i) {
+        _deblockedTokens.push_back(_tokenInfos[i].tokens->extract());
+    }
+
+    const std::vector<size_t>& finalTokens = *optFinalTokens;
+    // Now we convert our list of final tokens [1,2,3, 1, 4, ...] into a list of actual keys that
+    // can be put into the hash table.
+    {
+        size_t nextTokenIdToAdd = 0;
+        for (size_t i = 0; i < finalTokens.size(); ++i) {
+            const size_t tokenId = finalTokens[i];
+
+            // We've found a token that we haven't yet constructed a key for.
+            if (nextTokenIdToAdd == tokenId) {
+                // Construct the GB index for this key.
+                value::MaterializedRow key{_gbBlocks.size()};
+                size_t monoBlockIdx = 0;
+                size_t nonMonoBlockIdx = 0;
+                tassert(8848300,
+                        "Expected deblocked tokens to be correct size",
+                        _deblockedTokens.size() == nonMonoGbBlocks.size());
+
+                for (size_t keyIdx = 0; keyIdx < _gbBlocks.size(); ++keyIdx) {
+                    if (isMonoBlock[keyIdx]) {
+                        auto* monoBlock = monoGbBlocks[monoBlockIdx];
+                        key.reset(keyIdx, false, monoBlock->getTag(), monoBlock->getValue());
+                        ++monoBlockIdx;
+                    } else {
+                        const size_t originalTokenId = _tokenInfos[nonMonoBlockIdx].idxs[i];
+                        dassert(originalTokenId < _deblockedTokens[nonMonoBlockIdx].count());
+                        auto [t, v] = _deblockedTokens[nonMonoBlockIdx][originalTokenId];
+                        key.reset(keyIdx, false, t, v);
+                        ++nonMonoBlockIdx;
+                    }
+                }
+                out.keys.push_back(std::move(key));
+                ++nextTokenIdToAdd;
+            }
+        }
+    }
+
+    // Do not access 'finalTokens' again.
+    out.idxs = std::move(*optFinalTokens);
+    return out;
 }
 
 void BlockHashAggStage::open(bool reOpen) {
@@ -583,6 +679,11 @@ void BlockHashAggStage::open(bool reOpen) {
     if (_recordStore) {
         _recordStore->resetCursor(_opCtx, _rsCursor);
     }
+    _recordStore.reset();
+    _outKeyRowRecordStore = {0};
+    _outAggRowRecordStore = {0};
+    _spilledAggRow = {0};
+    _stashedNextRow = boost::none;
 
     if (reOpen) {
         _done = false;
@@ -665,85 +766,71 @@ void BlockHashAggStage::open(bool reOpen) {
     _accumulatorBitsetAccessor.reset(false, value::TypeTags::Nothing, 0);
     _htIt = _ht->end();
 
-    for (auto&& aggAccessor : _rowAggAccessors) {
-        if (_recordStore) {
+    if (_recordStore) {
+        for (auto&& aggAccessor : _rowAggAccessors) {
             aggAccessor->setIndex(1);
-        } else {
-            aggAccessor->setIndex(0);
         }
     }
 }
 
-boost::optional<value::MaterializedRow> BlockHashAggStage::getNextSpilledHelper() {
-    auto recoverSpilledRecord = [&](const Record& record) {
-        return deserializeSpilledRecord(record, _groupSlots.size(), _stashedBuffer);
+bool BlockHashAggStage::getNextSpilledHelper() {
+    auto recoverSpilledRecord = [&](const Record& record, BufBuilder& keyBuffer) {
+        return deserializeSpilledRecord(record, _groupSlots.size(), keyBuffer);
     };
 
-    for (size_t idx = 0; idx < _aggCodes.size(); ++idx) {
-        _rowAggRSAccessors[idx]->reset(false, value::TypeTags::Nothing, 0);
-    }
-
-    // Take a spilled row and merge it with the current accumulated value.
-    auto processRow = [&](const value::MaterializedRow& spilledAggRow) {
-        invariant(spilledAggRow.size() == _outAggBlocks.size());
-
-        for (size_t idx = 0; idx < _aggCodes.size(); ++idx) {
-            auto [spilledTag, spilledVal] = spilledAggRow.getViewOfValue(idx);
-            _spilledAccessors[idx].reset(spilledTag, spilledVal);
-
-            auto [rowOwned, rowTag, rowVal] = _bytecode.run(_mergingExprCodes[idx].get());
-            _rowAggRSAccessors[idx]->reset(rowOwned, rowTag, rowVal);
-        }
-    };
-
-    value::MaterializedRow firstKey{0};
     // If we have a stashed row from last time, use that first. Otherwise ask the record store for
     // the next value and process all the data for that key.
-    if (_stashedNextRow) {
-        firstKey = std::move(_stashedNextRow->first);
-        processRow(_stashedNextRow->second);
-        _stashedNextRow = boost::none;
-    } else {
+    if (!_stashedNextRow) {
         auto nextRecord = _rsCursor->next();
         if (!nextRecord) {
-            return boost::none;
+            return false;
         }
+
         // We are just starting the process of merging the spilled file segments.
-        auto firstRecoveredRow = recoverSpilledRecord(*nextRecord);
-        firstKey = std::move(firstRecoveredRow.first);
-        processRow(firstRecoveredRow.second);
+        auto firstRecoveredRow = recoverSpilledRecord(*nextRecord, _currentBuffer);
+
+        _outKeyRowRecordStore = std::move(firstRecoveredRow.first);
+        _outAggRowRecordStore = std::move(firstRecoveredRow.second);
+    } else {
+        _currentBuffer = std::move(_stashedBuffer);
+        _outKeyRowRecordStore = std::move(_stashedNextRow->first);
+        _outAggRowRecordStore = std::move(_stashedNextRow->second);
+        _stashedNextRow = boost::none;
     }
 
     // Find additional partial aggregates for the same key and merge them in order to compute the
     // final output.
-    _currentBuffer = std::move(_stashedBuffer);
     for (auto nextRecord = _rsCursor->next(); nextRecord; nextRecord = _rsCursor->next()) {
-        auto recoveredRow = recoverSpilledRecord(*nextRecord);
+        auto recoveredRow = recoverSpilledRecord(*nextRecord, _stashedBuffer);
         // If we found a different key, then we're done accumulating the current key. Since there's
         // no peek API, we have to stash `recoveredRow` for next time.
-        if (!value::MaterializedRowEq()(recoveredRow.first, firstKey)) {
+        if (!value::MaterializedRowEq()(recoveredRow.first, _outKeyRowRecordStore)) {
             _stashedNextRow = std::move(recoveredRow);
-            return {std::move(firstKey)};
+            return true;
         }
 
         // Merge in the new partial aggregate values.
-        processRow(recoveredRow.second);
+        _spilledAggRow = std::move(recoveredRow.second);
+        for (size_t idx = 0; idx < _mergingExprCodes.size(); ++idx) {
+            auto [rowOwned, rowTag, rowVal] = _bytecode.run(_mergingExprCodes[idx].get());
+            _rowAggRSAccessors[idx]->reset(rowOwned, rowTag, rowVal);
+        }
     }
 
-    return {std::move(firstKey)};
+    return true;
 }
 
 PlanState BlockHashAggStage::getNextSpilled() {
 
     size_t resultIdx = 0;
     for (; resultIdx < kBlockOutSize; resultIdx++) {
-        auto nextKey = getNextSpilledHelper();
+        bool hasNextKey = getNextSpilledHelper();
         // If we have a key, add the value to our result. If not, break because we won't get anymore
         // values from the record store.
-        if (nextKey) {
-            invariant(nextKey->size() == _outIdBlocks.size());
-            for (size_t i = 0; i < nextKey->size(); i++) {
-                auto [keyComponentTag, keyComponentVal] = nextKey->getViewOfValue(i);
+        if (hasNextKey) {
+            invariant(_outKeyRowRecordStore.size() == _outIdBlocks.size());
+            for (size_t i = 0; i < _outKeyRowRecordStore.size(); i++) {
+                auto [keyComponentTag, keyComponentVal] = _outKeyRowRecordStore.getViewOfValue(i);
                 _outIdBlocks[i].push_back(value::copyValue(keyComponentTag, keyComponentVal));
             }
             for (size_t i = 0; i < _outAggBlocks.size(); ++i) {
@@ -816,15 +903,15 @@ PlanState BlockHashAggStage::getNext() {
 
         // Copy the key from the current element in the HT into the out blocks.
         idx = 0;
-        for (auto& acc : _idHtAccessors) {
-            auto [t, v] = acc->copyOrMoveValue();
+        for (auto& idHtAccessor : _idHtAccessors) {
+            auto [t, v] = idHtAccessor->copyOrMoveValue();
             _outIdBlocks[idx++].push_back(t, v);
         }
 
         // Copy the values from the current element in the HT into the out block.
         idx = 0;
-        for (auto& acc : _rowAggHtAccessors) {
-            auto [t, v] = acc->copyOrMoveValue();
+        for (auto& rowAggHtAccessor : _rowAggHtAccessors) {
+            auto [t, v] = rowAggHtAccessor->copyOrMoveValue();
             _outAggBlocks[idx++].push_back(t, v);
         }
 
@@ -846,16 +933,28 @@ std::unique_ptr<PlanStageStats> BlockHashAggStage::getStats(bool includeDebugInf
 
         {
             BSONObjBuilder blockExprBob(bob.subobjStart("blockExpressions"));
-            for (auto&& [slot, aggs] : _blockRowAggs) {
+            for (auto&& [slot, aggTuple] : _aggs) {
                 blockExprBob.append(str::stream() << slot,
-                                    printer.print(aggs.blockAgg->debugPrint()));
+                                    printer.print(aggTuple.blockAgg->debugPrint()));
             }
         }
 
         {
             BSONObjBuilder rowExprBob(bob.subobjStart("rowExpressions"));
-            for (auto&& [slot, aggs] : _blockRowAggs) {
-                rowExprBob.append(str::stream() << slot, printer.print(aggs.rowAgg->debugPrint()));
+            for (auto&& [slot, aggTuple] : _aggs) {
+                rowExprBob.append(str::stream() << slot, printer.print(aggTuple.agg->debugPrint()));
+            }
+        }
+
+        {
+            BSONObjBuilder initExprBuilder(bob.subobjStart("initExprs"));
+            for (auto&& [slot, aggTuple] : _aggs) {
+                if (aggTuple.init) {
+                    initExprBuilder.append(str::stream() << slot,
+                                           printer.print(aggTuple.init->debugPrint()));
+                } else {
+                    initExprBuilder.appendNull(str::stream() << slot);
+                }
             }
         }
 
@@ -868,6 +967,17 @@ std::unique_ptr<PlanStageStats> BlockHashAggStage::getStats(bool includeDebugInf
                 nestedBuilder.append(str::stream() << slot, printer.print(expr->debugPrint()));
             }
         }
+
+        // Spilling stats.
+        bob.appendBool("usedDisk", _specificStats.usedDisk);
+        bob.appendNumber("spills", _specificStats.spills);
+        bob.appendNumber("spilledRecords", _specificStats.spilledRecords);
+        bob.appendNumber("spilledDataStorageSize", _specificStats.spilledDataStorageSize);
+
+        // Block-specific stats.
+        bob.appendNumber("blockAccumulations", _specificStats.blockAccumulations);
+        bob.appendNumber("blockAccumulatorTotalCalls", _specificStats.blockAccumulatorTotalCalls);
+        bob.appendNumber("elementWiseAccumulations", _specificStats.elementWiseAccumulations);
 
         ret->debugInfo = bob.obj();
     }
@@ -896,6 +1006,9 @@ void BlockHashAggStage::close() {
     }
     _rsCursor.reset();
     _recordStore.reset();
+    _outKeyRowRecordStore = {0};
+    _outAggRowRecordStore = {0};
+    _spilledAggRow = {0};
     _stashedNextRow = boost::none;
 
     _currentBlockSize = 0;
@@ -926,15 +1039,22 @@ std::vector<DebugPrinter::Block> BlockHashAggStage::debugPrint() const {
     for (bool blockExprPrint : {true, false}) {
         ret.emplace_back(DebugPrinter::Block("[`"));
         bool first = true;
-        for (auto&& [slot, aggs] : _blockRowAggs) {
+        for (auto&& [slot, aggTuple] : _aggs) {
             if (!first) {
                 ret.emplace_back(DebugPrinter::Block("`,"));
             }
 
             DebugPrinter::addIdentifier(ret, slot);
             ret.emplace_back("=");
-            const auto& aggExpr = blockExprPrint ? aggs.blockAgg : aggs.rowAgg;
+            const auto& aggExpr = blockExprPrint ? aggTuple.blockAgg : aggTuple.agg;
             DebugPrinter::addBlocks(ret, aggExpr->debugPrint());
+
+            if (!blockExprPrint && aggTuple.init) {
+                ret.emplace_back(DebugPrinter::Block("init{`"));
+                DebugPrinter::addBlocks(ret, aggTuple.init->debugPrint());
+                ret.emplace_back(DebugPrinter::Block("`}"));
+            }
+
             first = false;
         }
         ret.emplace_back("`]");
@@ -985,7 +1105,7 @@ std::vector<DebugPrinter::Block> BlockHashAggStage::debugPrint() const {
 size_t BlockHashAggStage::estimateCompileTimeSize() const {
     size_t size = sizeof(*this);
     size += size_estimator::estimate(_children);
-    size += size_estimator::estimate(_blockRowAggs);
+    size += size_estimator::estimate(_aggs);
     size += size_estimator::estimate(_outAccessorsMap);
     size += size_estimator::estimate(_mergingExprs);
     return size;

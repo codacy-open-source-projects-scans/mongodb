@@ -469,6 +469,20 @@ env.Library(
 )
 
 env.Library(
+    target='default_max_time_ms_cluster_parameter',
+    source=[
+        'default_max_time_ms_cluster_parameter.idl',
+        'default_max_time_ms_cluster_parameter.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/idl/cluster_server_parameter',
+        'query/query_request',
+        'server_base',
+        'server_feature_flags',
+    ],
+)
+
+env.Library(
     target='change_stream_options',
     source=[
         'change_stream_options.idl',
@@ -890,8 +904,8 @@ env.Library(
         'list_indexes.idl',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/admission/execution_admission_context',
         '$BUILD_DIR/mongo/db/query/cursor_response_idl',
-        '$BUILD_DIR/mongo/util/concurrency/admission_context',
         'api_parameters',
     ],
     LIBDEPS_PRIVATE=[
@@ -985,8 +999,8 @@ env.Library(
         'transaction_resources.cpp',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/admission/execution_admission_context',
         '$BUILD_DIR/mongo/s/grid',
-        '$BUILD_DIR/mongo/util/concurrency/admission_context',
         'concurrency/lock_manager',
         'shard_role_api_stor_ex',
         'storage/write_unit_of_work',
@@ -1269,6 +1283,7 @@ env.Library(
         'commands/server_status_core',
         'commands/txn_cmd_request',
         'curop_metrics',
+        'default_max_time_ms_cluster_parameter',
         'introspect',
         'multitenancy',
         'not_primary_error_tracker',
@@ -1620,6 +1635,7 @@ execEnv.Library(
         'exec/projection.cpp',
         'exec/queued_data_stage.cpp',
         'exec/record_store_fast_count.cpp',
+        'exec/recordid_deduplicator.cpp',
         'exec/requires_collection_stage.cpp',
         'exec/requires_index_stage.cpp',
         'exec/return_key.cpp',
@@ -1721,6 +1737,7 @@ execEnv.Library(
         '$BUILD_DIR/mongo/util/background_job',
         '$BUILD_DIR/mongo/util/elapsed_tracker',
         '$BUILD_DIR/mongo/util/field_set',
+        '$BUILD_DIR/third_party/croaring/croaring',
         '$BUILD_DIR/third_party/s2/s2',
         'audit',
         'auth/auth_checks',
@@ -1830,6 +1847,7 @@ env.Library(
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
         'storage/key_string',
+        'storage/storage_options',
     ],
 )
 
@@ -2477,6 +2495,7 @@ env.Library(
         '$BUILD_DIR/mongo/util/version_impl',
         '$BUILD_DIR/mongo/watchdog/watchdog_mongod',
         '$BUILD_DIR/third_party/shim_snappy',
+        'admission/admission_server_status_section',
         'auth/auth_op_observer',
         'auth/authserver',
         'bson/dotted_path_support',
@@ -2494,6 +2513,7 @@ env.Library(
         'curop_metrics',
         'dbdirectclient',
         'dbhelpers',
+        'default_max_time_ms_cluster_parameter',
         'exec/working_set',
         'feature_compatibility_version_metrics',
         'ftdc/ftdc_mongod',
@@ -3046,6 +3066,19 @@ env.Benchmark(
     ],
     LIBDEPS=[
         'server_base',
+    ],
+)
+
+env.Benchmark(
+    target='collection_acquisition_bm',
+    source=[
+        'collection_acquisition_bm.cpp',
+    ],
+    LIBDEPS=[
+        'repl/replmocks',
+        'service_context_d_test_fixture',
+        'shard_role',
+        'shard_role_api',
     ],
 )
 

@@ -32,6 +32,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/client.h"
 #include "mongo/db/ftdc/collector.h"
 #include "mongo/db/ftdc/constants.h"
@@ -54,7 +55,7 @@ void FTDCCollectorCollection::add(std::unique_ptr<FTDCCollectorInterface> collec
 }
 
 std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(
-    Client* client, UseMultiserviceSchema multiserviceSchema) {
+    Client* client, UseMultiServiceSchema multiServiceSchema) {
     static constexpr auto roles = std::to_array<std::pair<ClusterRole::Value, StringData>>({
         {ClusterRole::ShardServer, "shard"_sd},
         {ClusterRole::RouterServer, "router"_sd},
@@ -89,7 +90,8 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(
     auto opCtx = client->makeOperationContext();
     opCtx->setEnforceConstraints(false);
 
-    ScopedAdmissionPriority admissionPriority(opCtx.get(), AdmissionContext::Priority::kExempt);
+    ScopedAdmissionPriority<ExecutionAdmissionContext> admissionPriority(
+        opCtx.get(), AdmissionContext::Priority::kExempt);
 
     for (auto&& role : roles) {
         auto& collectorVector = _collectors[role.first];
@@ -100,7 +102,7 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(
         boost::optional<BSONObjBuilder> sectionBuilder;
         BSONObjBuilder* parent = &builder;
 
-        if (multiserviceSchema) {
+        if (multiServiceSchema) {
             sectionBuilder.emplace(builder.subobjStart(role.second));
             sectionBuilder->appendDate(kFTDCCollectStartField, getStartDate());
             parent = &(*sectionBuilder);
@@ -138,7 +140,7 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(
             firstLoop = false;
         }
 
-        if (multiserviceSchema) {
+        if (multiServiceSchema) {
             sectionBuilder->appendDate(kFTDCCollectEndField, end);
         }
     }

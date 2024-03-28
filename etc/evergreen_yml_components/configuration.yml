@@ -58,6 +58,16 @@ patch_aliases:
   variant: '^(.*security-patch-only|linux-x86-dynamic-compile|windows-compile-required)$'
   task: '.*'
 
+commit_queue_aliases:
+- variant: "commit-queue"
+  task: "^(bazel_.*|run_.*|compile_.*|lint_.*|validate_commit_message|jsCore|version_gen_validation|resmoke_validation_tests)$"
+  variant_tags: []
+  task_tags: []
+- variant: "^(amazon-linux2-arm64-dynamic-compile|linux-x86-dynamic-compile-required)$"
+  task: "clang_tidy"
+  variant_tags: []
+  task_tags: []
+
 #######################################
 #               Modules               #
 #######################################
@@ -68,43 +78,6 @@ modules:
   repo: git@github.com:wiredtiger/wiredtiger.git
   prefix: src/third_party
   branch: develop
-
-- name: dsi
-  repo: git@github.com:10gen/dsi.git
-  prefix: ${workdir}/src
-  branch: master
-- name: genny
-  repo: git@github.com:10gen/genny.git
-  prefix: ${workdir}/src
-  branch: master
-- name: workloads
-  repo: git@github.com:10gen/workloads.git
-  prefix: ${workdir}/src
-  branch: master
-- name: linkbench
-  repo: git@github.com:10gen/linkbench.git
-  prefix: ${workdir}/src
-  branch: master
-- name: linkbench2
-  repo: git@github.com:10gen/linkbench2.git
-  prefix: ${workdir}/src
-  branch: master
-- name: tsbs
-  repo: git@github.com:mongodb-forks/tsbs.git
-  prefix: ${workdir}/src
-  branch: main
-- name: YCSB
-  repo: git@github.com:mongodb-labs/YCSB.git
-  prefix: ${workdir}/src
-  branch: production
-- name: flamegraph
-  repo: git@github.com:mongodb-forks/flamegraph.git
-  prefix: ${workdir}/src
-  branch: master
-- name: PrivateWorkloads
-  repo: git@github.com:10gen/PrivateWorkloads.git
-  prefix: ${workdir}/src
-  branch: production
 
 # Pre task steps
 pre:

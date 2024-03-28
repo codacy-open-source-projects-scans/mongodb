@@ -127,7 +127,7 @@ buildvariants:
   - name: compile_test_parallel_core_stream_TG
   - name: compile_test_parallel_unittest_stream_TG
   - name: compile_test_parallel_dbtest_stream_TG
-  - name: generate_buildid_to_debug_symbols_mapping
+  - name: .release_critical .requires_compile_variant !.incompatible_development_variant !.stitch !.crypt
 
 - <<: *generic_linux_compile_params
   name: &linux-debug-aubsan-compile-required linux-debug-aubsan-compile-required
@@ -143,7 +143,6 @@ buildvariants:
       --allocator=system
       --sanitize=undefined,address
       --ssl
-      --ocsp-stapling=off
       -j$(grep -c ^processor /proc/cpuinfo)
       --link-model=dynamic
       --use-diagnostic-latches=on
@@ -167,35 +166,8 @@ buildvariants:
     core_analyzer_distro_name: rhel80-xlarge
     compile_variant: *linux_x86_dynamic_debug_compile_variant_name
   tasks:
-  - name: .aggregation !.encrypt !.feature_flag_guarded
-  - name: .auth !.audit !.multiversion
-  - name: sharding_auth_gen
-  - name: .causally_consistent !.wo_snapshot
-  - name: .change_streams
-  - name: .clustered_collections
-  - name: .misc_js
-  - name: disk_wiredtiger
-  - name: .jscore .common
-  - name: jsCore_txns_large_txns_format
-  - name: json_schema
-  - name: query_golden_classic
-  - name: libunwind_tests
-  - name: .multi_shard
-  - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-  - name: .ocsp
-  - name: .read_write_concern
-  - name: .timeseries_crud
-  - name: .replica_sets !.encrypt !.fcbis
-  - name: replica_sets_reconfig_jscore_passthrough_gen
-  - name: replica_sets_reconfig_jscore_stepdown_passthrough_gen
-  - name: replica_sets_max_mirroring_large_txns_format_gen
-  - name: .retry
-  - name: .read_only
-  - name: session_jscore_passthrough
-  - name: sharded_multi_stmt_txn_jscore_passthrough_gen
-  - name: .sharding .jscore !.wo_snapshot !.feature_flag_guarded
-  - name: sharding_gen
-  - name: sharding_max_mirroring_opportunistic_secondary_targeting_gen
+  - name: .development_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
+  - name: .release_critical !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
 
 - &rhel80-debug-aubsan-lite-template
   <<: *linux_debug_aubsan_compile_variant_dependency
@@ -206,7 +178,7 @@ buildvariants:
   - rhel80-build
   expansions:
     <<: *aubsan-lite-required-expansions
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits
+    test_flags: --excludeWithAnyTags=requires_increased_memlock_limits
   tasks:
   - name: jsCore
   - name: jsCore_txns
@@ -226,7 +198,6 @@ buildvariants:
       --allocator=system
       --sanitize=address
       --ssl
-      --ocsp-stapling=off
       -j$(grep -c ^processor /proc/cpuinfo)
       --link-model=dynamic
       --use-diagnostic-latches=on
@@ -237,7 +208,7 @@ buildvariants:
     hang_analyzer_dump_core: false
     scons_cache_scope: shared
     test_flags: >-
-      --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling,corrupts_data
+      --excludeWithAnyTags=requires_fast_memory,corrupts_data
       --enableEnterpriseTests=off
     separate_debug: off
     compile_variant: rhel80-asan
@@ -267,12 +238,11 @@ buildvariants:
       --allocator=system
       --sanitize=address
       --ssl
-      --ocsp-stapling=off
       -j$(grep -c ^processor /proc/cpuinfo)
       --link-model=dynamic
       --use-diagnostic-latches=on
     test_flags: >-
-      --excludeWithAnyTags=requires_fast_memory,requires_ocsp_stapling,requires_increased_memlock_limits,corrupts_data
+      --excludeWithAnyTags=requires_fast_memory,requires_increased_memlock_limits,corrupts_data
       --benchmarkRepetitions=1
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -300,7 +270,7 @@ buildvariants:
   - name: .causally_consistent !.wo_snapshot
   - name: .change_streams
   - name: .misc_js
-  - name: .concurrency !.no_txns !.kill_terminate
+  - name: .concurrency !.no_txns !.kill_terminate !.feature_flag_guarded
   - name: .encrypt
   - name: external_auth
   - name: external_auth_aws
@@ -342,6 +312,7 @@ buildvariants:
 - name: rhel80-debug-ubsan
   display_name: ~ UBSAN Enterprise RHEL 8.0 DEBUG
   cron: "0 4 * * *" # From the ${project_nightly_cron} parameter.
+  tags: ["bazel_check"]
   run_on:
   - rhel80-build
   stepback: false
@@ -358,13 +329,12 @@ buildvariants:
       --opt=on
       --sanitize=undefined
       --ssl
-      --ocsp-stapling=off
       --allocator=tcmalloc-gperf
       -j$(grep -c ^processor /proc/cpuinfo)
       --link-model=dynamic
       --use-diagnostic-latches=on
     test_flags: >-
-      --excludeWithAnyTags=requires_ocsp_stapling,requires_increased_memlock_limits,corrupts_data
+      --excludeWithAnyTags=requires_increased_memlock_limits,corrupts_data
       --benchmarkRepetitions=1
     multiversion_platform: rhel80
     multiversion_edition: enterprise
@@ -390,7 +360,7 @@ buildvariants:
   - name: .causally_consistent !.wo_snapshot
   - name: .change_streams
   - name: .misc_js
-  - name: .concurrency !.no_txns !.repl !.kill_terminate
+  - name: .concurrency !.no_txns !.repl !.kill_terminate !.feature_flag_guarded
   - name: disk_wiredtiger
   - name: .encrypt
   - name: initial_sync_fuzzer_gen
@@ -449,10 +419,9 @@ buildvariants:
       --allocator=system
       --sanitize=undefined,address,fuzzer
       --ssl
-      --ocsp-stapling=off
       -j$(grep -c ^processor /proc/cpuinfo)
       --use-diagnostic-latches=on
-    test_flags: --excludeWithAnyTags=requires_ocsp_stapling,corrupts_data
+    test_flags: --excludeWithAnyTags=corrupts_data
     resmoke_jobs_factor: 0.3  # Avoid starting too many mongod's under {A,UB}SAN build.
     hang_analyzer_dump_core: false
     scons_cache_scope: shared

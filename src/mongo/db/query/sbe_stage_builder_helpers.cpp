@@ -257,6 +257,11 @@ std::unique_ptr<sbe::PlanStage> makeLimitCoScanTree(PlanNodeId planNodeId, long 
         sbe::makeS<sbe::CoScanStage>(planNodeId), makeInt64Constant(limit), nullptr, planNodeId);
 }
 
+std::unique_ptr<sbe::EExpression> makeFillEmpty(std::unique_ptr<sbe::EExpression> expr,
+                                                std::unique_ptr<sbe::EExpression> altExpr) {
+    return makeBinaryOp(sbe::EPrimBinary::fillEmpty, std::move(expr), std::move(altExpr));
+}
+
 std::unique_ptr<sbe::EExpression> makeFillEmptyFalse(std::unique_ptr<sbe::EExpression> e) {
     return makeBinaryOp(sbe::EPrimBinary::fillEmpty, std::move(e), makeBoolConstant(false));
 }
@@ -434,7 +439,8 @@ std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateVirtualSc
     sbe::value::SlotIdGenerator* slotIdGenerator,
     sbe::value::TypeTags arrTag,
     sbe::value::Value arrVal,
-    PlanYieldPolicy* yieldPolicy) {
+    PlanYieldPolicy* yieldPolicy,
+    PlanNodeId planNodeId) {
     // The value passed in must be an array.
     invariant(sbe::value::isArray(arrTag));
 
@@ -445,15 +451,15 @@ std::pair<sbe::value::SlotId, std::unique_ptr<sbe::PlanStage>> generateVirtualSc
     auto projectSlot = slotIdGenerator->generate();
     auto unwindSlot = slotIdGenerator->generate();
     auto unwind = sbe::makeS<sbe::UnwindStage>(
-        sbe::makeProjectStage(makeLimitCoScanTree(kEmptyPlanNodeId, 1),
-                              kEmptyPlanNodeId,
+        sbe::makeProjectStage(makeLimitCoScanTree(planNodeId, 1),
+                              planNodeId,
                               projectSlot,
                               std::move(arrayExpression)),
         projectSlot,
         unwindSlot,
         slotIdGenerator->generate(),  // We don't need an index slot but must to provide it.
         false,                        // Don't preserve null and empty arrays.
-        kEmptyPlanNodeId,
+        planNodeId,
         yieldPolicy);
 
     // Return the UnwindStage and its output slot. The UnwindStage can be used as an input
@@ -466,13 +472,15 @@ std::pair<sbe::value::SlotVector, std::unique_ptr<sbe::PlanStage>> generateVirtu
     int numSlots,
     sbe::value::TypeTags arrTag,
     sbe::value::Value arrVal,
-    PlanYieldPolicy* yieldPolicy) {
+    PlanYieldPolicy* yieldPolicy,
+    PlanNodeId planNodeId) {
     using namespace std::literals;
 
     invariant(numSlots >= 1);
 
     // Generate a mock scan with a single output slot.
-    auto [scanSlot, scanStage] = generateVirtualScan(slotIdGenerator, arrTag, arrVal, yieldPolicy);
+    auto [scanSlot, scanStage] =
+        generateVirtualScan(slotIdGenerator, arrTag, arrVal, yieldPolicy, planNodeId);
 
     // Create a ProjectStage that will read the data from 'scanStage' and split it up
     // across multiple output slots.
@@ -486,9 +494,9 @@ std::pair<sbe::value::SlotVector, std::unique_ptr<sbe::PlanStage>> generateVirtu
                                               makeInt32Constant(i)));
     }
 
-    return {std::move(projectSlots),
-            sbe::makeS<sbe::ProjectStage>(
-                std::move(scanStage), std::move(projections), kEmptyPlanNodeId)};
+    return {
+        std::move(projectSlots),
+        sbe::makeS<sbe::ProjectStage>(std::move(scanStage), std::move(projections), planNodeId)};
 }
 
 std::pair<sbe::value::TypeTags, sbe::value::Value> makeValue(const BSONObj& bo) {
@@ -806,8 +814,6 @@ SbExpr generateSortTraverse(boost::optional<SbVar> inputVar,
 
     auto collatorSlot = state.getCollatorSlot();
 
-    StringData helperFn = isAscending ? "_internalLeast"_sd : "_internalGreatest"_sd;
-
     // Generate an expression to read a sub-field at the current nested level.
     auto fieldExpr = fieldSlot ? b.makeVariable(*fieldSlot)
                                : b.makeFunction("getField"_sd,
@@ -821,17 +827,14 @@ SbExpr generateSortTraverse(boost::optional<SbVar> inputVar,
             fieldSlot ? boost::optional<sbe::FrameId>{} : boost::make_optional(state.frameId());
         auto var = fieldSlot ? fieldExpr.clone() : b.makeVariable(*frameId, 0);
 
-        auto helperArgs = SbExpr::makeSeq(var.clone());
+        auto helperArgs = SbExpr::makeSeq(std::move(var));
         if (collatorSlot) {
             helperArgs.emplace_back(makeVariable(*collatorSlot));
         }
 
-        // According to MQL's sorting semantics, when a leaf field is an empty array we
-        // should use Undefined as the sort key.
-        auto resultExpr =
-            b.makeIf(b.makeFillEmptyFalse(b.makeFunction("isArray"_sd, var.clone())),
-                     b.makeFillEmptyUndefined(b.makeFunction(helperFn, std::move(helperArgs))),
-                     b.makeFillEmptyNull(var.clone()));
+        StringData helperFn = isAscending ? "getSortKeyAsc"_sd : "getSortKeyDesc"_sd;
+
+        auto resultExpr = b.makeFunction(helperFn, std::move(helperArgs));
 
         if (!fieldSlot) {
             resultExpr =
@@ -867,12 +870,13 @@ SbExpr generateSortTraverse(boost::optional<SbVar> inputVar,
 
     // According to MQL's sorting semantics, when a non-leaf field is an empty array or does not
     // exist we should use Null as the sort key.
+    StringData helperFn = isAscending ? "getNonLeafSortKeyAsc"_sd : "getNonLeafSortKeyDesc"_sd;
+
     return b.makeLet(frameId,
                      std::move(binds),
-                     b.makeFillEmptyNull(b.makeIf(
-                         b.makeFillEmptyFalse(b.makeFunction("isArray"_sd, std::move(var))),
-                         b.makeFunction(helperFn, std::move(helperArgs)),
-                         std::move(resultVar))));
+                     b.makeIf(b.makeFillEmptyFalse(b.makeFunction("isArray"_sd, std::move(var))),
+                              b.makeFunction(helperFn, std::move(helperArgs)),
+                              b.makeFillEmptyNull(std::move(resultVar))));
 }
 }  // namespace
 

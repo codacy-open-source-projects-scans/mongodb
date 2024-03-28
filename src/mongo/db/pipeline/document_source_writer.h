@@ -141,7 +141,7 @@ public:
     }
 
 protected:
-    GetNextResult doGetNext() final override;
+    GetNextResult doGetNext() final;
     /**
      * Prepares the stage to be able to write incoming batches.
      */
@@ -156,6 +156,11 @@ protected:
      * Writes the documents in 'batch' to the output namespace via 'bcr'.
      */
     virtual void flush(BatchedCommandRequest bcr, BatchedObjects batch) = 0;
+
+    boost::optional<ShardId> computeMergeShardId() const final {
+        return pExpCtx->mongoProcessInterface->determineSpecificMergeShard(pExpCtx->opCtx,
+                                                                           getOutputNs());
+    }
 
     /**
      * Estimates the size of the header of a batch write (that is, the size of the write command

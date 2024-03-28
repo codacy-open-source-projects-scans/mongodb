@@ -389,11 +389,12 @@ void QueryPlannerParams::applyQuerySettingsForCollection(
 
 void QueryPlannerParams::applyIndexFilters(const CanonicalQuery& canonicalQuery,
                                            const CollectionPtr& collection) {
+    // TODO: SERVER-88503 Remove Index Filters feature.
     auto filterAllowedIndexEntries = [](const AllowedIndicesFilter& allowedIndicesFilter,
                                         std::vector<IndexEntry>& indexEntries) {
         // Filter index entries
         // Check BSON objects in AllowedIndices::_indexKeyPatterns against IndexEntry::keyPattern.
-        // Removes IndexEntrys that do not match _indexKeyPatterns.
+        // Removes index entries that do not match _indexKeyPatterns.
         std::vector<IndexEntry> temp;
         for (std::vector<IndexEntry>::const_iterator i = indexEntries.begin();
              i != indexEntries.end();
@@ -417,16 +418,23 @@ void QueryPlannerParams::applyIndexFilters(const CanonicalQuery& canonicalQuery,
             querySettings.getAllowedIndicesFilter(canonicalQuery)) {
         filterAllowedIndexEntries(*allowedIndicesFilter, indices);
         indexFiltersApplied = true;
+
+        static Rarely sampler;
+        if (sampler.tick()) {
+            LOGV2_WARNING(
+                7923200,
+                "Index filters are deprecated, consider using query settings instead. See "
+                "https://www.mongodb.com/docs/manual/reference/command/setQuerySettings");
+        }
     }
 }
 
 void QueryPlannerParams::applyQuerySettingsOrIndexFiltersForMainCollection(
-    const CanonicalQuery& canonicalQuery,
-    const MultipleCollectionAccessor& collections,
-    bool shouldIgnoreQuerySettings) {
+    const CanonicalQuery& canonicalQuery, const MultipleCollectionAccessor& collections) {
     // If 'querySettings' has no index hints specified, then there are no settings to be applied
     // to this query.
     auto indexHintSpecs = canonicalQuery.getExpCtx()->getQuerySettings().getIndexHints();
+    const bool shouldIgnoreQuerySettings = options & IGNORE_QUERY_SETTINGS;
     if (indexHintSpecs && !shouldIgnoreQuerySettings) {
         applyQuerySettingsForCollection(
             canonicalQuery, collections.getMainCollection(), *indexHintSpecs, indices);
@@ -441,8 +449,7 @@ void QueryPlannerParams::applyQuerySettingsOrIndexFiltersForMainCollection(
 void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
     OperationContext* opCtx,
     const CanonicalQuery& canonicalQuery,
-    const MultipleCollectionAccessor& collections,
-    bool shouldIgnoreQuerySettings) {
+    const MultipleCollectionAccessor& collections) {
     if (canonicalQuery.cqPipeline().empty()) {
         return;
     }
@@ -474,6 +481,7 @@ void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
     }
 
     auto indexHintSpecs = canonicalQuery.getExpCtx()->getQuerySettings().getIndexHints();
+    const bool shouldIgnoreQuerySettings = options & IGNORE_QUERY_SETTINGS;
     if (!indexHintSpecs || shouldIgnoreQuerySettings) {
         return;
     }
@@ -489,8 +497,7 @@ void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
 void QueryPlannerParams::fillOutMainCollectionPlannerParams(
     OperationContext* opCtx,
     const CanonicalQuery& canonicalQuery,
-    const MultipleCollectionAccessor& collections,
-    bool shouldIgnoreQuerySettings) {
+    const MultipleCollectionAccessor& collections) {
     const auto& mainColl = collections.getMainCollection();
     // We will not output collection scans unless there are no indexed solutions. NO_TABLE_SCAN
     // overrides this behavior by not outputting a collscan even if there are no indexed
@@ -531,8 +538,7 @@ void QueryPlannerParams::fillOutMainCollectionPlannerParams(
 
     // If it's not NULL, we may have indices. Access the catalog and fill out IndexEntry(s)
     fillOutIndexEntries(opCtx, canonicalQuery, mainColl, indices, columnStoreIndexes);
-    applyQuerySettingsOrIndexFiltersForMainCollection(
-        canonicalQuery, collections, shouldIgnoreQuerySettings);
+    applyQuerySettingsOrIndexFiltersForMainCollection(canonicalQuery, collections);
 
     fillOutPlannerCollectionInfo(opCtx,
                                  mainColl,
@@ -636,8 +642,7 @@ QueryPlannerParams::QueryPlannerParams(QueryPlannerParams::ArgsForDistinct&& dis
 
     indices = getIndexEntriesForDistinct(distinctArgs);
     const auto& canonicalQuery = *distinctArgs.canonicalDistinct.getQuery();
-    applyQuerySettingsOrIndexFiltersForMainCollection(
-        canonicalQuery, distinctArgs.collections, distinctArgs.ignoreQuerySettings);
+    applyQuerySettingsOrIndexFiltersForMainCollection(canonicalQuery, distinctArgs.collections);
 
     // If there exists an index filter, we ignore all hints. Else, we only keep the index specified
     // by the hint. Since we cannot have an index with name $natural, that case will clear the

@@ -31,20 +31,20 @@ if (!isTrackingUnsplittableCollections) {
     const kColl = "coll"
     const kBucket = "system.buckets.coll"
 
-    function createWorked(nss, tsOptions = {}) {
+    function createWorked(collName, tsOptions = {}) {
         if (Object.keys(tsOptions).length === 0) {
-            assert.commandWorked(db.createCollection(nss));
+            assert.commandWorked(db.createCollection(collName));
         } else {
-            assert.commandWorked(db.createCollection(nss, {timeseries: tsOptions}));
+            assert.commandWorked(db.createCollection(collName, {timeseries: tsOptions}));
         }
-        return db.getCollection(nss);
+        return db.getCollection(collName);
     }
 
-    function createFailed(nss, tsOptions, errorCode) {
+    function createFailed(collName, tsOptions, errorCode) {
         if (Object.keys(tsOptions).length === 0) {
-            assert.commandFailedWithCode(db.createCollection(nss), errorCode);
+            assert.commandFailedWithCode(db.createCollection(collName), errorCode);
         } else {
-            let res = db.createCollection(nss, {timeseries: tsOptions});
+            let res = db.createCollection(collName, {timeseries: tsOptions});
             assert.commandFailedWithCode(res, errorCode);
         }
     }
@@ -100,14 +100,10 @@ if (!isTrackingUnsplittableCollections) {
 
         jsTest.log("Case collection: standard / collection: bucket timeseries.");
         runTest(() => {
-            let coll = createWorked(kColl);
-            // TODO SERVER-85855 creating bucket timeseries for a collection already created works,
-            // but it will redirect all the insertion into the bucket collection. Replace
-            // createWorked with createFailed once this bug is fixed. We expect now the bucket
-            // namespace to fail attempting to creating the view.
+            createWorked(kColl);
+            // TODO SERVER-85855 creating bucket timeseries for a collection already created should
+            // fail.
             createWorked(kBucket, tsOptions);
-
-            assert.commandFailed(coll.insert({x: 1}));
         });
     }
 
@@ -134,6 +130,7 @@ if (!isTrackingUnsplittableCollections) {
             createWorked(kColl, tsOptions);
             createFailed(kColl, tsOptions2, ErrorCodes.NamespaceExists);
         });
+
         jsTest.log("Case collection: timeseries / collection: bucket.");
         runTest(() => {
             createWorked(kColl, tsOptions);
@@ -141,9 +138,21 @@ if (!isTrackingUnsplittableCollections) {
         });
 
         jsTest.log("Case collection: timeseries / collection: bucket timeseries.");
+        runTest(
+            () => {
+                createWorked(kColl, tsOptions);
+                createWorked(kBucket, tsOptions);
+            },
+            // TODO BACKPORT-19356 creation of the bucket used to not be idempotent. Re-enable this
+            // test case in previous versions once the backport is completed.
+            "8.0"  // minRequiredVersion
+        );
+
+        jsTest.log(
+            "Case collection: timeseries / collection: bucket timeseries with different options.");
         runTest(() => {
             createWorked(kColl, tsOptions);
-            createFailed(kBucket, tsOptions, ErrorCodes.NamespaceExists);
+            createFailed(kBucket, tsOptions2, ErrorCodes.NamespaceExists);
         });
     }
 
@@ -187,18 +196,34 @@ if (!isTrackingUnsplittableCollections) {
         jsTest.log("Case collection: bucket timeseries / collection: standard.");
         runTest(() => {
             createWorked(kBucket, tsOptions)
-            // TODO SERVER-85855 creating a collection with an already created bucket timeseries
-            // works, but it will redirect all the insertion into the bucket collection. Replace
-            // createWorked with createFailed once this bug is fixed and the related view is created
-            // by the operation above
-            let coll = createWorked(kColl);
-            assert.commandFailed(coll.insert({x: 1}));
+            // TODO SERVER-85855 creating a normal collection with an already created bucket
+            // timeseries should fail.
+            createWorked(kColl);
         });
 
         jsTest.log("Case collection: bucket timeseries / collection: timeseries.");
+        runTest(
+            () => {
+                createWorked(kBucket, tsOptions)
+                createWorked(kColl, tsOptions);
+            },
+            // TODO BACKPORT-19356 creation of the bucket used to not be idempotent. Re-enable this
+            // test case in previous versions once the backport is completed.
+            "8.0"  // minRequiredVersion
+        );
+
+        jsTest.log(
+            "Case collection: bucket timeseries / collection: timeseries with different options.");
         runTest(() => {
             createWorked(kBucket, tsOptions)
-            createFailed(kColl, tsOptions, ErrorCodes.NamespaceExists);
+            createFailed(kColl, tsOptions2, ErrorCodes.NamespaceExists);
+        });
+
+        jsTest.log(
+            "Case collection: bucket timeseries / collection: bucket timeseries with different options.");
+        runTest(() => {
+            createWorked(kBucket, tsOptions)
+            createFailed(kBucket, tsOptions2, ErrorCodes.NamespaceExists);
         });
 
         jsTest.log("Case collection: bucket timeseries / collection: bucket.");
@@ -211,13 +236,11 @@ if (!isTrackingUnsplittableCollections) {
         runTest(
             () => {
                 createWorked(kBucket, tsOptions);
-                // Creating 2 times a bucket timeseries will fail with NamespaceExist instead of
-                // being idempotent
-                // TODO SERVER-85855 replace createFailed with createWorked
-                createFailed(kBucket, tsOptions, ErrorCodes.NamespaceExists);
+                createWorked(kBucket, tsOptions);
             },
-            // On 7.0 this test case used to correclty behave as idempotent operation.
-            "7.1"  // minRequiredVersion
+            // TODO BACKPORT-19356 creation of the bucket used to not be idempotent. Re-enable this
+            // test case in previous versions once the backport is completed.
+            "8.0"  // minRequiredVersion
         );
     }
 }

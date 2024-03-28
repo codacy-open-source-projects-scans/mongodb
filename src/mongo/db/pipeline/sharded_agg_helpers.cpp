@@ -91,6 +91,7 @@
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/cursor_response_gen.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -848,16 +849,10 @@ bool isRequiredToReadLocalData(const ShardTargetingPolicy& shardTargetingPolicy,
                                const NamespaceString& ns) {
     // Certain namespaces are shard-local; that is, they exist independently on every shard. For
     // these namespaces, a local cursor should always be used.
-    // TODO SERVER-59957: use NamespaceString::isPerShardNamespace instead.
-    auto shouldAlwaysAttachLocalCursorForNamespace = [](const NamespaceString& ns) {
-        return (ns.isLocalDB() || ns.isConfigDotCacheDotChunks() ||
-                ns.isReshardingLocalOplogBufferCollection() ||
-                ns == NamespaceString::kConfigImagesNamespace ||
-                ns.isChangeStreamPreImagesCollection());
-    };
+    const bool shouldAlwaysAttachLocalCursorForNamespace = ns.isShardLocalNamespace();
 
     return shardTargetingPolicy == ShardTargetingPolicy::kNotAllowed ||
-        shouldAlwaysAttachLocalCursorForNamespace(ns);
+        shouldAlwaysAttachLocalCursorForNamespace;
 }
 
 /**
@@ -1090,6 +1085,9 @@ BSONObj createPassthroughCommandForShard(
         }
     }
 
+    if (query_stats::shouldRequestRemoteMetrics(CurOp::get(expCtx->opCtx)->debug())) {
+        targetedCmd[AggregateCommandRequest::kIncludeQueryStatsMetricsFieldName] = Value(true);
+    }
     auto shardCommand = genericTransformForShards(
         std::move(targetedCmd), expCtx, explainVerbosity, std::move(readConcern));
 
@@ -1174,6 +1172,10 @@ BSONObj createCommandForTargetedShards(const boost::intrusive_ptr<ExpressionCont
 
     targetedCmd[AggregateCommandRequest::kExchangeFieldName] =
         exchangeSpec ? Value(exchangeSpec->exchangeSpec.toBSON()) : Value();
+
+    if (query_stats::shouldRequestRemoteMetrics(CurOp::get(expCtx->opCtx)->debug())) {
+        targetedCmd[AggregateCommandRequest::kIncludeQueryStatsMetricsFieldName] = Value(true);
+    }
 
     auto shardCommand =
         genericTransformForShards(std::move(targetedCmd), expCtx, explain, std::move(readConcern));
@@ -1530,6 +1532,8 @@ AsyncResultsMergerParams buildArmParams(boost::intrusive_ptr<ExpressionContext> 
     armParams.setSort(std::move(shardCursorsSortSpec));
     armParams.setTailableMode(expCtx->tailableMode);
     armParams.setNss(expCtx->ns);
+    armParams.setRequestQueryStatsFromRemotes(
+        query_stats::shouldRequestRemoteMetrics(CurOp::get(expCtx->opCtx)->debug()));
 
     if (auto lsid = expCtx->opCtx->getLogicalSessionId()) {
         OperationSessionInfoFromClient sessionInfo(*lsid, expCtx->opCtx->getTxnNumber());
@@ -1924,6 +1928,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> targetShardsAndAddMergeCursors(
     auto cri = getCollectionRoutingInfoForTargeting(expCtx, pipelineDataSource);
     auto targeting =
         targetPipeline(expCtx, pipeline.get(), pipelineDataSource, shardTargetingPolicy, cri);
+
     return dispatchTargetedPipelineAndAddMergeCursors(expCtx,
                                                       std::move(aggRequest),
                                                       std::move(pipeline),

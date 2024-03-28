@@ -2,6 +2,7 @@
  * Tests for basic functionality of the move collection feature.
  *
  * @tags: [
+ *  requires_fcv_80,
  *  featureFlagMoveCollection,
  *  assumes_balancer_off,
  *  requires_capped

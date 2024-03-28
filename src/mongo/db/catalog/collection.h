@@ -229,7 +229,7 @@ public:
     };
 
     Collection() = default;
-    virtual ~Collection() = default;
+    ~Collection() override = default;
 
     /**
      * Clones this Collection instance. Some members are deep copied and some are shallow copied.
@@ -454,6 +454,20 @@ public:
      */
     virtual void updateClusteredIndexTTLSetting(OperationContext* opCtx,
                                                 boost::optional<int64_t> expireAfterSeconds) = 0;
+
+    static bool everUsesCappedSnapshots(const NamespaceString& nss) {
+        // The oplog tracks its visibility through support from the storage engine.
+        if (nss.isOplog()) {
+            return false;
+        }
+
+        // Only use the behavior for non-replicated capped collections (which can accept concurrent
+        // writes).
+        if (nss.isReplicated()) {
+            return false;
+        }
+        return true;
+    }
 
     virtual Status updateCappedSize(OperationContext* opCtx,
                                     boost::optional<long long> newCappedSize,
@@ -771,7 +785,7 @@ public:
 
     CollectionPtr(const CollectionPtr&) = delete;
     CollectionPtr(CollectionPtr&&);
-    ~CollectionPtr();
+    ~CollectionPtr() override;
 
     CollectionPtr& operator=(const CollectionPtr&) = delete;
     CollectionPtr& operator=(CollectionPtr&&);

@@ -81,10 +81,6 @@ public:
         return _opName;
     }
 
-    bool countAddendIsIntegerOrDouble() const {
-        return _countAddendIsIntegerOrDouble;
-    }
-
     /**
      * This method returns the number of agg expressions that need to be generated for this
      * Op.
@@ -184,10 +180,6 @@ private:
 
     // Info about the specific accumulation op named by '_opName'.
     const OpInfo* _opInfo = nullptr;
-
-    // Flag that indicates if this is a "$sum" op whose input is an integer constant or a
-    // double constant.
-    bool _countAddendIsIntegerOrDouble = false;
 };
 
 extern const StringData kCount;
@@ -283,6 +275,23 @@ struct AccumTopBottomNInputs : public Inputs {
     SbExpr value;
     SbExpr sortBy;
     SbExpr sortSpec;
+};
+
+struct AccumBlockTopBottomNInputs : public Inputs {
+    AccumBlockTopBottomNInputs(std::pair<SbExpr::Vector, bool> value,
+                               std::pair<SbExpr::Vector, bool> sortBy,
+                               SbExpr sortSpec)
+        : values(std::move(value.first)),
+          sortBy(std::move(sortBy.first)),
+          sortSpec(std::move(sortSpec)),
+          valueIsArray(value.second),
+          useMK(sortBy.second) {}
+
+    SbExpr::Vector values;
+    SbExpr::Vector sortBy;
+    SbExpr sortSpec;
+    bool valueIsArray = false;
+    bool useMK = false;
 };
 
 struct InitAccumNInputs : public Inputs {

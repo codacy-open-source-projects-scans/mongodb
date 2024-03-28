@@ -84,6 +84,7 @@
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/default_max_time_ms_cluster_parameter.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/initialize_operation_session_info.h"
@@ -146,7 +147,6 @@
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/rpc/reply_builder_interface.h"
@@ -178,6 +178,7 @@
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
@@ -314,13 +315,6 @@ void generateErrorResponse(OperationContext* opCtx,
  * uninitialized cluster time.
  */
 LogicalTime getClientOperationTime(OperationContext* opCtx) {
-    auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet = replCoord->getSettings().isReplSet();
-
-    if (!isReplSet) {
-        return LogicalTime();
-    }
-
     return LogicalTime(
         repl::ReplClientInfo::forClient(opCtx->getClient()).getMaxKnownOperationTime());
 }
@@ -335,8 +329,7 @@ LogicalTime getClientOperationTime(OperationContext* opCtx) {
  */
 LogicalTime computeOperationTime(OperationContext* opCtx, LogicalTime startOperationTime) {
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    const bool isReplSet = replCoord->getSettings().isReplSet();
-    invariant(isReplSet);
+    dassert(replCoord->getSettings().isReplSet());
 
     auto operationTime = getClientOperationTime(opCtx);
     invariant(operationTime >= startOperationTime);
@@ -399,15 +392,17 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
         return;
     }
 
-    auto errorLabels = getErrorLabels(opCtx,
-                                      sessionOptions,
-                                      commandName,
-                                      code,
-                                      wcCode,
-                                      isInternalClient,
-                                      false /* isMongos */,
-                                      lastOpBeforeRun,
-                                      lastOpAfterRun);
+    auto errorLabels =
+        getErrorLabels(opCtx,
+                       sessionOptions,
+                       commandName,
+                       code,
+                       wcCode,
+                       isInternalClient,
+                       false /* isMongos */,
+                       OperationShardingState::isComingFromRouter(opCtx) /* isComingFromRouter */,
+                       lastOpBeforeRun,
+                       lastOpAfterRun);
     commandBodyFieldsBob->appendElements(errorLabels);
 
     const auto isNotPrimaryError =
@@ -465,7 +460,8 @@ void appendAdditionalParticipants(OperationContext* opCtx,
         }
     }
 
-    commandBodyFieldsBob->appendElements(BSON("additionalParticipants" << participantArray));
+    commandBodyFieldsBob->appendElements(
+        BSON(TxnResponseMetadata::kAdditionalParticipantsFieldName << participantArray));
 }
 
 class RunCommandOpTimes {
@@ -593,7 +589,12 @@ private:
 
         CommandHelpers::uassertShouldAttemptParse(opCtx, command, request);
 
-        _requestArgs = CommonRequestArgs::parse(IDLParserContext("request"), request.body);
+        _requestArgs = CommonRequestArgs::parse(IDLParserContext("request",
+                                                                 false,
+                                                                 request.validatedTenancyScope,
+                                                                 request.getValidatedTenantId(),
+                                                                 request.getSerializationContext()),
+                                                request.body);
 
         validateAPIParameters(request.body, _requestArgs.getAPIParametersFromClient(), command);
 
@@ -601,6 +602,11 @@ private:
 
         {
             stdx::lock_guard<Client> lk(*client);
+            // We construct a legacy $cmd namespace so we can fill in curOp using
+            // the existing logic that existed for OP_QUERY commands
+            NamespaceString nss(NamespaceString::makeCommandNamespace(_requestArgs.getDbName()));
+            CurOp::get(opCtx)->setNS_inlock(std::move(nss));
+
             CurOp::get(opCtx)->setCommand_inlock(command);
             APIParameters::get(opCtx) =
                 APIParameters::fromClient(_requestArgs.getAPIParametersFromClient());
@@ -1065,7 +1071,21 @@ void CheckoutSessionAndInvokeCommand::_checkOutSession() {
 
 void CheckoutSessionAndInvokeCommand::_tapError(Status status) {
     const OperationSessionInfoFromClient& sessionOptions = _ecd->getSessionOptions();
-    auto opCtx = _ecd->getExecutionContext().getOpCtx();
+    auto& execContext = _ecd->getExecutionContext();
+    auto opCtx = execContext.getOpCtx();
+
+    // We still append any participants that this shard might have added to the transaction on an
+    // error response because:
+    // 1. There are some errors that mongos will retry on when there is only one participant. It's
+    // important that mongos does not retry on these errors if the participant that it contacted
+    // added additional participants.
+    // 2. If the error is not retryable, mongos can then abort the transaction on the added
+    // participants rather than waiting for the added shards to abort either due to a transaction
+    // timeout or a new transaction being started, releasing their resources sooner.
+    appendAdditionalParticipants(opCtx,
+                                 _ecd->getExtraFieldsBuilder(),
+                                 execContext.getCommand()->getName(),
+                                 _ecd->getInvocation()->ns());
 
     if (status.code() == ErrorCodes::CommandOnShardedViewNotSupportedOnMongod) {
         // Exceptions are used to resolve views in a sharded cluster, so they should be handled
@@ -1204,8 +1224,8 @@ void RunCommandImpl::_epilogue() {
         });
 
     behaviors.waitForLinearizableReadConcern(opCtx);
-    const DatabaseName requestDbName = request.getDbName();
-    tenant_migration_access_blocker::checkIfLinearizableReadWasAllowedOrThrow(opCtx, requestDbName);
+    const DatabaseName& dbName = _ecd->getInvocation()->db();
+    tenant_migration_access_blocker::checkIfLinearizableReadWasAllowedOrThrow(opCtx, dbName);
 
     // Wait for data to satisfy the read concern level, if necessary.
     behaviors.waitForSpeculativeMajorityReadConcern(opCtx);
@@ -1590,7 +1610,7 @@ void ExecCommandDatabase::_initiateCommand() {
     if (auto clientMetadata = ClientMetadata::get(client)) {
         auto& apiParams = APIParameters::get(opCtx);
         auto& apiVersionMetrics = APIVersionMetrics::get(opCtx->getServiceContext());
-        auto appName = clientMetadata->getApplicationName().toString();
+        auto appName = clientMetadata->getApplicationName();
         apiVersionMetrics.update(appName, apiParams);
     }
 
@@ -1739,7 +1759,9 @@ void ExecCommandDatabase::_initiateCommand() {
         globalOpCounters.gotQuery();
     }
 
-    if (_requestArgs.getMaxTimeMS() || _requestArgs.getMaxTimeMSOpOnly()) {
+    auto requestOrDefaultMaxTimeMS =
+        getRequestOrDefaultMaxTimeMS(opCtx, _requestArgs.getMaxTimeMS(), command);
+    if (requestOrDefaultMaxTimeMS || _requestArgs.getMaxTimeMSOpOnly()) {
         // Parse the 'maxTimeMS' command option, and use it to set a deadline for the operation on
         // the OperationContext. The 'maxTimeMS' option unfortunately has a different meaning for a
         // getMore command, where it is used to communicate the maximum time to wait for new inserts
@@ -1748,8 +1770,7 @@ void ExecCommandDatabase::_initiateCommand() {
         // TODO SERVER-34277 Remove the special handling for maxTimeMS for getMores. This will
         // require introducing a new 'max await time' parameter for getMore, and eventually banning
         // maxTimeMS altogether on a getMore command.
-        const auto maxTimeMS = Milliseconds{uassertStatusOK(
-            parseMaxTimeMS(_requestArgs.getMaxTimeMS().value_or(IDLAnyType()).getElement()))};
+        const auto maxTimeMS = requestOrDefaultMaxTimeMS.value_or(Milliseconds{0});
         const auto maxTimeMSOpOnly = Milliseconds{uassertStatusOK(parseMaxTimeMSOpOnly(
             _requestArgs.getMaxTimeMSOpOnly().value_or(IDLAnyType()).getElement()))};
 
@@ -1777,7 +1798,7 @@ void ExecCommandDatabase::_initiateCommand() {
 
     // (Ignore FCV check): This feature flag is not FCV gated (shouldBeFCVGated is false)
     if (gFeatureFlagIngressAdmissionControl.isEnabledAndIgnoreFCVUnsafe()) {
-        boost::optional<ScopedAdmissionPriority> admissionPriority;
+        boost::optional<ScopedAdmissionPriority<IngressAdmissionContext>> admissionPriority;
         if (!_invocation->isSubjectToIngressAdmissionControl()) {
             admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
         }
@@ -1923,17 +1944,6 @@ void ExecCommandDatabase::_initiateCommand() {
     CurOp::get(opCtx)->ensureStarted();
 
     command->incrementCommandsExecuted();
-
-    if (shouldLog(logv2::LogComponent::kTracking, logv2::LogSeverity::Debug(1)) &&
-        rpc::TrackingMetadata::get(opCtx).getParentOperId()) {
-        rpc::TrackingMetadata::get(opCtx).initWithOperName(command->getName());
-        LOGV2_DEBUG_OPTIONS(4615605,
-                            1,
-                            {logv2::LogComponent::kTracking},
-                            "Command metadata",
-                            "trackingMetadata"_attr = rpc::TrackingMetadata::get(opCtx));
-        rpc::TrackingMetadata::get(opCtx).setIsLogged(true);
-    }
 }
 
 void ExecCommandDatabase::_commandExec() {
@@ -2021,6 +2031,16 @@ void ExecCommandDatabase::_commandExec() {
 
                 if (inCriticalSection) {
                     _execContext.behaviors.handleReshardingCriticalSectionMetrics(opCtx, *sce);
+                }
+
+                // Fail the direct shard operation so that a RetryableWriteError label can be
+                // returned and the write can be retried by the driver. The retry should succeed
+                // because a command failing with StaleConfig triggers sharding metadata refresh in
+                // the ScopedOperationCompletionShardingActions destructor.
+                auto fromRouter = OperationShardingState::isComingFromRouter(opCtx);
+                if (opCtx->isRetryableWrite() && !fromRouter &&
+                    ex.code() == ErrorCodes::StaleConfig) {
+                    throw;
                 }
 
                 const auto refreshed = _execContext.behaviors.refreshCollection(opCtx, *sce);
@@ -2120,7 +2140,7 @@ void ExecCommandDatabase::_handleFailure(Status status) {
                 1,
                 "Assertion while executing command",
                 "command"_attr = request.getCommandName(),
-                "db"_attr = request.getDatabase(),
+                "db"_attr = request.readDatabaseForLogging(),
                 "commandArgs"_attr = redact(
                     ServiceEntryPointCommon::getRedactedCopyForLogging(command, request.body)),
                 "error"_attr = redact(status.toString()));
@@ -2141,12 +2161,7 @@ void curOpCommandSetup(OperationContext* opCtx, const OpMsgRequest& request) {
     auto curop = CurOp::get(opCtx);
     curop->debug().iscommand = true;
 
-    // We construct a legacy $cmd namespace so we can fill in curOp using
-    // the existing logic that existed for OP_QUERY commands
-    NamespaceString nss(NamespaceString::makeCommandNamespace(request.getDbName()));
-
     stdx::lock_guard<Client> lk(*opCtx->getClient());
-    curop->setNS_inlock(nss);
     curop->setOpDescription_inlock(request.body);
     curop->markCommand_inlock();
 }
@@ -2194,7 +2209,7 @@ void executeCommand(HandleRequest::ExecutionContext& execContext) {
     LOGV2_DEBUG(21965,
                 2,
                 "About to run the command",
-                "db"_attr = request.getDatabase(),
+                "db"_attr = request.readDatabaseForLogging(),
                 "client"_attr = (opCtx->getClient() && opCtx->getClient()->hasRemote()
                                      ? opCtx->getClient()->getRemote().toString()
                                      : ""),
@@ -2218,7 +2233,7 @@ void executeCommand(HandleRequest::ExecutionContext& execContext) {
                     1,
                     "Assertion while executing command",
                     "command"_attr = execContext.getRequest().getCommandName(),
-                    "db"_attr = execContext.getRequest().getDatabase(),
+                    "db"_attr = execContext.getRequest().readDatabaseForLogging(),
                     "error"_attr = ex.toStatus().toString());
         throw;
     }
@@ -2241,7 +2256,7 @@ DbResponse makeCommandResponse(const HandleRequest::ExecutionContext& execContex
                       fmt::format("Not-primary error while processing '{}' operation  on '{}' "
                                   "database via fire-and-forget command execution.",
                                   request.getCommandName(),
-                                  request.getDatabase()));
+                                  request.readDatabaseForLogging()));
         }
         return {};  // Don't reply.
     }

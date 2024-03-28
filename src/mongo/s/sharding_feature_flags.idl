@@ -49,17 +49,17 @@ feature_flags:
     default: true
     version: 7.0
     shouldBeFCVGated: true
-  # TODO (SERVER-73632): Remove once 8.0 becomes last LTS.
-  featureFlagEmbeddedRouter:
-    description: "Feature flag to enable shard to double as router"
-    cpp_varname: feature_flags::gEmbeddedRouter
+  # TODO (SERVER-73632): Remove once 9.0 becomes last LTS.
+  featureFlagRouterPort:
+    description: "Feature flag to open the router port."
+    cpp_varname: feature_flags::gRouterPort
     default: false
     shouldBeFCVGated: false
-  # TODO (SERVER-87249): Remove after the internal router is enabled by default.
-  featureFlagMultiserviceFTDCSchema:
-    description: "Feature flag to enable the new format of the FTDC output files"
-    cpp_varname: feature_flags::gMultiserviceFTDCSchema
-    default: false
+  # TODO (SERVER-88107): Remove once 8.0 becomes last LTS.
+  featureFlagMultiServiceLogAndFTDCFormat:
+    description: "Feature flag to enable multi-service format of the log and FTDC data files."
+    cpp_varname: feature_flags::gMultiServiceLogAndFTDCFormat
+    default: true
     shouldBeFCVGated: false
   # TODO SERVER-79064: Remove once 8.0 becomes last LTS.
   featureFlagAuthoritativeRefineCollectionShardKey:
@@ -85,7 +85,8 @@ feature_flags:
   featureFlagAuthoritativeShardCollection:
     description: "Feature flag for enabling the authoritative version of the shardCollection DDL operation."
     cpp_varname: feature_flags::gAuthoritativeShardCollection
-    default: false
+    default: true
+    version: 8.0
     shouldBeFCVGated: true
   # TODO (SERVER-76436): Remove once 8.0 becomes last LTS.
   featureFlagBalanceUnshardedCollections:
@@ -104,7 +105,8 @@ feature_flags:
   featureFlagUpdateOneWithIdWithoutShardKey:
     description: "Feature flag for updateOne and deleteOne with _id equality without shard key correctness during chunk migrations."
     cpp_varname: feature_flags::gUpdateOneWithIdWithoutShardKey
-    default: false
+    default: true
+    version: 8.0
     shouldBeFCVGated: true
   # TODO (SERVER-83264): Remove once 8.0 becomes last LTS.
   featureFlagBalancerSettingsSchema:
@@ -147,7 +149,8 @@ feature_flags:
   featureFlagTrackUnshardedCollectionsUponMoveCollection:
     description: "Feature flag for enabling the tracking of user unsharded collection upon moveCollection"
     cpp_varname: feature_flags::gTrackUnshardedCollectionsUponMoveCollection
-    default: false
+    default: true
+    version: 8.0
     shouldBeFCVGated: true
   featureFlagReplicaSetEndpoint:
     description: When enabled, allows users to connect to a single-shard cluster with no dedicated config
@@ -168,5 +171,13 @@ feature_flags:
                   sharded cluster. Namely, no implicit creations by the shards and no usage of the
                   storage-level create command."
     cpp_varname: feature_flags::g80CollectionCreationPath
-    default: false
+    default: true
+    version: 8.0
+    shouldBeFCVGated: true
+  # TODO (SERVER-87196): remove the flag below after 8.0 is released
+  featureFlagEnforceRoutingByNamespace:
+    description: "Bans routing by UUID"
+    cpp_varname: feature_flags::gEnforceRoutingByNamespace
+    default: true
+    version: 8.0
     shouldBeFCVGated: true
