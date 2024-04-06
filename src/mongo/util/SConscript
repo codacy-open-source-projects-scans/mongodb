@@ -86,6 +86,10 @@ env.BazelLibrary(
         # NOTE: This library *must not* depend on any mongodb code
         'lint-leaf-node-no-deps',
     ],
+    LIBDEPS_NO_INHERIT=[
+        '$BUILD_DIR/third_party/shim_allocator',
+        '$BUILD_DIR/third_party/shim_unwind',
+    ],
 )
 
 env.SConscript(
@@ -382,6 +386,7 @@ for impl in [
 ]:
     if env['MONGO_ALLOCATOR'] in impl['options']:
         tcmallocAttrs = impl
+
 if tcmallocAttrs:
     tcmspEnv = env.Clone()
     if not use_system_version_of_library(tcmallocAttrs['sys_name']):
@@ -394,6 +399,19 @@ if tcmallocAttrs:
     if not use_system_version_of_library('valgrind'):
         # Include valgrind since tcmalloc disables itself while running under valgrind
         tcmspEnv.InjectThirdParty('valgrind')
+
+    tcmspEnv.Library(
+        target='allocator_thread',
+        source=[
+            'allocator_tcmalloc_thread.cpp',
+        ],
+        LIBDEPS_PRIVATE=[
+            '$BUILD_DIR/mongo/db/server_base',
+            '$BUILD_DIR/mongo/db/service_context',
+            'tcmalloc_server_status',
+            'tcmalloc_set_parameter',
+        ],
+    )
 
     tcmspEnv.Library(
         target='tcmalloc_set_parameter',
@@ -428,10 +446,6 @@ if tcmallocAttrs:
             '$BUILD_DIR/mongo/db/server_base',
             'tcmalloc_set_parameter',
         ],
-        LIBDEPS_DEPENDENTS=[
-            '$BUILD_DIR/mongo/db/mongod_initializers',
-            '$BUILD_DIR/mongo/s/mongos_initializers',
-        ],
     )
 
     tcmspEnv.CppUnitTest(
@@ -440,8 +454,21 @@ if tcmallocAttrs:
             'tcmalloc_set_parameter_test.cpp',
         ],
         LIBDEPS=[
+            '$BUILD_DIR/mongo/db/commands/server_status_core',
             '$BUILD_DIR/mongo/db/server_base',
+            'processinfo',
+            'tcmalloc_server_status',
             'tcmalloc_set_parameter',
+        ],
+    )
+else:
+    env.Library(
+        target='allocator_thread',
+        source=[
+            'allocator_system_thread.cpp',
+        ],
+        LIBDEPS_PRIVATE=[
+            '$BUILD_DIR/mongo/db/server_base',
         ],
     )
 
@@ -903,6 +930,7 @@ icuEnv.CppUnitTest(
         'text_test.cpp',
         'tick_source_test.cpp',
         'time_support_test.cpp',
+        'timer_test.cpp',
         'util_sort_test.cpp',
     ],
     LIBDEPS=[
@@ -962,10 +990,6 @@ env.Benchmark(
 stacktraceEnv = env.Clone()
 if use_libunwind:
     stacktraceEnv.InjectThirdParty(libraries=['unwind'])
-    stacktraceEnv.AppendUnique(LIBDEPS=[
-        '$BUILD_DIR/third_party/shim_unwind',
-    ], )
-
     stacktraceEnv.CppUnitTest(
         target=[
             'stacktrace_libunwind_test',

@@ -378,15 +378,20 @@ void OplogBatcher::_run(StorageInterface* storageInterface) {
             // UninterruptibleLockGuard in batch application because the only cause of
             // interruption would be shutdown, and the ReplBatcher thread has its own shutdown
             // handling.
-            UninterruptibleLockGuard noInterrupt(  // NOLINT.
-                shard_role_details::getLocker(opCtx.get()));
+            UninterruptibleLockGuard noInterrupt(opCtx.get());  // NOLINT.
 
             // Locks the oplog to check its max size, do this in the UninterruptibleLockGuard.
             batchLimits.bytes = getBatchLimitOplogBytes(opCtx.get(), storageInterface);
 
-            ops = fassertNoTrace(
-                31004,
-                getNextApplierBatch(opCtx.get(), batchLimits, Milliseconds(oplogBatchDelayMillis)));
+            // When this feature flag is enabled, the oplogBatchDelayMillis is handled in
+            // OplogWriter.
+            auto waitToFillBatch =
+                Milliseconds(feature_flags::gReduceMajorityWriteLatency.isEnabled(
+                                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())
+                                 ? 0
+                                 : oplogBatchDelayMillis);
+            ops = fassertNoTrace(31004,
+                                 getNextApplierBatch(opCtx.get(), batchLimits, waitToFillBatch));
         } catch (const ExceptionForCat<ErrorCategory::CancellationError>& e) {
             LOGV2_DEBUG(6133400,
                         1,

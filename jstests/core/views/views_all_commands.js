@@ -209,6 +209,7 @@ let viewsCommandTests = {
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
+    _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
     _shardsvrValidateShardKeyCandidate: {skip: isAnInternalCommand},
     _shardsvrCollMod: {skip: isAnInternalCommand},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
@@ -566,7 +567,7 @@ let viewsCommandTests = {
     },
     moveCollection: {
         command: {moveCollection: "test.view", toShard: "move_collection-rs"},
-        expectedErrorCode: [ErrorCodes.NamespaceNotFound],
+        expectedErrorCode: [ErrorCodes.NamespaceNotFound, ErrorCodes.IllegalOperation],
         skipStandalone: true,
         expectFailure: true,
         isAdminCommand: true,

@@ -671,7 +671,7 @@ PipelinePtr DocumentSourceLookUp::buildPipeline(
     // Query settings are looked up after parsing and therefore are not populated in the
     // 'fromExpCtx' as part of DocumentSourceLookUp constructor. Assign query settings to the
     // 'fromExpCtx' by copying them from the parent query ExpressionContext.
-    fromExpCtx->setQuerySettings(getContext()->getQuerySettings());
+    fromExpCtx->setQuerySettingsIfNotPresent(getContext()->getQuerySettings());
 
     // Resolve the 'let' variables to values per the given input document.
     resolveLetVariables(inputDoc, &fromExpCtx->variables);
@@ -979,7 +979,7 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
         _matchSrc = nextMatch;
     } else {
         // We have already absorbed a $match. We need to join it with 'dependent'.
-        _matchSrc->joinMatchWith(nextMatch);
+        _matchSrc->joinMatchWith(nextMatch, "$and"_sd);
     }
 
     // Remove the original $match.
@@ -1486,5 +1486,4 @@ void DocumentSourceLookUp::addInvolvedCollections(
         stage->addInvolvedCollections(collectionNames);
     }
 }
-
 }  // namespace mongo

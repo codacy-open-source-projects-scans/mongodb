@@ -3655,12 +3655,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinBitTestPosition(
             // If position to test is longer than the data to test against, zero-extend.
             isBitSet = false;
         } else {
-            // Convert the bit position to a byte position within a byte. Note that byte positions
-            // start at position 0 in the document's value BinData array representation, and bit
-            // positions start at the least significant bit.
-            auto byteIdx = bitPosition / 8;
-            auto currentBit = bitPosition % 8;
-            auto currentByte = binData[byteIdx];
+            // Convert 'bitPosition' to 'currentByte' and 'currentBit'. Note that bit positions are
+            // 0-based starting at the right-most bit in 'binData'.
+            int currentByte = binData[(binDataSize - (bitPosition / 8)) - 1];
+            int currentBit = bitPosition % 8;
 
             isBitSet = currentByte & (1 << currentBit);
         }
@@ -4933,6 +4931,26 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetToArray(Arity
 
     resGuard.reset();
     return {true, resTag, resVal};
+}
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinFillType(ArityType arity) {
+    invariant(arity == 3);
+
+    auto [inputOwned, inputTag, inputVal] = getFromStack(0);
+    auto [typeMaskOwned, typeMaskTag, typeMaskVal] = getFromStack(1);
+
+    if (typeMaskTag != value::TypeTags::NumberInt32 || inputTag == value::TypeTags::Nothing) {
+        return {true, value::TypeTags::Nothing, value::Value{0u}};
+    }
+    uint32_t typeMask = static_cast<uint32_t>(value::bitcastTo<int32_t>(typeMaskVal));
+
+    if (static_cast<bool>(getBSONTypeMask(inputTag) & typeMask)) {
+        // Return the fill value.
+        return moveFromStack(2);
+    } else {
+        // Return the input value.
+        return moveFromStack(0);
+    }
 }
 
 namespace {
@@ -9645,6 +9663,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinArrayToObject(arity);
         case Builtin::setToArray:
             return builtinSetToArray(arity);
+        case Builtin::fillType:
+            return builtinFillType(arity);
         case Builtin::aggFirstNNeedsMoreInput:
             return builtinAggFirstNNeedsMoreInput(arity);
         case Builtin::aggFirstN:
@@ -9808,6 +9828,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinValueBlockFillEmpty(arity);
         case Builtin::valueBlockFillEmptyBlock:
             return builtinValueBlockFillEmptyBlock(arity);
+        case Builtin::valueBlockFillType:
+            return builtinValueBlockFillType(arity);
         case Builtin::valueBlockAggMin:
             return builtinValueBlockAggMin(arity);
         case Builtin::valueBlockAggMax:
@@ -10182,6 +10204,8 @@ std::string builtinToString(Builtin b) {
             return "arrayToObject";
         case Builtin::setToArray:
             return "setToArray";
+        case Builtin::fillType:
+            return "fillType";
         case Builtin::aggFirstNNeedsMoreInput:
             return "aggFirstNNeedsMoreInput";
         case Builtin::aggFirstN:
@@ -10346,6 +10370,8 @@ std::string builtinToString(Builtin b) {
             return "valueBlockFillEmpty";
         case Builtin::valueBlockFillEmptyBlock:
             return "valueBlockFillEmptyBlock";
+        case Builtin::valueBlockFillType:
+            return "valueBlockFillType";
         case Builtin::valueBlockAggMin:
             return "valueBlockAggMin";
         case Builtin::valueBlockAggMax:

@@ -14,9 +14,12 @@ export function blockProcessingTestCases(timeFieldName,
                                          featureFlagsAllowBlockHashAgg,
                                          sbeFullEnabled) {
     const dateMidPoint = new Date((dateLowerBound.getTime() + dateUpperBound.getTime()) / 2);
+    const dollarPrefixedTime = '$' + timeFieldName;
+    const dollarPrefixedMeta = '$' + metaFieldName;
 
-    // You can name the meta field whatever you want, as long as it's 'meta'.
-    assert.eq(metaFieldName, "meta");
+    const metaDotRegion = dollarPrefixedMeta + '.region';
+    const metaDotNonExistent = dollarPrefixedMeta + '.NON_EXISTENT';
+    const metaDotSeries = dollarPrefixedMeta + '.series';
 
     return [
         {
@@ -187,7 +190,7 @@ export function blockProcessingTestCases(timeFieldName,
                 {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
                 {
                     $group: {
-                        _id: {$dateTrunc: {date: "$time", unit: "hour"}},
+                        _id: {$dateTrunc: {date: dollarPrefixedTime, unit: "hour"}},
                         a: {$min: '$y'},
                         b: {$max: '$y'}
                     }
@@ -202,7 +205,10 @@ export function blockProcessingTestCases(timeFieldName,
                 {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
                 {
                     $group: {
-                        _id: {$dateAdd: {startDate: "$time", unit: "millisecond", amount: 100}},
+                        _id: {
+                            $dateAdd:
+                                {startDate: dollarPrefixedTime, unit: "millisecond", amount: 100}
+                        },
                         a: {$min: '$y'}
                     }
                 },
@@ -223,7 +229,7 @@ export function blockProcessingTestCases(timeFieldName,
                                 amount: {
                                     $dateDiff: {
                                         startDate: new Date(datePrefix),
-                                        endDate: "$time",
+                                        endDate: dollarPrefixedTime,
                                         unit: "millisecond"
                                     }
                                 }
@@ -242,8 +248,10 @@ export function blockProcessingTestCases(timeFieldName,
                 {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
                 {
                     $group: {
-                        _id:
-                            {$dateSubtract: {startDate: "$time", unit: "millisecond", amount: 100}},
+                        _id: {
+                            $dateSubtract:
+                                {startDate: dollarPrefixedTime, unit: "millisecond", amount: 100}
+                        },
                         a: {$min: '$y'}
                     }
                 },
@@ -264,7 +272,7 @@ export function blockProcessingTestCases(timeFieldName,
                                 amount: {
                                     $dateDiff: {
                                         startDate: new Date(datePrefix),
-                                        endDate: "$time",
+                                        endDate: dollarPrefixedTime,
                                         unit: "millisecond"
                                     }
                                 }
@@ -288,7 +296,7 @@ export function blockProcessingTestCases(timeFieldName,
                             $min: {
                                 $dateDiff: {
                                     startDate: new Date(datePrefix),
-                                    endDate: "$time",
+                                    endDate: dollarPrefixedTime,
                                     unit: "millisecond"
                                 }
                             }
@@ -297,7 +305,7 @@ export function blockProcessingTestCases(timeFieldName,
                             $max: {
                                 $dateDiff: {
                                     startDate: new Date(datePrefix),
-                                    endDate: "$time",
+                                    endDate: dollarPrefixedTime,
                                     unit: "millisecond"
                                 }
                             }
@@ -305,7 +313,7 @@ export function blockProcessingTestCases(timeFieldName,
                         c: {
                             $min: {
                                 $dateDiff: {
-                                    startDate: "$time",
+                                    startDate: dollarPrefixedTime,
                                     endDate: new Date(datePrefix),
                                     unit: "millisecond"
                                 }
@@ -314,7 +322,7 @@ export function blockProcessingTestCases(timeFieldName,
                         d: {
                             $max: {
                                 $dateDiff: {
-                                    startDate: "$time",
+                                    startDate: dollarPrefixedTime,
                                     endDate: new Date(datePrefix),
                                     unit: "millisecond"
                                 }
@@ -334,15 +342,24 @@ export function blockProcessingTestCases(timeFieldName,
                     $group: {
                         _id: null,
                         a: {
-                            $min: {$dateAdd: {startDate: "$time", unit: "millisecond", amount: 100}}
+                            $min: {
+                                $dateAdd: {
+                                    startDate: dollarPrefixedTime,
+                                    unit: "millisecond",
+                                    amount: 100
+                                }
+                            }
                         },
                         b: {
                             $max: {
-                                $dateSubtract:
-                                    {startDate: "$time", unit: "millisecond", amount: 100}
+                                $dateSubtract: {
+                                    startDate: dollarPrefixedTime,
+                                    unit: "millisecond",
+                                    amount: 100
+                                }
                             }
                         },
-                        c: {$max: {$dateTrunc: {date: "$time", unit: "second"}}},
+                        c: {$max: {$dateTrunc: {date: dollarPrefixedTime, unit: "second"}}},
                     }
                 },
                 {$project: {_id: 0, a: 1, b: 1, c: 1}}
@@ -358,7 +375,11 @@ export function blockProcessingTestCases(timeFieldName,
                         _id: {
                             $dateTrunc: {
                                 date: {
-                                    $dateAdd: {startDate: "$time", unit: "millisecond", amount: 100}
+                                    $dateAdd: {
+                                        startDate: dollarPrefixedTime,
+                                        unit: "millisecond",
+                                        amount: 100
+                                    }
                                 },
                                 unit: "hour"
                             }
@@ -380,8 +401,11 @@ export function blockProcessingTestCases(timeFieldName,
                         _id: {
                             $dateTrunc: {
                                 date: {
-                                    $dateSubtract:
-                                        {startDate: "$time", unit: "millisecond", amount: 100}
+                                    $dateSubtract: {
+                                        startDate: dollarPrefixedTime,
+                                        unit: "millisecond",
+                                        amount: 100
+                                    }
                                 },
                                 unit: "hour"
                             }
@@ -404,7 +428,11 @@ export function blockProcessingTestCases(timeFieldName,
                             $dateDiff: {
                                 startDate: new Date(datePrefix),
                                 endDate: {
-                                    $dateAdd: {startDate: "$time", unit: "millisecond", amount: 100}
+                                    $dateAdd: {
+                                        startDate: dollarPrefixedTime,
+                                        unit: "millisecond",
+                                        amount: 100
+                                    }
                                 },
                                 unit: "millisecond"
                             }
@@ -470,7 +498,7 @@ export function blockProcessingTestCases(timeFieldName,
                         _id: {
                             $dateDiff: {
                                 startDate: new Date(datePrefix),
-                                endDate: "$time",
+                                endDate: dollarPrefixedTime,
                                 unit: "millisecond"
                             }
                         },
@@ -502,7 +530,7 @@ export function blockProcessingTestCases(timeFieldName,
                         msDiff: {
                             $dateDiff: {
                                 startDate: new Date(datePrefix),
-                                endDate: "$time",
+                                endDate: dollarPrefixedTime,
                                 unit: "millisecond"
                             }
                         }
@@ -563,7 +591,7 @@ export function blockProcessingTestCases(timeFieldName,
             pipeline: [
                 {
                     $group: {
-                        _id: {"$dateTrunc": {date: "$time", unit: "minute", binSize: 1}},
+                        _id: {"$dateTrunc": {date: dollarPrefixedTime, unit: "minute", binSize: 1}},
                         a: {$min: '$y'},
                         b: {$max: '$y'}
                     }
@@ -578,11 +606,14 @@ export function blockProcessingTestCases(timeFieldName,
                 {
                     $group: {
                         _id: {
-                            date: {$dateTrunc: {date: "$time", unit: "millisecond", binSize: 200}},
+                            date: {
+                                $dateTrunc:
+                                    {date: dollarPrefixedTime, unit: "millisecond", binSize: 200}
+                            },
                             delta: {
                                 $dateDiff: {
                                     startDate: new Date(datePrefix),
-                                    endDate: "$time",
+                                    endDate: dollarPrefixedTime,
                                     unit: "millisecond"
                                 }
                             }
@@ -601,8 +632,10 @@ export function blockProcessingTestCases(timeFieldName,
                 {
                     $group: {
                         _id: {
-                            date: {$dateTrunc: {date: "$time", unit: "minute", binSize: 1}},
-                            symbol: "$meta"
+                            date: {
+                                $dateTrunc: {date: dollarPrefixedTime, unit: "minute", binSize: 1}
+                            },
+                            symbol: dollarPrefixedMeta
                         },
                         a: {$min: '$y'},
                         b: {$max: '$y'}
@@ -615,7 +648,7 @@ export function blockProcessingTestCases(timeFieldName,
         {
             name: "GroupByMeta_MinAndMax_NoFilter",
             pipeline: [
-                {$group: {_id: "$meta", a: {$min: '$y'}, b: {$max: '$y'}}},
+                {$group: {_id: dollarPrefixedMeta, a: {$min: '$y'}, b: {$max: '$y'}}},
                 {$project: {_id: 1, a: 1, b: 1}}
             ],
             usesBlockProcessing: false
@@ -772,10 +805,76 @@ export function blockProcessingTestCases(timeFieldName,
         // $avg tests //////////////////////////////////////////////////////////////////////////////
         //
         {
+            name: "GroupByNull_Avg",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
+                {$group: {_id: null, a: {$avg: '$y'}}}
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "DateUpper_GroupByNull_Avg_Project",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
+                {$group: {_id: null, a: {$avg: '$y'}}},
+                {$project: {_id: 0, a: 1}}
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "DateLower_GroupByNull_Avg_Project",
+            pipeline: [
+                {$match: {[timeFieldName]: {$gt: dateLowerBound}}},
+                {$group: {_id: null, a: {$avg: '$y'}}},
+                {$project: {_id: 0, a: 1}}
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByX_Avg",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
+                {$group: {_id: '$x', a: {$avg: '$y'}}}
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
             name: "GroupByX_Avg_Project",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
                 {$group: {_id: '$x', a: {$avg: '$y'}}},
+                {$project: {_id: 0, a: 1}}
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByX_MultipleAvgs",
+            pipeline: [{$group: {_id: '$x', a: {$avg: '$x'}, b: {$avg: '$y'}, c: {$avg: '$z'}}}],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByXAndY_Avg_Project",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
+                {$group: {_id: {x: '$x', y: '$y'}, a: {$avg: '$z'}}},
+                {$project: {_id: 0, a: 1}}
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByMetaSortKey_Avg_Project",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
+                {$group: {_id: {$meta: 'sortKey'}, a: {$avg: '$y'}}},
+                {$project: {_id: 0, a: 1}}
+            ],
+            usesBlockProcessing: false
+        },
+        {
+            name: "GroupByX_AvgOfMetaSortKey_Project",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateUpperBound}}},
+                {$group: {_id: '$x', a: {$avg: {$meta: 'sortKey'}}}},
                 {$project: {_id: 0, a: 1}}
             ],
             usesBlockProcessing: false
@@ -1617,7 +1716,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByMetaSubField",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: "$meta.region", a: {$min: "$x"}}},
+                {$group: {_id: metaDotRegion, a: {$min: "$x"}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1625,7 +1724,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByMetaSubFields",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: {region: "$meta.region", series: "$meta.series"}, a: {$min: "$x"}}},
+                {$group: {_id: {region: metaDotRegion, series: metaDotSeries}, a: {$min: "$x"}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1633,7 +1732,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByMetaMultipleSubFields",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: {region: "$meta.region", series: "$meta.series"}, a: {$min: "$x"}}},
+                {$group: {_id: {region: metaDotRegion, series: metaDotSeries}, a: {$min: "$x"}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1643,8 +1742,96 @@ export function blockProcessingTestCases(timeFieldName,
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
                 {
                     $group: {
-                        _id: {region: {$ifNull: ["$meta.region", "foo"]}, series: "$meta.series"},
+                        _id: {region: {$ifNull: [metaDotRegion, "foo"]}, series: metaDotSeries},
                         a: {$min: "$x"}
+                    }
+                },
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByIfNullAlwaysNull",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
+                {
+                    $group: {
+                        _id: {gb: {$ifNull: ['$x', '$z', null]}, series: metaDotSeries},
+                        a: {$sum: "$y"}
+                    }
+                },
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByIfNullDifferentFinalType",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
+                {
+                    $group: {
+                        _id:
+                            {gb: {$ifNull: ["$x", "$z", NumberDecimal(37)]}, series: metaDotSeries},
+                        a: {$sum: "$y"}
+                    }
+                },
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByIfNullNeverNull",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
+                {
+                    $group: {
+                        _id: {gb: {$ifNull: ["$p", "$q", "$z"]}, series: metaDotSeries},
+                        a: {$max: "$x"}
+                    }
+                },
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByAccumulateIfNullSum",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
+                {$group: {_id: {gb: metaDotRegion}, a: {$sum: {$ifNull: ["$z", "$y", "$p"]}}}},
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByAccumulateIfNullMinMax",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
+                {
+                    $group: {
+                        _id: {gb: metaDotRegion},
+                        a: {$min: {$ifNull: ["$z", 6]}},
+                        b: {$max: {$ifNull: ["$y", "$missing", -4]}}
+                    }
+                },
+            ],
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
+        },
+        {
+            name: "GroupByAccumulateIfNullManyArgs",
+            pipeline: [
+                {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
+                {
+                    $group: {
+                        _id: {gb: metaDotRegion},
+                        a: {
+                            $min: {
+                                $ifNull: [
+                                    "$z",
+                                    "$missing1",
+                                    null,
+                                    "$missing2",
+                                    "$missing3",
+                                    "$y",
+                                    "$missing1",
+                                    [1, 2, 3]
+                                ]
+                            }
+                        },
                     }
                 },
             ],
@@ -1654,7 +1841,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByMetaNonExistent",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: "$meta.NON_EXISTENT", a: {$min: "$x"}}},
+                {$group: {_id: metaDotNonExistent, a: {$min: "$x"}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1662,7 +1849,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByExpressionOnMetaNonExistent",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: {$toLower: "$meta.NON_EXISTENT"}, a: {$min: "$x"}}},
+                {$group: {_id: {$toLower: metaDotNonExistent}, a: {$min: "$x"}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1670,7 +1857,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByMetaAndMeasurement",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: {region: "$meta.region", y: "$y"}, a: {$min: "$x"}}},
+                {$group: {_id: {region: metaDotRegion, y: "$y"}, a: {$min: "$x"}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1681,8 +1868,8 @@ export function blockProcessingTestCases(timeFieldName,
                 {
                     $group: {
                         _id: {
-                            region: "$meta.region",
-                            time: {$dateTrunc: {date: "$time", unit: "hour"}}
+                            region: metaDotRegion,
+                            time: {$dateTrunc: {date: dollarPrefixedTime, unit: "hour"}}
                         },
                         a: {$min: "$x"},
                         b: {$max: "$y"}
@@ -1695,7 +1882,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByXMinOfMeta",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: "$x", a: {$min: "$meta"}}},
+                {$group: {_id: "$x", a: {$min: dollarPrefixedMeta}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1703,7 +1890,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByXMinOfMetaSubField",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: "$x", a: {$min: "$meta.series"}}},
+                {$group: {_id: "$x", a: {$min: metaDotSeries}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1711,7 +1898,7 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByXMinOfExpressionOfMeta",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: "$x", a: {$min: {$toLower: "$meta.series"}}}},
+                {$group: {_id: "$x", a: {$min: {$toLower: metaDotSeries}}}},
             ],
             usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
@@ -1719,17 +1906,17 @@ export function blockProcessingTestCases(timeFieldName,
             name: "GroupByXAvgOfMeta",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: "$x", a: {$avg: "$meta"}}},
+                {$group: {_id: "$x", a: {$avg: dollarPrefixedMeta}}},
             ],
-            usesBlockProcessing: false
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
         {
             name: "GroupByXAvgOfMetaSubField",
             pipeline: [
                 {$match: {[timeFieldName]: {$lt: dateMidPoint}}},
-                {$group: {_id: "$x", a: {$avg: "$meta.series"}}},
+                {$group: {_id: "$x", a: {$avg: metaDotSeries}}},
             ],
-            usesBlockProcessing: false
+            usesBlockProcessing: featureFlagsAllowBlockHashAgg
         },
         {
             name: "GroupByComputedField",

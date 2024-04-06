@@ -521,23 +521,6 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
     return writeType;
 }
 
-BSONObj upgradeWriteConcern(const BSONObj& origWriteConcern) {
-    BSONObjIterator iter(origWriteConcern);
-    BSONObjBuilder newWriteConcern;
-
-    while (iter.more()) {
-        BSONElement elem(iter.next());
-
-        if (strncmp(elem.fieldName(), "w", 2) == 0) {
-            newWriteConcern.append("w", 1);
-        } else {
-            newWriteConcern.append(elem);
-        }
-    }
-
-    return newWriteConcern.obj();
-}
-
 BatchWriteOp::BatchWriteOp(OperationContext* opCtx, const BatchedCommandRequest& clientRequest)
     : _opCtx(opCtx),
       _clientRequest(clientRequest),
@@ -729,19 +712,6 @@ BatchedCommandRequest BatchWriteOp::buildBatchRequest(
     if (dbVersion)
         request.setDbVersion(*dbVersion);
 
-    if (_clientRequest.hasWriteConcern()) {
-        if (_clientRequest.requiresWriteAcknowledgement()) {
-            request.setWriteConcern(_clientRequest.getWriteConcern());
-        } else {
-            // Mongos needs to send to the shard with w > 0 so it will be able to see the
-            // writeErrors
-            request.setWriteConcern(upgradeWriteConcern(_clientRequest.getWriteConcern()));
-        }
-    } else if (!TransactionRouter::get(_opCtx)) {
-        // Apply the WC from the opCtx (except if in a transaction).
-        request.setWriteConcern(_opCtx->getWriteConcern().toBSON());
-    }
-
     return request;
 }
 
@@ -759,9 +729,17 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
     }
 
     int firstTargetedWriteOpIdx = targetedBatch.getWrites().front()->writeOpRef.first;
-    bool shouldDeferWriteWithoutShardKeyReponse =
-        _writeOps[firstTargetedWriteOpIdx].getWriteType() == WriteType::WithoutShardKeyWithId &&
-        targetedBatch.getNumOps() > 1;
+    bool isWriteWithoutShardKeyWithId =
+        _writeOps[firstTargetedWriteOpIdx].getWriteType() == WriteType::WithoutShardKeyWithId;
+    int batchSize = targetedBatch.getNumOps();
+    // A WriteWithoutShardKeyWithId batch of size 1 can be completed if it found n=1 from a
+    // previous shard. In this case skip processing the response.
+    if (batchSize == 1 && isWriteWithoutShardKeyWithId &&
+        _writeOps[firstTargetedWriteOpIdx].getWriteState() == WriteOpState_Completed) {
+        return;
+    }
+
+    bool shouldDeferWriteWithoutShardKeyReponse = isWriteWithoutShardKeyWithId && batchSize > 1;
     if (!shouldDeferWriteWithoutShardKeyReponse) {
         // Increment stats for this batch
         _incBatchStats(response);
@@ -820,14 +798,6 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
     write_ops::WriteError* lastError = nullptr;
     for (auto&& write : targetedBatch.getWrites()) {
         WriteOp& writeOp = _writeOps[write->writeOpRef.first];
-        // A WriteWithoutShardKeyWithId batch of size 1 can be completed if it found n=1 from a
-        // previous shard.
-        if (targetedBatch.getNumOps() == 1 &&
-            writeOp.getWriteType() == WriteType::WithoutShardKeyWithId &&
-            writeOp.getWriteState() == WriteOpState_Completed) {
-            break;
-        }
-
         invariant(writeOp.getWriteState() == WriteOpState_Pending);
 
         // See if we have an error for the write

@@ -1959,7 +1959,8 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         field_usage_check = _get_field_usage_checker(self._writer, struct)
         if isinstance(struct, ast.Command):
-            self._writer.write_line('BSONElement commandElement;')
+            if struct.namespace != common.COMMAND_NAMESPACE_IGNORED:
+                self._writer.write_line('BSONElement commandElement;')
             self._writer.write_line('bool firstFieldFound = false;')
             self._writer.write_empty_line()
 
@@ -2832,6 +2833,10 @@ class _CppSourceFileWriter(_CppFileWriterBase):
                                 (param.cpp_class.name, _encaps(param.name), param.set_at))
         if param.redact:
             self._writer.write_line('sp->setRedact();')
+
+        if param.omit_in_ftdc:
+            self._writer.write_line('sp->setOmitInFTDC();')
+
         self._writer.write_line('return sp;')
 
     def _gen_server_parameter_class_definitions(self, param):
@@ -2893,6 +2898,9 @@ class _CppSourceFileWriter(_CppFileWriterBase):
 
         if param.redact:
             self._writer.write_line('ret->setRedact();')
+
+        if param.omit_in_ftdc:
+            self._writer.write_line('ret->setOmitInFTDC();')
 
         if param.default and not (param.cpp_vartype and param.cpp_varname):
             # Only need to call setDefault() if we haven't in-place initialized the declared var.

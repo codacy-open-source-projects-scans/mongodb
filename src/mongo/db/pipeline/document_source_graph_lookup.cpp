@@ -335,6 +335,11 @@ void DocumentSourceGraphLookUp::doBreadthFirstSearch() {
                 : ShardTargetingPolicy::kNotAllowed;
             _variables.copyToExpCtx(_variablesParseState, _fromExpCtx.get());
 
+            // Query settings are looked up after parsing and therefore are not populated in the
+            // '_fromExpCtx' as part of DocumentSourceGraphLookUp constructor. Assign query settings
+            // to the '_fromExpCtx' by copying them from the parent query ExpressionContext.
+            _fromExpCtx->setQuerySettingsIfNotPresent(pExpCtx->getQuerySettings());
+
             std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
             try {
                 pipeline = Pipeline::makePipeline(_fromPipeline, _fromExpCtx, pipelineOpts);
@@ -529,11 +534,6 @@ void DocumentSourceGraphLookUp::performSearch() {
         _frontier.insert(startingValue);
         _frontierUsageBytes += startingValue.getApproximateSize();
     }
-
-    // Query settings are looked up after parsing and therefore are not populated in the
-    // '_fromExpCtx' as part of DocumentSourceGraphLookUp constructor. Assign query settings to the
-    // '_fromExpCtx' by copying them from the parent query ExpressionContext.
-    _fromExpCtx->setQuerySettings(pExpCtx->getQuerySettings());
 
     try {
         doBreadthFirstSearch();
@@ -900,4 +900,5 @@ void DocumentSourceGraphLookUp::addInvolvedCollections(
         stage->addInvolvedCollections(collectionNames);
     }
 }
+
 }  // namespace mongo

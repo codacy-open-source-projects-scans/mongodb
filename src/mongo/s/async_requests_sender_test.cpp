@@ -205,15 +205,12 @@ TEST_F(AsyncRequestsSenderTest, HandlesExceptionWhenUnyielding) {
 
         firstResponseProcessed.countDownAndWait();
 
-        // Unyield throws here, but the next response was already ready so it's returned. The
-        // outstanding requests are cancelled with the error unyield threw.
-        response = ars.next();
-        ASSERT(response.swResponse.getStatus().isOK());
-        ASSERT_EQ(response.shardId, kTestShardIds[1]);
-
+        // Unyield throws here. Even if the next response was already ready the response will fail.
+        // The returned error will have an empty shardId to represent a local failure rather than a
+        // remote failure.
         response = ars.next();
         ASSERT_EQ(response.swResponse.getStatus(), ErrorCodes::BadValue);
-        ASSERT_EQ(response.shardId, kTestShardIds[2]);
+        ASSERT_EQ(response.shardId, ShardId{});
     });
 
     onCommand([&](const auto& request) {
@@ -375,6 +372,96 @@ TEST_F(AsyncRequestsSenderTest, DesignatedHostMustBeInShard) {
     auto response = ars.next();
     ASSERT_EQ(response.swResponse.getStatus(), ErrorCodes::HostNotFound);
     ASSERT_EQ(response.shardId, kTestShardIds[1]);
+}
+
+TEST_F(AsyncRequestsSenderTest, PreLoadedShardIsUsedForInitialRequest) {
+    auto shardRegistry = Grid::get(operationContext())->shardRegistry();
+    auto shard0 = uassertStatusOK(shardRegistry->getShard(operationContext(), kTestShardIds[0]));
+    auto shard1 = uassertStatusOK(shardRegistry->getShard(operationContext(), kTestShardIds[1]));
+    auto shard2 = uassertStatusOK(shardRegistry->getShard(operationContext(), kTestShardIds[2]));
+
+    // Intentionally provide ShardIds mismatched with Shard types to prove the Shard given in the
+    // request is used for the initial attempt.
+    std::vector<AsyncRequestsSender::Request> requests;
+    requests.emplace_back(kTestShardIds[0],
+                          BSON("find"
+                               << "bar"),
+                          shard1);
+    requests.emplace_back(kTestShardIds[1],
+                          BSON("find"
+                               << "bar"),
+                          shard2);
+    requests.emplace_back(kTestShardIds[2],
+                          BSON("find"
+                               << "bar"),
+                          shard0);
+
+    auto ars = AsyncRequestsSender(operationContext(),
+                                   executor(),
+                                   kTestNss.dbName(),
+                                   requests,
+                                   ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                   Shard::RetryPolicy::kIdempotent,
+                                   nullptr /* no yielder */,
+                                   {} /* designatedHostsMap */);
+
+    auto future = launchAsync([&]() {
+        auto response = ars.next();
+        ASSERT(response.swResponse.getStatus().isOK());
+        ASSERT_EQ(response.shardId, kTestShardIds[0]);
+        ASSERT_EQ(response.shardHostAndPort, kTestShardHosts[1]);
+
+        response = ars.next();
+        ASSERT(response.swResponse.getStatus().isOK());
+        ASSERT_EQ(response.shardId, kTestShardIds[1]);
+        ASSERT_EQ(response.shardHostAndPort, kTestShardHosts[2]);
+
+        response = ars.next();
+        ASSERT(response.swResponse.getStatus().isOK());
+        ASSERT_EQ(response.shardId, kTestShardIds[2]);
+        // The ARS initially targets the host in Shard0 because that is the provided Shard but it
+        // retries on a network error and "refreshes," targeting the host in Shard2.
+        ASSERT_EQ(response.shardHostAndPort, kTestShardHosts[2]);
+    });
+
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT_EQ(request.target, kTestShardHosts[1]);
+        return CursorResponse(kTestNss, 0LL, {BSON("x" << 1)})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT_EQ(request.target, kTestShardHosts[2]);
+        return CursorResponse(kTestNss, 0LL, {BSON("x" << 2)})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    // The initial attempt targets the host in shard0 because that was the provided shard. Return a
+    // retriable error to verify the provided shard is only used for the initial attempt.
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT_EQ(request.target, kTestShardHosts[0]);
+        return Status(ErrorCodes::HostUnreachable, "mock network error");
+    });
+
+    // Retry targets the "right" host in Shard2.
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT_EQ(request.target, kTestShardHosts[2]);
+        return Status(ErrorCodes::HostUnreachable, "mock network error");
+    });
+
+    // Further retries also use the reloaded Shard.
+    onCommand([&](const auto& request) {
+        ASSERT(request.cmdObj["find"]);
+        ASSERT_EQ(request.target, kTestShardHosts[2]);
+        return CursorResponse(kTestNss, 0LL, {BSON("x" << 3)})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    future.default_timed_get();
 }
 
 }  // namespace

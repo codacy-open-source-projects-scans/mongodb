@@ -101,7 +101,9 @@ AsyncRequestsSender::AsyncRequestsSender(OperationContext* opCtx,
         auto designatedHost = designatedHostIter != designatedHostsMap.end()
             ? designatedHostIter->second
             : HostAndPort();
-        _remotes.emplace_back(this, request.shardId, request.cmdObj, std::move(designatedHost))
+        _remotes
+            .emplace_back(
+                this, request.shardId, request.cmdObj, std::move(designatedHost), request.shard)
             .executeRequest();
     }
 
@@ -127,6 +129,11 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() noexcept {
     // If we've been interrupted, the response queue should be filled with interrupted answers, go
     // ahead and return one of those
     if (!_interruptStatus.isOK()) {
+        if (_failedUnyield) {
+            AsyncRequestsSender::Response response{.swResponse = _interruptStatus};
+            return response;
+        }
+
         return _responseQueue.pop();
     }
 
@@ -156,8 +163,9 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() noexcept {
         auto unyieldStatus =
             _resourceYielder ? _resourceYielder->unyieldNoThrow(_opCtx) : Status::OK();
 
-        uassertStatusOK(waitStatus);
+        _failedUnyield = !unyieldStatus.isOK();
         uassertStatusOK(unyieldStatus);
+        uassertStatusOK(waitStatus);
 
         // There should always be a response ready after the wait above.
         auto response = _responseQueue.tryPop();
@@ -183,6 +191,11 @@ AsyncRequestsSender::Response AsyncRequestsSender::next() noexcept {
     // shutdown the scoped task executor
     _subExecutor->shutdown();
 
+    if (_failedUnyield) {
+        AsyncRequestsSender::Response response{.swResponse = _interruptStatus};
+        return response;
+    }
+
     return _responseQueue.pop();
 }
 
@@ -194,8 +207,8 @@ bool AsyncRequestsSender::done() noexcept {
     return !_remotesLeft;
 }
 
-AsyncRequestsSender::Request::Request(ShardId shardId, BSONObj cmdObj)
-    : shardId(shardId), cmdObj(cmdObj) {}
+AsyncRequestsSender::Request::Request(ShardId shardId, BSONObj cmdObj, std::shared_ptr<Shard> shard)
+    : shardId(shardId), cmdObj(cmdObj), shard(std::move(shard)) {}
 
 Status AsyncRequestsSender::Response::getEffectiveStatus(
     const AsyncRequestsSender::Response& response) {
@@ -215,13 +228,23 @@ Status AsyncRequestsSender::Response::getEffectiveStatus(
 AsyncRequestsSender::RemoteData::RemoteData(AsyncRequestsSender* ars,
                                             ShardId shardId,
                                             BSONObj cmdObj,
-                                            HostAndPort designatedHostAndPort)
+                                            HostAndPort designatedHostAndPort,
+                                            std::shared_ptr<Shard> shard)
     : _ars(ars),
       _shardId(std::move(shardId)),
       _cmdObj(std::move(cmdObj)),
-      _designatedHostAndPort(std::move(designatedHostAndPort)) {}
+      _designatedHostAndPort(std::move(designatedHostAndPort)),
+      _shard(std::move(shard)) {}
 
 SemiFuture<std::shared_ptr<Shard>> AsyncRequestsSender::RemoteData::getShard() noexcept {
+    if (_shard) {
+        // Clear the cached shard so any retries will look up the shard again, in case its state has
+        // changed.
+        using std::swap;
+        std::shared_ptr<Shard> temp;
+        swap(_shard, temp);
+        return temp;
+    }
     return Grid::get(getGlobalServiceContext())
         ->shardRegistry()
         ->getShard(*_ars->_subBaton, _shardId);

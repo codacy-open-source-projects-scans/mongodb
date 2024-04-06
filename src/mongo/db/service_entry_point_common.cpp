@@ -57,6 +57,7 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/admission/ingress_admission_controller.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/action_type.h"
@@ -198,7 +199,6 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangAfterSessionCheckOut);
 MONGO_FAIL_POINT_DEFINE(hangBeforeSettingTxnInterruptFlag);
 MONGO_FAIL_POINT_DEFINE(hangAfterCheckingWritabilityForMultiDocumentTransactions);
-MONGO_FAIL_POINT_DEFINE(enforceDirectShardOperationsCheck);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -430,18 +430,12 @@ void appendErrorLabelsAndTopologyVersion(OperationContext* opCtx,
     topologyVersion.serialize(&topologyVersionBuilder);
 }
 
-// TODO SERVER-85353 Remove commandName and nss parameters, which are used only for the failpoint
-// in TxnRouter::getAdditionalParticipantsForResponse
-void appendAdditionalParticipants(OperationContext* opCtx,
-                                  BSONObjBuilder* commandBodyFieldsBob,
-                                  const std::string& commandName,
-                                  const NamespaceString& nss) {
+void appendAdditionalParticipants(OperationContext* opCtx, BSONObjBuilder* commandBodyFieldsBob) {
     auto txnRouter = TransactionRouter::get(opCtx);
     if (!txnRouter)
         return;
 
-    auto additionalParticipants =
-        txnRouter.getAdditionalParticipantsForResponse(opCtx, commandName, nss);
+    auto additionalParticipants = txnRouter.getAdditionalParticipantsForResponse(opCtx);
     if (!additionalParticipants)
         return;
 
@@ -1082,10 +1076,7 @@ void CheckoutSessionAndInvokeCommand::_tapError(Status status) {
     // 2. If the error is not retryable, mongos can then abort the transaction on the added
     // participants rather than waiting for the added shards to abort either due to a transaction
     // timeout or a new transaction being started, releasing their resources sooner.
-    appendAdditionalParticipants(opCtx,
-                                 _ecd->getExtraFieldsBuilder(),
-                                 execContext.getCommand()->getName(),
-                                 _ecd->getInvocation()->ns());
+    appendAdditionalParticipants(opCtx, _ecd->getExtraFieldsBuilder());
 
     if (status.code() == ErrorCodes::CommandOnShardedViewNotSupportedOnMongod) {
         // Exceptions are used to resolve views in a sharded cluster, so they should be handled
@@ -1140,10 +1131,7 @@ void CheckoutSessionAndInvokeCommand::_commitInvocation() {
             auto txnResponseMetadata = txnParticipant.getResponseMetadata();
             auto bodyBuilder = replyBuilder->getBodyBuilder();
             bodyBuilder.appendElements(txnResponseMetadata);
-            appendAdditionalParticipants(execContext.getOpCtx(),
-                                         &bodyBuilder,
-                                         _ecd->getExecutionContext().getCommand()->getName(),
-                                         _ecd->getInvocation()->ns());
+            appendAdditionalParticipants(execContext.getOpCtx(), &bodyBuilder);
         }
     }
 }
@@ -1232,21 +1220,16 @@ void RunCommandImpl::_epilogue() {
 
     {
         auto body = replyBuilder->getBodyBuilder();
-        _ok = CommandHelpers::extractOrAppendOk(body);
-    }
-    behaviors.attachCurOpErrInfo(opCtx, replyBuilder->getBodyBuilder().asTempObj());
+        auto status = CommandHelpers::extractOrAppendOkAndGetStatus(body);
+        _ok = status.isOK();
+        behaviors.attachCurOpErrInfo(opCtx, status);
 
-    {
-        boost::optional<ErrorCodes::Error> code;
+        boost::optional<ErrorCodes::Error> code =
+            _ok ? boost::none : boost::optional<ErrorCodes::Error>(status.code());
         boost::optional<ErrorCodes::Error> wcCode;
-        auto body = replyBuilder->getBodyBuilder();
         auto response = body.asTempObj();
-        auto codeField = response["code"];
-        if (!_ok && codeField.isNumber()) {
-            code = ErrorCodes::Error(codeField.numberInt());
-        }
-        if (response.hasField("writeConcernError")) {
-            wcCode = ErrorCodes::Error(response["writeConcernError"]["code"].numberInt());
+        if (auto wcErrElement = response["writeConcernError"]; !wcErrElement.eoo()) {
+            wcCode = ErrorCodes::Error(wcErrElement["code"].numberInt());
         }
         appendErrorLabelsAndTopologyVersion(opCtx,
                                             &body,
@@ -1260,7 +1243,7 @@ void RunCommandImpl::_epilogue() {
     }
 
     auto commandBodyBob = replyBuilder->getBodyBuilder();
-    behaviors.appendReplyMetadata(opCtx, request, &commandBodyBob);
+    behaviors.appendReplyMetadata(opCtx, _ecd->getCommonRequestArgs(), &commandBodyBob);
     appendClusterAndOperationTime(
         opCtx, &commandBodyBob, &commandBodyBob, _ecd->getStartOperationTime());
 }
@@ -1759,8 +1742,8 @@ void ExecCommandDatabase::_initiateCommand() {
         globalOpCounters.gotQuery();
     }
 
-    auto requestOrDefaultMaxTimeMS =
-        getRequestOrDefaultMaxTimeMS(opCtx, _requestArgs.getMaxTimeMS(), command);
+    auto requestOrDefaultMaxTimeMS = getRequestOrDefaultMaxTimeMS(
+        opCtx, _requestArgs.getMaxTimeMS(), getInvocation()->isReadOperation());
     if (requestOrDefaultMaxTimeMS || _requestArgs.getMaxTimeMSOpOnly()) {
         // Parse the 'maxTimeMS' command option, and use it to set a deadline for the operation on
         // the OperationContext. The 'maxTimeMS' option unfortunately has a different meaning for a
@@ -1847,11 +1830,16 @@ void ExecCommandDatabase::_initiateCommand() {
     enforceRequireAPIVersion(opCtx, command);
 
     // Check that the client has the directShardOperations role if this is a direct operation to a
-    // shard.
+    // shard. This code is only used for warnings, errors will be emitted by the checks in the
+    // AutoGetX and AcquireX checks if featureFlagFailOnDirectShardOperations is enabled.
+    //
+    // TODO (SERVER-87190) Remove once 8.0 becomes last-lts. We will rely on the checks in the auto
+    // getters and collection acquisitions.
     const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
     if (command->requiresAuth() && ShardingState::get(opCtx)->enabled() &&
         fcvSnapshot.isVersionInitialized() &&
-        feature_flags::gCheckForDirectShardOperations.isEnabled(fcvSnapshot)) {
+        feature_flags::gCheckForDirectShardOperations.isEnabled(fcvSnapshot) &&
+        !feature_flags::gFailOnDirectShardOperations.isEnabled(fcvSnapshot)) {
         bool clusterHasTwoOrMoreShards = [&]() {
             auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
             auto* clusterCardinalityParam =
@@ -1871,14 +1859,6 @@ void ExecCommandDatabase::_initiateCommand() {
                           ActionType::issueDirectShardOperations)));
 
             if (!hasDirectShardOperations) {
-                // TODO (SERVER-77073): Remove this failpoint.
-                if (MONGO_unlikely(enforceDirectShardOperationsCheck.shouldFail())) {
-                    uasserted(
-                        ErrorCodes::Unauthorized,
-                        "You are connecting to a sharded cluster using a replica set or standalone"
-                        "connection string. Please use the sharded connection string.");
-                }
-
                 bool timeUpdated = false;
                 auto currentTime = opCtx->getServiceContext()->getFastClockSource()->now();
                 {
@@ -2119,7 +2099,7 @@ void ExecCommandDatabase::_handleFailure(Status status) {
                                         getLastOpAfterRun());
 
     BSONObjBuilder metadataBob;
-    behaviors.appendReplyMetadata(opCtx, request, &metadataBob);
+    behaviors.appendReplyMetadata(opCtx, getCommonRequestArgs(), &metadataBob);
 
     // The read concern may not have yet been placed on the operation context, so attempt to parse
     // it here, so if it is valid it can be used to compute the proper operationTime.

@@ -214,7 +214,7 @@ public:
             auto reqObj = unparsedRequest.body;
             auto& [replyItems, summaryFields, wcErrors, retriedStmtIds, _] = replyInfo;
             const NamespaceString cursorNss =
-                NamespaceString::makeBulkWriteNSS(req.getDollarTenant());
+                NamespaceString::makeBulkWriteNSS(req.getDbName().tenantId());
 
             if (bulk_write_common::isUnacknowledgedBulkWrite(opCtx)) {
                 // Skip cursor creation and return the simplest reply.
@@ -344,6 +344,14 @@ public:
                     boost::none /* verbosity */);
                 expCtx->variables.seedVariablesWithLetParameters(expCtx.get(), *let);
                 bulkRequest.setLet(expCtx->variables.toBSON(expCtx->variablesParseState, *let));
+            }
+
+            // "Fire and forget" bulk writes requested by the external clients need to be upgraded
+            // to w: 1 for potential writeErrors to be properly managed.
+            if (auto wc = opCtx->getWriteConcern();
+                !wc.requiresWriteAcknowledgement() && !opCtx->inMultiDocumentTransaction()) {
+                wc.w = 1;
+                opCtx->setWriteConcern(wc);
             }
 
             auto bulkWriteReply = cluster::bulkWrite(opCtx, bulkRequest, targeters);

@@ -297,29 +297,29 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
 
     // Using noop observer for both writer and applier. During steady state replication,
     // there is no need to log details on every batch we apply.
-    // TODO (SERVER-87674): use a different thread pool.
     if (useOplogWriter) {
-        _oplogWriter = std::make_unique<OplogWriterImpl>(_oplogWriterTaskExecutor.get(),
-                                                         _oplogWriteBuffer.get(),
-                                                         _oplogApplyBuffer.get(),
-                                                         replCoord,
-                                                         _storageInterface,
-                                                         &noopOplogWriterObserver,
-                                                         OplogWriter::Options());
+        _oplogWriter = std::make_unique<OplogWriterImpl>(
+            _oplogWriterTaskExecutor.get(),
+            _oplogWriteBuffer.get(),
+            _oplogApplyBuffer.get(),
+            nullptr,
+            replCoord,
+            _storageInterface,
+            _replicationProcess->getConsistencyMarkers(),
+            &noopOplogWriterObserver,
+            OplogWriter::Options(false /* skipWritesToOplogColl */,
+                                 true /* skipWritesToChangeColl */));
     }
 
-    // TODO (SERVER-85697): clean up the applier options.
-    OplogApplier::Options applierOptions(OplogApplication::Mode::kSecondary,
-                                         useOplogWriter /* skipWritesToOplog */,
-                                         useOplogWriter /* skipWritesToChangeCollection */);
-    _oplogApplier = std::make_unique<OplogApplierImpl>(_oplogApplierTaskExecutor.get(),
-                                                       _oplogApplyBuffer.get(),
-                                                       &noopOplogApplierObserver,
-                                                       replCoord,
-                                                       _replicationProcess->getConsistencyMarkers(),
-                                                       _storageInterface,
-                                                       applierOptions,
-                                                       _writerPool.get());
+    _oplogApplier = std::make_unique<OplogApplierImpl>(
+        _oplogApplierTaskExecutor.get(),
+        _oplogApplyBuffer.get(),
+        &noopOplogApplierObserver,
+        replCoord,
+        _replicationProcess->getConsistencyMarkers(),
+        _storageInterface,
+        OplogApplier::Options(OplogApplication::Mode::kSecondary),
+        _writerPool.get());
 
     invariant(!_bgSync);
     _bgSync = std::make_unique<BackgroundSync>(
@@ -637,7 +637,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     LOGV2(6015309, "Logging transition to primary to oplog on stepup");
     writeConflictRetry(
         opCtx, "logging transition to primary to oplog", NamespaceString::kRsOplogNamespace, [&] {
-            AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+            AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
             WriteUnitOfWork wuow(opCtx);
             opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
                 opCtx,
@@ -864,7 +864,7 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
 
         boost::optional<UninterruptibleLockGuard> noInterrupt;
         if (replCoord->isInPrimaryOrSecondaryState_UNSAFE())
-            noInterrupt.emplace(shard_role_details::getLocker(opCtx));
+            noInterrupt.emplace(opCtx);
 
         Status status = writeConflictRetry(
             opCtx, "save replica set lastVote", NamespaceString::kLastVoteNamespace, [&] {
@@ -921,7 +921,7 @@ Timestamp ReplicationCoordinatorExternalStateImpl::getGlobalTimestamp(ServiceCon
 }
 
 bool ReplicationCoordinatorExternalStateImpl::oplogExists(OperationContext* opCtx) {
-    return static_cast<bool>(LocalOplogInfo::get(opCtx)->getCollection());
+    return static_cast<bool>(LocalOplogInfo::get(opCtx)->getRecordStore());
 }
 
 StatusWith<OpTimeAndWallTime> ReplicationCoordinatorExternalStateImpl::loadLastOpTimeAndWallTime(

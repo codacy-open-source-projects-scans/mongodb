@@ -106,6 +106,7 @@
 #include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/repl/update_position_args.h"
+#include "mongo/db/replica_set_endpoint_sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/db/session/internal_session_pool.h"
@@ -968,6 +969,11 @@ void ReplicationCoordinatorImpl::startup(OperationContext* opCtx,
     invariant(_settings.isReplSet());
     invariant(!ReplSettings::shouldRecoverFromOplogAsStandalone());
 
+    // Do not modify local replication metadata if we are starting in magic restore mode.
+    if (storageGlobalParams.magicRestore) {
+        return;
+    }
+
     _storage->initializeStorageControlsForReplication(opCtx->getServiceContext());
 
     // We are expected to be able to transition out of the kConfigStartingUp state by the end
@@ -1337,7 +1343,6 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
     }
     lk.unlock();
 
-    _externalState->onDrainComplete(opCtx);
     ReplicaSetAwareServiceRegistry::get(_service).onStepUpBegin(opCtx, termWhenBufferIsEmpty);
 
     if (MONGO_unlikely(hangBeforeRSTLOnDrainComplete.shouldFail())) {
@@ -1362,6 +1367,7 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
         return;
     }
     _applierState = ApplierState::Stopped;
+    _externalState->onDrainComplete(opCtx);
 
     invariant(_getMemberState_inlock().primary());
     invariant(!_readWriteAbility->canAcceptNonLocalWrites(opCtx));
@@ -2681,11 +2687,11 @@ StatusWith<OpTime> ReplicationCoordinatorImpl::getLatestWriteOpTime(
     if (!canAcceptNonLocalWrites()) {
         return {ErrorCodes::NotWritablePrimary, "Not primary so can't get latest write optime"};
     }
-    const auto& oplog = LocalOplogInfo::get(opCtx)->getCollection();
+    const auto& oplog = LocalOplogInfo::get(opCtx)->getRecordStore();
     if (!oplog) {
         return {ErrorCodes::NamespaceNotFound, "oplog collection does not exist"};
     }
-    auto latestOplogTimestampSW = oplog->getRecordStore()->getLatestOplogTimestamp(opCtx);
+    auto latestOplogTimestampSW = oplog->getLatestOplogTimestamp(opCtx);
     if (!latestOplogTimestampSW.isOK()) {
         return latestOplogTimestampSW.getStatus();
     }
@@ -3086,7 +3092,7 @@ void ReplicationCoordinatorImpl::stepDown(OperationContext* opCtx,
             // attempt, we might as well spend whatever time we need to acquire it now.  For
             // the same reason, we also disable lock acquisition interruption, to guarantee that
             // we get the lock eventually.
-            UninterruptibleLockGuard noInterrupt(shard_role_details::getLocker(opCtx));  // NOLINT.
+            UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
 
             // Since we have released the RSTL lock at this point, there can be some read
             // operations sneaked in here, that might hold global lock in S mode or blocked on
@@ -3405,8 +3411,8 @@ bool ReplicationCoordinatorImpl::isInPrimaryOrSecondaryState_UNSAFE() const {
 
 bool ReplicationCoordinatorImpl::shouldRelaxIndexConstraints(OperationContext* opCtx,
                                                              const NamespaceString& ns) {
-    if (ReplSettings::shouldRecoverFromOplogAsStandalone() || !recoverToOplogTimestamp.empty() ||
-        tenantMigrationInfo(opCtx)) {
+    if (storageGlobalParams.magicRestore || ReplSettings::shouldRecoverFromOplogAsStandalone() ||
+        !recoverToOplogTimestamp.empty() || tenantMigrationInfo(opCtx)) {
         return true;
     }
     return !canAcceptWritesFor(opCtx, ns);
@@ -5275,6 +5281,14 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig(WithLock lk,
     } else {
         LOGV2(21394, "This node is not a member of the config");
     }
+    if (replica_set_endpoint::isFeatureFlagEnabledIgnoreFCV() &&
+        serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+        // The feature flag check here needs to ignore the FCV since the
+        // ReplicaSetEndpointShardingState needs to be maintained even before the FCV is fully
+        // upgraded.
+        replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)->setIsReplicaSetMember(
+            _selfIndex >= 0);
+    }
 
     // Wake up writeConcern waiters that are no longer satisfiable due to the rsConfig change.
     _replicationWaiterList.setValueIf_inlock([this](const OpTime& opTime,
@@ -5899,12 +5913,12 @@ Status ReplicationCoordinatorImpl::processReplSetRequestVotes(
     return Status::OK();
 }
 
-void ReplicationCoordinatorImpl::prepareReplMetadata(const BSONObj& metadataRequestObj,
+void ReplicationCoordinatorImpl::prepareReplMetadata(const CommonRequestArgs& requestArgs,
                                                      const OpTime& lastOpTimeFromClient,
                                                      BSONObjBuilder* builder) const {
 
-    bool hasReplSetMetadata = metadataRequestObj.hasField(rpc::kReplSetMetadataFieldName);
-    bool hasOplogQueryMetadata = metadataRequestObj.hasField(rpc::kOplogQueryMetadataFieldName);
+    bool hasReplSetMetadata = !!requestArgs.getReplData();
+    bool hasOplogQueryMetadata = !!requestArgs.getOplogQueryData();
     // Don't take any locks if we do not need to.
     if (!hasReplSetMetadata && !hasOplogQueryMetadata) {
         return;

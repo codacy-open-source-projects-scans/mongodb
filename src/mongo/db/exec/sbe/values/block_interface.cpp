@@ -68,8 +68,11 @@ void DeblockedTagValStorage::copyValuesFrom(const DeblockedTagValStorage& other)
 void DeblockedTagValStorage::release() {
     if (owned) {
         owned = false;
-        for (size_t i = 0; i < tags.size(); ++i) {
-            releaseValue(tags[i], vals[i]);
+        // Only need to release values if we don't know the type or know they aren't shallow.
+        if (tag == TypeTags::Nothing || !isShallowType(tag)) {
+            for (size_t i = 0; i < tags.size(); ++i) {
+                releaseValue(tags[i], vals[i]);
+            }
         }
     }
 }
@@ -126,18 +129,21 @@ std::unique_ptr<ValueBlock> ValueBlock::defaultMapImpl(const ColumnOp& op) {
     return buildBlockFromStorage(std::move(tags), std::move(vals));
 }
 
-std::unique_ptr<ValueBlock> ValueBlock::buildBlockFromStorage(std::vector<value::TypeTags> tags,
-                                                              std::vector<value::Value> vals) {
+std::unique_ptr<ValueBlock> buildBlockFromStorage(std::vector<value::TypeTags> tags,
+                                                  std::vector<value::Value> vals) {
     if (vals.empty()) {
         return std::make_unique<HeterogeneousBlock>();
     }
 
     if ((validHomogeneousType(tags[0]) || tags[0] == TypeTags::Nothing) &&
         std::all_of(tags.begin(), tags.end(), [&](TypeTags tag) { return tag == tags[0]; })) {
+
+        if (std::all_of(
+                vals.begin(), vals.end(), [&](value::Value value) { return value == vals[0]; })) {
+            return std::make_unique<MonoBlock>(vals.size(), tags[0], vals[0]);
+        }
+
         switch (tags[0]) {
-            case value::TypeTags::Nothing: {
-                return std::make_unique<MonoBlock>(vals.size(), value::TypeTags::Nothing, 0);
-            }
             case value::TypeTags::Boolean: {
                 return std::make_unique<value::BoolBlock>(std::move(vals));
             }
@@ -203,6 +209,10 @@ TokenizedBlock ValueBlock::tokenize() {
         idxs[i] = it->second;
     }
     return {std::make_unique<HeterogeneousBlock>(std::move(tokenTags), std::move(tokenVals)), idxs};
+}
+
+std::unique_ptr<MonoBlock> MonoBlock::makeNothingBlock(size_t ct) {
+    return std::make_unique<value::MonoBlock>(ct, value::TypeTags::Nothing, value::Value{0u});
 }
 
 TokenizedBlock MonoBlock::tokenize() {
@@ -405,6 +415,72 @@ template std::unique_ptr<ValueBlock> DateBlock::fillEmpty(TypeTags fillTag, Valu
 template std::unique_ptr<ValueBlock> DoubleBlock::fillEmpty(TypeTags fillTag, Value fillVal);
 template std::unique_ptr<ValueBlock> BoolBlock::fillEmpty(TypeTags fillTag, Value fillVal);
 
+std::unique_ptr<ValueBlock> ValueBlock::fillType(uint32_t typeMask,
+                                                 TypeTags fillTag,
+                                                 Value fillVal) {
+    auto deblocked = extract();
+    std::vector<TypeTags> tags(deblocked.count());
+    std::vector<Value> vals(deblocked.count());
+    for (size_t i = 0; i < deblocked.count(); ++i) {
+        // For Nothing values, we will always take the else branch.
+        if (static_cast<bool>(getBSONTypeMask(deblocked.tags()[i]) & typeMask)) {
+            auto [tag, val] = value::copyValue(fillTag, fillVal);
+            tags[i] = tag;
+            vals[i] = val;
+        } else {
+            auto [tag, val] = value::copyValue(deblocked.tags()[i], deblocked.vals()[i]);
+            tags[i] = tag;
+            vals[i] = val;
+        }
+    }
+
+    return std::make_unique<HeterogeneousBlock>(std::move(tags), std::move(vals));
+}
+
+std::unique_ptr<ValueBlock> MonoBlock::fillType(uint32_t typeMask,
+                                                TypeTags fillTag,
+                                                Value fillVal) {
+    if (static_cast<bool>(getBSONTypeMask(_tag) & typeMask)) {
+        return std::make_unique<MonoBlock>(_count, fillTag, fillVal);
+    }
+    return nullptr;
+}
+
+template <typename T, value::TypeTags TypeTag>
+std::unique_ptr<ValueBlock> HomogeneousBlock<T, TypeTag>::fillType(uint32_t typeMask,
+                                                                   TypeTags fillTag,
+                                                                   Value fillVal) {
+    if (static_cast<bool>(getBSONTypeMask(TypeTag) & typeMask)) {
+        if (*tryDense() || fillTag == value::TypeTags::Nothing) {
+            return std::make_unique<MonoBlock>(count(), fillTag, fillVal);
+        } else if (fillTag == TypeTag) {
+            // We also know that fillTag must be shallow since HomogeneousBlocks can only store
+            // shallow types.
+            std::vector<Value> vals(_vals.size(), fillVal);
+            return std::make_unique<HomogeneousBlock<T, TypeTag>>(std::move(vals), _presentBitset);
+        } else {
+            return ValueBlock::fillType(typeMask, fillTag, fillVal);
+        }
+    }
+    return nullptr;
+}
+
+template std::unique_ptr<ValueBlock> Int32Block::fillType(uint32_t typeMask,
+                                                          TypeTags fillTag,
+                                                          Value fillVal);
+template std::unique_ptr<ValueBlock> Int64Block::fillType(uint32_t typeMask,
+                                                          TypeTags fillTag,
+                                                          Value fillVal);
+template std::unique_ptr<ValueBlock> DateBlock::fillType(uint32_t typeMask,
+                                                         TypeTags fillTag,
+                                                         Value fillVal);
+template std::unique_ptr<ValueBlock> DoubleBlock::fillType(uint32_t typeMask,
+                                                           TypeTags fillTag,
+                                                           Value fillVal);
+template std::unique_ptr<ValueBlock> BoolBlock::fillType(uint32_t typeMask,
+                                                         TypeTags fillTag,
+                                                         Value fillVal);
+
 std::unique_ptr<ValueBlock> ValueBlock::exists() {
     if (tryDense().get_value_or(false) && tryCount()) {
         return std::make_unique<MonoBlock>(
@@ -417,6 +493,79 @@ std::unique_ptr<ValueBlock> ValueBlock::exists() {
     }
     return std::make_unique<BoolBlock>(std::move(vals));
 }
+
+template <typename T, class Cmp>
+size_t cmpImpl(value::Value lhs, value::Value rhs, size_t lhsIdx, size_t rhsIdx, const Cmp& cmp) {
+    if constexpr (std::is_same_v<T, double>) {
+        // Capture MQL double comparison semantics.
+        return cmp(compareDoubles(value::bitcastTo<T>(lhs), value::bitcastTo<T>(rhs)), 0) ? lhsIdx
+                                                                                          : rhsIdx;
+    } else {
+        return cmp(value::bitcastTo<T>(lhs), value::bitcastTo<T>(rhs)) ? lhsIdx : rhsIdx;
+    }
+}
+
+template <typename T, value::TypeTags TypeTag>
+template <typename Cmp>
+boost::optional<size_t> HomogeneousBlock<T, TypeTag>::argMinMaxImpl(Cmp cmp) {
+    size_t bestIdx = 0;
+    if (_vals.empty()) {
+        return boost::none;
+    } else if (*tryDense()) {
+        for (size_t i = bestIdx; i < _vals.size(); ++i) {
+            bestIdx = cmpImpl<T>(_vals[i], _vals[bestIdx], i, bestIdx, cmp);
+        }
+    } else {
+        // This is currently only used for sort keys which should never have Nothings so we will
+        // just return boost::none if the block is not dense.
+        return boost::none;
+    }
+    return bestIdx;
+}
+
+template <typename T, TypeTags TypeTag>
+boost::optional<size_t> HomogeneousBlock<T, TypeTag>::argMin() {
+    return argMinMaxImpl<std::less<>>();
+}
+
+template boost::optional<size_t> Int32Block::argMin();
+template boost::optional<size_t> Int64Block::argMin();
+template boost::optional<size_t> DateBlock::argMin();
+template boost::optional<size_t> DoubleBlock::argMin();
+template boost::optional<size_t> BoolBlock::argMin();
+
+template <typename T, TypeTags TypeTag>
+boost::optional<size_t> HomogeneousBlock<T, TypeTag>::argMax() {
+    return argMinMaxImpl<std::greater<>>();
+}
+
+template boost::optional<size_t> Int32Block::argMax();
+template boost::optional<size_t> Int64Block::argMax();
+template boost::optional<size_t> DateBlock::argMax();
+template boost::optional<size_t> DoubleBlock::argMax();
+template boost::optional<size_t> BoolBlock::argMax();
+
+std::pair<value::TypeTags, value::Value> ValueBlock::at(size_t idx) {
+    auto deblocked = extract();
+    invariant(idx < deblocked.count());
+    return deblocked[idx];
+}
+
+template <typename T, value::TypeTags TypeTag>
+std::pair<value::TypeTags, value::Value> HomogeneousBlock<T, TypeTag>::at(size_t idx) {
+    invariant(idx < count());
+    // Avoid extracting if possible.
+    if (*tryDense()) {
+        return {TypeTag, _vals[idx]};
+    }
+    return ValueBlock::at(idx);
+}
+
+template std::pair<value::TypeTags, value::Value> Int32Block::at(size_t idx);
+template std::pair<value::TypeTags, value::Value> Int64Block::at(size_t idx);
+template std::pair<value::TypeTags, value::Value> DateBlock::at(size_t idx);
+template std::pair<value::TypeTags, value::Value> DoubleBlock::at(size_t idx);
+template std::pair<value::TypeTags, value::Value> BoolBlock::at(size_t idx);
 
 void HeterogeneousBlock::push_back(TypeTags t, Value v) {
     constexpr auto maxSizeT = std::numeric_limits<size_t>::max();

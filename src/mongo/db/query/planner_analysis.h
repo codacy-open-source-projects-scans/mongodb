@@ -40,6 +40,7 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_solution.h"
@@ -152,6 +153,11 @@ public:
     static void removeImpreciseInternalExprFilters(const QueryPlannerParams& params,
                                                    QuerySolutionNode& root);
 
+    struct Strategy {
+        EqLookupNode::LookupStrategy strategy;
+        boost::optional<IndexEntry> indexEntry;
+        NaturalOrderHint::Direction scanDirection = NaturalOrderHint::Direction::kForward;
+    };
     /**
      * For the provided 'foreignCollName' and 'foreignFieldName' corresponding to an EqLookupNode,
      * returns what join algorithm should be used to execute it. In particular:
@@ -163,11 +169,10 @@ public:
      * small.
      * - A nested loop join is chosen in all other cases.
      */
-    static std::pair<EqLookupNode::LookupStrategy, boost::optional<IndexEntry>>
-    determineLookupStrategy(
+    static Strategy determineLookupStrategy(
         const NamespaceString& foreignCollName,
         const std::string& foreignField,
-        const std::map<NamespaceString, SecondaryCollectionInfo>& collectionsInfo,
+        const std::map<NamespaceString, CollectionInfo>& collectionsInfo,
         bool allowDiskUse,
         const CollatorInterface* collator);
 
@@ -175,7 +180,7 @@ public:
      * Checks if the foreign collection is eligible for the hash join algorithm. We conservatively
      * choose the hash join algorithm for cases when the hash table is unlikely to spill to disk.
      */
-    static bool isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo);
+    static bool isEligibleForHashJoin(const CollectionInfo& foreignCollInfo);
 };
 
 }  // namespace mongo

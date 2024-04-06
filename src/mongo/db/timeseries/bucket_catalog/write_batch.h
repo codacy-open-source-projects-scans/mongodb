@@ -60,6 +60,25 @@ struct CommitInfo {
     boost::optional<OID> electionId;
 };
 
+struct Sizes {
+    // Contains the verified size for:
+    // - The meta, control, and field names for previously unaccounted fields in a Bucket.
+    // - Data fields after intermediate().
+    int32_t uncommittedVerifiedSize = 0;
+
+    // The estimated size of uncommitted data fields being inserted into a Bucket.
+    int32_t uncommittedMeasurementEstimate = 0;
+
+    int32_t total() const {
+        return uncommittedVerifiedSize + uncommittedMeasurementEstimate;
+    }
+
+    void operator+=(const Sizes& other) {
+        uncommittedVerifiedSize += other.uncommittedVerifiedSize;
+        uncommittedMeasurementEstimate += other.uncommittedMeasurementEstimate;
+    }
+};
+
 /**
  * The basic unit of work for a bucket. Each insert will return a shared_ptr to a WriteBatch.
  * When a writer is finished with all their insertions, they should then take steps to ensure
@@ -69,6 +88,9 @@ struct CommitInfo {
  * it means another writer is in the process of committing. The writer can proceed to do other
  * work (like commit another batch), and when they have no other work to do, they can wait for
  * this batch to be committed by executing the blocking operation getWriteBatchResult().
+ *
+ * The order of members of this struct have been optimized for memory alignment, and therefore
+ * a low memory footprint. Take extra care if modifying the order or adding or removing fields.
  */
 struct WriteBatch {
     WriteBatch() = delete;
@@ -85,7 +107,9 @@ struct WriteBatch {
 
     // Whether the measurements in the bucket are sorted by timestamp or not.
     // True by default, if a v2 buckets gets promoted to v3 this is set to false.
-    // It should not be used for v1 buckets.
+    // It should not be used for v1 buckets. v2 buckets are preferred over v3 for improved
+    // read/query performance, v3 buckets get created as necessary to retain higher write
+    // performance.
     bool bucketIsSortedByTime = true;
 
     bool openedDueToMetadata =
@@ -112,6 +136,11 @@ struct WriteBatch {
     SharedPromise<CommitInfo> promise;
 
     ExecutionStatsController stats;
+
+    // Marginal numbers for this batch only. Uncommitted is a rough estimate of data in this batch,
+    // using 0 for anything under threshold, and uncompressed size for anything over threshold.
+    // Committed is 0 until it is populated by intermediate as the delta for committing this batch.
+    Sizes sizes;
 
     StringMap<std::size_t> newFieldNamesToBeInserted;  // Value is hash of string key
 
@@ -145,7 +174,7 @@ bool isWriteBatchFinished(const WriteBatch& batch);
 /**
  * Attempts to claim the right to commit a batch. If it returns true, rights are
  * granted. If it returns false, rights are revoked, and the caller should get the result
- * of the batch with getResult(). Non-blocking.
+ * of the batch with getWriteBatchResult(). Non-blocking.
  */
 bool claimWriteBatchCommitRights(WriteBatch& batch);
 

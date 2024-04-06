@@ -406,6 +406,21 @@ bool CommandHelpers::extractOrAppendOk(BSONObjBuilder& reply) {
     return true;
 }
 
+Status CommandHelpers::extractOrAppendOkAndGetStatus(BSONObjBuilder& reply) {
+    auto replyObj = reply.asTempObj();
+    auto okField = replyObj["ok"];
+    if (!okField) {
+        reply.append("ok", 1.0);
+        return Status::OK();
+    }
+
+    if (okField.trueValue()) {
+        return Status::OK();
+    }
+
+    return getErrorStatusFromCommandResult(replyObj);
+}
+
 void CommandHelpers::appendCommandWCStatus(BSONObjBuilder& result,
                                            const Status& awaitReplicationStatus,
                                            const WriteConcernResult& wcResult) {
@@ -706,11 +721,6 @@ void CommandHelpers::evaluateFailCommandFailPoint(OperationContext* opCtx,
      * Default value is used to suppress the uassert for `errorExtraInfo` if `errorCode` is not set.
      */
     long long errorCode = ErrorCodes::OK;
-    /**
-     * errorExtraInfo only holds a reference to the BSONElement of the parent object (data).
-     * The copy constructor of BSONObj handles cloning to keep references valid outside the scope.
-     */
-    BSONElement errorExtraInfo;
     const Command* cmd = invocation->definition();
     failCommand.executeIf(
         [&](const BSONObj& data) {
@@ -871,7 +881,7 @@ void CommandInvocation::set(OperationContext* opCtx,
     invocationForOpCtx(opCtx) = std::move(invocation);
 }
 
-std::shared_ptr<CommandInvocation> CommandInvocation::get(OperationContext* opCtx) {
+std::shared_ptr<CommandInvocation>& CommandInvocation::get(OperationContext* opCtx) {
     return invocationForOpCtx(opCtx);
 }
 

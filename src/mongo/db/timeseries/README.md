@@ -12,19 +12,19 @@ the `expireAfterSeconds` option.
 A time-series collection `mytscoll` in the `mydb` database is represented in the [catalog](../catalog/README.md) by a
 combination of a view and a system collection:
 
--   The view `mydb.mytscoll` is defined with the bucket collection as the source collection with
-    certain properties:
-    _ Writes (inserts only) are allowed on the view. Every document inserted must contain a time field.
-    _ Querying the view implicitly unwinds the data in the underlying bucket collection to return
-    documents in their original non-bucketed form. \* The aggregation stage [$\_internalUnpackBucket](../pipeline/document_source_internal_unpack_bucket.h) is used to
-    unwind the bucket data for the view. For more information about this stage and query rewrites for
-    time-series collections see [query/timeseries/README](../query/timeseries/README.md).
--   The system collection has the namespace `mydb.system.buckets.mytscoll` and is where the actual
-    data is stored.
-    -   Each document in the bucket collection represents a set of time-series data within a period of time.
-    -   If a meta-data field is defined at creation time, this will be used to organize the buckets so that
-        all measurements within a bucket have a common meta-data value.
-    -   Besides the time range, buckets are also constrained by the total number and size of measurements.
+- The view `mydb.mytscoll` is defined with the bucket collection as the source collection with
+  certain properties:
+  _ Writes (inserts only) are allowed on the view. Every document inserted must contain a time field.
+  _ Querying the view implicitly unwinds the data in the underlying bucket collection to return
+  documents in their original non-bucketed form. \* The aggregation stage [$\_internalUnpackBucket](../pipeline/document_source_internal_unpack_bucket.h) is used to
+  unwind the bucket data for the view. For more information about this stage and query rewrites for
+  time-series collections see [query/timeseries/README](../query/timeseries/README.md).
+- The system collection has the namespace `mydb.system.buckets.mytscoll` and is where the actual
+  data is stored.
+  - Each document in the bucket collection represents a set of time-series data within a period of time.
+  - If a meta-data field is defined at creation time, this will be used to organize the buckets so that
+    all measurements within a bucket have a common meta-data value.
+  - Besides the time range, buckets are also constrained by the total number and size of measurements.
 
 Time-series collections can also be sharded. For more information about sharding-specific implementation
 details, see [db/s/README_timeseries.md](../s/README_timeseries.md).
@@ -42,7 +42,7 @@ Uncompressed bucket (version 1):
         min: {
             <time field>: <time of first measurement in this bucket, rounded down based on granularity>,
             <field0>: <minimum value of 'field0' across all measurements>,
-            <field1>: <maximum value of 'field1' across all measurements>,
+            <field1>: <minimum value of 'field1' across all measurements>,
             ...
         },
         max: {
@@ -83,7 +83,8 @@ have more elements than the timefield.
 
 There are two types of compressed buckets, version 2 and version 3. They differ only in that the
 entries in the data field of version 2 buckets are sorted on the time field, whereas this is not
-enforced for version 3 buckets.
+enforced for version 3 buckets. Buckets with version 2 are perferred over version 3 for improved
+read/query performance. Version 3 buckets are created as necessary to retain high write performance.
 
 Compressed bucket (version 2 and version 3):
 
@@ -96,7 +97,7 @@ Compressed bucket (version 2 and version 3):
         min: {
             <time field>: <time of first measurement in this bucket, rounded down based on granularity>,
             <field0>: <minimum value of 'field0' across all measurements>,
-            <field1>: <maximum value of 'field1' across all measurements>,
+            <field1>: <minimum value of 'field1' across all measurements>,
             ...
         },
         max: {
@@ -139,12 +140,13 @@ at least one out-of-order measurement). Queries can also be less performant on V
 cannot rely on the fact that V3 buckets have their measurements in order by time.
 
 New V1 buckets will no longer be created in 8.0+, but existing V1 buckets from upgrades will
-continue to be supported. Closed V1 buckets can be re-opened, and will be compressed when more
-measurements are inserted into them.
+continue to be supported. Closed V1 buckets can be reopened, and will be compressed when more
+measurements are inserted into them. Specifically, the bucket will be compressed as v2 the
+[moment it is reopened](https://github.com/mongodb/mongo/blob/4ccd7e74075ac8a9685981570b575acf74efe350/src/mongo/db/timeseries/timeseries_write_util.cpp#L721), and the insert [will then operate](https://github.com/mongodb/mongo/blob/4ccd7e74075ac8a9685981570b575acf74efe350/src/mongo/db/timeseries/timeseries_write_util.cpp#L1075-L1081) on a compressed bucket.
 
 ### BSONColumnBuilder
 
-Each V2 and V3 bucket has a MeasurementMap, which is a map from each data field (excluding the meta field) in a bucket
+Each V2 and V3 bucket has a `MeasurementMap`, which is a map from each data field (excluding the meta field) in a bucket
 to a corresponding BSONColumnBuilder for that field. For example, if a bucket has a timefield `time`,
 there will be a mapping (`time` -> BSONColumnnBuilder for the BSONColumn of time data).
 
@@ -212,13 +214,13 @@ of a time-series collection. Starting in v6.0, indexes on time-series collection
 are permitted. The index key specification provided by the user via `createIndex` will be converted
 to the underlying buckets collection's schema.
 
--   The details for mapping the index specification between the time-series collection and the
-    underlying buckets collection may be found in
-    [timeseries_index_schema_conversion_functions.h](timeseries_index_schema_conversion_functions.h).
--   Newly supported index types in v6.0 and up
-    [store the original user index definition](https://github.com/mongodb/mongo/blob/cf80c11bc5308d9b889ed61c1a3eeb821839df56/src/mongo/db/timeseries/timeseries_commands_conversion_helper.cpp#L140-L147)
-    on the transformed index definition. When mapping the bucket collection index to the time-series
-    collection index, the original user index definition is returned.
+- The details for mapping the index specification between the time-series collection and the
+  underlying buckets collection may be found in
+  [timeseries_index_schema_conversion_functions.h](timeseries_index_schema_conversion_functions.h).
+- Newly supported index types in v6.0 and up
+  [store the original user index definition](https://github.com/mongodb/mongo/blob/cf80c11bc5308d9b889ed61c1a3eeb821839df56/src/mongo/db/timeseries/timeseries_commands_conversion_helper.cpp#L140-L147)
+  on the transformed index definition. When mapping the bucket collection index to the time-series
+  collection index, the original user index definition is returned.
 
 Once the indexes have been created, they can be inspected through the `listIndexes` command or the
 `$indexStats` aggregation stage. `listIndexes` and `$indexStats` against a time-series collection
@@ -232,29 +234,29 @@ time-series collections.
 
 Supported index types on the time field:
 
--   [Single](https://docs.mongodb.com/manual/core/index-single/).
--   [Compound](https://docs.mongodb.com/manual/core/index-compound/).
--   [Hashed](https://docs.mongodb.com/manual/core/index-hashed/).
--   [Wildcard](https://docs.mongodb.com/manual/core/index-wildcard/).
--   [Sparse](https://docs.mongodb.com/manual/core/index-sparse/).
--   [Multikey](https://docs.mongodb.com/manual/core/index-multikey/).
--   [Indexes with collations](https://docs.mongodb.com/manual/indexes/#indexes-and-collation).
+- [Single](https://docs.mongodb.com/manual/core/index-single/).
+- [Compound](https://docs.mongodb.com/manual/core/index-compound/).
+- [Hashed](https://docs.mongodb.com/manual/core/index-hashed/).
+- [Wildcard](https://docs.mongodb.com/manual/core/index-wildcard/).
+- [Sparse](https://docs.mongodb.com/manual/core/index-sparse/).
+- [Multikey](https://docs.mongodb.com/manual/core/index-multikey/).
+- [Indexes with collations](https://docs.mongodb.com/manual/indexes/#indexes-and-collation).
 
 Supported index types on the metaField or its subfields:
 
--   All of the supported index types on the time field.
--   [2d](https://docs.mongodb.com/manual/core/2d/) from v6.0.
--   [2dsphere](https://docs.mongodb.com/manual/core/2dsphere/) from v6.0.
--   [Partial](https://docs.mongodb.com/manual/core/index-partial/) from v6.0.
+- All of the supported index types on the time field.
+- [2d](https://docs.mongodb.com/manual/core/2d/) from v6.0.
+- [2dsphere](https://docs.mongodb.com/manual/core/2dsphere/) from v6.0.
+- [Partial](https://docs.mongodb.com/manual/core/index-partial/) from v6.0.
 
 Supported index types on measurement fields in v6.0 and up only:
 
--   [Single](https://docs.mongodb.com/manual/core/index-single/) from v6.0.
--   [Compound](https://docs.mongodb.com/manual/core/index-compound/) from v6.0.
--   [2dsphere](https://docs.mongodb.com/manual/core/2dsphere/) from v6.0.
--   [Partial](https://docs.mongodb.com/manual/core/index-partial/) from v6.0.
--   [TTL](https://docs.mongodb.com/manual/core/index-ttl/) from v6.3. Must be used in conjunction with
-    a `partialFilterExpression` based on the metaField or its subfields.
+- [Single](https://docs.mongodb.com/manual/core/index-single/) from v6.0.
+- [Compound](https://docs.mongodb.com/manual/core/index-compound/) from v6.0.
+- [2dsphere](https://docs.mongodb.com/manual/core/2dsphere/) from v6.0.
+- [Partial](https://docs.mongodb.com/manual/core/index-partial/) from v6.0.
+- [TTL](https://docs.mongodb.com/manual/core/index-ttl/) from v6.3. Must be used in conjunction with
+  a `partialFilterExpression` based on the metaField or its subfields.
 
 Index types that are not supported on time-series collections include
 [unique](https://docs.mongodb.com/manual/core/index-unique/), and

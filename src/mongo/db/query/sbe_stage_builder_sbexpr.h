@@ -620,6 +620,17 @@ struct SbAggExpr {
 
 using SbAggExprVector = std::vector<std::pair<SbAggExpr, boost::optional<SbSlot>>>;
 
+struct SbWindow {
+    SbSlotVector windowExprSlots;
+    SbSlotVector frameFirstSlots;
+    SbSlotVector frameLastSlots;
+    SbExpr::Vector initExprs;
+    SbExpr::Vector addExprs;
+    SbExpr::Vector removeExprs;
+    SbExpr lowBoundExpr;
+    SbExpr highBoundExpr;
+};
+
 inline void addVariableTypesHelper(VariableTypes& varTypes, SbSlot slot) {
     if (auto typeSig = slot.getTypeSignature()) {
         varTypes[getABTVariableName(slot)] = *typeSig;
@@ -698,14 +709,5 @@ SbExpr buildVectorizedExpr(StageBuilderState& state,
                            SbExpr scalarExpression,
                            const PlanStageSlots& outputs,
                            bool forFilterStage);
-
-/**
- * In the past, "SbSlot" used to be named "TypedSlot". For now we have this type alias so that code
- * that refers to "TypedSlot" still works.
- *
- * TODO SERVER-84559: Remove these type aliases when they're no longer needed.
- */
-using TypedSlot = SbSlot;
-using TypedSlotVector = SbSlotVector;
 
 }  // namespace mongo::stage_builder

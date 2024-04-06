@@ -28,13 +28,10 @@
  */
 #pragma once
 
-#include <cstdint>
-#include <type_traits>
-
 #include <boost/optional.hpp>
 
 #include "mongo/base/string_data.h"
-#include "mongo/platform/atomic_word.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/tick_source.h"
 
 namespace mongo {
@@ -46,6 +43,9 @@ class OperationContext;
  */
 class AdmissionContext {
 public:
+    AdmissionContext(const AdmissionContext& other);
+    AdmissionContext& operator=(const AdmissionContext& other);
+
     /**
      * Classifies the priority that an operation acquires a ticket when the system is under high
      * load (operations are throttled waiting for a ticket). Only applicable when there are no
@@ -70,28 +70,39 @@ public:
      */
     enum class Priority { kExempt = 0, kLow, kNormal };
 
-    void recordAdmission() {
-        _admissions += 1;
-    }
+    /**
+     * Returns the total time this admission context has ever waited in a queue.
+     */
+    Microseconds totalTimeQueuedMicros() const;
+
+    /**
+     * Returns the time this admission context started waiting to be queued, if it is currently
+     * queued.
+     */
+    boost::optional<TickSource::Tick> startQueueingTime() const;
 
     /**
      * Returns the number of times this context has taken a ticket.
      */
-    int getAdmissions() const {
-        return _admissions;
-    }
+    int getAdmissions() const;
 
-    Priority getPriority() const {
-        return _priority;
-    }
+    Priority getPriority() const;
 
 protected:
     friend class ScopedAdmissionPriorityBase;
+    friend class TicketHolder;
+    friend class WaitingForAdmissionGuard;
 
     AdmissionContext() = default;
 
-    int32_t _admissions{0};
-    Priority _priority{Priority::kNormal};
+    void recordAdmission();
+
+    constexpr static TickSource::Tick kNotQueueing = -1;
+
+    Atomic<int32_t> _admissions{0};
+    Atomic<Priority> _priority{Priority::kNormal};
+    Atomic<int64_t> _totalTimeQueuedMicros;
+    Atomic<TickSource::Tick> _startQueueingTime{kNotQueueing};
 };
 
 /**
@@ -127,6 +138,16 @@ public:
     explicit ScopedAdmissionPriority(OperationContext* opCtx, AdmissionContext::Priority priority)
         : ScopedAdmissionPriorityBase(opCtx, AdmissionContextType::get(opCtx), priority) {}
     ~ScopedAdmissionPriority() = default;
+};
+
+class WaitingForAdmissionGuard {
+public:
+    explicit WaitingForAdmissionGuard(AdmissionContext* admCtx, TickSource* tickSource);
+    ~WaitingForAdmissionGuard();
+
+private:
+    AdmissionContext* _admCtx;
+    TickSource* _tickSource;
 };
 
 StringData toString(AdmissionContext::Priority priority);

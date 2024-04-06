@@ -16,6 +16,7 @@
  */
 
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {runCommandWithSecurityToken} from "jstests/libs/multitenancy_utils.js";
 import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
 import {
     assertShardingMetadataForUnshardedCollectionDoesNotExist,
@@ -73,8 +74,8 @@ function makeDatabaseNameForTest() {
 function runTest(shard0Primary, execCtxType, expectShardingMetadata) {
     // Test implicit database and collection creation.
 
-    // TODO SERVER-85366 remove this check once retryable write can create unsplittable collections
-    // after an insert
+    // TODO SERVER-86254 adapt this check once retryable writes can track unsplittable collections
+    // on creation after an insert
     if (execCtxType == execCtxTypes.kRetryableWrite) {
         const dbName0 = makeDatabaseNameForTest();
         const collName0 = "testColl";
@@ -96,8 +97,8 @@ function runTest(shard0Primary, execCtxType, expectShardingMetadata) {
     const dbName2 = makeDatabaseNameForTest();
     const collName2 = "testColl0";
     assert.commandWorked(shard0Primary.getDB(dbName2).createCollection("testColl1"));
-    // TODO SERVER-85366 remove this check once retryable write can create unsplittable collections
-    // after an insert
+    // TODO SERVER-86254 adapt this check once retryable write can track unsplittable collections on
+    // creation after an insert
     if (execCtxType == execCtxTypes.kRetryableWrite) {
         testImplicitCreateCollection(
             shard0Primary, execCtxType, dbName2, collName2, "insert", false);
@@ -370,7 +371,7 @@ function getReplicaSetRestartOptions(maintenanceMode, setParameterOpts) {
 
 {
     jsTest.log("Running tests for a serverless replica set bootstrapped as a single-shard cluster");
-    // For serverless, commands against user collections require the "$tenant" field and auth.
+    // For serverless, commands against user collections require the unsigned token and auth.
     const keyFile = "jstests/libs/key1";
     const tenantId = ObjectId();
     const vtsKey = "secret";
@@ -402,20 +403,21 @@ function getReplicaSetRestartOptions(maintenanceMode, setParameterOpts) {
     const testRole = {
         name: "testRole",
         roles: ["readWriteAnyDatabase"],
-        privileges: [{resource: {db: "config", collection: ""}, actions: ["find"]}],
-        tenantId
+        privileges: [{resource: {db: "config", collection: ""}, actions: ["find"]}]
     };
     const testUser =
         {userName: "testUser", password: "testUserPwd", roles: [testRole.name], tenantId};
-    testUser.securityToken =
-        _createSecurityToken({user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey);
-    assert.commandWorked(adminDB.runCommand(makeCreateRoleCmdObj(testRole)));
-    assert.commandWorked(adminDB.runCommand(makeCreateUserCmdObj(testUser)));
+    const unsignedToken = _createTenantToken({tenant: tenantId});
+    assert.commandWorked(
+        runCommandWithSecurityToken(unsignedToken, adminDB, makeCreateRoleCmdObj(testRole)));
+    assert.commandWorked(
+        runCommandWithSecurityToken(unsignedToken, adminDB, makeCreateUserCmdObj(testUser)));
     adminDB.logout();
 
     const getShard0PrimaryFunc = () => {
         const primary = rst.getPrimary();
-        primary._setSecurityToken(testUser.securityToken);
+        primary._setSecurityToken(_createSecurityToken(
+            {user: testUser.userName, db: authDbName, tenant: tenantId}, vtsKey));
         return primary;
     };
     const restartFunc = (maintenanceMode) => {

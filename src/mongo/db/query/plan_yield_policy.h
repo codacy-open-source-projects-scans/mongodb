@@ -39,6 +39,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
@@ -211,7 +212,14 @@ public:
      * YIELD_AUTO and INTERRUPT_ONLY) or release locks or storage engine state (in the case of
      * auto-yielding plans).
      */
-    virtual bool shouldYieldOrInterrupt(OperationContext* opCtx);
+    inline bool shouldYieldOrInterrupt(OperationContext* opCtx) {
+        if (auto t = _fastClock->now().toMillisSinceEpoch();
+            MONGO_unlikely(_forceYield || t > _nextYieldCheckpoint)) {
+            _nextYieldCheckpoint = t + _yieldIntervalMs;
+            return doShouldYieldOrInterrupt(opCtx);
+        }
+        return false;
+    }
 
     /**
      * Resets the yield timer so that we wait for a while before yielding/interrupting again.
@@ -239,7 +247,7 @@ public:
      * yieldOrInterrupt(). This must only be called for auto-yielding plans, to force a yield. It
      * cannot be used to force an interrupt for INTERRUPT_ONLY plans.
      */
-    void forceYield() {
+    MONGO_COMPILER_ALWAYS_INLINE void forceYield() {
         dassert(canAutoYield());
         _forceYield = true;
     }
@@ -269,7 +277,7 @@ public:
      * either releasing storage engine resources via abandonSnapshot() OR yielding LockManager
      * locks.
      */
-    bool canAutoYield() const {
+    MONGO_COMPILER_ALWAYS_INLINE bool canAutoYield() const {
         switch (_policy) {
             case YieldPolicy::YIELD_AUTO:
             case YieldPolicy::WRITE_CONFLICT_RETRY_ONLY:
@@ -296,6 +304,12 @@ public:
     bool usesCollectionAcquisitions() const {
         return holds_alternative<YieldThroughAcquisitions>(_yieldable);
     }
+
+protected:
+    /**
+     * The function that actually do check for interrupt or release locks or storage engine state.
+     */
+    MONGO_COMPILER_NOINLINE virtual bool doShouldYieldOrInterrupt(OperationContext* opCtx);
 
 private:
     /**
@@ -331,8 +345,11 @@ private:
     std::variant<const Yieldable*, YieldThroughAcquisitions> _yieldable;
     std::unique_ptr<const YieldPolicyCallbacks> _callbacks;
 
-    bool _forceYield = false;
     ElapsedTracker _elapsedTracker;
+    int64_t _yieldIntervalMs;
+    ClockSource* _fastClock;
+    int64_t _nextYieldCheckpoint{0};
+    bool _forceYield = false;
 };
 
 }  // namespace mongo

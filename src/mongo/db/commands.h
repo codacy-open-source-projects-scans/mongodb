@@ -222,6 +222,12 @@ struct CommandHelpers {
     static bool extractOrAppendOk(BSONObjBuilder& reply);
 
     /**
+     * Parses an "ok" field, or appends "ok" to the command reply. Additionally returns a Status
+     * representing an "ok" or an error.
+     */
+    static Status extractOrAppendOkAndGetStatus(BSONObjBuilder& reply);
+
+    /**
      * Helper for setting a writeConcernError field in the command result object if
      * a writeConcern error occurs.
      *
@@ -758,7 +764,7 @@ public:
     virtual ~CommandInvocation();
 
     static void set(OperationContext* opCtx, std::shared_ptr<CommandInvocation> invocation);
-    static std::shared_ptr<CommandInvocation> get(OperationContext* opCtx);
+    static std::shared_ptr<CommandInvocation>& get(OperationContext* opCtx);
 
     /**
      * Runs the command, filling in result. Any exception thrown from here will cause result
@@ -926,6 +932,10 @@ public:
      */
     virtual bool isSubjectToIngressAdmissionControl() const {
         return false;
+    }
+
+    virtual bool isReadOperation() const {
+        return _definition->getReadWriteType() == Command::ReadWriteType::kRead;
     }
 
     /**

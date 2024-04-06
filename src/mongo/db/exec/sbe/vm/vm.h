@@ -52,6 +52,7 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/sbe/makeobj_spec.h"
 #include "mongo/db/exec/sbe/sort_spec.h"
+#include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/column_op.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -637,6 +638,8 @@ enum class Builtin : uint16_t {
     setToArray,
     arrayToObject,
 
+    fillType,
+
     aggFirstNNeedsMoreInput,
     aggFirstN,
     aggFirstNMerge,
@@ -716,7 +719,6 @@ enum class Builtin : uint16_t {
     aggRemovableBottomNRemove,
     aggRemovableBottomNFinalize,
 
-
     // Additional one-byte builtins go here.
 
     // Start of 2 byte builtins.
@@ -725,6 +727,7 @@ enum class Builtin : uint16_t {
     valueBlockIsTimezone,
     valueBlockFillEmpty,
     valueBlockFillEmptyBlock,
+    valueBlockFillType,
     valueBlockAggMin,
     valueBlockAggMax,
     valueBlockAggCount,
@@ -1330,6 +1333,9 @@ public:
     FastTuple<bool, value::TypeTags, value::Value> run(const CodeFragment* code);
     bool runPredicate(const CodeFragment* code);
 
+    typedef std::tuple<value::Array*, value::Array*, size_t, size_t, int32_t, int32_t, bool>
+        multiAccState;
+
 private:
     void runInternal(const CodeFragment* code, int64_t position);
     void runLambdaInternal(const CodeFragment* code, int64_t position);
@@ -1784,6 +1790,9 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToSetCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollAddToSetCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinSetToArray(ArityType arity);
+
+    FastTuple<bool, value::TypeTags, value::Value> builtinFillType(ArityType arity);
+
     FastTuple<bool, value::TypeTags, value::Value> builtinConvertSimpleSumToDoubleDoubleSum(
         ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinDoubleDoubleSum(ArityType arity);
@@ -1907,9 +1916,6 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinISOWeek(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinObjectToArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinArrayToObject(ArityType arity);
-
-    typedef std::tuple<value::Array*, value::Array*, size_t, size_t, int32_t, int32_t, bool>
-        multiAccState;
 
     static multiAccState getMultiAccState(value::TypeTags stateTag, value::Value stateVal);
 
@@ -2049,11 +2055,13 @@ private:
         ArityType arity);
 
     // Block builtins
+
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockExists(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockTypeMatch(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockIsTimezone(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmpty(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillEmptyBlock(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockFillType(ArityType arity);
     template <bool less>
     FastTuple<bool, value::TypeTags, value::Value> valueBlockMinMaxImpl(
         value::ValueBlock* inputBlock, value::ValueBlock* bitsetBlock);
@@ -2072,35 +2080,6 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockAggDoubleDoubleSum(
         ArityType arity);
 
-    // The intermediate heap will always store a tag, val pair and a value representing an array
-    // index,
-    // so we can use this struct instead of creating an SBE value from the index.
-    struct SortKeyAndIdx {
-        std::pair<value::TypeTags, value::Value> sortKey;
-        size_t outIdx = 0;
-    };
-
-    // Comparison based on the key of a SortKeyAndIdx.
-    template <typename Comp>
-    struct SortKeyAndIdxComp {
-        SortKeyAndIdxComp(const Comp& comp) : _comp(comp) {}
-
-        bool operator()(const SortKeyAndIdx& lhs, const SortKeyAndIdx& rhs) const {
-            return _comp(lhs.sortKey, rhs.sortKey);
-        }
-
-    private:
-        const Comp _comp;
-    };
-
-    // Used as a helper for blockNativeAggTopBottomNImpl, should not be used as a mergingExpr.
-    template <typename Less>
-    void combineBlockNativeAggTopBottomN(value::TypeTags stateTag,
-                                         value::Value stateVal,
-                                         std::vector<SortKeyAndIdx> newArr,
-                                         value::ValueBlock* valBlock,
-                                         Less less);
-
     // Take advantage of the fact that we know we have block input, instead of looping over
     // generalized helper functions.
     template <TopBottomSense Sense, bool ValueIsArray>
@@ -2109,8 +2088,8 @@ private:
         value::Value stateVal,
         value::ValueBlock* bitsetBlock,
         SortSpec* sortSpec,
-        size_t numKeyBlocks,
-        size_t numValBlocks);
+        size_t numKeysBlocks,
+        size_t numValuesBlocks);
 
     template <TopBottomSense Sense, bool ValueIsArray>
     FastTuple<bool, value::TypeTags, value::Value> builtinValueBlockAggTopBottomNImpl(

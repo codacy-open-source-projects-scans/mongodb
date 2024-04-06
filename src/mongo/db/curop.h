@@ -41,7 +41,6 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <ratio>
 #include <string>
 #include <utility>
 #include <vector>
@@ -50,7 +49,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/user_acquisition_stats.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -58,7 +56,6 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/concurrency/flow_control_ticketholder.h"
 #include "mongo/db/concurrency/lock_stats.h"
-#include "mongo/db/cursor_id.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_cursor_gen.h"
 #include "mongo/db/namespace_string.h"
@@ -87,7 +84,6 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/system_tick_source.h"
 #include "mongo/util/tick_source.h"
-#include "mongo/util/time_support.h"
 
 #ifndef MONGO_CONFIG_USE_RAW_LATCHES
 #include "mongo/util/diagnostic_info.h"
@@ -363,8 +359,6 @@ public:
     boost::optional<uint32_t> planCacheKey;
     // The hash of the query's "stable" key. This represents the query's shape.
     boost::optional<uint32_t> queryHash;
-    // The hash of the query's shape.
-    boost::optional<query_shape::QueryShapeHash> queryShapeHash;
 
     /* The QueryStatsInfo struct was created to bundle all the queryStats related fields of CurOp &
      * OpDebug together (SERVER-83280).
@@ -514,9 +508,6 @@ public:
     // resolved views per query, a hash map would unlikely provide any benefits.
     std::map<NamespaceString, std::pair<std::vector<NamespaceString>, std::vector<BSONObj>>>
         resolvedViews;
-
-    // Stores the time the operation spent waiting for ingress admission control ticket
-    Microseconds waitForIngressAdmissionTicketDurationMicros{0};
 };
 
 /**
@@ -1098,8 +1089,12 @@ public:
         return _shouldOmitDiagnosticInformation;
     }
 
-    void setWaitingForIngressAdmission(WithLock, bool waiting) {
-        _waitingForIngressAdmission = waiting;
+    boost::optional<query_shape::QueryShapeHash> getQueryShapeHash() const {
+        return _queryShapeHash;
+    }
+
+    void setQueryShapeHash(const boost::optional<query_shape::QueryShapeHash>& hash) {
+        _queryShapeHash = hash;
     }
 
 private:
@@ -1214,14 +1209,14 @@ private:
     // allows for a data race between stopWaitForWriteConcernTimer and curop::reportState.
     std::atomic<Milliseconds> _atomicWaitForWriteConcernDurationMillis{Milliseconds{0}};  // NOLINT
 
-    // True if waiting for ingress admission ticket
-    bool _waitingForIngressAdmission{false};
-
     // Flag to decide if diagnostic information should be omitted.
     bool _shouldOmitDiagnosticInformation{false};
 
     // TODO SERVER-87201: Remove need to zero out blocked time prior to operation starting.
     Milliseconds _blockedTimeAtStart{0};
+
+    // The hash of the query's shape.
+    boost::optional<query_shape::QueryShapeHash> _queryShapeHash{boost::none};
 };
 
 }  // namespace mongo

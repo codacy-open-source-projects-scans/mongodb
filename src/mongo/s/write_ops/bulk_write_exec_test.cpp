@@ -4713,16 +4713,9 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, MatchAndRetryableErrorBatched) {
             boost::none},
         boost::none);
 
-    ASSERT_EQ(updateOp1.getChildWriteOps_forTest()[0].state, WriteOpState_Deferred);
-    ASSERT_EQ(updateOp1.getChildWriteOps_forTest()[1].state, WriteOpState_Deferred);
-    ASSERT_EQ(updateOp1.getChildWriteOps_forTest()[2].state, WriteOpState_Error);
-
-    ASSERT_EQ(updateOp2.getChildWriteOps_forTest()[0].state, WriteOpState_Deferred);
-    ASSERT_EQ(updateOp2.getChildWriteOps_forTest()[1].state, WriteOpState_Deferred);
-    ASSERT_EQ(updateOp2.getChildWriteOps_forTest()[2].state, WriteOpState_Error);
-
-    // Despite the retry error, we should consider the write a success since we got an n=1
-    // from the last shard and can ignore the error.
+    // Due to the retry error, we should have reset the write to ready and cleared the child ops.
+    ASSERT_EQ(updateOp1.getWriteState(), WriteOpState_Ready);
+    ASSERT_EQ(updateOp2.getWriteState(), WriteOpState_Ready);
     ASSERT_EQ(updateOp1.getChildWriteOps_forTest().size(), 0);
     ASSERT_EQ(updateOp2.getChildWriteOps_forTest().size(), 0);
     ASSERT_FALSE(op.isFinished());
@@ -5843,59 +5836,6 @@ TEST_F(BulkWriteExecTest, TestMaxRoundsWithoutProgress) {
             return reply.toBSON();
         });
     }
-
-    future.default_timed_get();
-}
-
-TEST_F(BulkWriteExecTest, TestWriteConcernUpgradesFromW0) {
-    NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
-    ShardEndpoint endpoint0(
-        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
-
-    std::vector<std::unique_ptr<NSTargeter>> targeters;
-    targeters.push_back(initTargeterFullRange(nss0, endpoint0));
-
-    BulkWriteCommandRequest request(
-        {BulkWriteInsertOp(0, BSON("x" << 1)), BulkWriteInsertOp(0, BSON("x" << 2))},
-        {NamespaceInfoEntry(nss0)});
-
-    LOGV2(8340600, "Executing a bulkWrite with w:0 writeConcern that should be upgraded.");
-
-    auto future = launchAsync([&] {
-        auto opCtx = operationContext();
-        opCtx->setWriteConcern(
-            WriteConcernOptions::parse(WriteConcernOptions::Unacknowledged).getValue());
-        auto reply = bulk_write_exec::execute(opCtx, targeters, request);
-
-        // Should have 2 reply items.
-        ASSERT_EQUALS(reply.replyItems.size(), 2u);
-        ASSERT_EQUALS(reply.summaryFields.nInserted, 2);
-    });
-
-    // Check the request to make sure it contains non-w:0 WC.
-    onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
-        LOGV2(8340601,
-              "Mocking a normal response after checking for writeConcern value.",
-              "request"_attr = request);
-
-        ASSERT(request.cmdObj.hasField("writeConcern"));
-        auto wcField = request.cmdObj.getField("writeConcern").Obj();
-        ASSERT(wcField.hasField("w"));
-        ASSERT_NE(wcField.getField("w").numberInt(), 0);
-
-        BulkWriteCommandReply reply;
-        reply.setCursor(BulkWriteCommandResponseCursor(
-            0,  // cursorId
-            std::vector<mongo::BulkWriteReplyItem>{BulkWriteReplyItem(0), BulkWriteReplyItem(1)},
-            NamespaceString::makeBulkWriteNSS(boost::none)));
-        reply.setNErrors(0);
-        reply.setNInserted(2);
-        reply.setNDeleted(0);
-        reply.setNMatched(0);
-        reply.setNModified(0);
-        reply.setNUpserted(0);
-        return reply.toBSON();
-    });
 
     future.default_timed_get();
 }

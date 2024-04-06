@@ -268,6 +268,7 @@
 #include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
+#include "mongo/util/allocator_thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
 #include "mongo/util/clock_source.h"
@@ -725,8 +726,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         // Initialize the cached pointer to the oplog collection. We want to do this even as
         // standalone
         // so accesses to the cached pointer in replica set nodes started as standalone still work
-        // (mainly AutoGetOplog). In case the oplog doesn't exist, it is just initialized to null.
-        // This initialization must happen within a GlobalWrite lock context.
+        // (mainly AutoGetOplogFastPath). In case the oplog doesn't exist, it is just initialized to
+        // null. This initialization must happen within a GlobalWrite lock context.
         repl::acquireOplogCollectionForLogging(startupOpCtx.get());
     }
 
@@ -2197,6 +2198,8 @@ int mongod_main(int argc, char* argv[]) {
     // Per SERVER-7434, startSignalProcessingThread must run after any forks (i.e.
     // initialize_server_global_state::forkServerOrDie) and before the creation of any other threads
     startSignalProcessingThread();
+
+    startAllocatorThread();
 
     ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);
     ChangeStreamOptionsManager::create(service);

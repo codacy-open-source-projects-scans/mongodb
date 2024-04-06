@@ -132,9 +132,7 @@ server_parameters:
         set_at: [ startup, runtime ]
         cpp_varname: "internalInsertMaxBatchSize"
         cpp_vartype: AtomicWord<int>
-        default:
-            expr: 64
-            is_constexpr: false
+        default: 500
         validator:
             gt: 0
         redact: false
@@ -273,7 +271,8 @@ feature_flags:
             Enable support to always use the compressed time-series bucket format when inserting,
             updating, or removing data into new, existing, or re-opened buckets.
         cpp_varname: feature_flags::gTimeseriesAlwaysUseCompressedBuckets
-        default: false
+        default: true
+        version: 8.0
         shouldBeFCVGated: true
     featureFlagTSBucketingParametersUnchanged:
         description: "Enable storing the 'timeseriesBucketingParametersHaveChanged' parameter on disk"

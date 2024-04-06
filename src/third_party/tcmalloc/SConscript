@@ -7,6 +7,7 @@ import SCons
 
 Import("env")
 Import("has_option")
+Import("get_option")
 
 env = env.Clone(
     # Building with hidden visibility interferes with intercepting the
@@ -56,7 +57,7 @@ _bazelToSconsMap = dict(
         'memory': [],
         'numeric:bits': [],
         'numeric:int128': [],
-        'strings:str_format': [],
+        'strings:str_format': ['str_format_internal'],
         'types:optional': [],
         'types:span': [],
     }.items())
@@ -157,6 +158,13 @@ def slurpBlaze(target, source, exports, env):
         if 'LIBDEPS' in kwargs:
             kwargs['LIBDEPS'] = sorted(list(set(kwargs['LIBDEPS'])))
 
+        # libunwind and tcmalloc are both added as global dependencies. Skip
+        # inheriting global dependencies to avoid a circular dependency.
+        kwargs['LIBDEPS_NO_INHERIT'] = [
+            '$BUILD_DIR/third_party/shim_allocator',
+            '$BUILD_DIR/third_party/shim_unwind',
+        ]
+
         for cf in libDef.get('copts', []):
             kwargs.setdefault('CCFLAGS', [e for e in env.get('CCFLAGS', [])]).append(cf)
         tcmalloc_scons_print(f'env.Library(**{json.dumps(kwargs, indent=4)})', file=sys.stderr)
@@ -167,6 +175,9 @@ def slurpBlaze(target, source, exports, env):
 
 env = env.Clone()
 env.InjectThirdParty(libraries=['abseil-cpp'])
+
+if get_option('link-model') == 'dynamic':
+    env.Append(CPPDEFINES=[('MONGO_TCMALLOC_DYNAMIC_BUILD', 1)])
 
 slurpBlaze(
     target=env.File('tcmalloc_deps.json').srcnode(), source=[],

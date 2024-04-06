@@ -33,12 +33,21 @@ export const logQueries = {
     },
     duringInitialSyncQuery:
         {severity: "warning", "msg": "cannot execute dbcheck due to ongoing initial sync"},
+    duringStableRecovery:
+        {severity: "warning", "msg": "cannot execute dbcheck due to ongoing stable recovering"},
     errorQuery: {"severity": "error"},
     warningQuery: {"severity": "warning"},
     infoOrErrorQuery:
         {$or: [{"severity": "info", "operation": "dbCheckBatch"}, {"severity": "error"}]},
     infoBatchQuery: {"severity": "info", "operation": "dbCheckBatch"},
     inconsistentBatchQuery: {"severity": "error", "msg": "dbCheck batch inconsistent"},
+    startStopQuery: {
+        $or: [
+            {"operation": "dbCheckStart", "severity": "info"},
+            {"operation": "dbCheckStop", "severity": "info"}
+        ]
+    },
+    writeConcernErrorQuery: {severity: "error", "msg": "dbCheck failed waiting for writeConcern"},
 };
 
 // Apply function on all secondary nodes except arbiters.
@@ -247,6 +256,24 @@ export const checkHealthLog = (healthlog, query, numExpected, timeout = 60 * 100
         timeout);
 };
 
+export const checkHealthLogGTE = (healthlog, query, numExpected, timeout = 60 * 1000) => {
+    let query_count;
+    assert.soon(
+        function() {
+            query_count = healthlog.find(query).count();
+            if (query_count != numExpected) {
+                jsTestLog("health log query returned " + query_count + " entries, expected " +
+                          numExpected + "  query: " + tojson(query) +
+                          " found: " + tojson(healthlog.find(query).toArray()));
+            }
+            return query_count >= numExpected;
+        },
+        "health log query returned " + query_count + " entries, expected " + numExpected +
+            "  query: " + tojson(query) + " found: " + tojson(healthlog.find(query).toArray()) +
+            " HealthLog: " + tojson(healthlog.find().toArray()),
+        timeout);
+};
+
 // Temporarily restart the secondary as a standalone, inject an inconsistency and
 // restart it back as a secondary.
 export const injectInconsistencyOnSecondary = (replSet, dbName, cmd, noCleanData = true) => {
@@ -320,7 +347,9 @@ export const runDbCheckForDatabase =
             ErrorCodes.InvalidViewDefinition,
             // Might hit stale shardVersion response from shard config while racing with
             // 'dropCollection' command.
-            ErrorCodes.StaleConfig
+            ErrorCodes.StaleConfig,
+            // TODO (SERVER-79850): Internally handle this within dbCheck.
+            ErrorCodes.ObjectIsBusy,
         ];
 
         listCollectionsWithoutViews(db).map(c => c.name).forEach(collName => {
@@ -375,53 +404,54 @@ export const runDbCheckForDatabase =
 // Assert no errors/warnings (i.e., found inconsistencies). Tolerate
 // SnapshotTooOld errors, as they can occur if the primary is slow enough processing a
 // batch that the secondary is unable to obtain the timestamp the primary used.
-export const assertForDbCheckErrors = (node,
-                                       assertForErrors = true,
-                                       assertForWarnings = false,
-                                       errorsFound = []) => {
-    let severityValues = [];
-    if (assertForErrors == true) {
-        severityValues.push("error");
-    }
-
-    if (assertForWarnings == true) {
-        severityValues.push("warning");
-    }
-
-    const healthlog = node.getDB('local').system.healthlog;
-    // Regex matching strings that start without "SnapshotTooOld"
-    const regexStringWithoutSnapTooOld = /^((?!^SnapshotTooOld).)*$/;
-
-    // healthlog is a capped collection, truncation during scan might cause cursor
-    // invalidation. Truncated data is most likely from previous tests in the fixture, so we
-    // should still be able to catch errors by retrying.
-    assert.soon(() => {
-        try {
-            let errs = healthlog.find(
-                {"severity": {$in: severityValues}, "data.error": regexStringWithoutSnapTooOld});
-            if (errs.hasNext()) {
-                const errMsg = "dbCheck found inconsistency on " + node.host;
-                jsTestLog(errMsg + ". Errors/Warnings: ");
-                let err;
-                for (let count = 0; errs.hasNext() && count < 20; count++) {
-                    err = errs.next();
-                    errorsFound.push(err);
-                    jsTestLog(tojson(err));
-                }
-                assert(false, errMsg);
-            }
-            return true;
-        } catch (e) {
-            if (e.code !== ErrorCodes.CappedPositionLost) {
-                throw e;
-            }
-            jsTestLog(`Retrying on CappedPositionLost error: ${tojson(e)}`);
-            return false;
+export const assertForDbCheckErrors =
+    (node, assertForErrors = true, assertForWarnings = false, errorsFound = []) => {
+        let severityValues = [];
+        if (assertForErrors == true) {
+            severityValues.push("error");
         }
-    }, "healthlog scan could not complete.", 60000);
 
-    jsTestLog("Checked health log for on " + node.host);
-};
+        if (assertForWarnings == true) {
+            severityValues.push("warning");
+        }
+
+        const healthlog = node.getDB('local').system.healthlog;
+        // Regex matching strings that start without "SnapshotTooOld"
+        // const regexStringWithoutSnapTooOld = /^((?!^SnapshotTooOld).)*$/;
+        // TODO (SERVER-79850): Handle ObjectIsBusy within dbCheck and replace the regex with the
+        // commented-out above regex.
+        const regexString = /^((?!^(SnapshotTooOld|ObjectIsBusy)).)*$/;
+
+        // healthlog is a capped collection, truncation during scan might cause cursor
+        // invalidation. Truncated data is most likely from previous tests in the fixture, so we
+        // should still be able to catch errors by retrying.
+        assert.soon(() => {
+            try {
+                let errs =
+                    healthlog.find({"severity": {$in: severityValues}, "data.error": regexString});
+                if (errs.hasNext()) {
+                    const errMsg = "dbCheck found inconsistency on " + node.host;
+                    jsTestLog(errMsg + ". Errors/Warnings: ");
+                    let err;
+                    for (let count = 0; errs.hasNext() && count < 20; count++) {
+                        err = errs.next();
+                        errorsFound.push(err);
+                        jsTestLog(tojson(err));
+                    }
+                    assert(false, errMsg);
+                }
+                return true;
+            } catch (e) {
+                if (e.code !== ErrorCodes.CappedPositionLost) {
+                    throw e;
+                }
+                jsTestLog(`Retrying on CappedPositionLost error: ${tojson(e)}`);
+                return false;
+            }
+        }, "healthlog scan could not complete.", 60000);
+
+        jsTestLog("Checked health log for on " + node.host);
+    };
 
 // Check for dbcheck errors for all nodes in a replica set and ignoring arbiters.
 export const assertForDbCheckErrorsForAllNodes =

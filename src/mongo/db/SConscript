@@ -432,15 +432,21 @@ env.Library(
     LIBDEPS_PRIVATE=[
         'server_base',
     ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
 )
 
 env.Library(
     target='write_concern_options',
     source=[
+        'write_concern_idl.cpp',
+        'write_concern.idl',
         'write_concern_options.cpp',
         'write_concern_options.idl',
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/idl/idl_parser',
         'read_write_concern_provenance',
     ],
     LIBDEPS_PRIVATE=[
@@ -905,6 +911,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/admission/execution_admission_context',
+        '$BUILD_DIR/mongo/db/admission/ingress_admission_context',
         '$BUILD_DIR/mongo/db/query/cursor_response_idl',
         'api_parameters',
     ],
@@ -1021,6 +1028,7 @@ env.Library(
         'catalog/collection_yield_restore.cpp',
         'catalog_raii.cpp',
         'db_raii.cpp',
+        'direct_connection_util.cpp',
         'shard_role.cpp',
     ],
     LIBDEPS=[
@@ -1943,6 +1951,7 @@ env.Library(
         'query/collation/collator_factory_interface',
         'query/collation/collator_interface',
         'query/datetime/date_time_support',
+        'query/query_knob_configuration',
         'query/query_knobs',
         'query/query_settings/query_settings',
         'query/query_shape/query_shape_common',
@@ -2607,6 +2616,7 @@ env.Library(
         '$BUILD_DIR/mongo/transport/service_executor',
         '$BUILD_DIR/mongo/transport/session_manager',
         '$BUILD_DIR/mongo/transport/transport_layer_manager',
+        '$BUILD_DIR/mongo/util/allocator_thread',
         '$BUILD_DIR/mongo/util/cmdline_utils/cmdline_utils',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
         '$BUILD_DIR/mongo/util/latch_analyzer'

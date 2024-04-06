@@ -58,7 +58,7 @@ public:
     /**
      * Adjusts the total number of tickets allocated for ingress admission control to 'newSize'.
      */
-    void resizeTicketPool(int32_t newSize);
+    void resizeTicketPool(OperationContext* opCtx, int32_t newSize);
 
     /**
      * Reports the ingress admission control metrics.
@@ -79,20 +79,6 @@ public:
 
 private:
     std::unique_ptr<SemaphoreTicketHolder> _ticketHolder{nullptr};
-};
-
-/**
- * Stores state and statistics related to ingress admission control for a given transactional
- * context.
- */
-class IngressAdmissionContext : public AdmissionContext {
-public:
-    IngressAdmissionContext() = default;
-
-    /**
-     * Retrieve the IngressAdmissionContext decoration the provided OperationContext
-     */
-    static IngressAdmissionContext& get(OperationContext* opCtx);
 };
 
 }  // namespace mongo

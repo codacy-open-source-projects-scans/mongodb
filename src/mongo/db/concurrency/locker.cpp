@@ -202,7 +202,8 @@ void Locker::getFlowControlTicket(OperationContext* opCtx, LockMode lockMode) {
     if (ticketholder && lockMode == LockMode::MODE_IX && _clientState.load() == kInactive &&
         ExecutionAdmissionContext::get(opCtx).getPriority() !=
             AdmissionContext::Priority::kExempt &&
-        !_uninterruptibleLocksRequested) {
+        !opCtx->uninterruptibleLocksRequested_DO_NOT_USE())  // NOLINT
+    {
         // FlowControl only acts when a MODE_IX global lock is being taken. The clientState is only
         // being modified here to change serverStatus' `globalLock.currentQueue` metrics. This
         // method must not exit with a side-effect on the clientState. That value is also used for
@@ -243,7 +244,7 @@ void Locker::reacquireTicket(OperationContext* opCtx) {
         for (auto it = _requests.begin(); it; it.next()) {
             invariant(it->mode == LockMode::MODE_IS || it->mode == LockMode::MODE_IX);
             // TODO SERVER-80206: Remove opCtx->checkForInterrupt().
-            if (!_uninterruptibleLocksRequested) {
+            if (!opCtx->uninterruptibleLocksRequested_DO_NOT_USE()) {  // NOLINT
                 opCtx->checkForInterrupt();
             }
 
@@ -272,7 +273,7 @@ void Locker::releaseTicket() {
 void Locker::lockGlobal(OperationContext* opCtx, LockMode mode, Date_t deadline) {
     dassert(isLocked() == (_modeForTicket != MODE_NONE));
     if (_modeForTicket == MODE_NONE) {
-        if (_uninterruptibleLocksRequested) {
+        if (opCtx->uninterruptibleLocksRequested_DO_NOT_USE()) {  // NOLINT
             // Ignore deadline.
             invariant(_acquireTicket(opCtx, mode, Date_t::max()));
         } else {
@@ -404,8 +405,8 @@ bool Locker::unlock(ResourceId resId) {
             _numResourcesToUnlockAtEndUnitOfWork++;
         }
         it->unlockPending++;
-        // unlockPending will be incremented if a lock is converted or acquired in the same mode
-        // recursively, and unlock() is called multiple times on one ResourceId.
+        // unlockPending will be incremented if a lock is acquired in the same mode recursively, and
+        // unlock() is called multiple times on one ResourceId.
         invariant(it->unlockPending <= it->recursiveCount);
         return false;
     }
@@ -432,8 +433,9 @@ void Locker::endWriteUnitOfWork() {
             _numResourcesToUnlockAtEndUnitOfWork--;
         }
         while (it->unlockPending > 0) {
-            // If a lock is converted, unlock() may be called multiple times on a resource within
-            // the same WriteUnitOfWork. All such unlock() requests must thus be fulfilled here.
+            // If a lock is acquired recursively, unlock() may be called multiple times on a
+            // resource within the same WriteUnitOfWork. All such unlock() requests must thus be
+            // fulfilled here.
             it->unlockPending--;
             unlock(it.key());
         }
@@ -626,7 +628,6 @@ void Locker::releaseWriteUnitOfWorkAndUnlock(LockSnapshot* stateOut) {
     // All locks should be pending to unlock.
     invariant(_requests.size() == _numResourcesToUnlockAtEndUnitOfWork);
     for (auto it = _requests.begin(); it; it.next()) {
-        // No converted lock so we don't need to unlock more than once.
         invariant(it->unlockPending == 1);
         it->unlockPending--;
     }
@@ -823,7 +824,7 @@ LockResult Locker::_lockBegin(OperationContext* opCtx, ResourceId resId, LockMod
         }
     }
 
-    // Making this call here will record lock re-acquisitions and conversions as well.
+    // Making this call here will record lock re-acquisitions as well.
     globalStats.recordAcquisition(_id, resId, mode);
     _stats.recordAcquisition(resId, mode);
 
@@ -855,7 +856,7 @@ LockResult Locker::_lockBegin(OperationContext* opCtx, ResourceId resId, LockMod
         globalStats.recordWait(_id, resId, mode);
         _stats.recordWait(resId, mode);
         _setWaitingResource(resId);
-    } else if (result == LOCK_OK && _uninterruptibleLocksRequested == 0) {
+    } else if (result == LOCK_OK && !opCtx->uninterruptibleLocksRequested_DO_NOT_USE()) {  // NOLINT
         // Lock acquisitions are not allowed to succeed when opCtx is marked as interrupted, unless
         // the caller requested an uninterruptible lock.
         auto interruptStatus = opCtx->checkForInterruptNoAssert();
@@ -899,7 +900,7 @@ void Locker::_lockComplete(OperationContext* opCtx,
     // This failpoint is used to time out non-intent locks if they cannot be granted immediately
     // for user operations. Testing-only.
     const bool isUserOperation = opCtx->getClient()->isFromUserConnection();
-    if (!_uninterruptibleLocksRequested && isUserOperation &&
+    if (!opCtx->uninterruptibleLocksRequested_DO_NOT_USE() && isUserOperation &&  // NOLINT
         MONGO_unlikely(failNonIntentLocksIfWaitNeeded.shouldFail())) {
         uassert(ErrorCodes::LockTimeout,
                 str::stream() << "Cannot immediately acquire lock '" << resId.toString()
@@ -917,7 +918,7 @@ void Locker::_lockComplete(OperationContext* opCtx,
         timeout = deadline - Date_t::now();
     }
     timeout = std::min(timeout, _maxLockTimeout ? *_maxLockTimeout : Milliseconds::max());
-    if (_uninterruptibleLocksRequested) {
+    if (opCtx->uninterruptibleLocksRequested_DO_NOT_USE()) {  // NOLINT
         timeout = Milliseconds::max();
     }
 
@@ -931,7 +932,7 @@ void Locker::_lockComplete(OperationContext* opCtx,
         // wait time anyways.
         // Unless a caller has requested an uninterruptible lock, we want to use the opCtx's
         // interruptible wait so that pending lock acquisitions can be cancelled.
-        if (_uninterruptibleLocksRequested == 0) {
+        if (!opCtx->uninterruptibleLocksRequested_DO_NOT_USE()) {  // NOLINT
             result = _notify.wait(opCtx, waitTime);
         } else {
             result = _notify.wait(waitTime);
@@ -999,15 +1000,22 @@ bool Locker::_acquireTicket(OperationContext* opCtx, LockMode mode, Date_t deadl
         // hole.
         invariant(!shard_role_details::getRecoveryUnit(opCtx)->isTimestamped());
 
-        if (auto ticket = holder->waitForTicketUntil(
-                _uninterruptibleLocksRequested ? *Interruptible::notInterruptible() : *opCtx,
-                &ExecutionAdmissionContext::get(opCtx),
-                deadline,
-                _timeQueuedForTicketMicros)) {
-            _ticket = std::move(*ticket);
-        } else {
+        _ticket = [&]() {
+            ExecutionAdmissionContext* admCtx = &ExecutionAdmissionContext::get(opCtx);
+            if (opCtx->uninterruptibleLocksRequested_DO_NOT_USE()) {  // NOLINT
+                return holder->waitForTicketUntilNoInterrupt_DO_NOT_USE(opCtx, admCtx, deadline);
+            }
+
+            return holder->waitForTicketUntil(opCtx, admCtx, deadline);
+        }();
+
+        if (!_ticket) {
             return false;
         }
+
+        // TODO(SERVER-88732): Remove `_timeQueuedForTicketMicros` when we only track admission
+        // context for waiting metrics.
+        _timeQueuedForTicketMicros = ExecutionAdmissionContext::get(opCtx).totalTimeQueuedMicros();
         restoreStateOnErrorGuard.dismiss();
     }
 

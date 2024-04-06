@@ -113,7 +113,7 @@
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_decorations.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings/query_settings_utils.h"
@@ -240,6 +240,7 @@ ClientCursorPin registerCursor(OperationContext* opCtx,
  * or the given executor (otherwise) and collects them in the query stats store.
  */
 void collectQueryStats(OperationContext* opCtx,
+                       const boost::intrusive_ptr<ExpressionContext>& expCtx,
                        mongo::PlanExecutor* maybeExec,
                        ClientCursorPin* maybePinnedCursor) {
     invariant(maybeExec || maybePinnedCursor);
@@ -256,7 +257,7 @@ void collectQueryStats(OperationContext* opCtx,
     if (maybePinnedCursor) {
         collectQueryStatsMongod(opCtx, *maybePinnedCursor);
     } else {
-        collectQueryStatsMongod(opCtx, std::move(curOp->debug().queryStatsInfo.key));
+        collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().queryStatsInfo.key));
     }
 }
 
@@ -264,12 +265,13 @@ void collectQueryStats(OperationContext* opCtx,
  * Builds the reply for a pipeline over a sharded collection that contains an exchange stage.
  */
 void handleMultipleCursorsForExchange(OperationContext* opCtx,
+                                      const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                       const NamespaceString& nsForCursor,
                                       std::vector<ClientCursorPin>& pinnedCursors,
                                       const AggregateCommandRequest& request,
                                       rpc::ReplyBuilderInterface* result) {
     invariant(pinnedCursors.size() > 1);
-    collectQueryStats(opCtx, nullptr, &pinnedCursors[0]);
+    collectQueryStats(opCtx, expCtx, nullptr, &pinnedCursors[0]);
     long long batchSize =
         request.getCursor().getBatchSize().value_or(aggregation_request_helper::kDefaultBatchSize);
 
@@ -466,7 +468,7 @@ boost::optional<ClientCursorPin> executeSingleExecUntilFirstBatch(
         cursor->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
     }
 
-    collectQueryStats(opCtx, execs[0].get(), maybePinnedCursor.get_ptr());
+    collectQueryStats(opCtx, expCtx, execs[0].get(), maybePinnedCursor.get_ptr());
 
     boost::optional<CursorMetrics> metrics = request.getIncludeQueryStatsMetrics()
         ? boost::make_optional(CurOp::get(opCtx)->debug().getCursorMetrics())
@@ -516,7 +518,7 @@ boost::optional<ClientCursorPin> executeUntilFirstBatch(
             registerCursor(opCtx, expCtx, origNss, *cmdObj, privileges, std::move(exec), nullptr);
         pinnedCursors.emplace_back(std::move(pinnedCursor));
     }
-    handleMultipleCursorsForExchange(opCtx, origNss, pinnedCursors, request, result);
+    handleMultipleCursorsForExchange(opCtx, expCtx, origNss, pinnedCursors, request, result);
 
     if (pinnedCursors.size() > 0) {
         return std::move(pinnedCursors[0]);
@@ -770,42 +772,6 @@ std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createExchangePipelinesI
 }
 
 /**
- * Creates additional pipelines if needed to serve the aggregation. This includes additional
- * pipelines for exchange optimization and search commands that generate metadata. Returns
- * a vector of all pipelines needed for the query, including the original one.
- *
- * Takes ownership of the original, passed in, pipeline.
- */
-std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> createAdditionalPipelinesIfNeeded(
-    const AggregateCommandRequest& request,
-    const LiteParsedPipeline& liteParsedPipeline,
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
-    const std::function<void(void)>& resetContextFn) {
-
-    std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> pipelines;
-    auto expCtx = pipeline->getContext();
-
-    // Exchange is not allowed to be specified if there is a $search stage.
-    if (search_helpers::isSearchPipeline(pipeline.get())) {
-        // Release locks early, before we generate the search pipeline, so that we don't hold them
-        // during network calls to mongot. This is fine for search pipelines since they are not
-        // reading any local (lock-protected) data in the main pipeline.
-        resetContextFn();
-        pipelines.push_back(std::move(pipeline));
-
-        if (auto metadataPipe = search_helpers::generateMetadataPipelineAndAttachCursorsForSearch(
-                expCtx->opCtx, expCtx, request, pipelines.back().get(), expCtx->uuid)) {
-            pipelines.push_back(std::move(metadataPipe));
-        }
-    } else {
-        // Takes ownership of 'pipeline'.
-        pipelines = createExchangePipelinesIfNeeded(
-            request, liteParsedPipeline.getInvolvedNamespaces(), std::move(pipeline));
-    }
-    return pipelines;
-}
-
-/**
  * Performs validations related to API versioning, time-series stages, and general command
  * validation.
  * Throws UserAssertion if any of the validations fails
@@ -856,13 +822,29 @@ std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createLegacyEx
         // have gotten from find command.
         execs.emplace_back(std::move(executor));
     } else {
-        search_helpers::prepareSearchForTopLevelPipeline(pipeline.get());
         // Complete creation of the initial $cursor stage, if needed.
         PipelineD::attachInnerQueryExecutorToPipeline(
             collections, attachCallback, std::move(executor), pipeline.get());
 
-        auto pipelines = createAdditionalPipelinesIfNeeded(
-            request, liteParsedPipeline, std::move(pipeline), resetContextFn);
+        std::vector<std::unique_ptr<Pipeline, PipelineDeleter>> pipelines;
+        // Any pipeline that relies on calls to mongot requires additional setup.
+        if (search_helpers::isMongotPipeline(pipeline.get())) {
+            // Release locks early, before we generate the search pipeline, so that we don't hold
+            // them during network calls to mongot. This is fine for search pipelines since they are
+            // not reading any local (lock-protected) data in the main pipeline.
+            resetContextFn();
+            pipelines.push_back(std::move(pipeline));
+
+            if (auto metadataPipe = search_helpers::prepareSearchForTopLevelPipelineLegacyExecutor(
+                    expCtx->opCtx, expCtx, request, pipelines.back().get(), expCtx->uuid)) {
+                pipelines.push_back(std::move(metadataPipe));
+            }
+        } else {
+            // Takes ownership of 'pipeline'.
+            pipelines = createExchangePipelinesIfNeeded(
+                request, liteParsedPipeline.getInvolvedNamespaces(), std::move(pipeline));
+        }
+
         for (auto&& pipelineIt : pipelines) {
             // There are separate ExpressionContexts for each exchange pipeline, so make sure to
             // pass the pipeline's ExpressionContext to the plan executor factory.
@@ -1184,7 +1166,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
     // TODO: SERVER-73632 Remove feature flag for PM-635.
     // Query settings will only be looked up on mongos and therefore should be part of command
     // body on mongod if present.
-    expCtx->setQuerySettings(
+    expCtx->setQuerySettingsIfNotPresent(
         query_settings::lookupQuerySettingsForAgg(expCtx,
                                                   requestForQueryStats,
                                                   *pipeline,
@@ -1287,7 +1269,7 @@ Status _runAggregate(OperationContext* opCtx,
     // replication rollback, which at the storage layer waits for all cursors to be closed under the
     // global MODE_X lock, after having sent interrupt signals to read operations. This operation
     // must never hold open storage cursors while ignoring interrupt.
-    InterruptibleLockGuard interruptibleLockAcquisition(shard_role_details::getLocker(opCtx));
+    InterruptibleLockGuard interruptibleLockAcquisition(opCtx);
 
     auto catalog = CollectionCatalog::latest(opCtx);
 
@@ -1563,7 +1545,7 @@ Status _runAggregate(OperationContext* opCtx,
         auto bonsaiEligibility =
             determineBonsaiEligibility(opCtx, collections.getMainCollection(), request, *pipeline);
         const bool bonsaiEligible = isEligibleForBonsaiUnderFrameworkControl(
-            opCtx, request.getExplain().has_value(), bonsaiEligibility);
+            expCtx, request.getExplain().has_value(), bonsaiEligibility);
 
         bool bonsaiExecSuccess = true;
         if (bonsaiEligible) {
@@ -1643,8 +1625,8 @@ Status _runAggregate(OperationContext* opCtx,
             } else {
                 // If we had an optimization failure, only error if we're not in tryBonsai.
                 bonsaiExecSuccess = false;
-                auto queryControl = QueryKnobConfiguration::decoration(opCtx)
-                                        .getInternalQueryFrameworkControlForOp();
+                auto queryControl =
+                    expCtx->getQueryKnobConfiguration().getInternalQueryFrameworkControlForOp();
                 tassert(7319401,
                         "Optimization failed either without tryBonsai set, or without a hint.",
                         queryControl == QueryFrameworkControlEnum::kTryBonsai &&
@@ -1716,7 +1698,7 @@ Status _runAggregate(OperationContext* opCtx,
                 *cmdObj,
                 &bodyBuilder);
         }
-        collectQueryStatsMongod(opCtx, std::move(curOp->debug().queryStatsInfo.key));
+        collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().queryStatsInfo.key));
     } else {
         auto maybePinnedCursor = executeUntilFirstBatch(opCtx,
                                                         expCtx,

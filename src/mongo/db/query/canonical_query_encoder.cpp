@@ -87,7 +87,7 @@
 #include "mongo/db/query/projection.h"
 #include "mongo/db/query/projection_ast.h"
 #include "mongo/db/query/projection_ast_util.h"
-#include "mongo/db/query/query_decorations.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -662,7 +662,7 @@ void encodeKeyForPipelineStage(DocumentSource* docSource,
  * plans for limit: 10 and limit: 1000 may be different. This allows us to cache different plans for
  * different cases without unbounded growth of plan cache for each skip and limit value.
  */
-char getLimitSkipCategory(OperationContext* opCtx,
+char getLimitSkipCategory(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                           boost::optional<int64_t> skip,
                           boost::optional<int64_t> limit) {
     if (limit.value_or(0) == 1 && !skip) {
@@ -677,7 +677,7 @@ char getLimitSkipCategory(OperationContext* opCtx,
         return 'l';
     }
     size_t planEvaluationMaxResults =
-        QueryKnobConfiguration::decoration(opCtx).getPlanEvaluationMaxResultsForOp();
+        expCtx->getQueryKnobConfiguration().getPlanEvaluationMaxResultsForOp();
     if (limitSkipSum < planEvaluationMaxResults) {
         return 's';
     } else if (limitSkipSum < 10 * planEvaluationMaxResults) {
@@ -697,7 +697,7 @@ void encodeLimitSkip(const CanonicalQuery& cq, BufBuilder* bufBuilder) {
         bufBuilder->appendChar('p');
         bufBuilder->appendChar(skip ? 1 : 0);
         bufBuilder->appendChar(limit ? 1 : 0);
-        bufBuilder->appendChar(getLimitSkipCategory(cq.getOpCtx(), skip, limit));
+        bufBuilder->appendChar(getLimitSkipCategory(cq.getExpCtx(), skip, limit));
     } else {
         bufBuilder->appendChar('c');
         bufBuilder->appendNum(skip.value_or(0));
@@ -752,12 +752,15 @@ void encodeFindCommandRequest(const CanonicalQuery& cq, BufBuilder* bufBuilder) 
 class MatchExpressionSbePlanCacheKeySerializationVisitor final
     : public MatchExpressionConstVisitor {
 public:
-    explicit MatchExpressionSbePlanCacheKeySerializationVisitor(OperationContext* opCtx,
-                                                                BufBuilder* builder,
-                                                                bool encodeParameterTypes)
-        : _opCtx(opCtx), _builder(builder), _encodeParameterTypes(encodeParameterTypes) {
-        invariant(_opCtx);
-    }
+    explicit MatchExpressionSbePlanCacheKeySerializationVisitor(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BufBuilder* builder,
+        bool encodeParameterTypes,
+        bool hasSort)
+        : _expCtx(expCtx),
+          _builder(builder),
+          _encodeParameterTypes(encodeParameterTypes),
+          _hasSort(hasSort) {}
 
     void visit(const BitsAllClearMatchExpression* expr) final {
         encodeBitTestExpression(expr);
@@ -801,11 +804,11 @@ public:
 
         // Encode the number of unique $in values as part of the plan cache key. If the query is
         // optimized by exploding for sort, the number of unique elements in $in determines how many
-        // merge branches we get in the query plan.
-        if (expr->getInputParamId()) {
+        // merge branches we get in the query plan. If there is no sort, this is not necessary.
+        if (expr->getInputParamId() && _hasSort) {
             size_t maxScansToExplode =
-                QueryKnobConfiguration::decoration(_opCtx).getMaxScansToExplodeForOp();
-            // Assume that $in have n elements.
+                _expCtx->getQueryKnobConfiguration().getMaxScansToExplodeForOp();
+            // Assume that $in has n elements.
             // If n is less than or equal to maxScansToExplode, then it is possible that explode for
             // sort optimization will be used, so we need to add n to plan cache key.
             // If n is greater than maxScansToExplode, then we can't explode it for sort. So we can
@@ -1105,10 +1108,16 @@ private:
         _builder->appendBuf(elem.value(), elem.valuesize());
     }
 
-    OperationContext* const _opCtx;
+    const boost::intrusive_ptr<ExpressionContext>& _expCtx;
     BufBuilder* const _builder;
     // Whether to encode the type of query parameter into the cache key.
     bool _encodeParameterTypes{false};
+    // Whether there is a sort absorbed by the Canonical query. Note: '_hasSort' is true only when
+    // there is a sort that can be used for explode for sort optimization. For a $match stage,
+    // '_hasSort' should be false since $match does not perform index selection. In cases where a
+    // $sort is not absorbed by the canonical query '_hasSort' should be false since we only perform
+    // explode for sort using the sort in canonical query.
+    bool _hasSort;
 };
 
 /**
@@ -1120,10 +1129,12 @@ private:
  */
 class MatchExpressionSbePlanCacheKeySerializationWalker {
 public:
-    explicit MatchExpressionSbePlanCacheKeySerializationWalker(OperationContext* opCtx,
-                                                               BufBuilder* builder,
-                                                               bool encodeParameterTypes)
-        : _builder{builder}, _visitor{opCtx, _builder, encodeParameterTypes} {
+    explicit MatchExpressionSbePlanCacheKeySerializationWalker(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BufBuilder* builder,
+        bool encodeParameterTypes,
+        bool hasSort)
+        : _builder{builder}, _visitor{expCtx, _builder, encodeParameterTypes, hasSort} {
         invariant(_builder);
     }
 
@@ -1160,11 +1171,13 @@ private:
  * following property: Two match expression trees which are identical after auto-parameterization
  * have the same key, otherwise the keys must differ.
  */
-void encodeKeyForAutoParameterizedMatchSBE(OperationContext* opCtx,
+void encodeKeyForAutoParameterizedMatchSBE(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                            MatchExpression* matchExpr,
                                            BufBuilder* builder,
-                                           bool encodeParameterTypes) {
-    MatchExpressionSbePlanCacheKeySerializationWalker walker{opCtx, builder, encodeParameterTypes};
+                                           bool encodeParameterTypes,
+                                           bool hasSort) {
+    MatchExpressionSbePlanCacheKeySerializationWalker walker{
+        expCtx, builder, encodeParameterTypes, hasSort};
     tree_walker::walk<true, MatchExpression>(matchExpr, &walker);
 }
 
@@ -1176,7 +1189,7 @@ namespace canonical_query_encoder {
  * Encode the stages pushed down to SBE via CanonicalQuery::cqPipeline.
  * Also encodes pipelines that are eligible for the Bonsai plan cache.
  */
-void encodePipeline(const ExpressionContext* expCtx,
+void encodePipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                     const std::vector<boost::intrusive_ptr<DocumentSource>>& cqPipeline,
                     BufBuilder* bufBuilder,
                     const Optimizer optimizer) {
@@ -1190,7 +1203,13 @@ void encodePipeline(const ExpressionContext* expCtx,
             const bool encodeParameterTypes = optimizer == Optimizer::kBonsai;
             // Match expressions are parameterized so need to be encoded differently.
             encodeKeyForAutoParameterizedMatchSBE(
-                expCtx->opCtx, matchStage->getMatchExpression(), bufBuilder, encodeParameterTypes);
+                expCtx,
+                matchStage->getMatchExpression(),
+                bufBuilder,
+                encodeParameterTypes,
+                // We do not use explode for sort optimization for a $match stage, since it is not
+                // a part of index selection.
+                false /*hasSort*/);
         } else if (!search_helpers::encodeSearchForSbeCache(expCtx, documentSource, bufBuilder)) {
             encodeKeyForPipelineStage(documentSource, serializedArray, bufBuilder);
         }
@@ -1199,7 +1218,7 @@ void encodePipeline(const ExpressionContext* expCtx,
 }
 
 CanonicalQuery::QueryShapeString encodePipeline(
-    const ExpressionContext* expCtx,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const std::vector<boost::intrusive_ptr<DocumentSource>>& pipelineStages,
     const Optimizer optimizer) {
     static constexpr size_t bufferSize = 200;
@@ -1255,8 +1274,11 @@ std::string encodeSBE(const CanonicalQuery& cq, const Optimizer optimizer) {
     // Only encode parameter types in the MatchExpression if this key is being generated by
     // Bonsai.
     const bool encodeParameterTypes = optimizer == Optimizer::kBonsai;
-    encodeKeyForAutoParameterizedMatchSBE(
-        cq.getOpCtx(), cq.getPrimaryMatchExpression(), &bufBuilder, encodeParameterTypes);
+    encodeKeyForAutoParameterizedMatchSBE(cq.getExpCtx(),
+                                          cq.getPrimaryMatchExpression(),
+                                          &bufBuilder,
+                                          encodeParameterTypes,
+                                          !sort.isEmpty());
     bufBuilder.appendBuf(proj.objdata(), proj.objsize());
     bufBuilder.appendStr(strBuilderEncoded, false /* includeEndingNull */);
     bufBuilder.appendChar(kEncodeSectionDelimiter);
@@ -1280,7 +1302,7 @@ std::string encodeSBE(const CanonicalQuery& cq, const Optimizer optimizer) {
 
     encodeFindCommandRequest(cq, &bufBuilder);
 
-    encodePipeline(cq.getExpCtxRaw(), cq.cqPipeline(), &bufBuilder, optimizer);
+    encodePipeline(cq.getExpCtx(), cq.cqPipeline(), &bufBuilder, optimizer);
     if (const auto& bitset = cq.searchMetadata(); bitset.any()) {
         bufBuilder.appendStr(bitset.to_string(), false /* includeEndingNull */);
     }
@@ -1316,7 +1338,7 @@ CanonicalQuery::PlanCacheCommandKey encodeForPlanCacheCommand(const Pipeline& pi
             encodeKeyForMatch(matchStage->getMatchExpression(), &keyBuilder);
             bufBuilder.appendStr(keyBuilder.stringData());
         } else if (!search_helpers::encodeSearchForSbeCache(
-                       pipeline.getContext().get(), documentSource, &bufBuilder)) {
+                       pipeline.getContext(), documentSource, &bufBuilder)) {
             encodeKeyForPipelineStage(documentSource, serializedArray, &bufBuilder);
         }
     }  // for each stage in 'pipeline'

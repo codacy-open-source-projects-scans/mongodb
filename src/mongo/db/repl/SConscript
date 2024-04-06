@@ -646,6 +646,7 @@ env.Benchmark(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        'apply_ops_command_info',
         'oplog_entry',
     ],
 )
@@ -661,6 +662,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/service_context',
         'oplog_entry',
         'repl_coordinator_interface',
+        'repl_server_parameters',
     ],
 )
 
@@ -693,6 +695,7 @@ env.Library(
         '$BUILD_DIR/mongo/executor/task_executor_interface',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
         'oplog_entry',
+        'repl_server_parameters',
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/admission/execution_admission_context',
@@ -703,7 +706,6 @@ env.Library(
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/processinfo',
         'repl_coordinator_interface',
-        'repl_server_parameters',
     ],
 )
 
@@ -726,6 +728,7 @@ env.Library(
         'oplog',
         'oplog_application_interface',
         'oplog_entry',
+        'oplog_write',
         'repl_coordinator_interface',
         'repl_settings',
         'replication_metrics',
@@ -1855,6 +1858,7 @@ if wiredtiger:
             'primary_only_service_test.cpp',
             'primary_only_service_util_test.cpp',
             'read_concern_args_test.cpp',
+            'repl_client_info_test.cpp',
             'repl_set_config_checks_test.cpp',
             'repl_set_config_test.cpp',
             'repl_set_heartbeat_response_test.cpp',
@@ -2007,6 +2011,7 @@ env.CppUnitTest(
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/read_write_concern_defaults_mock',
         '$BUILD_DIR/mongo/db/serverless/shard_split_utils',
+        '$BUILD_DIR/mongo/db/service_request_common',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         'isself',
         'repl_coordinator_impl',

@@ -64,11 +64,12 @@
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/index_bounds.h"
+#include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/interval.h"
 #include "mongo/db/query/interval_evaluation_tree.h"
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/projection.h"
-#include "mongo/db/query/query_decorations.h"
+#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_solution.h"
@@ -814,7 +815,8 @@ bool shouldReverseScanForSort(QuerySolutionNode* solnRoot,
     const bool hasNaturalHint =
         findCommand.getHint()[query_request_helper::kNaturalSortField].ok() &&
         !params.querySettingsApplied;
-    const bool hasQuerySettingsEnforcedDirection = params.collscanDirection.has_value();
+    const bool hasQuerySettingsEnforcedDirection =
+        params.mainCollectionInfo.collscanDirection.has_value();
     if (isCollscan && (hasNaturalHint || hasQuerySettingsEnforcedDirection)) {
         return false;
     }
@@ -826,7 +828,7 @@ bool shouldReverseScanForSort(QuerySolutionNode* solnRoot,
 }
 }  // namespace
 
-bool QueryPlannerAnalysis::isEligibleForHashJoin(const SecondaryCollectionInfo& foreignCollInfo) {
+bool QueryPlannerAnalysis::isEligibleForHashJoin(const CollectionInfo& foreignCollInfo) {
     return !internalQueryDisableLookupExecutionUsingHashJoin.load() && foreignCollInfo.exists &&
         foreignCollInfo.stats.noOfRecords <=
         internalQueryCollectionMaxNoOfDocumentsToChooseHashJoin.load() &&
@@ -886,7 +888,7 @@ void QueryPlannerAnalysis::removeUselessColumnScanRowStoreExpression(QuerySoluti
 // static
 void QueryPlannerAnalysis::removeImpreciseInternalExprFilters(const QueryPlannerParams& params,
                                                               QuerySolutionNode& root) {
-    if (params.collectionStats.isTimeseries) {
+    if (params.mainCollectionInfo.stats.isTimeseries) {
         // For timeseries collections, the imprecise filters are able to get rid of an entire
         // bucket's worth of data, and save us from unpacking potentially thousands of documents.
         // In this case, we decide not to prune the imprecise filters.
@@ -914,17 +916,19 @@ void QueryPlannerAnalysis::removeImpreciseInternalExprFilters(const QueryPlanner
 }
 
 // static
-std::pair<EqLookupNode::LookupStrategy, boost::optional<IndexEntry>>
-QueryPlannerAnalysis::determineLookupStrategy(
+QueryPlannerAnalysis::Strategy QueryPlannerAnalysis::determineLookupStrategy(
     const NamespaceString& foreignCollName,
     const std::string& foreignField,
-    const std::map<NamespaceString, SecondaryCollectionInfo>& collectionsInfo,
+    const std::map<NamespaceString, CollectionInfo>& collectionsInfo,
     bool allowDiskUse,
     const CollatorInterface* collator) {
     auto foreignCollItr = collectionsInfo.find(foreignCollName);
     if (foreignCollItr == collectionsInfo.end() || !foreignCollItr->second.exists) {
         return {EqLookupNode::LookupStrategy::kNonExistentForeignCollection, boost::none};
     }
+
+    const auto scanDirection =
+        foreignCollItr->second.collscanDirection.value_or(NaturalOrderHint::Direction::kForward);
 
     // Check if an eligible index exists for indexed loop join strategy.
     const auto foreignIndex = [&]() -> boost::optional<IndexEntry> {
@@ -955,14 +959,17 @@ QueryPlannerAnalysis::determineLookupStrategy(
         return boost::none;
     }();
 
-    // TODO SERVER-86400 Throw 'ErrorCodes::NoQueryExecutionPlans' if 'NO_TABLE_SCAN' option is set
+    // TODO SERVER-88629 Throw 'ErrorCodes::NoQueryExecutionPlans' if 'NO_TABLE_SCAN' option is set
     // for HashJoin and NestedLoopJoin.
     if (foreignIndex) {
-        return {EqLookupNode::LookupStrategy::kIndexedLoopJoin, std::move(foreignIndex)};
+        // $natural hinted scan direction is not relevant for IndexedLoopJoin, but is passed here
+        // for consistency.
+        return {
+            EqLookupNode::LookupStrategy::kIndexedLoopJoin, std::move(foreignIndex), scanDirection};
     } else if (allowDiskUse && isEligibleForHashJoin(foreignCollItr->second)) {
-        return {EqLookupNode::LookupStrategy::kHashJoin, boost::none};
+        return {EqLookupNode::LookupStrategy::kHashJoin, boost::none, scanDirection};
     } else {
-        return {EqLookupNode::LookupStrategy::kNestedLoopJoin, boost::none};
+        return {EqLookupNode::LookupStrategy::kNestedLoopJoin, boost::none, scanDirection};
     }
 }
 
@@ -971,7 +978,7 @@ void QueryPlannerAnalysis::analyzeGeo(const QueryPlannerParams& params,
                                       QuerySolutionNode* solnRoot) {
     // Get field names of all 2dsphere indexes with version >= 3.
     std::set<StringData> twoDSphereFields;
-    for (const IndexEntry& indexEntry : params.indices) {
+    for (const IndexEntry& indexEntry : params.mainCollectionInfo.indexes) {
         if (indexEntry.type != IndexType::INDEX_2DSPHERE) {
             continue;
         }
@@ -1139,7 +1146,7 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
 
     // Too many ixscans spoil the performance.
     if (totalNumScans >
-        QueryKnobConfiguration::decoration(query.getOpCtx()).getMaxScansToExplodeForOp()) {
+        query.getExpCtx()->getQueryKnobConfiguration().getMaxScansToExplodeForOp()) {
         (*solnRoot)->hitScanLimit = true;
         LOGV2_DEBUG(
             20950,
@@ -1340,7 +1347,7 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
 
     // If we're answering a query on a sharded system, we need to drop documents that aren't
     // logically part of our shard.
-    if (params.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
+    if (params.mainCollectionInfo.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
         if (!solnRoot->fetched()) {
             // See if we need to fetch information for our shard key.
             // NOTE: Solution nodes only list ordinary, non-transformed index keys for now

@@ -290,8 +290,7 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
             uassertStatusOK(userAllowedCreateNS(opCtx, ns));
             // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
             // TODO (SERVER-82066): Update handling for direct connections.
-            // TODO (SERVER-81937): Update handling for transactions.
-            // TODO (SERVER-85366): Update handling for retryable writes.
+            // TODO (SERVER-86254): Update handling for transactions and retryable writes.
             boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
                 allowCollectionCreation;
             const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
@@ -322,6 +321,8 @@ namespace {
 // written in timestamp order, so we defer optime assignment until the oplog is about to be
 // written. Multidocument transactions should not generate opTimes because they are
 // generated at the time of commit.
+//
+// The "begin" and "end" iterators must remain valid until the active WriteUnitOfWork resolves.
 void acquireOplogSlotsForInserts(OperationContext* opCtx,
                                  const CollectionAcquisition& collection,
                                  std::vector<InsertStatement>::iterator begin,
@@ -338,6 +339,13 @@ void acquireOplogSlotsForInserts(OperationContext* opCtx,
         it->oplogSlot = *slot++;
     }
 
+    // If we abort this WriteUnitOfWork, we must make sure we never attempt to use these reserved
+    // oplog slots again.
+    shard_role_details::getRecoveryUnit(opCtx)->onRollback([begin, end](OperationContext* opCtx) {
+        for (auto it = begin; it != end; it++) {
+            it->oplogSlot = OplogSlot();
+        }
+    });
     hangAndFailAfterDocumentInsertsReserveOpTimes.executeIf(
         [&](const BSONObj& data) {
             hangAndFailAfterDocumentInsertsReserveOpTimes.pauseWhileSet(opCtx);
@@ -652,6 +660,11 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
         // Otherwise, proceed as though the batch insert block failed, since the batch insert block
         // assumes `acquireCollection` is successful.
         shouldProceedWithBatchInsert = false;
+        // We can get an unauthorized error in the case of direct shard operations. This command
+        // will not succeed upon the next collection acquisition either.
+        if (ex.code() == ErrorCodes::Unauthorized) {
+            throw;
+        }
     }
 
     if (shouldProceedWithBatchInsert) {
@@ -829,8 +842,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
         uassertStatusOK(userAllowedCreateNS(opCtx, nsString));
         // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
         // TODO (SERVER-82066): Update handling for direct connections.
-        // TODO (SERVER-81937): Update handling for transactions.
-        // TODO (SERVER-85366): Update handling for retryable writes.
+        // TODO (SERVER-86254): Update handling for transactions and retryable writes.
         boost::optional<OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE>
             allowCollectionCreation;
         const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
@@ -2415,13 +2427,13 @@ void compressUncompressedBucketOnReopen(OperationContext* opCtx,
 
 
 /**
- * Attempts to perform bucket compression on time-series bucket. It will surpress any error caused
+ * Attempts to perform bucket compression on time-series bucket. It will suppress any error caused
  * by the write and silently leave the bucket uncompressed when any type of error is encountered.
  */
 void tryPerformTimeseriesBucketCompression(OperationContext* opCtx,
                                            const write_ops::InsertCommandRequest& request,
                                            timeseries::bucket_catalog::ClosedBucket& closedBucket) {
-    // Buckets with just a single measurement is not worth compressing.
+    // A bucket with just a single measurement is not worth compressing.
     if (closedBucket.numMeasurements.has_value() && closedBucket.numMeasurements.value() <= 1) {
         return;
     }
@@ -2845,6 +2857,11 @@ void getTimeseriesBatchResultsNoTenantMigration(
                                                             docsToRetry);
 }
 
+/**
+ * Stages writes to the system.buckets collection, which may have the side effect of reopening an
+ * existing bucket to put the measurement(s) into as well as closing buckets. Returns info about the
+ * write which is needed for committing the write.
+ */
 std::tuple<UUID, TimeseriesBatches, TimeseriesStmtIds, size_t /* numInserted */>
 insertIntoBucketCatalog(OperationContext* opCtx,
                         const write_ops::InsertCommandRequest& request,
@@ -2984,6 +3001,11 @@ insertIntoBucketCatalog(OperationContext* opCtx,
         bucketsColl->uuid(), std::move(batches), std::move(stmtIds), request.getDocuments().size()};
 }
 
+/**
+ * Writes to the underlying system.buckets collection as a series of ordered time-series inserts.
+ * Returns true on success, false otherwise, filling out errors as appropriate on failure as well
+ * as containsRetry which is used at a higher layer to report a retry count metric.
+ */
 bool performOrderedTimeseriesWritesAtomically(OperationContext* opCtx,
                                               const write_ops::InsertCommandRequest& request,
                                               std::vector<write_ops::WriteError>* errors,

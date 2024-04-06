@@ -131,18 +131,9 @@ void executeChildBatches(OperationContext* opCtx,
             bulkReq.serialize(BSONObj(), &builder);
 
             logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &builder);
-
-            // Per-operation write concern is not supported in transactions.
             if (!TransactionRouter::get(opCtx)) {
-                auto wc = opCtx->getWriteConcern();
-                if (wc.requiresWriteAcknowledgement()) {
-                    builder.append(WriteConcernOptions::kWriteConcernField, wc.toBSON());
-                } else {
-                    // Mongos needs to send to the shard with w > 0 so it will be able to see the
-                    // writeErrors
-                    builder.append(WriteConcernOptions::kWriteConcernField,
-                                   upgradeWriteConcern(wc.toBSON()));
-                }
+                builder.append(WriteConcernOptions::kWriteConcernField,
+                               opCtx->getWriteConcern().toBSON());
             }
 
             auto obj = builder.obj();
@@ -1529,7 +1520,7 @@ void BulkWriteOp::noteChildBatchError(const TargetedWriteBatch& targetedBatch,
     // Treat an error to get a batch response as failures of the contained write(s).
     const int numErrors = _clientRequest.getOrdered() ? 1 : targetedBatch.getWrites().size();
     auto emulatedReply =
-        createEmulatedErrorReply(status, numErrors, _clientRequest.getDollarTenant());
+        createEmulatedErrorReply(status, numErrors, _clientRequest.getDbName().tenantId());
 
     // This error isn't actually specific to any namespaces and so we do not want to track it.
     noteChildBatchResponse(targetedBatch,
@@ -1858,7 +1849,6 @@ int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {
     request.setNsInfo(nsInfo);
 
     request.setDbName(_clientRequest.getDbName());
-    request.setDollarTenant(_clientRequest.getDollarTenant());
     request.setLet(_clientRequest.getLet());
     // We'll account for the size to store each individual op as we add them, so just put an empty
     // vector as a placeholder for the array. This will ensure we properly count the size of the

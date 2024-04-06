@@ -35,7 +35,6 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/bson/util/bsoncolumn.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
@@ -129,6 +128,12 @@ public:
 
     DeblockedTagVals deblock(boost::optional<DeblockedTagValStorage>& storage) override;
 
+    std::unique_ptr<ValueBlock> fillEmpty(TypeTags fillTag, Value fillVal) override;
+
+    std::unique_ptr<ValueBlock> fillType(uint32_t typeMask,
+                                         TypeTags fillTag,
+                                         Value fillVal) override;
+
     // Returns true if none of the values in this block are arrays or objects. Returns false if
     // any _may_ be arrays or objects.
     bool hasNoObjsOrArrays() const {
@@ -143,13 +148,6 @@ public:
 
     boost::optional<size_t> tryCount() const override {
         return _count;
-    }
-
-    BSONColumn getBSONColumn() const {
-        return BSONColumn(BSONBinData{
-            value::getBSONBinData(TypeTags::bsonBinData, _blockVal),
-            static_cast<int>(value::getBSONBinDataSize(TypeTags::bsonBinData, _blockVal)),
-            BinDataType::Column});
     }
 
     std::pair<TypeTags, Value> tryLowerBound() const override {
@@ -177,21 +175,36 @@ public:
     boost::optional<bool> tryDense() const override {
         return _isTimeField;
     }
+    boost::optional<bool> tryHasArray() const override;
+
+    // Whether this TS block was decompressed. This is not a method on the block API.
+    bool decompressed() const {
+        return static_cast<bool>(_decompressedBlock);
+    }
+
+    // Test-only helper.
+    ValueBlock* decompressedBlock_forTest() {
+        return _decompressedBlock.get();
+    }
 
 private:
+    /**
+     * Returns the BinData for this TsBlock, if present. It's illegal to call this for TsBlocks
+     * backed by a bucket which does not use BinData/BSONColumn.
+     */
+    BSONBinData getBinData() const;
+
     void ensureDeblocked();
 
     /**
      * Deblocks the values from a BSON object block.
      */
-    void deblockFromBsonObj(std::vector<TypeTags>& deblockedTags,
-                            std::vector<Value>& deblockedVals) const;
+    void deblockFromBsonObj();
 
     /**
      * Deblocks the values from a BSON column block.
      */
-    void deblockFromBsonColumn(std::vector<TypeTags>& deblockedTags,
-                               std::vector<Value>& deblockedVals);
+    void deblockFromBsonColumn();
 
     bool isTimeFieldSorted() const;
 

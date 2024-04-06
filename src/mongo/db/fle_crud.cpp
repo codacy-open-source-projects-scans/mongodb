@@ -408,13 +408,17 @@ insertSingleDocument(OperationContext* opCtx,
     auto reply = std::make_shared<write_ops::InsertCommandReply>();
     auto service = opCtx->getService();
 
+    auto baseStmtId = *stmtId;
     auto swResult = trun->runNoThrow(
         opCtx,
-        [service, sharedInsertBlock, reply, ownedDocument, bypassDocumentValidation](
+        [service, sharedInsertBlock, reply, ownedDocument, bypassDocumentValidation, baseStmtId](
             const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
             FLEQueryInterfaceImpl queryImpl(txnClient, service);
 
             auto [edcNss2, efc2, serverPayload2, stmtId2] = *sharedInsertBlock.get();
+
+            // Reset the statement ID in case of transient transaction retries
+            *stmtId2 = baseStmtId;
 
             if (MONGO_unlikely(fleCrudHangPreInsert.shouldFail())) {
                 LOGV2(6516701, "Hanging due to fleCrudHangPreInsert fail point");
@@ -1926,8 +1930,9 @@ std::vector<std::vector<FLEEdgeCountInfo>> FLETagNoTXNQuery::getTags(
 
     // We need to instruct the request object (via serialization context passed in when constructing
     // getCountsCmd) that we do not ALSO prefix the $db field when serialize() is later called since
-    // we will already be setting the $tenant field below.  Providing both a tenant prefix and a
-    // $tenant field is unsupported and can lead to namespace errors.
+    // we will already be setting the unsigned security token with default tenant protocol below.
+    // Providing both a tenant prefix and a default tenant protocol is unsupported and can lead to
+    // namespace errors.
     auto sc = SerializationContext::stateCommandRequest(
         setDollarTenant, vts != boost::none && vts->isFromAtlasProxy());
 

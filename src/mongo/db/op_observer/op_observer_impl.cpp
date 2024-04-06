@@ -622,7 +622,7 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
                             << ", is non-empty but not equal to count: " << count);
 
     // Use OplogAccessMode::kLogOp to avoid recursive locking.
-    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kLogOp);
+    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kLogOp);
 
     WriteUnitOfWork wuow(opCtx);
 
@@ -2091,8 +2091,6 @@ void OpObserverImpl::onTransactionPrepare(
         oplogEntry.setPrevWriteOpTimeInTransaction(repl::OpTime());
         oplogEntry.setObject(applyOpsBuilder.done());
         oplogEntry.setWallClockTime(wallClockTime);
-
-        // TODO SERVER-69286: set the top-level tenantId here
 
         logApplyOps(opCtx,
                     &oplogEntry,

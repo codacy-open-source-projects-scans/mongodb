@@ -46,6 +46,7 @@
 #include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/direct_connection_util.h"
 #include "mongo/db/repl/collection_utils.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
@@ -147,6 +148,10 @@ AutoGetDb::AutoGetDb(OperationContext* opCtx,
           auto databaseHolder = DatabaseHolder::get(opCtx);
           return databaseHolder->getDb(opCtx, dbName);
       }()) {
+    // Check if this operation is a direct connection and if it is authorized to be one after
+    // acquiring the lock.
+    direct_connection_util::checkDirectShardOperationAllowed(opCtx, dbName);
+
     // The 'primary' database must be version checked for sharding.
     DatabaseShardingState::assertMatchingDbVersion(opCtx, _dbName);
 }
@@ -335,6 +340,10 @@ AutoGetCollection::AutoGetCollection(OperationContext* opCtx,
         // We ensure the database reference is valid by refreshing it.
         _autoDb.refreshDbReferenceIfNull(opCtx);
     }
+
+    // Recheck if this operation is a direct connection and if it is authorized to be one after
+    // acquiring the collection locks.
+    direct_connection_util::checkDirectShardOperationAllowed(opCtx, _resolvedNss.dbName());
 
     verifyDbAndCollection(
         opCtx, modeColl, nsOrUUID, _resolvedNss, _coll.get(), _autoDb.getDb(), verifyWriteEligible);
@@ -633,10 +642,10 @@ ReadSourceScope::~ReadSourceScope() {
     }
 }
 
-AutoGetOplog::AutoGetOplog(OperationContext* opCtx,
-                           OplogAccessMode mode,
-                           Date_t deadline,
-                           const AutoGetOplogOptions& options) {
+AutoGetOplogFastPath::AutoGetOplogFastPath(OperationContext* opCtx,
+                                           OplogAccessMode mode,
+                                           Date_t deadline,
+                                           const AutoGetOplogFastPathOptions& options) {
     auto lockMode = (mode == OplogAccessMode::kRead) ? MODE_IS : MODE_IX;
     if (mode == OplogAccessMode::kLogOp) {
         // Invariant that global lock is already held for kLogOp mode.
@@ -650,7 +659,8 @@ AutoGetOplog::AutoGetOplog(OperationContext* opCtx,
     }
 
     _oplogInfo = LocalOplogInfo::get(opCtx);
-    _oplog = CollectionPtr(_oplogInfo->getCollection());
+    _oplog = CollectionPtr(CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
+        opCtx, NamespaceString::kRsOplogNamespace));
     _oplog.makeYieldable(opCtx, LockedCollectionYieldRestore(opCtx, _oplog));
 }
 

@@ -108,6 +108,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeExtraIndexKeysCheck);
 MONGO_FAIL_POINT_DEFINE(hangBeforeReverseLookupCatalogSnapshot);
 MONGO_FAIL_POINT_DEFINE(hangAfterReverseLookupCatalogSnapshot);
 MONGO_FAIL_POINT_DEFINE(hangBeforeExtraIndexKeysHashing);
+MONGO_FAIL_POINT_DEFINE(sleepAfterExtraIndexKeysHashing);
 
 namespace mongo {
 
@@ -131,7 +132,7 @@ repl::OpTime _logOp(OperationContext* opCtx,
     oplogEntry.setTid(nss.tenantId() ? nss.tenantId() : tenantIdForStartStop);
     oplogEntry.setUuid(uuid);
     oplogEntry.setObject(obj);
-    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
     return writeConflictRetry(
         opCtx, "dbCheck oplog entry", NamespaceString::kRsOplogNamespace, [&] {
             auto const clockSource = opCtx->getServiceContext()->getFastClockSource();
@@ -629,7 +630,7 @@ void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
     int64_t totalBytesSeen = 0;
     int64_t totalKeysSeen = 0;
     do {
-        DbCheckExtraIndexKeysBatchStats batchStats = {0};
+        DbCheckExtraIndexKeysBatchStats batchStats = {};
         batchStats.deadline = Date_t::now() + Milliseconds(_info.maxBatchTimeMillis);
         batchStats.nConsecutiveIdenticalKeysAtEnd = 1;
 
@@ -684,6 +685,12 @@ void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
 
         // 3. Run hashing algorithm.
         Status hashStatus = _hashExtraIndexKeysCheck(opCtx, &batchStats);
+        if (MONGO_unlikely(sleepAfterExtraIndexKeysHashing.shouldFail())) {
+            LOGV2_DEBUG(3083201,
+                        3,
+                        "Sleeping for 1 second due to sleepAfterExtraIndexKeysHashing failpoint");
+            opCtx->sleepFor(Milliseconds(1000));
+        }
         if (!hashStatus.isOK()) {
             LOGV2_DEBUG(7844902,
                         3,
@@ -693,7 +700,9 @@ void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
                         logAttrs(_info.nss),
                         "uuid"_attr = _info.uuid);
             // TODO SERVER-79850: Raise all errors to the upper level.
-            if (hashStatus.code() != ErrorCodes::IndexNotFound) {
+            if (hashStatus.code() != ErrorCodes::IndexNotFound &&
+                hashStatus.code() != ErrorCodes::WriteConcernFailed &&
+                hashStatus.code() != ErrorCodes::UnsatisfiableWriteConcern) {
                 // Raise the error to the upper level.
                 iassert(hashStatus);
             }
@@ -710,7 +719,6 @@ void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
         // }
 
         // 5. Check if we've exceeded any limits.
-        _batchesProcessed++;
         totalBytesSeen += batchStats.nBytes;
         totalKeysSeen += batchStats.nKeys;
 
@@ -736,9 +744,64 @@ Status DbChecker::_hashExtraIndexKeysCheck(OperationContext* opCtx,
         LOGV2_DEBUG(7844906, 3, "Hanging due to hangBeforeExtraIndexKeysHashing failpoint");
         hangBeforeExtraIndexKeysHashing.pauseWhileSet(opCtx);
     }
+
+    auto status = _runHashExtraKeyCheck(opCtx, batchStats);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    auto logEntry =
+        dbCheckBatchEntry(batchStats->batchId,
+                          _info.nss,
+                          _info.uuid,
+                          batchStats->nHasherKeys,
+                          batchStats->nHasherBytes,
+                          batchStats->md5,
+                          batchStats->md5,
+                          key_string::rehydrateKey(batchStats->keyPattern, batchStats->firstBson),
+                          key_string::rehydrateKey(batchStats->keyPattern, batchStats->lastBson),
+                          batchStats->nConsecutiveIdenticalKeysAtEnd,
+                          batchStats->readTimestamp,
+                          batchStats->time,
+                          boost::none /* collOpts */,
+                          batchStats->indexSpec);
+
+    if (kDebugBuild || logEntry->getSeverity() != SeverityEnum::Info ||
+        batchStats->logToHealthLog) {
+        // On debug builds, health-log every batch result.
+        HealthLogInterface::get(opCtx)->log(*logEntry);
+    }
+
+    WriteConcernResult unused;
+    status = waitForWriteConcern(opCtx, batchStats->time, _info.writeConcern, &unused);
+
+    if (!status.isOK()) {
+        BSONObjBuilder context;
+        if (batchStats->batchId) {
+            context.append("batchId", batchStats->batchId->toBSON());
+        }
+        context.append("firstKey", batchStats->firstBson);
+        context.append("lastKey", batchStats->lastBson);
+
+        // TODO SERVER-79850: Investigate refactoring dbcheck code to only check for errors
+        // in one location.
+        auto entry = dbCheckErrorHealthLogEntry(_info.nss,
+                                                _info.uuid,
+                                                "dbCheck failed waiting for writeConcern",
+                                                ScopeEnum::Collection,
+                                                OplogEntriesEnum::Batch,
+                                                status,
+                                                context.done());
+        HealthLogInterface::get(opCtx)->log(*entry);
+        return status;
+    }
+    return Status::OK();
+}
+
+Status DbChecker::_runHashExtraKeyCheck(OperationContext* opCtx,
+                                        DbCheckExtraIndexKeysBatchStats* batchStats) {
     StringData indexName = _info.secondaryIndexCheckParameters.get().getSecondaryIndex();
     DbCheckOplogBatch oplogBatch;
-    BSONObjBuilder builder;
     {
         // We need to release the acquisition by dbcheck before writing to the oplog. This is
         // because dbcheck acquires the global lock in IS mode, and the oplog will attempt to
@@ -761,7 +824,6 @@ Status DbChecker::_hashExtraIndexKeysCheck(OperationContext* opCtx,
                 OplogEntriesEnum::Batch,
                 status);
             HealthLogInterface::get(opCtx)->log(*logEntry);
-            batchStats->finishedIndexBatch = true;
             batchStats->finishedIndexCheck = true;
 
             return status;
@@ -773,8 +835,6 @@ Status DbChecker::_hashExtraIndexKeysCheck(OperationContext* opCtx,
         uassert(ErrorCodes::SnapshotUnavailable,
                 "No snapshot available yet for dbCheck extra index keys check",
                 readTimestamp);
-        batchStats->readTimestamp = readTimestamp;
-
 
         const IndexDescriptor* index =
             collection->getIndexCatalog()->findIndexByName(opCtx, indexName);
@@ -793,10 +853,10 @@ Status DbChecker::_hashExtraIndexKeysCheck(OperationContext* opCtx,
                 OplogEntriesEnum::Batch,
                 status);
             HealthLogInterface::get(opCtx)->log(*logEntry);
-            batchStats->finishedIndexBatch = true;
             batchStats->finishedIndexCheck = true;
             return status;
         }
+
         const IndexCatalogEntry* indexCatalogEntry = collection->getIndexCatalog()->getEntry(index);
         auto iam = indexCatalogEntry->accessMethod()->asSortedData();
         const auto ordering = iam->getSortedDataInterface()->getOrdering();
@@ -837,7 +897,6 @@ Status DbChecker::_hashExtraIndexKeysCheck(OperationContext* opCtx,
 
         // Send information on this batch over the oplog.
         std::string md5 = hasher->total();
-        batchStats->md5 = md5;
         oplogBatch.setType(OplogEntriesEnum::Batch);
         oplogBatch.setNss(_info.nss);
         oplogBatch.setReadTimestamp(*readTimestamp);
@@ -866,38 +925,27 @@ Status DbChecker::_hashExtraIndexKeysCheck(OperationContext* opCtx,
                     logAttrs(_info.nss),
                     "uuid"_attr = _info.uuid);
 
-        builder.append("success", true);
-        builder.append("count", hasher->keysSeen());
-        builder.append("bytes", hasher->bytesSeen());
-        builder.append("md5", batchStats->md5);
-        builder.append("batchStart",
-                       key_string::rehydrateKey(index->keyPattern(), firstBsonWithoutRecordId));
-        builder.append("batchEnd",
-                       key_string::rehydrateKey(index->keyPattern(), lastBsonWithoutRecordId));
-        builder.append("nConsecutiveIdenticalIndexKeysSeenAtEnd",
-                       hasher->nConsecutiveIdenticalIndexKeysSeenAtEnd());
-        if (readTimestamp) {
-            builder.append("readTimestamp", *readTimestamp);
-        }
+        auto [shouldLogBatch, batchId] = _shouldLogBatch(oplogBatch);
+        batchStats->logToHealthLog = shouldLogBatch;
+        batchStats->batchId = batchId;
+        batchStats->readTimestamp = readTimestamp;
+        batchStats->nHasherKeys = hasher->keysSeen();
+        batchStats->nHasherBytes = hasher->bytesSeen();
+        batchStats->md5 = md5;
+        batchStats->keyPattern = index->keyPattern();
+        batchStats->indexSpec = index->infoObj();
+
+        batchStats->firstBson = firstBsonWithoutRecordId;
+        batchStats->lastBson = lastBsonWithoutRecordId;
     }
+
+    if (MONGO_unlikely(hangBeforeAddingDBCheckBatchToOplog.shouldFail())) {
+        LOGV2(8831800, "Hanging dbCheck due to failpoint 'hangBeforeAddingDBCheckBatchToOplog'");
+        hangBeforeAddingDBCheckBatchToOplog.pauseWhileSet();
+    }
+
     batchStats->time = _logOp(
         opCtx, _info.nss, boost::none /* tenantIdForStartStop */, _info.uuid, oplogBatch.toBSON());
-
-    builder.append("optime", batchStats->time.toBSON());
-    auto logEntry = dbCheckHealthLogEntry(_info.nss,
-                                          _info.uuid,
-                                          SeverityEnum::Info,
-                                          "dbcheck extra keys check batch on primary",
-                                          ScopeEnum::Index,
-                                          OplogEntriesEnum::Batch,
-                                          builder.obj());
-
-    if (kDebugBuild || logEntry->getSeverity() != SeverityEnum::Info ||
-        (_batchesProcessed % gDbCheckHealthLogEveryNBatches.load() == 0)) {
-        // On debug builds, health-log every batch result; on release builds, health-log
-        // every N batches.
-        HealthLogInterface::get(opCtx)->log(*logEntry);
-    }
     return Status::OK();
 }
 
@@ -1682,7 +1730,7 @@ void DbChecker::_dataConsistencyCheck(OperationContext* opCtx) {
         auto entry = dbCheckBatchEntry(stats.batchId,
                                        _info.nss,
                                        _info.uuid,
-                                       stats.nDocs,
+                                       stats.nCount,
                                        stats.nBytes,
                                        stats.md5,
                                        stats.md5,
@@ -1700,21 +1748,28 @@ void DbChecker::_dataConsistencyCheck(OperationContext* opCtx) {
         WriteConcernResult unused;
         auto status = waitForWriteConcern(opCtx, stats.time, _info.writeConcern, &unused);
         if (!status.isOK()) {
+            BSONObjBuilder context;
+            if (stats.batchId) {
+                context.append("batchId", stats.batchId->toBSON());
+            }
+            context.append("lastKey", stats.lastKey);
             // TODO SERVER-79850: Investigate refactoring dbcheck code to only check for errors
             // in one location.
-            auto entry = dbCheckWarningHealthLogEntry(_info.nss,
-                                                      _info.uuid,
-                                                      "dbCheck failed waiting for writeConcern",
-                                                      ScopeEnum::Collection,
-                                                      OplogEntriesEnum::Batch,
-                                                      status);
+            auto entry = dbCheckErrorHealthLogEntry(_info.nss,
+                                                    _info.uuid,
+                                                    "dbCheck failed waiting for writeConcern",
+                                                    ScopeEnum::Collection,
+                                                    OplogEntriesEnum::Batch,
+                                                    status,
+                                                    context.done());
             HealthLogInterface::get(opCtx)->log(*entry);
+            return;
         }
 
         start = stats.lastKey;
 
         // Update our running totals.
-        totalDocsSeen += stats.nDocs;
+        totalDocsSeen += stats.nCount;
         totalBytesSeen += stats.nBytes;
         {
             stdx::unique_lock<Client> lk(*opCtx->getClient());
@@ -1826,10 +1881,12 @@ StatusWith<DbCheckCollectionBatchStats> DbChecker::_runBatch(OperationContext* o
             hangBeforeDbCheckLogOp.pauseWhileSet();
         }
 
-        result.logToHealthLog = _shouldLogBatch(batch);
-        result.batchId = batch.getBatchId();
+        auto [shouldLogBatch, batchId] = _shouldLogBatch(batch);
+        result.logToHealthLog = shouldLogBatch;
+        result.batchId = batchId;
         result.readTimestamp = readTimestamp;
         result.nDocs = hasher->docsSeen();
+        result.nCount = hasher->countSeen();
         result.nBytes = hasher->bytesSeen();
         result.lastKey = hasher->lastKeySeen();
         result.md5 = md5;
@@ -1868,17 +1925,19 @@ std::unique_ptr<DbCheckAcquisition> DbChecker::_acquireDBCheckLocks(OperationCon
     return acquisition;
 }
 
-bool DbChecker::_shouldLogBatch(DbCheckOplogBatch& batch) {
+std::pair<bool, boost::optional<UUID>> DbChecker::_shouldLogBatch(DbCheckOplogBatch& batch) {
     _batchesProcessed++;
     bool shouldLog = (_batchesProcessed % gDbCheckHealthLogEveryNBatches.load() == 0);
     // TODO(SERVER-78399): Remove the check and always set the parameters of the batch.
     // Check 'gSecondaryIndexChecksInDbCheck' feature flag is enabled.
     if (batch.getSecondaryIndexCheckParameters()) {
+        auto uuid = UUID::gen();
         batch.setLogBatchToHealthLog(shouldLog);
-        batch.setBatchId(UUID::gen());
+        batch.setBatchId(uuid);
+        return {shouldLog, uuid};
     }
 
-    return shouldLog;
+    return {shouldLog, boost::none};
 }
 
 /**
