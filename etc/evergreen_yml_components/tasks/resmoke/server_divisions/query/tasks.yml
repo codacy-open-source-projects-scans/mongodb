@@ -145,10 +145,12 @@ tasks:
   ## Standalone generational fuzzer for multiversion aggregation expressions ##
   - <<: *jstestfuzz_template
     name: aggregation_expression_multiversion_fuzzer_gen
+    # TODO SERVER-82766: multiversion fuzzers had been timing out on TSAN builds.
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
         "non_deterministic",
+        "incompatible_tsan",
         "aggfuzzer",
         "multiversion",
         "require_npm",
@@ -201,10 +203,12 @@ tasks:
   ## Standalone generational fuzzer for multiversion aggregation pipelines ##
   - <<: *jstestfuzz_template
     name: aggregation_multiversion_fuzzer_gen
+    # TODO SERVER-82766: multiversion fuzzers had been timing out on TSAN builds.
     tags:
       [
         "assigned_to_jira_team_server_query_execution",
         "non_deterministic",
+        "incompatible_tsan",
         "aggfuzzer",
         "common",
         "multiversion",
@@ -341,6 +345,43 @@ tasks:
           num_files: 70
           num_tasks: 20
           jstestfuzz_vars: --diffTestingMode timeseries --numPipelines=1000
+          npm_command: agg-fuzzer
+          suite: generational_fuzzer
+          resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+
+  ## Standalone fuzzer for checking block_processing correctness ##
+  - <<: *jstestfuzz_template
+    name: aggregation_blockprocessing_fuzzer_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_query_execution",
+        "release_critical",
+        "incompatible_development_variant",
+        "incompatible_mac",
+        "incompatible_ppc",
+        "incompatible_s390x",
+        "aggfuzzer",
+        "common",
+        "timeseries",
+        "blockprocessing",
+        "require_npm",
+        "random_name",
+        "no_debug_mode",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          <<: *jstestfuzz_config_vars
+          # We have seen some common scenarios where the generated pipelines take a while to run and can
+          # hit some timeouts. We'll split 70000 pipelines across 70 files, compared to 80000 pipelines
+          # across 20 files in the other generational agg fuzzers. This approach can be considered if we
+          # see similar timeouts elsewhere. It is not well understood whether/how we could pass
+          # 'numPipelines' as an argument in the yaml here, but it works as part of the
+          # 'jstestfuzz_vars' argument string. If a future reader better understands this evergreen
+          # integration, please update this comment and/or move numPipelines to a yaml arg here.
+          num_files: 70
+          num_tasks: 20
+          jstestfuzz_vars: --diffTestingMode blockprocessing --numPipelines=1000
           npm_command: agg-fuzzer
           suite: generational_fuzzer
           resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
@@ -749,6 +790,13 @@ tasks:
       - func: "run tests"
 
   - <<: *task_template
+    name: implicit_query_settings_fallback
+    tags: ["assigned_to_jira_team_server_query_execution", "default"]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
     name: index_filters_to_query_settings
     # Not every build variant speaks 'sbe_only' and this suite requires SBE
     # which can be enforced by 'requires_all_feature_flags'
@@ -1098,7 +1146,7 @@ tasks:
           npm_command: agg-fuzzer
 
   - <<: *task_template
-    name: aggregation_repeat_queries
+    name: aggregation_repeat_queries_multiplan_single_solutions
     tags: ["assigned_to_jira_team_server_query_optimization", "default"]
     depends_on:
       - name: aggregation

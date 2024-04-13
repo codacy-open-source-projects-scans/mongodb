@@ -1265,10 +1265,11 @@ boost::optional<OpTime> ShardMergeRecipientService::Instance::_getOldestActiveTr
     // config.transactions collection aren't coalesced for multi-statement transactions during
     // secondary oplog application, unlike the retryable writes where updates to config.transactions
     // collection are coalesced on secondaries.
-    findCmd.setReadConcern(BSON(repl::ReadConcernArgs::kLevelFieldName
-                                << repl::readConcernLevels::kSnapshotName
-                                << repl::ReadConcernArgs::kAtClusterTimeFieldName << ReadTimestamp
-                                << repl::ReadConcernArgs::kAllowTransactionTableSnapshot << true));
+    findCmd.setReadConcern(
+        BSON(repl::ReadConcernArgs::kLevelFieldName
+             << repl::readConcernLevels::toString(repl::ReadConcernLevel::kSnapshotReadConcern)
+             << repl::ReadConcernArgs::kAtClusterTimeFieldName << ReadTimestamp
+             << repl::ReadConcernArgs::kAllowTransactionTableSnapshot << true));
 
     auto earliestOpenTransactionBson = _client->findOne(std::move(findCmd), _readPreference);
     LOGV2_DEBUG(7339736,
@@ -1403,7 +1404,7 @@ void ShardMergeRecipientService::Instance::_processCommittedTransactionEntry(con
     // Use the same wallclock time as the noop entry.
     sessionTxnRecord.setLastWriteDate(noopEntry.getWallClockTime());
 
-    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
     writeConflictRetry(
         opCtx, "writeDonorCommittedTxnEntry", NamespaceString::kRsOplogNamespace, [&] {
             WriteUnitOfWork wuow(opCtx);
@@ -1863,7 +1864,7 @@ ShardMergeRecipientService::Instance::_advanceMajorityCommitTsToBkpCursorCheckpo
                        "mergeRecipientWriteNoopToAdvanceStableTimestamp",
                        NamespaceString::kRsOplogNamespace,
                        [&] {
-                           AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
+                           AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
                            WriteUnitOfWork wuow(opCtx);
                            const std::string msg = str::stream()
                                << "Merge recipient advancing stable timestamp";

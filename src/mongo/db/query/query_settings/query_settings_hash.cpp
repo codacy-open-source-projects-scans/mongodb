@@ -39,22 +39,11 @@ size_t hash(const QuerySettings& querySettings) {
         boost::hash_combine(hash, absl::Hash<QueryFrameworkControlEnum>{}(*version));
     }
     if (auto indexHints = querySettings.getIndexHints()) {
-        auto hashVectorOfHints = [&](const std::vector<IndexHint>& hints) {
-            for (const auto& hint : hints) {
+        for (const auto& hintSpec : *indexHints) {
+            for (const auto& hint : hintSpec.getAllowedIndexes()) {
                 boost::hash_combine(hash, hint.hash());
             }
-        };
-        visit(OverloadedVisitor{
-                  [&](const std::vector<IndexHintSpec>& hintSpecs) {
-                      for (const auto& hintSpec : hintSpecs) {
-                          hashVectorOfHints(hintSpec.getAllowedIndexes());
-                      }
-                  },
-                  [&](const IndexHintSpec& hintSpec) {
-                      hashVectorOfHints(hintSpec.getAllowedIndexes());
-                  },
-              },
-              *indexHints);
+        }
     }
     return hash;
 }

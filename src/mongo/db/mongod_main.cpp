@@ -726,8 +726,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         // Initialize the cached pointer to the oplog collection. We want to do this even as
         // standalone
         // so accesses to the cached pointer in replica set nodes started as standalone still work
-        // (mainly AutoGetOplogFastPath). In case the oplog doesn't exist, it is just initialized to
-        // null. This initialization must happen within a GlobalWrite lock context.
+        // (mainly AutoGetOplog). In case the oplog doesn't exist, it is just initialized to null.
+        // This initialization must happen within a GlobalWrite lock context.
         repl::acquireOplogCollectionForLogging(startupOpCtx.get());
     }
 
@@ -2151,10 +2151,6 @@ int mongod_main(int argc, char* argv[]) {
             quickExit(ExitCode::fail);
         }
     }();
-
-    if (audit::setAuditInterface) {
-        audit::setAuditInterface(service);
-    }
 
     {
         // Create the durable history registry prior to calling the `setUp*` methods. They may

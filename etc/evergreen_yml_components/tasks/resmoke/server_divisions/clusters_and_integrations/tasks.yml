@@ -445,7 +445,8 @@ tasks:
         "assigned_to_jira_team_server_servicearch",
         "default",
         "incompatible_mac",
-        "incompatible_ibm",
+        "incompatible_ppc",
+        "incompatible_s390x",
         "concurrency",
         "common",
         "read_concern_maj",
@@ -559,7 +560,8 @@ tasks:
 
   - <<: *task_template
     name: integration_tests_replset
-    tags: ["assigned_to_jira_team_server_servicearch", "integration"]
+    tags:
+      ["assigned_to_jira_team_server_servicearch", "auxiliary", "integration"]
     depends_on:
       - name: compile_integration_test
     commands:
@@ -570,7 +572,8 @@ tasks:
 
   - <<: *task_template
     name: integration_tests_replset_ssl_auth
-    tags: ["assigned_to_jira_team_server_servicearch", "integration"]
+    tags:
+      ["assigned_to_jira_team_server_servicearch", "auxiliary", "integration"]
     depends_on:
       - name: compile_integration_test
     commands:
@@ -581,7 +584,13 @@ tasks:
 
   - <<: *task_template
     name: integration_tests_sharded
-    tags: ["assigned_to_jira_team_server_servicearch", "integration", "sharded"]
+    tags:
+      [
+        "assigned_to_jira_team_server_servicearch",
+        "auxiliary",
+        "integration",
+        "sharded",
+      ]
     depends_on:
       - name: compile_integration_test
     commands:
@@ -593,7 +602,12 @@ tasks:
   - <<: *task_template
     name: integration_tests_standalone
     tags:
-      ["assigned_to_jira_team_server_servicearch", "integration", "standalone"]
+      [
+        "assigned_to_jira_team_server_servicearch",
+        "auxiliary",
+        "integration",
+        "standalone",
+      ]
     depends_on:
       - name: compile_integration_test
     commands:
@@ -604,7 +618,13 @@ tasks:
 
   - <<: *task_template
     name: integration_tests_standalone_audit
-    tags: ["assigned_to_jira_team_server_servicearch", "integration", "audit"]
+    tags:
+      [
+        "assigned_to_jira_team_server_servicearch",
+        "auxiliary",
+        "integration",
+        "audit",
+      ]
     depends_on:
       - name: compile_integration_test
     commands:
@@ -623,6 +643,7 @@ tasks:
         "incompatible_windows",
         "incompatible_ppc",
         "incompatible_s390x",
+        "incompatible_tsan",
       ]
     commands:
       - func: "do setup"
@@ -714,14 +735,26 @@ tasks:
 
   - <<: *task_template
     name: serverless
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "serverless"]
+    tags:
+      [
+        "assigned_to_jira_team_server_servicearch",
+        "default",
+        "serverless",
+        "requires_large_host_tsan",
+      ]
     commands:
       - func: "do setup"
       - func: "run tests"
 
   - <<: *task_template
     name: serverless_MTM
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "serverless"]
+    tags:
+      [
+        "assigned_to_jira_team_server_servicearch",
+        "default",
+        "serverless",
+        "requires_large_host_tsan",
+      ]
     commands:
       - func: "do setup"
       - func: "run tests"
@@ -1094,7 +1127,7 @@ tasks:
 
   ## fetch_and_run_libfuzzertests - get input corpora from s3 and run libfuzzertests ##
   - name: fetch_and_run_libfuzzertests
-    tags: ["assigned_to_jira_team_server_security"]
+    tags: ["assigned_to_jira_team_server_security", "experimental"]
     commands:
       - func: "fetch corpus"
       - func: "run tests"
@@ -1221,7 +1254,7 @@ tasks:
           suite: core_ese
 
   - <<: *task_template
-    name: jsCore_min_batch_repeat_queries_ese_gsm
+    name: jsCore_min_batch_repeat_queries_multiplan_single_solutions_ese_gsm
     tags:
       [
         "assigned_to_jira_team_server_security",
@@ -1237,7 +1270,7 @@ tasks:
       - func: "do setup"
       - func: "run tests"
         vars:
-          suite: core_min_batch_repeat_queries_ese_gsm
+          suite: core_min_batch_repeat_queries_multiplan_single_solutions_ese_gsm
 
   - <<: *gen_task_template
     name: multiversion_auth_future_git_tag_gen
@@ -1840,17 +1873,6 @@ tasks:
     commands:
       - func: "generate resmoke tasks"
 
-  - <<: *gen_task_template
-    name: sharded_collections_single_writes_without_shard_key_jscore_passthrough_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_cluster_scalability",
-        "default",
-        "sharding",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-
   - <<: *task_template
     name: sharded_jscore_txns
     tags:
@@ -2161,6 +2183,7 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_cluster_scalability",
+        "default",
         "replica_sets",
         "common",
         "san",
@@ -2476,22 +2499,24 @@ tasks:
         vars:
           use_large_distro: "true"
 
-  - <<: *gen_task_template
-    name: cwrwc_wc_majority_passthrough_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_catalog_and_routing",
-        "release_critical",
-        "incompatible_mac",
-        "incompatible_all_feature_flags",
-        "read_write_concern",
-        "write",
-        "secondary_read_after_majority_write",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
+  # TODO(SERVER-89135): Fix this passthrough with causal consistency or remove it.
+  # Disable this test due to wrong secondary read after majority write assumption.
+  # - <<: *gen_task_template
+  #   name: cwrwc_wc_majority_passthrough_gen
+  #   tags:
+  #     [
+  #       "assigned_to_jira_team_server_catalog_and_routing",
+  #       "release_critical",
+  #       "incompatible_mac",
+  #       "incompatible_all_feature_flags",
+  #       "read_write_concern",
+  #       "write",
+  #       "secondary_read_after_majority_write",
+  #     ]
+  #   commands:
+  #     - func: "generate resmoke tasks"
+  #       vars:
+  #         use_large_distro: "true"
 
   - <<: *gen_task_template
     name: fcv_upgrade_downgrade_replica_sets_jscore_passthrough_gen
