@@ -30,24 +30,6 @@ variables:
       - name: compile_mongocrypt_shlib
         variant: amazon2-arm64-mongocrypt-shlib-compile
 
-  - &al2023_arm64_compile_variant_dependency
-    depends_on:
-      - name: package_new_compile
-        variant: al2023-arm64-compile
-
-  - &al2023_al2_arm64_compile_variant_dependency
-    depends_on:
-      - name: package_new_compile
-        variant: al2023-arm64-compile
-      - name: package_new_compile
-        variant: amazon2-arm64-compile
-
-  - &amazon2_x86_expansions
-    multiversion_platform: amazon2
-    multiversion_edition: enterprise
-    repo_edition: enterprise
-    num_scons_link_jobs_available: 0.99
-
   - &schedule_variant_auto_tasks_task
     name: schedule_variant_auto_tasks
     activate: false
@@ -61,21 +43,6 @@ variables:
     depends_on:
       - name: schedule_global_auto_tasks
         variant: task_generation
-
-  # THIS HAS COPIES IN:
-  # - etc/evergreen_yml_components/variants/perf/perf.yml
-  # - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
-  # - etc/evergreen_yml_components/variants/amazon/test_dev.yml
-  # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
-  - &linux_arm64_generic_expansions
-    multiversion_platform: amazon2
-    multiversion_edition: enterprise
-    multiversion_architecture: aarch64
-    packager_arch: aarch64
-    packager_distro: amazon2
-    repo_edition: enterprise
-    large_distro_name: amazon2-arm64-large
-    num_scons_link_jobs_available: 0.99
 
   - modules: &perf_modules
       - dsi
@@ -273,29 +240,30 @@ buildvariants:
     tasks: &linux_3_shard_tasks
       - *schedule_patch_auto_tasks_task
       - *schedule_variant_auto_tasks_task
-      - name: ycsb.2023-09
-      - name: ycsb_single_thread
-      - name: ycsb_w1.2023-09
-      - name: crud_workloads_majority
-      - name: crud_workloads_w1
-      - name: misc_workloads
-      - name: map_reduce_workloads
-      - name: smoke_test
       - name: canaries_only
-      - name: mongos_workloads
-        cron: *high-value-workload-cron
-      - name: mongos_large_catalog_workloads
-      - name: move_chunk_workloads
-        cron: *high-value-workload-cron
       - name: change_streams_latency
         cron: *high-value-workload-cron
       - name: change_streams_listen_throughput
         cron: *high-value-workload-cron
       - name: change_streams_multi_mongos
-      - name: tsbs_query_sharded
+      - name: crud_workloads_majority
+      - name: crud_workloads_w1
+      - name: map_reduce_workloads
+      - name: misc_workloads
+      - name: mongos_large_catalog_workloads
+      - name: mongos_workloads
+        cron: *high-value-workload-cron
+      - name: move_chunk_workloads
+        cron: *high-value-workload-cron
+      - name: smoke_test
       - name: tsbs_query_finance_sharded
-      - name: tsbs_query_sharded_balancer
       - name: tsbs_query_finance_sharded_balancer
+      - name: tsbs_query_sharded
+      - name: tsbs_query_sharded_balancer
+      - name: ycsb.2023-09
+      - name: ycsb_read_concern_available.2023-09
+      - name: ycsb_single_thread
+      - name: ycsb_w1.2023-09
 
   - <<: *amazon_linux2_arm64_compile_variant_dependency
     name: perf-3-node-replSet.arm.aws.2023-11
@@ -320,6 +288,7 @@ buildvariants:
       - *schedule_variant_auto_tasks_task
       - name: ycsb.2023-09
         cron: *high-value-workload-cron
+      - name: ycsb_audit.2023-09
       - name: ycsb_single_thread
       - name: ycsb_w1.2023-09
       - name: ycsb_60GB.2023-09

@@ -344,7 +344,10 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
                                            entry.getOpTime());
             }
         }
-        result.affectedNamespaces.emplace(entry.getNss());
+
+        if (!entry.getNss().isEmpty()) {
+            result.affectedNamespaces.emplace(entry.getNss());
+        }
     };
 
     // Restore the current timestamp read source after fetching transaction history, which may
@@ -608,7 +611,7 @@ void TransactionParticipant::performNoopWrite(OperationContext* opCtx, StringDat
     }
 
     {
-        AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+        AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
         uassert(ErrorCodes::NotWritablePrimary,
                 "Not primary when performing noop write for {}"_format(msg),
                 replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));

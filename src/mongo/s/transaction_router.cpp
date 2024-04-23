@@ -630,6 +630,19 @@ void TransactionRouter::Router::processParticipantResponse(OperationContext* opC
                     opCtx,
                     shardIdToUpdate,
                     Participant::ReadOnly::kOutstandingAdditionalParticipant);
+
+                if (!p().recoveryShardId) {
+                    LOGV2_DEBUG(
+                        89275,
+                        3,
+                        "Choosing outstanding additional participant shard as recovery shard",
+                        "sessionId"_attr = _sessionId(),
+                        "txnNumber"_attr = o().txnNumberAndRetryCounter.getTxnNumber(),
+                        "txnRetryCounter"_attr = o().txnNumberAndRetryCounter.getTxnRetryCounter(),
+                        "shardId"_attr = shardIdToUpdate);
+                    p().recoveryShardId = shardIdToUpdate;
+                }
+
                 return;
             }
 
@@ -1773,10 +1786,13 @@ void TransactionRouter::Router::appendRecoveryToken(BSONObjBuilder* builder) con
     TxnRecoveryToken recoveryToken;
 
     // The recovery shard is chosen on the first statement that did a write (transactions that only
-    // did reads do not need to be recovered; they can just be retried).
+    // did reads do not need to be recovered; they can just be retried) or that returned an
+    // additional participant with an empty readOnly value.
     if (p().recoveryShardId) {
-        invariant(o().participants.find(*p().recoveryShardId)->second.readOnly ==
-                  Participant::ReadOnly::kNotReadOnly);
+        auto recoveryShardReadOnly = o().participants.find(*p().recoveryShardId)->second.readOnly;
+        invariant(recoveryShardReadOnly == Participant::ReadOnly::kNotReadOnly ||
+                  recoveryShardReadOnly ==
+                      Participant::ReadOnly::kOutstandingAdditionalParticipant);
         recoveryToken.setRecoveryShardId(*p().recoveryShardId);
     }
 
@@ -1866,27 +1882,26 @@ BSONObj TransactionRouter::Router::_commitWithRecoveryToken(OperationContext* op
             recoveryToken.getRecoveryShardId());
     const auto& recoveryShardId = *recoveryToken.getRecoveryShardId();
 
-    const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
-
     auto coordinateCommitCmd = [&] {
         CoordinateCommitTransaction coordinateCommitCmd;
         coordinateCommitCmd.setDbName(DatabaseName::kAdmin);
         coordinateCommitCmd.setParticipants({});
-
-        auto rawCoordinateCommit = coordinateCommitCmd.toBSON(
+        return coordinateCommitCmd.toBSON(
             BSON(WriteConcernOptions::kWriteConcernField << opCtx->getWriteConcern().toBSON()));
-
-        return attachTxnFieldsIfNeeded(opCtx, recoveryShardId, rawCoordinateCommit);
     }();
 
-    auto recoveryShard = uassertStatusOK(shardRegistry->getShard(opCtx, recoveryShardId));
-    return uassertStatusOK(recoveryShard->runCommandWithFixedRetryAttempts(
-                               opCtx,
-                               ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                               DatabaseName::kAdmin,
-                               coordinateCommitCmd,
-                               Shard::RetryPolicy::kIdempotent))
-        .response;
+    MultiStatementTransactionRequestsSender ars(
+        opCtx,
+        Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
+        DatabaseName::kAdmin,
+        {{recoveryShardId, coordinateCommitCmd}},
+        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+        Shard::RetryPolicy::kIdempotent);
+
+    const auto response = ars.next();
+    invariant(ars.done());
+    uassertStatusOK(response.swResponse);
+    return response.swResponse.getValue().data;
 }
 
 void TransactionRouter::Router::_logSlowTransaction(OperationContext* opCtx,

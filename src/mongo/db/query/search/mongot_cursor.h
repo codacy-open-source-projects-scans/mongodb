@@ -28,6 +28,7 @@
  */
 #pragma once
 
+#include "mongo/db/pipeline/visitors/docs_needed_bounds.h"
 #include "mongo/executor/task_executor_cursor.h"
 
 namespace mongo::mongot_cursor {
@@ -48,7 +49,10 @@ static constexpr StringData kVerbosityField = "verbosity"_sd;
 static constexpr StringData kIntermediateField = "intermediate"_sd;
 static constexpr StringData kCursorOptionsField = "cursorOptions"_sd;
 static constexpr StringData kDocsRequestedField = "docsRequested"_sd;
+static constexpr StringData kBatchSizeField = "batchSize"_sd;
 static constexpr StringData kRequiresSearchSequenceToken = "requiresSearchSequenceToken"_sd;
+
+static constexpr long long kMinimumMongotBatchSize = 10;
 
 // Default sort spec is to sort decreasing by search score.
 static const BSONObj kSortSpec = BSON("$searchScore" << -1);
@@ -70,19 +74,24 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
     const executor::RemoteCommandRequest& command,
     std::shared_ptr<executor::TaskExecutor> taskExecutor,
     bool preFetchNextBatch,
-    std::function<void(BSONObjBuilder& bob)> augmentGetMore = nullptr,
+    std::function<boost::optional<long long>()> calcDocsNeededFn = nullptr,
     std::unique_ptr<PlanYieldPolicy> yieldPolicy = nullptr);
 
 /**
  * Run the given search query against mongot and build one cursor object for each
  * cursor returned from mongot.
+ * TODO SERVER-87077 This function should accept a InternalSearchMongotRemoteSpec rather than
+ * require the fields passed individually.
  */
 std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSearchStage(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const BSONObj& query,
     std::shared_ptr<executor::TaskExecutor> taskExecutor,
     boost::optional<long long> docsRequested = boost::none,
-    std::function<void(BSONObjBuilder& bob)> augmentGetMore = nullptr,
+    boost::optional<DocsNeededBounds> minDocsNeededBounds = boost::none,
+    boost::optional<DocsNeededBounds> maxDocsNeededBounds = boost::none,
+    boost::optional<int64_t> userBatchSize = boost::none,
+    std::function<boost::optional<long long>()> calcDocsNeededFn = nullptr,
     const boost::optional<int>& protocolVersion = boost::none,
     bool requiresSearchSequenceToken = false,
     std::unique_ptr<PlanYieldPolicy> yieldPolicy = nullptr);

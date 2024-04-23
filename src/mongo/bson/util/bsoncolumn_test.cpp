@@ -8520,6 +8520,9 @@ TEST_F(BSONColumnTest, BlockFuzzerDiscoveredEdgeCases) {
         "fwBAAwAAAAAAAAAA"_sd,
         "CgBh/wABemEUAAAAAAAAAAIBAAA="_sd,
         "BQAvAAAAAABQslBQUFBQUFBQUFAAUFBQUFB5UP7///9QUFBQUFBQUFCBgYGBgYGBgYGBgYGBgYFQbFCpUFBQgVBQUFBQUFBQP1BQUFBQUAAA"_sd,
+        // Block-based Path API doesn't validate the scale index for non-double values
+        // (SERVER-89155).
+        "8AgAAAAIAAAA0Cz/AAAAAAdSAAA="_sd,
         // The two APIs had different delta values, but both should fail (SERVER-85860 and
         // SERVER-87873).
         "BQADAAAAkP8AkJCR///+/4jIfdAmAAAAAAAAAJACAAAAAP8AAAA="_sd,
@@ -8531,6 +8534,8 @@ TEST_F(BSONColumnTest, BlockFuzzerDiscoveredEdgeCases) {
         // Block-based API had a stack overflow for BinData values (SERVER-88207).
         "BQAXAAAAMcLCPso9PcJhJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmsMIYAAECAAIAAA=="_sd,
         "BQAwAAAAAAcAAAAAAAEAAAAAAABAAAAAAAA7Ozs7Ozs7Ozs6Ozs7Ozs7Ozs7Ozs7Ozs7OwD+/4A7OzsA/v+A/wA="_sd,
+        // Block-based API didn't allow non-zero/missing deltas after EOO (SERVER-89150).
+        "8h4AAAD/p/+zSENBMoAB/0hDQzKAAP9IOjCAAP8AAACCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCggA="_sd,
     };
 
     for (auto&& binaryBase64 : binariesBase64) {

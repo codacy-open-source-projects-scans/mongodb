@@ -299,8 +299,9 @@ BSONObj normalizeCollation(OperationContext* opCtx, const BSONObj& collation) {
 BSONObj resolveCollationForUserQueries(OperationContext* opCtx,
                                        const NamespaceString& nss,
                                        const boost::optional<BSONObj>& collationInRequest,
-                                       bool isUnsplittable) {
-    if (isUnsplittable) {
+                                       bool isUnsplittable,
+                                       bool isRegisterExistingCollectionInGlobalCatalog) {
+    if (isUnsplittable && !isRegisterExistingCollectionInGlobalCatalog) {
         if (collationInRequest) {
             return normalizeCollation(opCtx, *collationInRequest);
         } else {
@@ -325,8 +326,9 @@ BSONObj resolveCollationForUserQueries(OperationContext* opCtx,
     const auto actualCollator = [&]() -> const CollatorInterface* {
         const auto& coll = autoColl.getCollection();
         if (coll) {
-            uassert(
-                ErrorCodes::InvalidOptions, "can't shard a capped collection", !coll->isCapped());
+            uassert(ErrorCodes::InvalidOptions,
+                    "can't shard a capped collection",
+                    isUnsplittable || !coll->isCapped());
             return coll->getDefaultCollator();
         }
 
@@ -339,7 +341,7 @@ BSONObj resolveCollationForUserQueries(OperationContext* opCtx,
 
     auto actualCollatorBSON = actualCollator->getSpec().toBSON();
 
-    if (!collationInRequest) {
+    if (!collationInRequest && !isRegisterExistingCollectionInGlobalCatalog) {
         auto actualCollatorFilter =
             uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
                                 ->makeFromBSON(actualCollatorBSON));
@@ -643,8 +645,12 @@ void checkShardingCatalogCollectionOptions(OperationContext* opCtx,
 
     {
         // Check collator
-        const auto requestedCollator = resolveCollationForUserQueries(
-            opCtx, targetNss, request.getCollation(), request.getUnsplittable());
+        const auto requestedCollator =
+            resolveCollationForUserQueries(opCtx,
+                                           targetNss,
+                                           request.getCollation(),
+                                           request.getUnsplittable(),
+                                           request.getRegisterExistingCollectionInGlobalCatalog());
         const auto defaultCollator =
             cm.getDefaultCollator() ? cm.getDefaultCollator()->getSpec().toBSON() : BSONObj();
         uassert(
@@ -913,7 +919,7 @@ void exitCriticalSectionsOnCoordinator(OperationContext* opCtx,
  * an equivalent descriptor that may be persisted with the recovery document.
  */
 TranslatedRequestParams translateRequestParameters(OperationContext* opCtx,
-                                                   ShardsvrCreateCollectionRequest& request,
+                                                   const ShardsvrCreateCollectionRequest& request,
                                                    const NamespaceString& originalNss) {
     auto performCheckOnCollectionUUID = [opCtx, request](const NamespaceString& resolvedNss) {
         AutoGetCollection coll{
@@ -951,8 +957,11 @@ TranslatedRequestParams translateRequestParameters(OperationContext* opCtx,
         return makeTranslateRequestParams(
             resolvedNamespace,
             *request.getShardKey(),
-            resolveCollationForUserQueries(
-                opCtx, resolvedNamespace, request.getCollation(), request.getUnsplittable()),
+            resolveCollationForUserQueries(opCtx,
+                                           resolvedNamespace,
+                                           request.getCollation(),
+                                           request.getUnsplittable(),
+                                           request.getRegisterExistingCollectionInGlobalCatalog()),
             boost::none /* timeseries */);
     }
 
@@ -998,8 +1007,11 @@ TranslatedRequestParams translateRequestParameters(OperationContext* opCtx,
         return makeTranslateRequestParams(
             resolvedNamespace,
             request.getShardKey().value(),
-            resolveCollationForUserQueries(
-                opCtx, resolvedNamespace, request.getCollation(), request.getUnsplittable()),
+            resolveCollationForUserQueries(opCtx,
+                                           resolvedNamespace,
+                                           request.getCollation(),
+                                           request.getUnsplittable(),
+                                           request.getRegisterExistingCollectionInGlobalCatalog()),
             timeseriesOptions);
     }
 
@@ -1015,8 +1027,11 @@ TranslatedRequestParams translateRequestParameters(OperationContext* opCtx,
     return makeTranslateRequestParams(
         resolvedNamespace,
         keyPattern,
-        resolveCollationForUserQueries(
-            opCtx, resolvedNamespace, request.getCollation(), request.getUnsplittable()),
+        resolveCollationForUserQueries(opCtx,
+                                       resolvedNamespace,
+                                       request.getCollation(),
+                                       request.getUnsplittable(),
+                                       request.getRegisterExistingCollectionInGlobalCatalog()),
         timeseriesOptions);
 }
 
@@ -2514,6 +2529,27 @@ ExecutorFuture<void> CreateCollectionCoordinator::_cleanupOnAbort(
             // Exit both critical sections on the coordinator
             exitCriticalSectionsOnCoordinator(
                 opCtx, true /* throwIfReasonDiffers */, _critSecReason, originalNss());
+        })
+        .onError([this, anchor = shared_from_this()](const Status& status) {
+            const auto opCtxHolder = cc().makeOperationContext();
+            auto* opCtx = opCtxHolder.get();
+            getForwardableOpMetadata().setOn(opCtx);
+
+            // If a shard has been removed, remove it from the list of involved shards.
+            if (_doc.getShardIds() && status == ErrorCodes::ShardNotFound) {
+                auto involvedShardIds = *_doc.getShardIds();
+                auto allShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+
+                std::erase_if(involvedShardIds, [&](auto&& shard) {
+                    return std::find(allShardIds.begin(), allShardIds.end(), shard) ==
+                        allShardIds.end();
+                });
+
+                _doc.setShardIds(std::move(involvedShardIds));
+                _updateStateDocument(opCtx, CreateCollectionCoordinatorDocument(_doc));
+            }
+
+            return status;
         });
 }
 

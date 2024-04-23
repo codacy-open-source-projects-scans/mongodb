@@ -273,7 +273,7 @@ public:
         ReplicationConsistencyMarkers* consistencyMarkers,
         StorageInterface* storageInterface,
         const OplogApplier::Options& options,
-        ThreadPool* writerPool) final {
+        ThreadPool* workerPool) final {
         MONGO_UNREACHABLE;
     };
 
@@ -1027,7 +1027,7 @@ SemiFuture<void> ShardMergeRecipientService::Instance::_openBackupCursor(
 
     const auto aggregateCommandRequestObj = [] {
         AggregateCommandRequest aggRequest(
-            NamespaceString::makeCollectionlessAggregateNSS(DatabaseName::kAdmin),
+            NamespaceString::makeCollectionlessAggregateNSS(DatabaseName::kLocal),
             {BSON("$backupCursor" << BSONObj())});
         // We must set a writeConcern on internal commands.
         aggRequest.setWriteConcern(WriteConcernOptions());
@@ -1151,7 +1151,7 @@ SemiFuture<void> ShardMergeRecipientService::Instance::_openBackupCursor(
     _donorFilenameBackupCursorFileFetcher = std::make_unique<Fetcher>(
         _backupCursorExecutor.get(),
         _client->getServerHostAndPort(),
-        DatabaseName::kAdmin,
+        DatabaseName::kLocal,
         aggregateCommandRequestObj,
         fetcherCallback,
         ReadPreferenceSetting(ReadPreference::PrimaryPreferred).toContainingBSON(),
@@ -1404,7 +1404,7 @@ void ShardMergeRecipientService::Instance::_processCommittedTransactionEntry(con
     // Use the same wallclock time as the noop entry.
     sessionTxnRecord.setLastWriteDate(noopEntry.getWallClockTime());
 
-    AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+    AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
     writeConflictRetry(
         opCtx, "writeDonorCommittedTxnEntry", NamespaceString::kRsOplogNamespace, [&] {
             WriteUnitOfWork wuow(opCtx);
@@ -1864,7 +1864,7 @@ ShardMergeRecipientService::Instance::_advanceMajorityCommitTsToBkpCursorCheckpo
                        "mergeRecipientWriteNoopToAdvanceStableTimestamp",
                        NamespaceString::kRsOplogNamespace,
                        [&] {
-                           AutoGetOplog oplogWrite(opCtx, OplogAccessMode::kWrite);
+                           AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
                            WriteUnitOfWork wuow(opCtx);
                            const std::string msg = str::stream()
                                << "Merge recipient advancing stable timestamp";
@@ -2043,7 +2043,7 @@ void ShardMergeRecipientService::Instance::_cleanupOnMigrationCompletion(Status 
         using std::swap;
         swap(savedDonorOplogFetcher, _donorOplogFetcher);
         swap(savedTenantOplogApplier, _tenantOplogApplier);
-        swap(savedWriterPool, _writerPool);
+        swap(savedWriterPool, _workerPool);
         swap(savedDonorFilenameBackupCursorFileFetcher, _donorFilenameBackupCursorFileFetcher);
         swap(savedBackupCursorKeepAliveFuture, _backupCursorKeepAliveFuture);
     }
@@ -2174,7 +2174,7 @@ void ShardMergeRecipientService::Instance::_startOplogApplier() {
                                                                boost::none,
                                                                _donorOplogBuffer.get(),
                                                                **_scopedExecutor,
-                                                               _writerPool.get());
+                                                               _workerPool.get());
 
     LOGV2_DEBUG(7339750,
                 1,
@@ -2202,7 +2202,7 @@ void ShardMergeRecipientService::Instance::_setup(ConnectionPair connectionPair)
     _client = std::move(connectionPair.first);
     _oplogFetcherClient = std::move(connectionPair.second);
 
-    _writerPool = makeTenantMigrationWriterPool();
+    _workerPool = makeTenantMigrationWorkerPool();
 
     _sharedData = std::make_unique<TenantMigrationSharedData>(_serviceContext->getFastClockSource(),
                                                               getMigrationUUID());

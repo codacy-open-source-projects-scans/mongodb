@@ -1734,7 +1734,7 @@ void ExecCommandDatabase::_initiateCommand() {
         globalOpCounters.gotQuery();
     }
 
-    auto requestOrDefaultMaxTimeMS = getRequestOrDefaultMaxTimeMS(
+    auto [requestOrDefaultMaxTimeMS, usesDefaultMaxTimeMS] = getRequestOrDefaultMaxTimeMS(
         opCtx, _requestArgs.getMaxTimeMS(), getInvocation()->isReadOperation());
     if (requestOrDefaultMaxTimeMS || _requestArgs.getMaxTimeMSOpOnly()) {
         // Parse the 'maxTimeMS' command option, and use it to set a deadline for the operation on
@@ -1768,6 +1768,8 @@ void ExecCommandDatabase::_initiateCommand() {
                 opCtx->setDeadlineByDate(startedCommandExecAt + maxTimeMS,
                                          ErrorCodes::MaxTimeMSExpired);
             }
+            opCtx->setUsesDefaultMaxTimeMS(_requestArgs.getUsesDefaultMaxTimeMS().value_or(false) ||
+                                           usesDefaultMaxTimeMS);
         }
     }
 
@@ -1879,6 +1881,7 @@ void ExecCommandDatabase::_commandExec() {
     }
     _execContext.behaviors.setPrepareConflictBehaviorForReadConcern(opCtx, getInvocation());
 
+    _extraFieldsBuilder.resetToEmpty();
     _execContext.getReplyBuilder()->reset();
 
     if (OperationShardingState::isComingFromRouter(opCtx)) {

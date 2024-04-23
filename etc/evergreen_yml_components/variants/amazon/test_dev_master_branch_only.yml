@@ -48,8 +48,6 @@ variables:
     #   variant: amazon-linux2-arm64-dynamic-compile
 
   # THIS HAS COPIES IN:
-  # - etc/evergreen_yml_components/variants/perf/perf.yml
-  # - etc/evergreen_yml_components/variants/perf/perf_branching.yml
   # - etc/evergreen_yml_components/variants/amazon/test_dev_master_branch_only.yml
   # - etc/evergreen_yml_components/variants/amazon/test_dev.yml
   # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
@@ -60,7 +58,7 @@ variables:
     packager_arch: aarch64
     packager_distro: amazon2
     repo_edition: enterprise
-    large_distro_name: amazon2-arm64-large
+    large_distro_name: amazon2-arm64-atlas-large
     core_analyzer_distro_name: amazon2-arm64-xlarge
     num_scons_link_jobs_available: 0.99
 
@@ -187,6 +185,7 @@ buildvariants:
         MONGO_DISTMOD=amazon2023
         -j$(grep -c ^processor /proc/cpuinfo)
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --build-mongot
       test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,requires_v4_0,requires_external_data_source,requires_latch_analyzer
       has_packages: false
       multiversion_platform: amazon2023
@@ -204,6 +203,8 @@ buildvariants:
           - amazon2023.0-large
       - name: search
       - name: search_auth
+      - name: search_end_to_end_sharded_cluster
+      - name: search_end_to_end_single_node
       - name: search_pinned_connections_auth
       - name: search_ssl
       - name: vector_search
@@ -228,6 +229,7 @@ buildvariants:
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
         BAZEL_FLAGS="--subcommands --verbose_failures --sandbox_debug"
         --modules=
+        --build-mongot
       test_flags: >-
         --excludeWithAnyTags=incompatible_with_amazon_linux,requires_external_data_source,requires_latch_analyzer
         --enableEnterpriseTests=off
@@ -247,6 +249,8 @@ buildvariants:
           - amazon2023.0-arm64-large
       - name: search
       - name: search_auth
+      - name: search_end_to_end_sharded_cluster
+      - name: search_end_to_end_single_node
       - name: search_pinned_connections_auth
       - name: search_ssl
       - name: vector_search
@@ -270,6 +274,7 @@ buildvariants:
         MONGO_DISTMOD=amazon2
         -j$(grep -c ^processor /proc/cpuinfo)
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --build-mongot
       scons_cache_scope: shared
       scons_cache_mode: all
       has_packages: false
@@ -286,6 +291,8 @@ buildvariants:
           - amazon2-arm64-large
       - name: search
       - name: search_auth
+      - name: search_end_to_end_sharded_cluster
+      - name: search_end_to_end_single_node
       - name: search_pinned_connections_auth
       - name: search_ssl
       - name: vector_search
@@ -308,6 +315,7 @@ buildvariants:
         MONGO_DISTMOD=amazon2
         -j$(grep -c ^processor /proc/cpuinfo)
         --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
+        --build-mongot
       test_flags: --excludeWithAnyTags=incompatible_with_amazon_linux,requires_ldap_pool,requires_v4_0,requires_external_data_source,requires_latch_analyzer
       has_packages: false
       multiversion_platform: amazon2
@@ -325,6 +333,8 @@ buildvariants:
           - amazon2-large
       - name: search
       - name: search_auth
+      - name: search_end_to_end_sharded_cluster
+      - name: search_end_to_end_single_node
       - name: search_pinned_connections_auth
       - name: search_ssl
       - name: vector_search
@@ -334,11 +344,11 @@ buildvariants:
   - &enterprise-amazon-linux2-arm64-all-feature-flags-template
     <<: *amazon_linux2_arm64_dynamic_compile_variant_dependency
     name: &enterprise-amazon-linux2-arm64-all-feature-flags enterprise-amazon-linux2-arm64-all-feature-flags
-    display_name: "! Amazon Linux 2 arm64 Enterprise (all feature flags)"
+    display_name: "! Amazon Linux 2 arm64 Atlas Enterprise (all feature flags)"
     tags: ["required"]
     cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
     run_on:
-      - amazon2-arm64-small
+      - amazon2-arm64-atlas-small
     stepback: true
     expansions: &enterprise-amazon-linux2-arm64-all-feature-flags-expansions
       <<: *amazon_linux2_arm64_dynamic_expansions
@@ -358,15 +368,15 @@ buildvariants:
       - name: .development_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_all_feature_flags
       - name: .development_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_all_feature_flags
         distros:
-          - amazon2-arm64-large
+          - amazon2-arm64-atlas-large
       - name: .release_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_all_feature_flags
       - name: .release_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_all_feature_flags
         distros:
-          - amazon2-arm64-large
+          - amazon2-arm64-atlas-large
       - name: .default !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_all_feature_flags
       - name: .default .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_all_feature_flags
         distros:
-          - amazon2-arm64-large
+          - amazon2-arm64-atlas-large
 
   - &enterprise-amazon-linux2-arm64-all-feature-flags-fuzzers
     <<: *enterprise-amazon-linux2-arm64-all-feature-flags-template

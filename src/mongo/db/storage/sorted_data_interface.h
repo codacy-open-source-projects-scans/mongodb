@@ -457,14 +457,16 @@ public:
                            const char* typeBitsData,
                            int32_t typeBitsSize,
                            key_string::Version version,
-                           bool isRecordIdAtEndOfKeyString)
+                           bool isRecordIdAtEndOfKeyString,
+                           const RecordId* id = nullptr)
         : _ksData(ksData),
           _ridData(ridData),
           _tbData(typeBitsData),
           _ksSize(ksSize),
           _ridSize(ridSize),
           _tbSize(typeBitsSize),
-          _version(version) {
+          _version(version),
+          _id(id) {
         invariant(ksSize > 0 && ridSize > 0 && typeBitsSize >= 0);
         _ksOriginalSize = isRecordIdAtEndOfKeyString ? (ksSize + ridSize) : ksSize;
     }
@@ -506,23 +508,16 @@ public:
         return _ksOriginalSize > _ksSize;
     }
 
-    RecordId decodeRecordId(KeyFormat ridFormat) const {
-        if (KeyFormat::Long == ridFormat) {
-            BufReader reader(_ridData, _ridSize);
-            return key_string::decodeRecordIdLong(&reader);
-        } else if (KeyFormat::String == ridFormat) {
-            return key_string::decodeRecordIdStrAtEnd(_ridData, _ridSize);
-        } else {
-            MONGO_UNREACHABLE;
-        }
+    const RecordId* getRecordId() const {
+        return _id;
     }
 
     /**
      * Create a Value copy from this view including all components.
      */
     key_string::Value getValueCopy() const {
-        return std::move(*key_string::Value::makeValue(
-            _version, getKeyStringWithoutRecordIdView(), getRecordIdView(), getTypeBitsView()));
+        return key_string::Value::makeValue(
+            _version, getKeyStringWithoutRecordIdView(), getRecordIdView(), getTypeBitsView());
     }
 
     bool isEmpty() const {
@@ -552,6 +547,7 @@ private:
     int32_t _ridSize = 0;
     int32_t _tbSize = 0;
     key_string::Version _version;
+    const RecordId* _id = nullptr;
 };
 
 }  // namespace mongo

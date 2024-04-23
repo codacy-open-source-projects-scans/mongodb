@@ -68,16 +68,16 @@ protected:
     }
 
     void assertDiscreteAndEq(DocsNeededBounds bounds, long long expectedValue) {
-        ASSERT_TRUE(std::holds_alternative<DiscreteValue>(bounds));
-        ASSERT_EQUALS(std::get<DiscreteValue>(bounds).value, expectedValue);
+        ASSERT_TRUE(std::holds_alternative<long long>(bounds));
+        ASSERT_EQUALS(std::get<long long>(bounds), expectedValue);
     }
 
     void assertUnknown(DocsNeededBounds bounds) {
-        ASSERT_TRUE(std::holds_alternative<Unknown>(bounds));
+        ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::Unknown>(bounds));
     }
 
     void assertNeedAll(DocsNeededBounds bounds) {
-        ASSERT_TRUE(std::holds_alternative<NeedAll>(bounds));
+        ASSERT_TRUE(std::holds_alternative<docs_needed_bounds::NeedAll>(bounds));
     }
 
     // Helper functions for creating document source stages for more consise pipeline building

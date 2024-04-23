@@ -972,18 +972,49 @@ DEDUPE_SYMBOL_LINKFLAGS = select({
     "//conditions:default": [],
 })
 
+MTUNE_MARCH_COPTS = select({
+    # If we are enabling vectorization in sandybridge mode, we'd
+    # rather not hit the 256 wide vector instructions because the
+    # heavy versions can cause clock speed reductions.
+    "//bazel/config:linux_x86_64": [
+        "-march=sandybridge",
+        "-mtune=generic",
+        "-mprefer-vector-width=128",
+    ],
+    "//bazel/config:linux_aarch64": [
+        "-march=armv8.2-a",
+        "-mtune=generic",
+    ],
+    "//bazel/config:linux_ppc64le": [
+        "-mcpu=power8",
+        "-mtune=power8",
+        "-mcmodel=medium",
+    ],
+    "//bazel/config:linux_s390x": [
+        "-march=z196",
+        "-mtune=zEC12",
+    ],
+    "//conditions:default": [],
+})
+
+MONGO_GLOBAL_INCLUDE_DIRECTORIES = [
+    "-Isrc",
+    "-Isrc/third_party/boost",
+    "-Isrc/third_party/immer/dist",
+]
+
 MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES + \
                        THREAD_SANITIZER_DEFINES + UNDEFINED_SANITIZER_DEFINES + GLIBCXX_DEBUG_DEFINES + \
                        WINDOWS_DEFINES + TCMALLOC_DEFINES + LINUX_DEFINES + GCC_OPT_DEFINES + BOOST_DEFINES + \
                        ABSEIL_DEFINES + PCRE2_DEFINES + SAFEINT_DEFINES
 
-MONGO_GLOBAL_COPTS = ["-Isrc", "-Isrc/third_party/boost"] + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS + \
+MONGO_GLOBAL_COPTS = MONGO_GLOBAL_INCLUDE_DIRECTORIES + WINDOWS_COPTS + LIBCXX_COPTS + ADDRESS_SANITIZER_COPTS + \
                      MEMORY_SANITIZER_COPTS + FUZZER_SANITIZER_COPTS + UNDEFINED_SANITIZER_COPTS + \
                      THREAD_SANITIZER_COPTS + ANY_SANITIZER_AVAILABLE_COPTS + LINUX_OPT_COPTS + \
                      GCC_OR_CLANG_WARNINGS_COPTS + GCC_OR_CLANG_GENERAL_COPTS + \
                      FLOATING_POINT_COPTS + MACOS_WARNINGS_COPTS + CLANG_WARNINGS_COPTS + \
                      CLANG_FNO_LIMIT_DEBUG_INFO + COMPRESS_DEBUG_COPTS + DEBUG_TYPES_SECTION_FLAGS + \
-                     IMPLICIT_FALLTHROUGH_COPTS
+                     IMPLICIT_FALLTHROUGH_COPTS + MTUNE_MARCH_COPTS
 
 MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS + \
                          UNDEFINED_SANITIZER_LINKFLAGS + THREAD_SANITIZER_LINKFLAGS + \
@@ -993,7 +1024,7 @@ MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAG
                          GCC_OR_CLANG_LINKFLAGS + COMPRESS_DEBUG_LINKFLAGS + DEDUPE_SYMBOL_LINKFLAGS + \
                          DEBUG_TYPES_SECTION_FLAGS
 
-MONGO_GLOBAL_ACCESSIBLE_HEADERS = ["//src/third_party/boost:headers"]
+MONGO_GLOBAL_ACCESSIBLE_HEADERS = ["//src/third_party/boost:headers", "//src/third_party/immer:headers"]
 
 MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES
 
@@ -1078,7 +1109,8 @@ def mongo_cc_library(
         mongo_api_name = None,
         target_compatible_with = [],
         skip_global_deps = [],
-        non_transitive_dyn_linkopts = []):
+        non_transitive_dyn_linkopts = [],
+        defines = []):
     """Wrapper around cc_library.
 
     Args:
@@ -1096,11 +1128,14 @@ def mongo_cc_library(
       linkstatic: Whether or not linkstatic should be passed to the native bazel cc_test rule. This argument
         is currently not supported. The mongo build must link entirely statically or entirely dynamically. This can be
         configured via //config/bazel:linkstatic.
-      local_defines: macro definitions passed to all source and header files.
+      local_defines: macro definitions added to the compile line when building any source in this target, but not to the compile
+        line of targets that depend on this.
       skip_global_deps: Globally injected dependencies to skip adding as a dependency (options: "libunwind", "allocator").
       non_transitive_dyn_linkopts: Any extra link options to pass in when linking dynamically. Unlike linkopts these are not
         applied transitively to all targets depending on this target, and are only used when linking this target itself.
         See https://jira.mongodb.org/browse/SERVER-89047 for motivation.
+      defines: macro definitions added to the compile line when building any source in this target, as well as the compile
+        line of targets that depend on this.
     """
 
     if linkstatic == True:
@@ -1162,6 +1197,7 @@ def mongo_cc_library(
         linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + visibility_support_defines + local_defines,
+        defines = defines,
         includes = includes,
         features = MONGO_GLOBAL_FEATURES + ["supports_pic", "pic"],
         target_compatible_with = select({
@@ -1183,6 +1219,7 @@ def mongo_cc_library(
         linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + local_defines,
+        defines = defines,
         includes = includes,
         features = MONGO_GLOBAL_FEATURES + select({
             "//bazel/config:linkstatic_disabled": ["supports_pic", "pic"],
@@ -1237,7 +1274,8 @@ def mongo_cc_binary(
         includes = [],
         linkstatic = False,
         local_defines = [],
-        target_compatible_with = []):
+        target_compatible_with = [],
+        defines = []):
     """Wrapper around cc_binary.
 
     Args:
@@ -1255,6 +1293,8 @@ def mongo_cc_binary(
         is currently not supported. The mongo build must link entirely statically or entirely dynamically. This can be
         configured via //config/bazel:linkstatic.
       local_defines: macro definitions passed to all source and header files.
+      defines: macro definitions added to the compile line when building any source in this target, as well as the compile
+        line of targets that depend on this.
     """
 
     if linkstatic == True:
@@ -1292,6 +1332,7 @@ def mongo_cc_binary(
         linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags,
         linkstatic = LINKSTATIC_ENABLED,
         local_defines = MONGO_GLOBAL_DEFINES + LIBUNWIND_DEFINES + local_defines,
+        defines = defines,
         includes = includes,
         features = MONGO_GLOBAL_FEATURES + ["pie"],
         dynamic_deps = select({

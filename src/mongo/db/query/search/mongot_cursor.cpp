@@ -28,6 +28,7 @@
  */
 #include "mongo/db/query/search/mongot_cursor.h"
 
+#include "mongo/db/query/search/mongot_cursor_getmore_strategy.h"
 #include "mongo/db/query/search/mongot_options.h"
 #include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/logv2/log.h"
@@ -38,25 +39,6 @@ namespace mongo::mongot_cursor {
 MONGO_FAIL_POINT_DEFINE(shardedSearchOpCtxDisconnect);
 
 namespace {
-executor::TaskExecutorCursor::Options getSearchCursorOptions(
-    bool preFetchNextBatch,
-    std::function<void(BSONObjBuilder& bob)> augmentGetMore,
-    std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
-    executor::TaskExecutorCursor::Options opts;
-    opts.yieldPolicy = std::move(yieldPolicy);
-    // If we are pushing down a limit to mongot, then we should avoid prefetching the next
-    // batch. We optimistically assume that we will only need a single batch and attempt to
-    // avoid doing unnecessary work on mongot. If $idLookup filters out enough documents
-    // such that we are not able to satisfy the limit, then we will fetch the next batch
-    // syncronously on the subsequent 'getNext()' call.
-    opts.preFetchNextBatch = preFetchNextBatch;
-    if (!opts.preFetchNextBatch) {
-        // Only set this function if we will not be prefetching.
-        opts.getMoreAugmentationWriter = augmentGetMore;
-    }
-    return opts;
-}
-
 executor::RemoteCommandRequest getRemoteCommandRequestForSearchQuery(
     OperationContext* opCtx,
     const NamespaceString& nss,
@@ -65,6 +47,7 @@ executor::RemoteCommandRequest getRemoteCommandRequestForSearchQuery(
     const BSONObj& query,
     const boost::optional<int> protocolVersion = boost::none,
     const boost::optional<long long> docsRequested = boost::none,
+    const boost::optional<long long> batchSize = boost::none,
     const bool requiresSearchSequenceToken = false) {
     BSONObjBuilder cmdBob;
     cmdBob.append(kSearchField, nss.coll());
@@ -82,12 +65,22 @@ executor::RemoteCommandRequest getRemoteCommandRequestForSearchQuery(
     if (protocolVersion) {
         cmdBob.append(kIntermediateField, *protocolVersion);
     }
+
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    const auto needsSetBatchSize =
+        feature_flags::gFeatureFlagSearchBatchSizeTuning.isEnabled(fcvSnapshot) &&
+        batchSize.has_value();
     // (Ignore FCV check): This feature is enabled on an earlier FCV.
-    const auto needsSetDocsRequested =
+    // We should only set docsRequested if we're not setting batchSize.
+    // TODO SERVER-74941 Remove docsRequested alongside featureFlagSearchBatchSizeLimit.
+    const auto needsSetDocsRequested = !needsSetBatchSize &&
         feature_flags::gFeatureFlagSearchBatchSizeLimit.isEnabledAndIgnoreFCVUnsafe() &&
         docsRequested.has_value();
-    if (needsSetDocsRequested || requiresSearchSequenceToken) {
+    if (needsSetBatchSize || needsSetDocsRequested || requiresSearchSequenceToken) {
         BSONObjBuilder cursorOptionsBob(cmdBob.subobjStart(kCursorOptionsField));
+        if (needsSetBatchSize) {
+            cursorOptionsBob.append(kBatchSizeField, batchSize.get());
+        }
         if (needsSetDocsRequested) {
             cursorOptionsBob.append(kDocsRequestedField, docsRequested.get());
         }
@@ -113,6 +106,26 @@ void doThrowIfNotRunningWithMongotHostConfigured() {
             << "https://dochub.mongodb.org/core/atlas-cli-deploy-local-reqs.",
         globalMongotParams.enabled);
 }
+
+boost::optional<long long> computeInitialBatchSize(const DocsNeededBounds minBounds,
+                                                   const DocsNeededBounds maxBounds,
+                                                   const boost::optional<int64_t> userBatchSize) {
+    // TODO SERVER-63765 Allow cursor establishment for sharded clusters when userBatchSize is 0.
+    // TODO SERVER-89494 Enable non-extractable limit queries.
+    // TODO SERVER-88888 Add oversubscription logic.
+    return visit(
+        OverloadedVisitor{
+            [](long long minVal, long long maxVal) -> boost::optional<long long> {
+                if (minVal == maxVal) {
+                    return std::max(minVal, kMinimumMongotBatchSize);
+                }
+                return boost::none;
+            },
+            [](auto& minVal, auto& maxVal) -> boost::optional<long long> { return boost::none; },
+        },
+        minBounds,
+        maxBounds);
+}
 }  // namespace
 
 executor::RemoteCommandRequest getRemoteCommandRequest(OperationContext* opCtx,
@@ -133,15 +146,17 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
     const executor::RemoteCommandRequest& command,
     std::shared_ptr<executor::TaskExecutor> taskExecutor,
     bool preFetchNextBatch,
-    std::function<void(BSONObjBuilder& bob)> augmentGetMore,
+    std::function<boost::optional<long long>()> calcDocsNeededFn,
     std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
     std::vector<std::unique_ptr<executor::TaskExecutorCursor>> cursors;
-    auto initialCursor = makeTaskExecutorCursor(
-        expCtx->opCtx,
-        taskExecutor,
-        command,
-        getSearchCursorOptions(preFetchNextBatch, augmentGetMore, std::move(yieldPolicy)),
-        makeRetryOnNetworkErrorPolicy());
+    auto getMoreStrategy = std::make_shared<executor::MongotTaskExecutorCursorGetMoreStrategy>(
+        preFetchNextBatch, calcDocsNeededFn);
+    auto initialCursor =
+        makeTaskExecutorCursor(expCtx->opCtx,
+                               taskExecutor,
+                               command,
+                               {std::move(getMoreStrategy), std::move(yieldPolicy)},
+                               makeRetryOnNetworkErrorPolicy());
 
     auto additionalCursors = initialCursor->releaseAdditionalCursors();
     cursors.push_back(std::move(initialCursor));
@@ -158,7 +173,10 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
     const BSONObj& query,
     std::shared_ptr<executor::TaskExecutor> taskExecutor,
     boost::optional<long long> docsRequested,
-    std::function<void(BSONObjBuilder& bob)> augmentGetMore,
+    boost::optional<DocsNeededBounds> minDocsNeededBounds,
+    boost::optional<DocsNeededBounds> maxDocsNeededBounds,
+    boost::optional<int64_t> userBatchSize,
+    std::function<boost::optional<long long>()> calcDocsNeededFn,
     const boost::optional<int>& protocolVersion,
     bool requiresSearchSequenceToken,
     std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
@@ -168,6 +186,18 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
         return {};
     }
 
+    boost::optional<long long> batchSize = boost::none;
+    if (minDocsNeededBounds.has_value() & maxDocsNeededBounds.has_value()) {
+        batchSize =
+            computeInitialBatchSize(*minDocsNeededBounds, *maxDocsNeededBounds, userBatchSize);
+    }
+
+    // If we are sending docsRequested to mongot, then we should avoid prefetching the next
+    // batch. We optimistically assume that we will only need a single batch and attempt to
+    // avoid doing unnecessary work on mongot. If $idLookup filters out enough documents
+    // such that we are not able to satisfy the limit, then we will fetch the next batch
+    // syncronously on the subsequent 'getNext()' call.
+    // TODO SERVER-86739 batchSize tuning will change conditions for pre-fetch enablement
     bool prefetchNextBatch = !docsRequested.has_value();
     return establishCursors(expCtx,
                             getRemoteCommandRequestForSearchQuery(expCtx->opCtx,
@@ -177,10 +207,11 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
                                                                   query,
                                                                   protocolVersion,
                                                                   docsRequested,
+                                                                  batchSize,
                                                                   requiresSearchSequenceToken),
                             taskExecutor,
                             prefetchNextBatch,
-                            augmentGetMore,
+                            calcDocsNeededFn,
                             std::move(yieldPolicy));
 }
 
@@ -202,7 +233,7 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
             expCtx->opCtx, expCtx->ns, expCtx->uuid, expCtx->explain, query, protocolVersion),
         taskExecutor,
         /*preFetchNextBatch*/ false,
-        /*augmentGetMore*/ nullptr,
+        /*calcDocsNeededFn*/ nullptr,
         std::move(yieldPolicy));
 }
 

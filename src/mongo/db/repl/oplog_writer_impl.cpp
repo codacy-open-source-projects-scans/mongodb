@@ -64,7 +64,7 @@ Status insertDocsToOplogAndChangeCollections(OperationContext* opCtx,
                                              bool writeChangeColl,
                                              OplogWriter::Observer* observer) {
     WriteUnitOfWork wuow(opCtx);
-    boost::optional<AutoGetOplog> autoOplog;
+    boost::optional<AutoGetOplogFastPath> autoOplog;
     boost::optional<ChangeStreamChangeCollectionManager::ChangeCollectionsWriter> ccw;
 
     // Acquire locks. We must acquire the locks for all collections we intend to write to before
@@ -157,7 +157,7 @@ BSONObj OplogWriterStats::getReport() const {
 OplogWriterImpl::OplogWriterImpl(executor::TaskExecutor* executor,
                                  OplogBuffer* writeBuffer,
                                  OplogBuffer* applyBuffer,
-                                 ThreadPool* writerPool,
+                                 ThreadPool* workerPool,
                                  ReplicationCoordinator* replCoord,
                                  StorageInterface* storageInterface,
                                  ReplicationConsistencyMarkers* consistencyMarkers,
@@ -165,7 +165,7 @@ OplogWriterImpl::OplogWriterImpl(executor::TaskExecutor* executor,
                                  const OplogWriter::Options& options)
     : OplogWriter(executor, writeBuffer, options),
       _applyBuffer(applyBuffer),
-      _writerPool(writerPool),
+      _workerPool(workerPool),
       _replCoord(replCoord),
       _storageInterface(storageInterface),
       _consistencyMarkers(consistencyMarkers),
@@ -194,21 +194,19 @@ void OplogWriterImpl::_run() {
             rsSyncApplyStop.pauseWhileSet(opCtx);
         }
 
+        // Transition to SECONDARY state, if possible.
+        // TODO (SERVER-88447): investigate if this should be called here.
+        _replCoord->finishRecoveryIfEligible(opCtx);
+
         auto batch = _batcher.getNextBatch(opCtx, Seconds(1));
-
-        // Signal the apply buffer to enter or exit drain mode if it is not.
-        if (_applyBufferInDrainMode != batch.exhausted()) {
-            if (_applyBufferInDrainMode) {
-                _applyBuffer->exitDrainMode();
-            } else {
-                _applyBuffer->enterDrainMode();
-            }
-            _applyBufferInDrainMode = batch.exhausted();
-        }
-
         if (batch.empty()) {
             if (inShutdown()) {
                 return;
+            }
+            if (batch.termWhenExhausted()) {
+                // The writer's buffer has been drained, now signal the applier's buffer
+                // to enter drain mode.
+                _replCoord->signalWriterDrainComplete(opCtx, *batch.termWhenExhausted());
             }
             continue;
         }
@@ -289,8 +287,8 @@ bool OplogWriterImpl::scheduleWriteOplogBatch(OperationContext* opCtx,
     // We want to be able to take advantage of bulk inserts so we don't use multiple threads
     // if it would result too little work per thread. This also ensures that we can amortize
     // the setup/teardown overhead across many writes.
-    invariant(_writerPool);
-    const auto poolMaxThreads = _writerPool->getStats().options.maxThreads;
+    invariant(_workerPool);
+    const auto poolMaxThreads = _workerPool->getStats().options.maxThreads;
     const auto enoughToMultiThread = ops.size() >= kMinOpsPerThread * poolMaxThreads;
     const auto numWriteThreads = enoughToMultiThread ? poolMaxThreads : 1;
     const size_t numOpsPerThread = ops.size() / numWriteThreads;
@@ -299,7 +297,7 @@ bool OplogWriterImpl::scheduleWriteOplogBatch(OperationContext* opCtx,
     for (size_t t = 0; t < numWriteThreads; ++t) {
         size_t begin = t * numOpsPerThread;
         size_t end = (t == numWriteThreads - 1) ? ops.size() : begin + numOpsPerThread;
-        _writerPool->schedule(makeOplogWriteForRange(begin, end));
+        _workerPool->schedule(makeOplogWriteForRange(begin, end));
     }
 
     return true;
@@ -307,7 +305,7 @@ bool OplogWriterImpl::scheduleWriteOplogBatch(OperationContext* opCtx,
 
 void OplogWriterImpl::waitForScheduledWrites(OperationContext* opCtx) {
     // Wait for all scheduled writes to complete.
-    _writerPool->waitForIdle();
+    _workerPool->waitForIdle();
 
     // Reset oplogTruncateAfterPoint after writes are complete.
     bool writeOplogColl = !getOptions().skipWritesToOplogColl;
