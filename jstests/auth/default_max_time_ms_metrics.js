@@ -8,7 +8,7 @@
  *   requires_auth,
  *   # Transactions aborted upon fcv upgrade or downgrade; cluster parameters use internal txns.
  *   uses_transactions,
- *   featureFlagDefaultReadMaxTimeMS,
+ *   requires_fcv_81,
  * ]
  */
 
@@ -113,6 +113,7 @@ const st = new ShardingTest({
     shards: {nodes: 1},
     config: {nodes: 1},
     keyFile: 'jstests/libs/key1',
+    mongosOptions: {setParameter: {'failpoint.skipClusterParameterRefresh': "{'mode':'alwaysOn'}"}},
 });
 // Ensures the command times out on the shard but not the router.
 const mongosFP = configureFailPoint(st.s.getDB("admin"), "maxTimeNeverTimeOut");

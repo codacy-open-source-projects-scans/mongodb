@@ -252,8 +252,8 @@ void collectQueryStats(OperationContext* opCtx,
         : maybeExec->getPlanExplainer();
     PlanSummaryStats stats;
     planExplainer.getSummaryStats(&stats);
-    curOp->debug().setPlanSummaryMetrics(stats);
     curOp->setEndOfOpMetrics(stats.nReturned);
+    curOp->debug().setPlanSummaryMetrics(std::move(stats));
 
     if (maybePinnedCursor) {
         collectQueryStatsMongod(opCtx, *maybePinnedCursor);
@@ -406,7 +406,7 @@ bool getFirstBatch(OperationContext* opCtx,
         // If this executor produces a postBatchResumeToken, add it to the cursor response.
         responseBuilder.setPostBatchResumeToken(exec.getPostBatchResumeToken());
         responseBuilder.append(nextDoc);
-        docUnitsReturned.observeOne(nextDoc.objsize());
+        docUnitsReturned.observeOneDoc(nextDoc.objsize());
     }
 
     if (doRegisterCursor) {

@@ -279,9 +279,8 @@ public:
             }
 
             if (arrayBuilder.arrSize() > 0) {
-                metadataBob->appendArray(
-                    Generic_reply_fields_unstable_v1::kRoutingCacheGossipFieldName,
-                    arrayBuilder.obj());
+                metadataBob->appendArray(GenericReplyFields::kRoutingCacheGossipFieldName,
+                                         arrayBuilder.obj());
             }
         }
     }

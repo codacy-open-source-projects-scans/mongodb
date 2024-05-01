@@ -42,7 +42,6 @@ executor:
     mongod_options:
       enableMajorityReadConcern: ''
       set_parameters:
-        enableAutoCompaction: 1
         enableElectionHandoff: 0
         enableTestCommands: 1
         logComponentVerbosity:
@@ -59,6 +58,8 @@ executor:
         catchUpTimeoutMillis: 0
   hooks:
   - class: LagOplogApplicationInBackground
+    shell_options:
+      nodb: ''
   - class: ContinuousStepdown
     kill: true
   - class: CheckReplOplogs

@@ -84,11 +84,6 @@ std::map<NamespaceString, ListCollectionsReplyItem> getCollectionsFromShard(
             // This collection can never be tracked so we skip it
             continue;
         }
-        if (nss.isTimeseriesBucketsCollection()) {
-            // TODO SERVER-83878: re-enable random migrations for unsharded timeseries collections
-            // once we are able to track them in the global catalog.
-            continue;
-        }
 
         localColls.emplace(std::move(nss), std::move(replyItem));
     }
@@ -237,6 +232,133 @@ MoveUnshardedPolicy::MoveUnshardedPolicy()
             fpBalancerShouldReturnRandomMigrations != nullptr);
 }
 
+void MoveUnshardedPolicy::applyActionResult(OperationContext* opCtx,
+                                            const BalancerStreamAction& action,
+                                            const BalancerStreamActionResponse& response) {
+
+    const auto& moveAction = get<MigrateInfo>(action);
+    const auto& moveResponse = get<Status>(response);
+
+    if (!moveResponse.isOK()) {
+        auto isAcceptableError = [](const Status& status) {
+            // Categories covering stepdown, crashes, network issues, slow machines, stale routing
+            // info
+            const bool isErrorInAcceptableCategory = status.isA<ErrorCategory::ShutdownError>() ||
+                status.isA<ErrorCategory::NetworkError>() ||
+                status.isA<ErrorCategory::RetriableError>() ||
+                status.isA<ErrorCategory::Interruption>() ||
+                status.isA<ErrorCategory::ExceededTimeLimitError>() ||
+                status.isA<ErrorCategory::WriteConcernError>() ||
+                status.isA<ErrorCategory::NeedRetargettingError>() ||
+                status.isA<ErrorCategory::NotPrimaryError>();
+            if (isErrorInAcceptableCategory) {
+                return true;
+            }
+
+            switch (status.code()) {
+                case ErrorCodes::BackgroundOperationInProgressForNamespace:
+                // TODO SERVER-89892 Investigate CannotCreateIndex error
+                case ErrorCodes::CannotCreateIndex:
+                // TODO SERVER-90002 Investigate CannotInsertTimeseriesBucketsWithMixedSchema error
+                case ErrorCodes::CannotInsertTimeseriesBucketsWithMixedSchema:
+                case ErrorCodes::CommandNotSupported:
+                case ErrorCodes::DuplicateKey:
+                case ErrorCodes::FailedToSatisfyReadPreference:
+                // TODO SERVER-89826 Investigate IllegalOperation error
+                case ErrorCodes::IllegalOperation:
+                case ErrorCodes::LockBusy:
+                case ErrorCodes::NamespaceNotFound:
+                case ErrorCodes::NotImplemented:
+                // TODO SERVER-89342 Remove OperationCannotBeBatched from whitelist
+                case ErrorCodes::OperationCannotBeBatched:
+                case ErrorCodes::OplogQueryMinTsMissing:
+                case ErrorCodes::ReshardCollectionInProgress:
+                case ErrorCodes::SnapshotTooOld:
+                case ErrorCodes::StaleDbVersion:
+                    return true;
+                default:
+                    return false;
+            }
+        };
+        tassert(8959500,
+                str::stream()
+                    << "An unexpected error occured while moving a random unsharded collection"
+                    << ", from: " << moveAction.from << ", to: " << moveAction.to
+                    << ", nss: " << moveAction.nss.toStringForErrorMsg()
+                    << ", error: " << moveResponse.toString(),
+                isAcceptableError(moveResponse));
+    }
+}
+
+// Returns a MigrateInfo for a moveCollection of an unsharded collection from one of the given
+// donors to one of the given recipients. Returns boost::none if there are no eligible collections
+// to move or no eligibile recipients. Handles overlaps in the given donors and recipients.
+boost::optional<MigrateInfo> selectUnsplittableCollectionToMove(
+    OperationContext* opCtx,
+    stdx::unordered_set<ShardId>* availableShards,
+    const std::vector<ShardId>& availableDonors,
+    const std::vector<ShardId>& availableRecipients) {
+    auto collectionAndChunks = [&]() -> boost::optional<std::pair<NamespaceString, ChunkType>> {
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+
+        if (!feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot) &&
+            !feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabled(fcvSnapshot)) {
+            return boost::none;
+        }
+
+        for (const auto& shardId : availableDonors) {
+            if (!feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot)) {
+                auto randomUntrackedColl = getRandomUntrackedCollectionOnShard(opCtx, shardId);
+                if (randomUntrackedColl) {
+                    return randomUntrackedColl;
+                }
+            }
+
+            auto trackedUnshardedCollections =
+                getTrackedUnshardedCollectionsOnShard(opCtx, shardId);
+            if (!trackedUnshardedCollections.empty()) {
+                auto rndIdx = getRandomIndex(trackedUnshardedCollections);
+                auto& randomTrackedUnshardedColl = trackedUnshardedCollections.at(rndIdx);
+                return randomTrackedUnshardedColl;
+            }
+        }
+
+        return boost::none;
+    }();
+    if (!collectionAndChunks) {
+        return boost::none;
+    }
+
+    NamespaceString& collectionToMove = collectionAndChunks->first;
+    ChunkType& chunkToMove = collectionAndChunks->second;
+    const ShardId& sourceShardId = collectionAndChunks->second.getShard();
+
+    // Pick a destination
+    boost::optional<ShardId> destinationShardId = [&]() -> boost::optional<ShardId> {
+        for (const auto& availableShard : availableRecipients) {
+            if (availableShard != sourceShardId) {
+                return availableShard;
+            }
+        }
+
+        return boost::none;
+    }();
+    if (!destinationShardId) {
+        return boost::none;
+    }
+
+    // Remove source and destination shards from the available shards set to not use them again
+    // on the same balancer round.
+    tassert(8701800,
+            "Source shard does not exist in available shards",
+            availableShards->erase(sourceShardId));
+    tassert(8701801,
+            "Target shard does not exist in available shards",
+            availableShards->erase(*destinationShardId));
+
+    return MigrateInfo(
+        *destinationShardId, collectionToMove, chunkToMove, ForceJumbo::kDoNotForce, boost::none);
+}
 
 MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
     OperationContext* opCtx,
@@ -244,85 +366,54 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
     stdx::unordered_set<ShardId>* availableShards) {
     MigrateInfoVector result;
 
-    if (MONGO_unlikely(fpBalancerShouldReturnRandomMigrations->shouldFail())) {
+    if (auto sfp = fpBalancerShouldReturnRandomMigrations->scoped();
+        MONGO_unlikely(sfp.isActive())) {
         if (availableShards->size() < 2) {
             return result;
         }
 
-        const std::vector<ShardId> randomizedAvailableShards = [&] {
-            std::vector<ShardId> candidateShards;
-            for (auto& availableShard : *availableShards) {
-                candidateShards.emplace_back(availableShard);
+        // Separate draining shards so they can be handled separately.
+        std::vector<ShardId> randomizedAvailableShards, randomizedDrainingShards;
+        for (const auto& shardStat : allShards) {
+            if (!availableShards->contains(shardStat.shardId)) {
+                continue;
             }
-            std::shuffle(candidateShards.begin(),
-                         candidateShards.end(),
-                         opCtx->getClient()->getPrng().urbg());
-            return candidateShards;
-        }();
-
-        auto collectionAndChunks = [&]() -> boost::optional<std::pair<NamespaceString, ChunkType>> {
-            const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-
-            if (!feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot) &&
-                !feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabled(
-                    fcvSnapshot)) {
-                return {};
+            if (shardStat.isDraining) {
+                randomizedDrainingShards.emplace_back(shardStat.shardId);
+            } else {
+                randomizedAvailableShards.emplace_back(shardStat.shardId);
             }
+        }
+        std::shuffle(randomizedDrainingShards.begin(),
+                     randomizedDrainingShards.end(),
+                     opCtx->getClient()->getPrng().urbg());
+        std::shuffle(randomizedAvailableShards.begin(),
+                     randomizedAvailableShards.end(),
+                     opCtx->getClient()->getPrng().urbg());
 
-            for (const auto& shardId : randomizedAvailableShards) {
-                if (!feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot)) {
-                    auto randomUntrackedColl = getRandomUntrackedCollectionOnShard(opCtx, shardId);
-                    if (randomUntrackedColl) {
-                        return randomUntrackedColl;
-                    }
-                }
-
-                auto trackedUnshardedCollections =
-                    getTrackedUnshardedCollectionsOnShard(opCtx, shardId);
-                if (!trackedUnshardedCollections.empty()) {
-                    auto rndIdx = getRandomIndex(trackedUnshardedCollections);
-                    auto& randomTrackedUnshardedColl = trackedUnshardedCollections.at(rndIdx);
-                    return randomTrackedUnshardedColl;
-                }
-            }
-
-            return {};
-        }();
-
-        if (!collectionAndChunks) {
+        // Try to move collections off draining shards first.
+        auto drainingShardMigration = selectUnsplittableCollectionToMove(
+            opCtx, availableShards, randomizedDrainingShards, randomizedAvailableShards);
+        if (drainingShardMigration) {
+            result.emplace_back(*drainingShardMigration);
             return result;
         }
 
-        NamespaceString& collectionToMove = collectionAndChunks->first;
-        ChunkType& chunkToMove = collectionAndChunks->second;
-        const ShardId& sourceShardId = collectionAndChunks->second.getShard();
+        // Choosing to move a collection between shards removes them from the available shards,
+        // which prevents them from being chosen for a random chunk migration, so allow skipping a
+        // random moveCollection to avoid "starving" random chunk migrations with few shards. Note
+        // safeNumberDouble() defaults to 0 if the field is missing.
+        auto skipMoveCollectionThreshold =
+            sfp.getData()["skipMoveCollectionThreshold"].safeNumberDouble();
+        if (opCtx->getClient()->getPrng().nextCanonicalDouble() < skipMoveCollectionThreshold) {
+            return result;
+        }
 
-        // Pick a destination
-        boost::optional<ShardId> destinationShardId = [&]() -> boost::optional<ShardId> {
-            for (const auto& availableShard : randomizedAvailableShards) {
-                if (availableShard != sourceShardId) {
-                    return availableShard;
-                }
-            }
-            tasserted(8245245, "Destination does not exist");
-
-            return {};
-        }();
-
-        result.emplace_back(MigrateInfo(*destinationShardId,
-                                        collectionToMove,
-                                        chunkToMove,
-                                        ForceJumbo::kDoNotForce,
-                                        boost::none));
-
-        // Remove source and destination shards from the available shards set to not use them again
-        // on the same balancer round.
-        tassert(8701800,
-                "Source shard does not exist in available shards",
-                availableShards->erase(sourceShardId));
-        tassert(8701801,
-                "Target shard does not exist in available shards",
-                availableShards->erase(*destinationShardId));
+        auto migration = selectUnsplittableCollectionToMove(
+            opCtx, availableShards, randomizedAvailableShards, randomizedAvailableShards);
+        if (migration) {
+            result.emplace_back(*migration);
+        }
     }
 
     return result;

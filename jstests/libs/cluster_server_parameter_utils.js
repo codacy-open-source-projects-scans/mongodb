@@ -40,6 +40,14 @@ export const kNonTestOnlyClusterParameters = {
         serverless: true,
         standaloneIncompatible: false,
     },
+    defaultMaxTimeMS: {
+        default: {readOperations: 0},
+        testValues: [{readOperations: 42}, {readOperations: 60000}],
+        featureFlag: 'DefaultReadMaxTimeMS',
+        setParameters: {'multitenancySupport': true},
+        serverless: true,
+        standaloneIncompatible: false,
+    }
 };
 
 export const kTestOnlyClusterParameters = {
@@ -307,6 +315,8 @@ export function runGetClusterParameterSharded(st,
                                               tenantId = undefined,
                                               omitInFTDC = false,
                                               omittedInFTDCClusterParameters = []) {
+    const shards = [st.rs0, st.rs1, st.rs2];
+    shards.forEach((shard) => shard.awaitReplication());
     assert(runGetClusterParameterNode(st.s0,
                                       getClusterParameterArgs,
                                       expectedClusterParameters,
@@ -320,7 +330,6 @@ export function runGetClusterParameterSharded(st,
                                      tenantId,
                                      omitInFTDC,
                                      omittedInFTDCClusterParameters);
-    const shards = [st.rs0, st.rs1, st.rs2];
     shards.forEach(function(shard) {
         runGetClusterParameterReplicaSet(shard,
                                          getClusterParameterArgs,
