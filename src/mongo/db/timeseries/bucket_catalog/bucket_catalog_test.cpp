@@ -145,6 +145,12 @@ protected:
 
     Status _reopenBucket(const CollectionPtr& coll, const BSONObj& bucketDoc);
 
+    RolloverAction _rolloverAction(const std::shared_ptr<WriteBatch>& batch);
+
+    void _testUseBucketSkipsConflictingBucket(std::function<void(BucketCatalog&, Bucket&)>);
+    void _testUseAlternateBucketSkipsConflictingBucket(
+        std::function<void(BucketCatalog&, Bucket&)>);
+
     OperationContext* _opCtx;
     BucketCatalog* _bucketCatalog;
 
@@ -391,9 +397,12 @@ Status BucketCatalogTest::_reopenBucket(const CollectionPtr& coll, const BSONObj
     if (metaFieldName) {
         metadata = bucketDoc.getField(kBucketMetaFieldName);
     }
-    TrackingContext trackingContext;
-    auto key = BucketKey{
-        uuid, BucketMetadata{trackingContext, metadata, coll->getDefaultCollator(), metaFieldName}};
+    auto key = BucketKey{uuid,
+                         BucketMetadata{getTrackingContext(_bucketCatalog->trackingContexts,
+                                                           TrackingScope::kOpenBucketsByKey),
+                                        metadata,
+                                        coll->getDefaultCollator(),
+                                        metaFieldName}};
 
     // Validate the bucket document against the schema.
     auto validator = [&](OperationContext * opCtx, const BSONObj& bucketDoc) -> auto {
@@ -435,6 +444,89 @@ Status BucketCatalogTest::_reopenBucket(const CollectionPtr& coll, const BSONObj
         .getStatus();
 }
 
+RolloverAction BucketCatalogTest::_rolloverAction(const std::shared_ptr<WriteBatch>& batch) {
+    auto& stripe = _bucketCatalog->stripes[batch->bucketHandle.stripe];
+    auto& [key, bucket] = *stripe->openBucketsById.find(batch->bucketHandle.bucketId);
+    return bucket->rolloverAction;
+}
+
+void BucketCatalogTest::_testUseBucketSkipsConflictingBucket(
+    std::function<void(BucketCatalog&, Bucket&)> makeBucketConflict) {
+    BSONObj measurement = BSON(_timeField << Date_t::now() << _metaField << 1);
+    auto swResult =
+        prepareInsert(*_bucketCatalog, _uuid1, nullptr, _getTimeseriesOptions(_ns1), measurement);
+    ASSERT_OK(swResult);
+    auto& [insertCtx, time] = swResult.getValue();
+
+    Bucket& bucket1 = internal::allocateBucket(_opCtx,
+                                               *_bucketCatalog,
+                                               *_bucketCatalog->stripes[insertCtx.stripeNumber],
+                                               WithLock::withoutLock(),
+                                               insertCtx,
+                                               time);
+    makeBucketConflict(*_bucketCatalog, bucket1);
+
+    Bucket& bucket2 = internal::allocateBucket(_opCtx,
+                                               *_bucketCatalog,
+                                               *_bucketCatalog->stripes[insertCtx.stripeNumber],
+                                               WithLock::withoutLock(),
+                                               insertCtx,
+                                               time);
+
+    ASSERT_EQ(&bucket2,
+              internal::useBucket(_opCtx,
+                                  *_bucketCatalog,
+                                  *_bucketCatalog->stripes[insertCtx.stripeNumber],
+                                  WithLock::withoutLock(),
+                                  _ns1,
+                                  insertCtx,
+                                  internal::AllowBucketCreation::kNo,
+                                  time));
+}
+
+void BucketCatalogTest::_testUseAlternateBucketSkipsConflictingBucket(
+    std::function<void(BucketCatalog&, Bucket&)> makeBucketConflict) {
+    BSONObj measurement = BSON(_timeField << Date_t::now() << _metaField << 1);
+    auto swResult =
+        prepareInsert(*_bucketCatalog, _uuid1, nullptr, _getTimeseriesOptions(_ns1), measurement);
+    ASSERT_OK(swResult);
+    auto& [insertCtx, time] = swResult.getValue();
+
+    Bucket& bucket1 = internal::allocateBucket(_opCtx,
+                                               *_bucketCatalog,
+                                               *_bucketCatalog->stripes[insertCtx.stripeNumber],
+                                               WithLock::withoutLock(),
+                                               insertCtx,
+                                               time);
+    makeBucketConflict(*_bucketCatalog, bucket1);
+
+    Bucket& bucket2 = internal::allocateBucket(_opCtx,
+                                               *_bucketCatalog,
+                                               *_bucketCatalog->stripes[insertCtx.stripeNumber],
+                                               WithLock::withoutLock(),
+                                               insertCtx,
+                                               time);
+    // Temporarily mark bucket2 rolled over so we can open another.
+    bucket2.rolloverAction = RolloverAction::kArchive;
+
+    Bucket& bucket3 = internal::allocateBucket(_opCtx,
+                                               *_bucketCatalog,
+                                               *_bucketCatalog->stripes[insertCtx.stripeNumber],
+                                               WithLock::withoutLock(),
+                                               insertCtx,
+                                               time);
+    // Unmark bucket2 to ensure we have an open bucket to skip as well.
+    bucket2.rolloverAction = RolloverAction::kNone;
+    bucket3.rolloverAction = RolloverAction::kArchive;
+
+    ASSERT_EQ(&bucket3,
+              internal::useAlternateBucket(*_bucketCatalog,
+                                           *_bucketCatalog->stripes[insertCtx.stripeNumber],
+                                           WithLock::withoutLock(),
+                                           _ns1,
+                                           insertCtx,
+                                           time));
+}
 
 TEST_F(BucketCatalogTest, InsertIntoSameBucket) {
     // The first insert should be able to take commit rights
@@ -904,6 +996,43 @@ TEST_F(BucketCatalogTest, PrepareCommitOnAlreadyAbortedBatch) {
     ASSERT_NOT_OK(prepareCommit(*_bucketCatalog, _ns1, batch));
     ASSERT(isWriteBatchFinished(*batch));
     ASSERT_EQ(getWriteBatchResult(*batch).getStatus(), ErrorCodes::TimeseriesBucketCleared);
+}
+
+TEST_F(BucketCatalogTest, InsertRollsOverAlternateBucket) {
+    // Open an initial bucket.
+    auto result1 =
+        _insertOneHelper(_opCtx, *_bucketCatalog, _ns1, _uuid1, BSON(_timeField << Date_t::now()));
+    auto batch1 = get<SuccessfulInsertion>(result1.getValue()).batch;
+
+    // Insert something backward in time, so mark the first bucket to be archived.
+    auto result2 = _insertOneHelper(
+        _opCtx, *_bucketCatalog, _ns1, _uuid1, BSON(_timeField << (Date_t::now() - Days{1})));
+    auto batch2 = get<SuccessfulInsertion>(result2.getValue()).batch;
+    ASSERT_NE(batch1->bucketHandle.bucketId.oid, batch2->bucketHandle.bucketId.oid);
+    ASSERT_EQ(_rolloverAction(batch1), RolloverAction::kArchive);
+
+    // Continue to insert more to the initial bucket until we rollover to new bucket.
+    size_t bucketCount = 1;
+    while (true) {
+        // Using tryInsert will let us select an alternate bucket, even though it's been marked for
+        // archival.
+        auto result = _tryInsertOneHelper(
+            _opCtx, *_bucketCatalog, _ns1, _uuid1, BSON(_timeField << Date_t::now()));
+        auto batch = get<SuccessfulInsertion>(result.getValue()).batch;
+
+        if (batch->bucketHandle.bucketId.oid != batch1->bucketHandle.bucketId.oid) {
+            // We expect this rollover only happened because we hit a limit that results in a hard
+            // closure.
+            ASSERT_EQ(_rolloverAction(batch1), RolloverAction::kHardClose);
+            // We should go back and mark the open (non-alternate) bucket closed.
+            ASSERT_EQ(_rolloverAction(batch2), RolloverAction::kSoftClose);
+            // The new bucket should be open.
+            ASSERT_EQ(_rolloverAction(batch), RolloverAction::kNone);
+            break;
+        }
+
+        ASSERT_LTE(++bucketCount, gTimeseriesBucketMaxCount);
+    }
 }
 
 TEST_F(BucketCatalogTest, CombiningWithInsertsFromOtherClients) {
@@ -1858,7 +1987,7 @@ TEST_F(BucketCatalogTest, InsertIntoReopenedUncompressedBucket) {
     ReopeningContext reopeningContext{*_bucketCatalog,
                                       *_bucketCatalog->stripes[0],
                                       WithLock::withoutLock(),
-                                      batch->bucketKey.cloneAsUntracked(),
+                                      batch->bucketKey,
                                       getCurrentEra(_bucketCatalog->bucketStateRegistry),
                                       {}};
     reopeningContext.bucketToReopen = BucketToReopen{bucketDoc, validator};
@@ -1943,7 +2072,7 @@ TEST_F(BucketCatalogTest, CannotInsertIntoOutdatedBucket) {
     ReopeningContext reopeningContext{*_bucketCatalog,
                                       *_bucketCatalog->stripes[0],
                                       WithLock::withoutLock(),
-                                      batch->bucketKey.cloneAsUntracked(),
+                                      batch->bucketKey,
                                       oldCatalogEra,
                                       {}};
     reopeningContext.bucketToReopen = BucketToReopen{bucketDoc, validator};
@@ -2075,16 +2204,20 @@ TEST_F(BucketCatalogTest, ArchiveBasedReopeningConflictsWithArchiveBasedReopenin
     // Inject an archived record.
     auto options = _getTimeseriesOptions(_ns1);
     BSONObj doc = ::mongo::fromjson(R"({"time":{"$date":"2022-06-05T15:34:40.000Z"},"tag":"c"})");
-    TrackingContext trackingContext;
     BucketKey key{_uuid1,
-                  BucketMetadata{trackingContext, doc["tag"], nullptr, options.getMetaField()}};
+                  BucketMetadata{getTrackingContext(_bucketCatalog->trackingContexts,
+                                                    TrackingScope::kOpenBucketsByKey),
+                                 doc["tag"],
+                                 nullptr,
+                                 options.getMetaField()}};
     auto minTime = roundTimestampToGranularity(doc["time"].Date(), options);
     BucketId id{_uuid1, OID::gen()};
     ASSERT_OK(initializeBucketState(_bucketCatalog->bucketStateRegistry, id));
     _bucketCatalog->stripes[0]->archivedBuckets[key.hash].emplace(
         minTime,
         ArchivedBucket{id,
-                       make_tracked_string(_bucketCatalog->trackingContext,
+                       make_tracked_string(getTrackingContext(_bucketCatalog->trackingContexts,
+                                                              TrackingScope::kArchivedBuckets),
                                            options.getTimeField().toString())});
 
     // Should try to reopen archived bucket.
@@ -2114,16 +2247,20 @@ TEST_F(BucketCatalogTest,
     // Inject an archived record.
     auto options = _getTimeseriesOptions(_ns1);
     BSONObj doc1 = ::mongo::fromjson(R"({"time":{"$date":"2022-06-05T15:34:40.000Z"},"tag":"c"})");
-    TrackingContext trackingContext;
     BucketKey key{_uuid1,
-                  BucketMetadata{trackingContext, doc1["tag"], nullptr, options.getMetaField()}};
+                  BucketMetadata{getTrackingContext(_bucketCatalog->trackingContexts,
+                                                    TrackingScope::kOpenBucketsByKey),
+                                 doc1["tag"],
+                                 nullptr,
+                                 options.getMetaField()}};
     auto minTime1 = roundTimestampToGranularity(doc1["time"].Date(), options);
     BucketId id1{_uuid1, OID::gen()};
     ASSERT_OK(initializeBucketState(_bucketCatalog->bucketStateRegistry, id1));
     _bucketCatalog->stripes[0]->archivedBuckets[key.hash].emplace(
         minTime1,
         ArchivedBucket{id1,
-                       make_tracked_string(_bucketCatalog->trackingContext,
+                       make_tracked_string(getTrackingContext(_bucketCatalog->trackingContexts,
+                                                              TrackingScope::kArchivedBuckets),
                                            options.getTimeField().toString())});
 
     // Should try to reopen archived bucket.
@@ -2144,7 +2281,8 @@ TEST_F(BucketCatalogTest,
     _bucketCatalog->stripes[0]->archivedBuckets[key.hash].emplace(
         minTime2,
         ArchivedBucket{id2,
-                       make_tracked_string(_bucketCatalog->trackingContext,
+                       make_tracked_string(getTrackingContext(_bucketCatalog->trackingContexts,
+                                                              TrackingScope::kArchivedBuckets),
                                            options.getTimeField().toString())});
 
     // A second attempt should block.
@@ -2165,16 +2303,20 @@ TEST_F(BucketCatalogTest, ArchivingAndClosingUnderSideBucketCatalogMemoryPressur
     ClosedBuckets closedBuckets;
 
     // Create dummy bucket and populate bucket state registry.
-    TrackingContext trackingContext;
     auto dummyUUID = UUID::gen();
     auto dummyBucketId = BucketId(dummyUUID, OID());
     auto dummyBucketKey =
-        BucketKey(dummyUUID, BucketMetadata(trackingContext, BSONElement{}, nullptr, boost::none));
+        BucketKey(dummyUUID,
+                  BucketMetadata(getTrackingContext(sideBucketCatalog->trackingContexts,
+                                                    TrackingScope::kOpenBucketsById),
+                                 BSONElement{},
+                                 nullptr,
+                                 boost::none));
     sideBucketCatalog->bucketStateRegistry.bucketStates.emplace(dummyBucketId,
                                                                 BucketState::kNormal);
-    auto dummyBucket = std::make_unique<Bucket>(trackingContext,
+    auto dummyBucket = std::make_unique<Bucket>(sideBucketCatalog->trackingContexts,
                                                 dummyBucketId,
-                                                dummyBucketKey.cloneAsUntracked(),
+                                                dummyBucketKey,
                                                 "time",
                                                 Date_t(),
                                                 sideBucketCatalog->bucketStateRegistry);
@@ -2183,15 +2325,17 @@ TEST_F(BucketCatalogTest, ArchivingAndClosingUnderSideBucketCatalogMemoryPressur
     auto& stripe = *sideBucketCatalog->stripes[0];
     stripe.openBucketsById.try_emplace(
         dummyBucketId,
-        make_unique_tracked<Bucket>(sideBucketCatalog->trackingContext,
-                                    sideBucketCatalog->trackingContext,
+        make_unique_tracked<Bucket>(getTrackingContext(sideBucketCatalog->trackingContexts,
+                                                       TrackingScope::kOpenBucketsById),
+                                    sideBucketCatalog->trackingContexts,
                                     dummyBucketId,
-                                    dummyBucketKey.cloneAsUntracked(),
+                                    dummyBucketKey,
                                     "time",
                                     Date_t(),
                                     sideBucketCatalog->bucketStateRegistry));
-    stripe.openBucketsByKey[dummyBucketKey.cloneAsUntracked()].emplace(dummyBucket.get());
+    stripe.openBucketsByKey[dummyBucketKey].emplace(dummyBucket.get());
     stripe.idleBuckets.push_front(dummyBucket.get());
+    dummyBucket->idleListEntry = stripe.idleBuckets.begin();
     stdx::lock_guard stripeLock{stripe.mutex};
 
     // Create execution stats controller.
@@ -2207,12 +2351,11 @@ TEST_F(BucketCatalogTest, ArchivingAndClosingUnderSideBucketCatalogMemoryPressur
     ASSERT_EQ(0,
               sideBucketCatalog->globalExecutionStats.numBucketsClosedDueToMemoryThreshold.load());
 
-
-    // Set the catalog memory usage to be above the memory usage threshold by the amount of memory
-    // used by the idle bucket.
-    sideBucketCatalog->trackingContext.stats().bytesAllocated(
-        getTimeseriesSideBucketCatalogMemoryUsageThresholdBytes() -
-        sideBucketCatalog->trackingContext.allocated() + trackingContext.allocated());
+    // Set the catalog memory usage to be above the memory usage threshold.
+    auto& sideContext =
+        getTrackingContext(sideBucketCatalog->trackingContexts, TrackingScope::kOpenBucketsById);
+    sideContext.stats().bytesAllocated(getTimeseriesSideBucketCatalogMemoryUsageThresholdBytes() -
+                                       getMemoryUsage(*sideBucketCatalog) + 1);
 
     // When we exceed the memory usage threshold we will first try to archive idle buckets to try
     // to get below the threshold. If this does not get us beneath the threshold, we will then try
@@ -2241,8 +2384,8 @@ TEST_F(BucketCatalogTest, ArchivingAndClosingUnderSideBucketCatalogMemoryPressur
     // Set the memory usage to be back at the threshold. Now, when we run expire idle buckets again,
     // because there are no idle buckets left to archive, we will close the bucket that we
     // previously archived.
-    sideBucketCatalog->trackingContext.stats().bytesAllocated(
-        getTimeseriesSideBucketCatalogMemoryUsageThresholdBytes() + 1);
+    sideContext.stats().bytesAllocated(getTimeseriesSideBucketCatalogMemoryUsageThresholdBytes() -
+                                       getMemoryUsage(*sideBucketCatalog) + +1);
     internal::expireIdleBuckets(_makeOperationContext().second.get(),
                                 *sideBucketCatalog,
                                 stripe,
@@ -2287,6 +2430,46 @@ TEST_F(BucketCatalogTest, GetCacheDerivedBucketMaxSizeRespectsAbsoluteMin) {
         /*storageCacheSize=*/1, /*workloadCardinality=*/1);
     ASSERT_EQ(effectiveMaxSize, gTimeseriesBucketMinSize.load());
     ASSERT_EQ(cacheDerivedBucketMaxSize, gTimeseriesBucketMinSize.load());
+}
+
+TEST_F(BucketCatalogTest, UseBucketSkipsBucketWithDirectWrite) {
+    _testUseBucketSkipsConflictingBucket([](BucketCatalog& catalog, Bucket& bucket) {
+        directWriteStart(
+            catalog.bucketStateRegistry, bucket.bucketId.collectionUUID, bucket.bucketId.oid);
+    });
+}
+
+TEST_F(BucketCatalogTest, UseBucketSkipsClearedBucket) {
+    _testUseBucketSkipsConflictingBucket([](BucketCatalog& catalog, Bucket& bucket) {
+        clear(catalog, bucket.bucketId.collectionUUID);
+    });
+}
+
+
+TEST_F(BucketCatalogTest, UseBucketSkipsFrozenBucket) {
+    _testUseBucketSkipsConflictingBucket([](BucketCatalog& catalog, Bucket& bucket) {
+        freezeBucket(catalog.bucketStateRegistry, bucket.bucketId);
+    });
+}
+
+TEST_F(BucketCatalogTest, UseAlternateBucketSkipsBucketWithDirectWrite) {
+    _testUseAlternateBucketSkipsConflictingBucket([](BucketCatalog& catalog, Bucket& bucket) {
+        directWriteStart(
+            catalog.bucketStateRegistry, bucket.bucketId.collectionUUID, bucket.bucketId.oid);
+    });
+}
+
+TEST_F(BucketCatalogTest, UseAlternateBucketSkipsClearedBucket) {
+    _testUseAlternateBucketSkipsConflictingBucket([](BucketCatalog& catalog, Bucket& bucket) {
+        clear(catalog, bucket.bucketId.collectionUUID);
+    });
+}
+
+
+TEST_F(BucketCatalogTest, UseAlternateBucketSkipsFrozenBucket) {
+    _testUseAlternateBucketSkipsConflictingBucket([](BucketCatalog& catalog, Bucket& bucket) {
+        freezeBucket(catalog.bucketStateRegistry, bucket.bucketId);
+    });
 }
 
 }  // namespace

@@ -684,12 +684,14 @@ tasks:
   ## initial sync generational fuzzer ##
   - <<: *jstestfuzz_template
     name: initial_sync_fuzzer_gen
+    # TODO (SERVER-89735): capped:true + recordIdsReplicated:true crashes initial sync.
     tags:
       [
         "assigned_to_jira_team_server_repl",
         "default",
         "require_npm",
         "random_name",
+        "exclude_when_record_ids_replicated",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1673,7 +1675,7 @@ tasks:
     commands:
       - func: "generate resmoke tasks"
         vars:
-          use_large_distro: "true"
+          use_xlarge_distro: "true"
 
   - <<: *gen_task_template
     name: sharded_collections_txns_uninitialized_fcv_jscore_passthrough_gen
@@ -1921,6 +1923,9 @@ tasks:
         "default",
         "config_fuzzer",
         "large",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1940,6 +1945,9 @@ tasks:
         "config_fuzzer",
         "large",
         "sharded",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1960,6 +1968,9 @@ tasks:
         "default",
         "config_fuzzer",
         "large",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1990,6 +2001,9 @@ tasks:
         "default",
         "config_fuzzer",
         "large",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2008,6 +2022,9 @@ tasks:
         "default",
         "config_fuzzer",
         "large",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2028,6 +2045,9 @@ tasks:
         "config_fuzzer",
         "large",
         "linux_only",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2045,6 +2065,9 @@ tasks:
         "assigned_to_jira_team_server_execution",
         "default",
         "config_fuzzer_stress",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2064,6 +2087,9 @@ tasks:
         "assigned_to_jira_team_server_execution",
         "default",
         "config_fuzzer_stress",
+        "incompatible_tsan",
+        "incompatible_aubsan",
+        "incompatible_debug_mode",
       ]
     commands:
       - func: "generate resmoke tasks"

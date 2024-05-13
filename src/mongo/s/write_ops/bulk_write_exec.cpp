@@ -128,7 +128,7 @@ void executeChildBatches(OperationContext* opCtx,
 
             // Transform the request into a sendable BSON.
             BSONObjBuilder builder;
-            bulkReq.serialize(BSONObj(), &builder);
+            bulkReq.serialize(&builder);
 
             logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &builder);
             if (!TransactionRouter::get(opCtx)) {
@@ -546,7 +546,7 @@ void executeRetryableTimeseriesUpdate(OperationContext* opCtx,
                 4,
                 "Processing bulk write response for retryable timeseries update",
                 "opIdx"_attr = opIdx,
-                "singleUpdateRequest"_attr = redact(singleUpdateRequest.toBSON({})),
+                "singleUpdateRequest"_attr = redact(singleUpdateRequest.toBSON()),
                 "replyItem"_attr = replyItem,
                 "wcError"_attr = wcError.toString());
 
@@ -609,14 +609,16 @@ void executeWriteWithoutShardKey(
             return childBatches.begin()->second.get();
         }();
 
+        // Note: It is fine to use 'getAproxNShardsOwningChunks' here because the result is only
+        // used to update stats.
         bulkWriteOp.noteTwoPhaseWriteProtocol(
-            *targetedWriteBatch, nsIdx, targeter->getNShardsOwningChunks());
+            *targetedWriteBatch, nsIdx, targeter->getAproxNShardsOwningChunks());
 
         auto cmdObj = bulkWriteOp
                           .buildBulkCommandRequest(targeters,
                                                    *targetedWriteBatch,
                                                    allowShardKeyUpdatesWithoutFullShardKeyInQuery)
-                          .toBSON({});
+                          .toBSON();
 
         auto swRes = write_without_shard_key::runTwoPhaseWriteProtocol(
             opCtx, targeter->getNS(), std::move(cmdObj));
@@ -687,7 +689,7 @@ void executeWriteWithoutShardKey(
     }
 }
 
-void executeNonTargetedSingleWriteWithoutShardKeyWithId(
+void executeNonTargetedWriteWithoutShardKeyWithId(
     OperationContext* opCtx,
     const std::vector<std::unique_ptr<NSTargeter>>& targeters,
     TargetedBatchMap& childBatches,
@@ -735,7 +737,7 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
     LOGV2_DEBUG(7263700,
                 4,
                 "Starting execution of a bulkWrite",
-                "clientRequest"_attr = redact(clientRequest.toBSON({})));
+                "clientRequest"_attr = redact(clientRequest.toBSON()));
 
     BulkWriteOp bulkWriteOp(opCtx, clientRequest);
 
@@ -781,7 +783,7 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
                 executeWriteWithoutShardKey(
                     opCtx, targeters, childBatches, bulkWriteOp, errorsPerNamespace);
             } else if (targetStatus.getValue() == WriteType::WithoutShardKeyWithId) {
-                executeNonTargetedSingleWriteWithoutShardKeyWithId(
+                executeNonTargetedWriteWithoutShardKeyWithId(
                     opCtx, targeters, childBatches, bulkWriteOp, errorsPerNamespace);
             } else if (targetStatus.getValue() == WriteType::MultiWriteBlockingMigrations) {
                 coordinateMultiUpdate(opCtx, childBatches, bulkWriteOp);
@@ -866,7 +868,10 @@ BulkWriteReplyInfo execute(OperationContext* opCtx,
     }
 
     for (size_t nsIdx = 0; nsIdx < targeters.size(); ++nsIdx) {
-        bulkWriteOp.noteNumShardsOwningChunks(nsIdx, targeters[nsIdx]->getNShardsOwningChunks());
+        // Note: It is fine to use 'getAproxNShardsOwningChunks' here because the result is only
+        // used to update stats.
+        bulkWriteOp.noteNumShardsOwningChunks(nsIdx,
+                                              targeters[nsIdx]->getAproxNShardsOwningChunks());
     }
 
     LOGV2_DEBUG(7263701, 4, "Finished execution of bulkWrite");
@@ -1800,7 +1805,6 @@ void BulkWriteOp::finishExecutingWriteWithoutShardKeyWithId() {
             if (targeterHasStaleShardResponse()) {
                 if (writeOp.getWriteState() != WriteOpState_Ready) {
                     writeOp.resetWriteToReady();
-                    _shouldStopCurrentRound = false;
                 }
             } else if (writeOp.getWriteState() != WriteOpState_Error) {
                 auto nVal = response.getNModified() + response.getNDeleted();
@@ -1829,6 +1833,10 @@ void BulkWriteOp::finishExecutingWriteWithoutShardKeyWithId() {
         }
         _deferredWCErrors = boost::none;
     }
+
+    // Setting _shouldStopCurrentRound to false here allows for the processing of any pending
+    // writeOps. The decision to stop retrying for the current writeOp is made before this point.
+    _shouldStopCurrentRound = false;
 }
 
 int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {
@@ -1873,7 +1881,7 @@ int BulkWriteOp::getBaseChildBatchCommandSizeEstimate() const {
     }
 
     BSONObjBuilder builder;
-    request.serialize(BSONObj(), &builder);
+    request.serialize(&builder);
     // Add writeConcern and lsid/txnNumber to ensure we save space for them.
     logical_session_id_helpers::serializeLsidAndTxnNumber(_opCtx, &builder);
     builder.append(WriteConcernOptions::kWriteConcernField, _opCtx->getWriteConcern().toBSON());

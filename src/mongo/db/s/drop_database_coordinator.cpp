@@ -249,7 +249,7 @@ void DropDatabaseCoordinator::_dropShardedCollection(
 
     // We need to send the drop to all the shards because both movePrimary and
     // moveChunk leave garbage behind for sharded collections.
-    auto participants = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+    auto participants = getAllShardsAndConfigServerIds(opCtx);
     // Remove primary shard from participants
     participants.erase(std::remove(participants.begin(), participants.end(), primaryShardId),
                        participants.end());
@@ -410,7 +410,7 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                     auto dropDatabaseParticipantCmd = ShardsvrDropDatabaseParticipant();
                     dropDatabaseParticipantCmd.setDbName(_dbName);
                     const auto cmdObj = CommandHelpers::appendMajorityWriteConcern(
-                        dropDatabaseParticipantCmd.toBSON({}));
+                        dropDatabaseParticipantCmd.toBSON());
 
                     // The database needs to be dropped first on the db primary shard
                     // because otherwise changestreams won't receive the drop event.

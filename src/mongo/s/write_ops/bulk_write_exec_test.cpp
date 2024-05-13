@@ -1792,7 +1792,7 @@ TEST_F(BulkWriteOpTest, TestGetBaseChildBatchCommandSizeEstimate) {
     nsEntry.setIsTimeseriesNamespace(true);
 
     BSONObjBuilder builder;
-    request.serialize(BSONObj(), &builder);
+    request.serialize(&builder);
     // Add writeConcern and lsid/txnNumber if applicable.
     logical_session_id_helpers::serializeLsidAndTxnNumber(_opCtx, &builder);
     builder.append(WriteConcernOptions::kWriteConcernField, _opCtx->getWriteConcern().toBSON());
@@ -4176,7 +4176,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, FirstShardFindMatchAndWCError) {
     // Since we got an n=1 reply we are done.
     op.finishExecutingWriteWithoutShardKeyWithId();
     ASSERT(op.isFinished());
-    ASSERT(op.shouldStopCurrentRound());
     ASSERT_EQ(updateOp.getWriteState(), WriteOpState_Completed);
 
     auto replies = op.generateReplyInfo();
@@ -4488,7 +4487,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndRetryableErrorAndWCError)
     // Since we got an n=1 reply we are done.
     op.finishExecutingWriteWithoutShardKeyWithId();
     ASSERT(op.isFinished());
-    ASSERT(op.shouldStopCurrentRound());
     ASSERT_EQ(updateOp.getWriteState(), WriteOpState_Completed);
 
     auto replies = op.generateReplyInfo();

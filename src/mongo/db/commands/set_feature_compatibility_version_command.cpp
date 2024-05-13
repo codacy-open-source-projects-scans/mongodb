@@ -165,6 +165,7 @@ MONGO_FAIL_POINT_DEFINE(failAfterReachingTransitioningState);
 MONGO_FAIL_POINT_DEFINE(hangAtSetFCVStart);
 MONGO_FAIL_POINT_DEFINE(failAfterSendingShardsToDowngradingOrUpgrading);
 MONGO_FAIL_POINT_DEFINE(hangAfterBlockingIndexBuildsForFcvDowngrade);
+MONGO_FAIL_POINT_DEFINE(automaticallyCollmodToRecordIdsReplicatedFalse);
 
 /**
  * Ensures that only one instance of setFeatureCompatibilityVersion can run at a given time.
@@ -184,7 +185,7 @@ void deletePersistedDefaultRWConcernDocument(OperationContext* opCtx) {
             entry.setMulti(false);
             return entry;
         }()});
-        return deleteOp.serialize({});
+        return deleteOp.serialize();
     }());
     uassertStatusOK(getStatusFromWriteCommandReply(commandResponse->getCommandReply()));
 }
@@ -230,7 +231,7 @@ void deleteShardingStateRecoveryDoc(OperationContext* opCtx) {
                 entry.setMulti(false);
                 return entry;
             }()});
-        return deleteOp.serialize({});
+        return deleteOp.serialize();
     }());
     uassertStatusOK(getStatusFromWriteCommandReply(commandResponse->getCommandReply()));
 }
@@ -267,6 +268,48 @@ void uassertStatusOKIgnoreNSNotFound(Status status) {
     }
 
     uassertStatusOK(status);
+}
+
+/*
+ * Automatically modifies data on downgrade for testing. This is because in some cases,
+ * the server expects the user to modify data themselves. In testing, as there may not
+ * actually be a real user, we need to do it ourselves.
+ */
+void maybeModifyDataOnDowngradeForTest(
+    OperationContext* opCtx,
+    const multiversion::FeatureCompatibilityVersion requestedVersion,
+    const multiversion::FeatureCompatibilityVersion originalVersion) {
+    if (MONGO_unlikely(automaticallyCollmodToRecordIdsReplicatedFalse.shouldFail())) {
+        // If the test-only failpoint 'automaticallyCollmodToRecordIdsReplicatedFalse' is set,
+        // we automatically strip the 'recordIdsReplicated' parameter from the collection
+        // options when performing an FCV downgrade to a version that doesn't support replicated
+        // recordIds. Normally this is not the case: when a collection with
+        // recordIdsReplicated:true is found, we complain.
+        if (gFeatureFlagRecordIdsReplicated.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
+                requestedVersion, originalVersion)) {
+            LOGV2(8700500,
+                  "Automatically issuing collMod to strip recordIdsReplicated:true field.");
+            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+                Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+                catalog::forEachCollectionFromDb(
+                    opCtx,
+                    dbName,
+                    MODE_X,
+                    [&](const Collection* collection) {
+                        BSONObjBuilder responseBuilder;
+                        auto collMod = CollMod{collection->ns()};
+                        collMod.setRecordIdsReplicated(false);
+                        uassertStatusOK(processCollModCommand(
+                            opCtx, collection->ns(), collMod, nullptr, &responseBuilder));
+                        return true;
+                    },
+                    [&](const Collection* collection) {
+                        return collection->areRecordIdsReplicated();
+                        ;
+                    });
+            }
+        }
+    }
 }
 
 /**
@@ -449,9 +492,10 @@ public:
                 if (role && role->has(ClusterRole::ConfigServer)) {
                     uassert(ErrorCodes::CannotDowngrade,
                             "Cannot downgrade while cluster server parameters are being set",
-                            ConfigsvrCoordinatorService::getService(opCtx)
-                                ->areAllCoordinatorsOfTypeFinished(
-                                    opCtx, ConfigsvrCoordinatorTypeEnum::kSetClusterParameter));
+                            (requestedVersion > actualVersion ||
+                             ConfigsvrCoordinatorService::getService(opCtx)
+                                 ->areAllCoordinatorsOfTypeFinished(
+                                     opCtx, ConfigsvrCoordinatorTypeEnum::kSetClusterParameter)));
                 }
 
                 // We pass boost::none as the setIsCleaningServerMetadata argument in order to
@@ -734,30 +778,51 @@ private:
     // of _userCollectionsUassertsForDowngrade or _internalServerCleanupForDowngrade.
     void _userCollectionsWorkForUpgrade(
         OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
+
+        std::vector<std::function<void(const Collection* collection)>> collValidationFunctions;
+
         const auto& [originalVersion, _] = getTransitionFCVFromAndTo(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot().getVersion());
+
         if (gFeatureFlagQERangeV2.isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion,
                                                                                originalVersion)) {
-            auto checkForDeprecatedQueryType = [](const Collection* collection) {
+            collValidationFunctions.emplace_back([](const Collection* collection) -> void {
                 const auto& encryptedFields =
                     collection->getCollectionOptions().encryptedFieldConfig;
                 if (encryptedFields) {
                     uassert(ErrorCodes::CannotUpgrade,
-                            str::stream()
-                                << "Collection " << collection->ns().toStringForErrorMsg()
-                                << " has an encrypted field with query type rangePreview, "
-                                   "which is deprecated. Please drop this collection "
-                                   "before trying to upgrade FCV.",
+                            fmt::format("Collection {} has an encrypted field with query type "
+                                        "rangePreview, which is deprecated. Please drop this "
+                                        "collection before upgrading FCV.",
+                                        collection->ns().toStringForErrorMsg()),
                             !hasQueryType(encryptedFields.get(),
                                           QueryTypeEnum::RangePreviewDeprecated));
                 }
-                return true;
-            };
-            for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-                Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
-                catalog::forEachCollectionFromDb(
-                    opCtx, dbName, MODE_IS, checkForDeprecatedQueryType);
-            }
+            });
+        }
+
+        if (gFeatureFlagDisallowBucketCollectionWithoutTimeseriesOptions
+                .isEnabledOnTargetFCVButDisabledOnOriginalFCV(requestedVersion, originalVersion)) {
+            collValidationFunctions.emplace_back([](const Collection* collection) {
+                uassert(ErrorCodes::CannotUpgrade,
+                        fmt::format("Bucket collection '{}' does not have timeseries options, "
+                                    "which is not allowed in new FCV version. Please rename or "
+                                    "drop this collection before upgrading FCV.",
+                                    collection->ns().toStringForErrorMsg()),
+                        !collection->ns().isTimeseriesBucketsCollection() ||
+                            collection->getTimeseriesOptions());
+            });
+        }
+
+        for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
+            Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
+            catalog::forEachCollectionFromDb(
+                opCtx, dbName, MODE_IS, [&](const Collection* collection) {
+                    for (const auto& collValidationFunc : collValidationFunctions) {
+                        collValidationFunc(collection);
+                    }
+                    return true;
+                });
         }
     }
 
@@ -794,11 +859,6 @@ private:
             _upgradeConfigSettingsSchema(opCtx, requestedVersion);
             _initializePlacementHistory(opCtx, requestedVersion);
         }
-
-        // TODO SERVER-80490: Remove this once 8.0 is released.
-        // Sanitizes the wiredTiger.creationString option from the durable catalog. Removes the
-        // encryption config options since they are ephemeral in nature.
-        _sanitizeCreationConfigString(opCtx, requestedVersion);
     }
 
     void _upgradeConfigSettingsSchema(
@@ -818,70 +878,6 @@ private:
         if (feature_flags::gPlacementHistoryPostFCV3.isEnabledOnTargetFCVButDisabledOnOriginalFCV(
                 requestedVersion, originalVersion)) {
             ShardingCatalogManager::get(opCtx)->initializePlacementHistory(opCtx);
-        }
-    }
-
-    // TODO SERVER-80490: Remove this method once 8.0 is released.
-    void _sanitizeCreationConfigString(
-        OperationContext* opCtx, const multiversion::FeatureCompatibilityVersion requestedVersion) {
-        // We bypass the UserWritesBlock mode here in order to not see errors arising from the
-        // block. The user already has permission to run FCV at this point and the writes performed
-        // here aren't modifying any user data with the exception of fixing up the collection
-        // metadata.
-        auto originalValue = WriteBlockBypass::get(opCtx).isWriteBlockBypassEnabled();
-        ON_BLOCK_EXIT([&] { WriteBlockBypass::get(opCtx).set(originalValue); });
-        WriteBlockBypass::get(opCtx).set(true);
-
-        auto curop = CurOp::get(opCtx);
-        for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
-            Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
-            catalog::forEachCollectionFromDb(
-                opCtx,
-                dbName,
-                MODE_X,
-                [&](const Collection* collection) {
-                    NamespaceStringOrUUID nsOrUUID(dbName, collection->uuid());
-                    CollMod collModCmd(collection->ns());
-
-                    // Nested CurOp for collMod. Namespace should ideally be
-                    // the command namespace for 'dbName' but collMod internally
-                    // overrides the CurOp namespace (through OldClientContext)
-                    // with the namespace of the collection being modified.
-                    CurOp collModCurOp;
-                    collModCurOp.push(opCtx);
-                    collModCurOp.setGenericOpRequestDetails(collection->ns(),
-                                                            curop->getCommand(),
-                                                            collModCmd.toBSON({}),
-                                                            NetworkOp::dbMsg);
-
-                    BSONObjBuilder unusedBuilder;
-                    uassertStatusOK(processCollModCommand(
-                        opCtx, nsOrUUID, collModCmd, nullptr, &unusedBuilder));
-
-                    try {
-                        // Logs the collMod statistics if it took longer than the server
-                        // parameter `slowMs` to complete.
-                        collModCurOp.completeAndLogOperation(
-                            {MONGO_LOGV2_DEFAULT_COMPONENT, toLogService(opCtx->getService())},
-                            CollectionCatalog::get(opCtx)
-                                ->getDatabaseProfileSettings(dbName)
-                                .filter);
-                    } catch (const DBException& e) {
-                        LOGV2_WARNING(8592500,
-                                      "unable to log collMod operation during setFCV upgrade",
-                                      "dbName"_attr = dbName,
-                                      "error"_attr = e);
-                    }
-                    return true;
-                },
-                [&](const Collection* coll) {
-                    // Performing sanitisation on node local collections is unnecessary since by
-                    // definition they can use configuration specific to this node.
-                    //
-                    // We also only focus on normal collections that are created by the user.
-                    const auto ns = coll->ns();
-                    return ns.isReplicated() && ns.isNormalCollection() && !ns.isOnInternalDb();
-                });
         }
     }
 
@@ -1132,7 +1128,7 @@ private:
         requestPhase.setPhase(phase);
         requestPhase.setChangeTimestamp(changeTimestamp);
         uassertStatusOK(ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
-            opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase.toBSON({}))));
+            opCtx, CommandHelpers::appendMajorityWriteConcern(requestPhase.toBSON())));
     }
 
     // This helper function is for any uasserts for users to clean up user collections. Uasserts for
@@ -1208,7 +1204,8 @@ private:
         }
 
         if (gFeatureFlagRecordIdsReplicated.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
-                requestedVersion, originalVersion)) {
+                requestedVersion, originalVersion) &&
+            MONGO_likely(!automaticallyCollmodToRecordIdsReplicatedFalse.shouldFail())) {
             // so don't allow downgrading with such a collection.
             for (const auto& dbName : DatabaseHolder::get(opCtx)->getNames()) {
                 Lock::DBLock dbLock(opCtx, dbName, MODE_IS);
@@ -1377,6 +1374,8 @@ private:
                         });
                 }
             }
+
+            maybeModifyDataOnDowngradeForTest(opCtx, requestedVersion, originalVersion);
         }
 
         _cleanUpClusterParameters(opCtx, requestedVersion);

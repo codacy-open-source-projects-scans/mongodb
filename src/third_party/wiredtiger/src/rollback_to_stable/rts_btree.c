@@ -19,8 +19,7 @@ __rts_btree_abort_update(WT_SESSION_IMPL *session, WT_ITEM *key, WT_UPDATE *firs
 {
     WT_UPDATE *stable_upd, *tombstone, *upd;
     char ts_string[2][WT_TS_INT_STRING_SIZE];
-    bool dryrun;
-    bool txn_id_visible;
+    bool dryrun, txn_id_visible;
 
     dryrun = S2C(session)->rts->dryrun;
 
@@ -272,18 +271,15 @@ __rts_btree_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_ROW *rip,
     WT_DECL_ITEM(key_string);
     WT_DECL_RET;
     WT_PAGE *page;
-    WT_TIME_WINDOW *tw, *hs_tw;
+    WT_TIME_WINDOW *hs_tw, *tw;
     WT_UPDATE *tombstone, *upd;
     wt_timestamp_t hs_durable_ts, hs_start_ts, hs_stop_durable_ts, newer_hs_durable_ts, pinned_ts;
     uint64_t hs_counter, type_full;
     uint32_t hs_btree_id;
-    uint8_t *memp;
-    uint8_t type;
+    uint8_t *memp, type;
     char ts_string[4][WT_TS_INT_STRING_SIZE];
     char tw_string[WT_TIME_STRING_SIZE];
-    bool dryrun;
-    bool first_record;
-    bool valid_update_found;
+    bool dryrun, first_record, valid_update_found;
 
     dryrun = S2C(session)->rts->dryrun;
 
@@ -440,7 +436,7 @@ __rts_btree_ondisk_fixup_key(WT_SESSION_IMPL *session, WT_REF *ref, WT_ROW *rip,
           "Out of order history store updates detected");
 
         if (hs_stop_durable_ts < newer_hs_durable_ts)
-            WT_STAT_CONN_DATA_INCR(session, txn_rts_hs_stop_older_than_newer_start);
+            WT_STAT_CONN_DSRC_INCR(session, txn_rts_hs_stop_older_than_newer_start);
 
         /*
          * Validate the timestamps in the key and the cell are same. This must be validated only
@@ -858,9 +854,9 @@ __rts_btree_abort_col_var(WT_SESSION_IMPL *session, WT_REF *ref, wt_timestamp_t 
              * on-disk value is actually stable.
              */
             if (unpack.type == WT_CELL_DEL)
-                WT_STAT_CONN_DATA_INCR(session, txn_rts_delete_rle_skipped);
+                WT_STAT_CONN_DSRC_INCR(session, txn_rts_delete_rle_skipped);
             else if (stable_updates_count == rle)
-                WT_STAT_CONN_DATA_INCR(session, txn_rts_stable_rle_skipped);
+                WT_STAT_CONN_DSRC_INCR(session, txn_rts_stable_rle_skipped);
             else {
                 j = 0;
                 if (inshead != NULL) {
@@ -875,7 +871,7 @@ __rts_btree_abort_col_var(WT_SESSION_IMPL *session, WT_REF *ref, wt_timestamp_t 
                             /* We can stop right away if the on-disk version is stable. */
                             if (is_ondisk_stable) {
                                 if (rle > 1)
-                                    WT_STAT_CONN_DATA_INCR(session, txn_rts_stable_rle_skipped);
+                                    WT_STAT_CONN_DSRC_INCR(session, txn_rts_stable_rle_skipped);
                                 goto stop;
                             }
                             j++;
@@ -893,7 +889,7 @@ __rts_btree_abort_col_var(WT_SESSION_IMPL *session, WT_REF *ref, wt_timestamp_t 
                     /* We can stop right away if the on-disk version is stable. */
                     if (is_ondisk_stable) {
                         if (rle > 1)
-                            WT_STAT_CONN_DATA_INCR(session, txn_rts_stable_rle_skipped);
+                            WT_STAT_CONN_DSRC_INCR(session, txn_rts_stable_rle_skipped);
                         goto stop;
                     }
                     j++;
@@ -952,7 +948,7 @@ __rts_btree_abort_col_fix(WT_SESSION_IMPL *session, WT_REF *ref, wt_timestamp_t 
     WT_INSERT *ins;
     WT_INSERT_HEAD *inshead;
     WT_PAGE *page;
-    uint32_t ins_recno_offset, recno_offset, numtws, tw;
+    uint32_t ins_recno_offset, numtws, recno_offset, tw;
     char ts_string[WT_TS_INT_STRING_SIZE];
 
     page = ref->page;

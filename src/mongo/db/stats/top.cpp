@@ -151,7 +151,7 @@ void Top::record(OperationContext* opCtx,
 }
 
 void Top::record(OperationContext* opCtx,
-                 const std::set<NamespaceString>& nssSet,
+                 std::span<const NamespaceString> nssSet,
                  LogicalOp logicalOp,
                  LockType lockType,
                  long long micros,
@@ -235,17 +235,25 @@ void Top::appendLatencyStats(const NamespaceString& nss,
 
 void Top::incrementGlobalLatencyStats(OperationContext* opCtx,
                                       uint64_t latency,
+                                      uint64_t workingTime,
                                       Command::ReadWriteType readWriteType) {
     if (!opCtx->shouldIncrementLatencyStats())
         return;
 
     incrementHistogramForUser(opCtx, latency, _globalHistogramStats, readWriteType);
+    incrementHistogramForUser(opCtx, workingTime, _workingTimeHistogramStats, readWriteType);
 }
 
 void Top::appendGlobalLatencyStats(bool includeHistograms,
                                    bool slowMSBucketsOnly,
                                    BSONObjBuilder* builder) {
     _globalHistogramStats.append(includeHistograms, slowMSBucketsOnly, builder);
+}
+
+void Top::appendWorkingTimeStats(bool includeHistograms,
+                                 bool slowMSBucketsOnly,
+                                 BSONObjBuilder* builder) {
+    _workingTimeHistogramStats.append(includeHistograms, slowMSBucketsOnly, builder);
 }
 
 void Top::incrementGlobalTransactionLatencyStats(OperationContext* opCtx, uint64_t latency) {

@@ -61,24 +61,7 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/namespace_string_util.h"
 
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
-
 namespace mongo {
-
-namespace fallback_op_observer_util {
-
-bool inRecoveryMode(OperationContext* opCtx) {
-    const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (!replCoord->getSettings().isReplSet()) {
-        return false;
-    }
-
-    const auto memberState = replCoord->getMemberState();
-    return memberState.startup2() || memberState.rollback();
-}
-
-}  // namespace fallback_op_observer_util
 
 void FallbackOpObserver::onInserts(OperationContext* opCtx,
                                    const CollectionPtr& coll,
@@ -100,10 +83,6 @@ void FallbackOpObserver::onInserts(OperationContext* opCtx,
     if (nss.isSystemDotJavascript()) {
         Scope::storedFuncMod(opCtx);
     } else if (nss.isSystemDotViews()) {
-        if (fallback_op_observer_util::inRecoveryMode(opCtx)) {
-            return;
-        }
-
         try {
             for (auto it = first; it != last; it++) {
                 view_util::validateViewDefinitionBSON(opCtx, it->doc, nss.dbName());
@@ -168,10 +147,6 @@ void FallbackOpObserver::onUpdate(OperationContext* opCtx,
     if (nss.isSystemDotJavascript()) {
         Scope::storedFuncMod(opCtx);
     } else if (nss.isSystemDotViews()) {
-        if (fallback_op_observer_util::inRecoveryMode(opCtx)) {
-            return;
-        }
-
         CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName());
     } else if (nss == NamespaceString::kSessionTransactionsTableNamespace &&
                !opAccumulator->opTime.writeOpTime.isNull()) {
@@ -183,40 +158,6 @@ void FallbackOpObserver::onUpdate(OperationContext* opCtx,
             opCtx, args.updateArgs->updatedDoc["_id"], args.updateArgs->updatedDoc);
     }
 }
-
-
-namespace {
-void onDeleteView(OperationContext* opCtx,
-                  const NamespaceString& viewNamespace,
-                  const BSONObj& doc) {
-    auto catalog = CollectionCatalog::get(opCtx);
-    try {
-        auto targetCollectionStr = doc["_id"].checkAndGetStringData();
-        NamespaceString targetNamespace = NamespaceStringUtil::deserialize(
-            viewNamespace.tenantId(), targetCollectionStr, SerializationContext::stateDefault());
-
-        // TODO: SERVER-83496 Some tests use apply_ops with invalid namespaces or wrong parameters,
-        // which produce errors in the collection acquisition
-
-        uassert(ErrorCodes::BadValue,
-                str::stream() << "Drop on invalid view: "
-                              << targetNamespace.toStringForResourceId(),
-                targetNamespace.isValid());
-
-        Status status = catalog->dropView(opCtx, targetNamespace);
-        if (!status.isOK()) {
-            LOGV2_WARNING(7861503,
-                          "Failed to remove view from the system catalog",
-                          "view"_attr = targetNamespace.toStringForErrorMsg());
-            iasserted(ErrorCodes::InternalError, "Failed to remove view from catalog");
-        }
-    } catch (const DBException&) {
-        // If a previous operation left the view catalog in an invalid state, we refresh
-        // the catalog
-        catalog->reloadViews(opCtx, viewNamespace.dbName());
-    }
-}
-}  // namespace
 
 void FallbackOpObserver::onDelete(OperationContext* opCtx,
                                   const CollectionPtr& coll,
@@ -234,11 +175,7 @@ void FallbackOpObserver::onDelete(OperationContext* opCtx,
     if (nss.isSystemDotJavascript()) {
         Scope::storedFuncMod(opCtx);
     } else if (nss.isSystemDotViews()) {
-        if (fallback_op_observer_util::inRecoveryMode(opCtx)) {
-            return;
-        }
-
-        onDeleteView(opCtx, nss, doc);
+        CollectionCatalog::get(opCtx)->reloadViews(opCtx, nss.dbName());
     } else if (nss == NamespaceString::kSessionTransactionsTableNamespace &&
                (inBatchedWrite || !opAccumulator->opTime.writeOpTime.isNull())) {
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
@@ -265,10 +202,6 @@ repl::OpTime FallbackOpObserver::onDropCollection(OperationContext* opCtx,
     if (collectionName.isSystemDotJavascript()) {
         Scope::storedFuncMod(opCtx);
     } else if (collectionName.isSystemDotViews()) {
-        if (fallback_op_observer_util::inRecoveryMode(opCtx)) {
-            return {};
-        }
-
         CollectionCatalog::get(opCtx)->clearViews(opCtx, collectionName.dbName());
     } else if (collectionName == NamespaceString::kSessionTransactionsTableNamespace) {
         // Disallow this drop if there are currently prepared transactions.
@@ -294,24 +227,6 @@ repl::OpTime FallbackOpObserver::onDropCollection(OperationContext* opCtx,
     }
 
     return {};
-}
-
-// TODO: this might not be needed after SERVER-89706
-void FallbackOpObserver::onReplicationRollback(OperationContext* opCtx,
-                                               const RollbackObserverInfo& rbInfo) {
-    stdx::unordered_set<DatabaseName> deduplicatedDbNames{};
-    for (const auto& ns : rbInfo.rollbackNamespaces) {
-        deduplicatedDbNames.insert(ns.dbName());
-    }
-
-    for (const auto& dbName : deduplicatedDbNames) {
-        Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
-        Lock::CollectionLock sysCollLock(
-            opCtx, NamespaceString::makeSystemDotViewsNamespace(dbName), MODE_X);
-        WriteUnitOfWork wuow(opCtx);
-        CollectionCatalog::get(opCtx)->reloadViews(opCtx, dbName);
-        wuow.commit();
-    }
 }
 
 }  // namespace mongo

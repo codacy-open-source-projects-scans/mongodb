@@ -614,7 +614,7 @@ class _CppHeaderFileWriter(_CppFileWriterBase):
                 textwrap.dedent("""\
             This function will return true every time because there is no underlying BSONObj anchor.
             The object owns the data of all of its members."""))
-            self._writer.write_line("bool isOwner() const { return true; }")
+            self._writer.write_line("bool isOwned() const { return true; }")
 
     def gen_protected_ownership_setters(self, struct):
         # type: (ast.Struct) -> None
@@ -1753,6 +1753,11 @@ class _CppSourceFileWriter(_CppFileWriterBase):
         """Generate the C++ deserializer piece for a C++ mongo::OpMsg::DocumentSequence."""
         cpp_type_info = cpp_types.get_cpp_type(field)
         cpp_type = cpp_type_info.get_type_name()
+
+        # If field (cpp_type) is the same type as sequence.objs, just copy and skip loop
+        if cpp_type == "mongo::BSONObj" and not field.type.deserializer:
+            self._writer.write_line('%s = sequence.objs;' % (_get_field_member_name(field)))
+            return
 
         self._writer.write_line('std::vector<%s> values;' % (cpp_type))
         self._writer.write_line('values.reserve(sequence.objs.size());')

@@ -93,8 +93,11 @@ void setClusterParameterImplShard(OperationContext* opCtx,
             "setClusterParameter can only run on mongos in sharded clusters",
             (serverGlobalParams.clusterRole.has(ClusterRole::None)));
 
+    // setClusterParameter is serialized against setFeatureCompatibilityVersion.
+    FixedFCVRegion fcvRegion(opCtx);
+
     if (!feature_flags::gFeatureFlagAuditConfigClusterParameter.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            fcvRegion->acquireFCVSnapshot())) {
         uassert(ErrorCodes::IllegalOperation,
                 str::stream() << SetClusterParameter::kCommandName
                               << " cannot be run on standalones",
@@ -102,9 +105,6 @@ void setClusterParameterImplShard(OperationContext* opCtx,
     }
 
     hangInSetClusterParameterFailPointCheck(request);
-
-    // setClusterParameter is serialized against setFeatureCompatibilityVersion.
-    FixedFCVRegion fcvRegion(opCtx);
 
     std::unique_ptr<ServerParameterService> parameterService =
         std::make_unique<ClusterParameterService>();
@@ -133,7 +133,7 @@ void setClusterParameterImplRouter(OperationContext* opCtx,
         opCtx,
         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
         DatabaseName::kAdmin,
-        configsvrSetClusterParameter.toBSON({}),
+        configsvrSetClusterParameter.toBSON(),
         Shard::RetryPolicy::kIdempotent));
 
     uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(std::move(cmdResponse)));

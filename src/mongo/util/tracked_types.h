@@ -306,6 +306,17 @@ tracked_set<Key> make_tracked_set(TrackingContext& trackingContext) {
     return tracked_set<Key>(trackingContext.makeAllocator<Key>());
 }
 
+template <class Key,
+          class Hash = absl::container_internal::hash_default_hash<Key>,
+          class Eq = absl::container_internal::hash_default_eq<Key>>
+using tracked_flat_hash_set =
+    absl::flat_hash_set<Key, Hash, Eq, std::scoped_allocator_adaptor<TrackingAllocator<Key>>>;
+
+template <class Key>
+tracked_flat_hash_set<Key> make_tracked_flat_hash_set(TrackingContext& trackingContext) {
+    return tracked_flat_hash_set<Key>(trackingContext.makeAllocator<Key>());
+}
+
 template <class T, std::size_t N>
 using tracked_inlined_vector =
     absl::InlinedVector<T, N, std::scoped_allocator_adaptor<TrackingAllocator<T>>>;
@@ -313,54 +324,6 @@ using tracked_inlined_vector =
 template <class T, std::size_t N>
 tracked_inlined_vector<T, N> make_tracked_inlined_vector(TrackingContext& trackingContext) {
     return tracked_inlined_vector<T, N>(trackingContext.makeAllocator<T>());
-}
-
-class TrackedBufBuilder : public BasicBufBuilder<TrackingSharedBufferAllocator> {
-public:
-    static constexpr size_t kDefaultInitSizeBytes = 512;
-    TrackedBufBuilder(TrackingAllocatorStats& stats, size_t size = kDefaultInitSizeBytes)
-        : BasicBufBuilder(stats, size) {}
-
-    TrackedBufBuilder(TrackingAllocator<void> allocator, size_t size = kDefaultInitSizeBytes)
-        : TrackedBufBuilder(allocator.getStats(), size) {}
-
-    SharedBuffer release() {
-        return _buf.release();
-    }
-};
-
-class UntrackedBufBuilder : public BufBuilder {
-public:
-    UntrackedBufBuilder(std::allocator<void> = {}, size_t size = kDefaultInitSizeBytes)
-        : BufBuilder(size) {}
-};
-
-class TrackableBSONObj {
-public:
-    explicit TrackableBSONObj(BSONObj obj) : _obj(std::move(obj)) {
-        invariant(_obj.isOwned() || _obj.isEmptyPrototype());
-    }
-
-    size_t allocated() const {
-        return !_obj.isEmptyPrototype() ? _obj.objsize() : 0;
-    }
-
-    BSONObj& get() {
-        return _obj;
-    }
-
-    const BSONObj& get() const {
-        return _obj;
-    }
-
-private:
-    BSONObj _obj;
-};
-using TrackedBSONObj = Tracked<TrackableBSONObj>;
-using UntrackedBSONObj = Untracked<TrackableBSONObj>;
-
-inline TrackedBSONObj makeTrackedBson(TrackingContext& trackingContext, BSONObj obj) {
-    return trackingContext.makeTracked(TrackableBSONObj{std::move(obj)});
 }
 
 }  // namespace mongo

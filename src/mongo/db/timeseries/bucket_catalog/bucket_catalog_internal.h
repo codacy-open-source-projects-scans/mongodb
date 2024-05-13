@@ -103,6 +103,7 @@ StripeNumber getStripeNumber(const BucketKey& key, size_t numberOfStripes);
  * Extracts the information from the input 'doc' that is used to map the document to a bucket.
  */
 StatusWith<std::pair<BucketKey, Date_t>> extractBucketingParameters(
+    TrackingContext&,
     const UUID& collectionUUID,
     const StringDataComparator* comparator,
     const TimeseriesOptions& options,
@@ -151,7 +152,7 @@ Bucket* useBucket(OperationContext* opCtx,
 
 /**
  * Retrieve a previously closed bucket for write use if one exists in the catalog. Considers buckets
- * that are pending closure or archival but which are still eligible to recieve new measurements.
+ * that are pending closure or archival but which are still eligible to receive new measurements.
  */
 Bucket* useAlternateBucket(BucketCatalog& catalog,
                            Stripe& stripe,
@@ -207,7 +208,9 @@ StatusWith<std::reference_wrapper<Bucket>> reuseExistingBucket(BucketCatalog& ca
 
 /**
  * Given an already-selected 'bucket', inserts 'doc' to the bucket if possible. If not, and 'mode'
- * is set to 'kYes', we will create a new bucket and insert into that bucket.
+ * is set to 'kYes', we will create a new bucket and insert into that bucket. If `existingBucket`
+ * was selected via `useAlternateBucket`, then the previous bucket returned by `useBucket` should be
+ * passed in as `excludedBucket`.
  */
 std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     OperationContext* opCtx,
@@ -219,7 +222,9 @@ std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     AllowBucketCreation mode,
     InsertContext& insertContext,
     Bucket& existingBucket,
-    const Date_t& time);
+    const Date_t& time,
+    Bucket* excludedBucket,
+    boost::optional<RolloverAction> excludedAction);
 
 /**
  * Wait for other batches to finish so we can prepare 'batch'
@@ -341,7 +346,9 @@ Bucket& allocateBucket(OperationContext* opCtx,
 /**
  * Close the existing, full bucket and open a new one for the same metadata.
  *
- * Writes information about the closed bucket to the 'info' parameter.
+ * Writes information about the closed bucket to the 'info' parameter. Optionally, if `bucket` was
+ * selected via `useAlternateBucket`, pass the current open bucket as `additionalBucket` to mark for
+ * archival and preserve the invariant of only one open bucket per key.
  */
 Bucket& rollover(OperationContext* opCtx,
                  BucketCatalog& catalog,
@@ -350,7 +357,9 @@ Bucket& rollover(OperationContext* opCtx,
                  Bucket& bucket,
                  InsertContext& info,
                  RolloverAction action,
-                 const Date_t& time);
+                 const Date_t& time,
+                 Bucket* additionalBucket,
+                 boost::optional<RolloverAction> additionalAction);
 
 /**
  * Determines if 'bucket' needs to be rolled over to accommodate 'doc'. If so, determines whether
@@ -358,7 +367,7 @@ Bucket& rollover(OperationContext* opCtx,
  */
 std::pair<RolloverAction, RolloverReason> determineRolloverAction(
     OperationContext* opCtx,
-    TrackingContext&,
+    TrackingContexts&,
     const BSONObj& doc,
     InsertContext& info,
     Bucket& bucket,

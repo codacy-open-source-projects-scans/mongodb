@@ -161,9 +161,9 @@ public:
     BSONElement elem;
     TrackingContext trackingContext;
     BucketMetadata bucketMetadata{trackingContext, elem, nullptr, boost::none};
-    BucketKey bucketKey1{uuid1, bucketMetadata.cloneAsUntracked()};
-    BucketKey bucketKey2{uuid2, bucketMetadata.cloneAsUntracked()};
-    BucketKey bucketKey3{uuid3, bucketMetadata.cloneAsUntracked()};
+    BucketKey bucketKey1{uuid1, bucketMetadata};
+    BucketKey bucketKey2{uuid2, bucketMetadata};
+    BucketKey bucketKey3{uuid3, bucketMetadata};
     Date_t date = Date_t::now();
     TimeseriesOptions options;
     ExecutionStatsController stats = internal::getOrInitializeExecutionStats(*this, uuid1);
@@ -601,6 +601,7 @@ TEST_F(BucketStateRegistryTest, HasBeenClearedFunctionReturnsAsExpected) {
 
     // Sanity check that all this still works with multiple buckets in a namespace being cleared.
     auto& bucket3 = createBucket(info2, date);
+    bucket3.rolloverAction = RolloverAction::kArchive;  // Rollover before opening another bucket
     auto& bucket4 = createBucket(info2, date);
     ASSERT_EQ(bucket3.lastChecked, 1);
     ASSERT_EQ(bucket4.lastChecked, 1);
@@ -658,14 +659,22 @@ TEST_F(BucketStateRegistryTest, ClearRegistryGarbageCollection) {
     // Era 2 still has bucket4 in it, so its count remains non-zero.
     ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 1);
     auto& bucket5 = createBucket(info1, date);
+    bucket4.rolloverAction = RolloverAction::kArchive;  // Rollover before opening another bucket
     auto& bucket6 = createBucket(info2, date);
     ASSERT_EQ(bucket5.lastChecked, 3);
     ASSERT_EQ(bucket6.lastChecked, 3);
     clear(*this, uuid1);
     checkAndRemoveClearedBucket(bucket5);
-    // Eras 2 and 3 still have bucket4 and bucket6 in them respectively, so their counts remain
-    // non-zero.
-    ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 2);
+    if constexpr (!kDebugBuild) {
+        ASSERT_EQ(bucket4.lastChecked, 2);
+        // Eras 2 and 3 still have bucket4 and bucket6 in them respectively, so their counts remain
+        // non-zero.
+        ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 2);
+    } else {
+        ASSERT_EQ(bucket4.lastChecked, 3);  // Debug check advanced this while creating bucket6.
+        // Era3 still has bucket4 and bucket6, so its count remains non-zero.
+        ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 1);
+    }
     clear(*this, uuid2);
     checkAndRemoveClearedBucket(bucket4);
     checkAndRemoveClearedBucket(bucket6);
@@ -744,11 +753,11 @@ TEST_F(BucketStateRegistryTest, AbortingBatchRemovesBucketState) {
     auto bucketId = bucket.bucketId;
 
     auto stats = internal::getOrInitializeExecutionStats(*this, info1.key.collectionUUID);
-    TrackingContext trackingContext;
+    TrackingContexts trackingContexts;
     auto batch =
-        std::make_shared<WriteBatch>(trackingContext,
+        std::make_shared<WriteBatch>(trackingContexts,
                                      BucketHandle{bucketId, info1.stripeNumber},
-                                     info1.key.cloneAsUntracked(),
+                                     info1.key,
                                      0,
                                      stats,
                                      StringData{bucket.timeField.data(), bucket.timeField.size()});
@@ -770,11 +779,11 @@ TEST_F(BucketStateRegistryTest, ClosingBucketGoesThroughPendingCompressionState)
     ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kNormal));
 
     auto stats = internal::getOrInitializeExecutionStats(*this, info1.key.collectionUUID);
-    TrackingContext trackingContext;
+    TrackingContexts trackingContexts;
     auto batch =
-        std::make_shared<WriteBatch>(trackingContext,
+        std::make_shared<WriteBatch>(trackingContexts,
                                      BucketHandle{bucketId, info1.stripeNumber},
-                                     info1.key.cloneAsUntracked(),
+                                     info1.key,
                                      0,
                                      stats,
                                      StringData{bucket.timeField.data(), bucket.timeField.size()});
