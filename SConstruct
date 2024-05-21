@@ -501,6 +501,7 @@ for pack in [
     ('intel_decimal128', 'intel decimal128'),
     ('bson', ),
     ('libmongocrypt', ),
+    ('tomcrypt', ),
     ('pcre2', ),
     ('protobuf', "Protocol Buffers"),
     ('snappy', ),
@@ -2054,27 +2055,6 @@ if env.get('ENABLE_OOM_RETRY'):
     else:
         env['OOM_RETRY_ATTEMPTS'] = 10
         env['OOM_RETRY_MAX_DELAY_SECONDS'] = 120
-
-        if env.ToolchainIs('clang', 'gcc'):
-            env['OOM_RETRY_MESSAGES'] = [
-                ': out of memory',
-                'virtual memory exhausted: Cannot allocate memory',
-                ': fatal error: Killed signal terminated program cc1',
-                # TODO: SERVER-77322 remove this non memory related ICE.
-                r'during IPA pass: cp.+g\+\+: internal compiler error',
-                'ld terminated with signal 9',
-            ]
-        elif env.ToolchainIs('msvc'):
-            env['OOM_RETRY_MESSAGES'] = [
-                'LNK1102: out of memory',
-                'C1060: compiler is out of heap space',
-                'c1xx : fatal error C1063: INTERNAL COMPILER ERROR',
-                r'LNK1171: unable to load mspdbcore\.dll',
-                "LNK1201: error writing to program database ",
-                "The paging file is too small for this operation to complete.",
-            ]
-            env['OOM_RETRY_RETURNCODES'] = [1102]
-
         env.Tool('oom_auto_retry')
 
 if env.ToolchainIs('clang'):
@@ -2085,7 +2065,7 @@ if env.ToolchainIs('clang'):
         env.FatalError("Error: A clang --gcov build must have either --opt=debug or --opt=on to " +
                        "prevent crashes due to excessive stack usage")
 
-    if has_option('sanitize') and optBuild not in ("on", "debug"):
+    if has_option('sanitize') and get_option('sanitize') != "" and optBuild not in ("on", "debug"):
         env.FatalError("Error: A clang --sanitize build must have either --opt=debug or --opt=on " +
                        "to prevent crashes due to excessive stack usage")
 
@@ -2442,7 +2422,7 @@ if link_model.startswith("dynamic"):
         env.AppendUnique(LINKFLAGS=["-Wl,--no-as-needed"])
 
         # Using zdefs doesn't work at all with the sanitizers
-        if not has_option('sanitize'):
+        if not has_option('sanitize') and get_option('sanitize') != "":
 
             if link_model == "dynamic-strict":
                 env.AppendUnique(SHLINKFLAGS=["-Wl,-z,defs"])
@@ -4171,7 +4151,7 @@ def doConfigure(myenv):
 
         conf.Finish()
 
-    if has_option('sanitize'):
+    if has_option('sanitize') and get_option('sanitize') != "":
 
         if not myenv.ToolchainIs('clang', 'gcc'):
             env.FatalError('sanitize is only supported with clang or gcc')
@@ -5232,6 +5212,9 @@ def doConfigure(myenv):
 
     if use_system_version_of_library("fmt"):
         conf.FindSysLibDep("fmt", ["fmt"])
+
+    if use_system_version_of_library("tomcrypt"):
+        conf.FindSysLibDep("tomcrypt", ["tomcrypt"])
 
     if use_system_version_of_library("libunwind"):
         conf.FindSysLibDep("unwind", ["unwind"])
@@ -6338,16 +6321,6 @@ if get_option('lint-scope') == 'changed':
 
     env.AlwaysBuild(patch_file)
 
-    pylinters = env.Command(
-        target="#lint-pylinters",
-        source=[
-            "buildscripts/pylinters.py",
-            patch_file,
-        ],
-        action=
-        "REVISION=$REVISION ENTERPRISE_REV=$ENTERPRISE_REV $PYTHON ${SOURCES[0]} lint-git-diff",
-    )
-
     clang_format = env.Command(
         target="#lint-clang-format",
         source=[
@@ -6369,14 +6342,6 @@ if get_option('lint-scope') == 'changed':
     )
 
 else:
-    pylinters = env.Command(
-        target="#lint-pylinters",
-        source=[
-            "buildscripts/pylinters.py",
-        ],
-        action="$PYTHON ${SOURCES[0]} lint-all",
-    )
-
     clang_format = env.Command(
         target="#lint-clang-format",
         source=[
@@ -6393,15 +6358,16 @@ else:
         action="$PYTHON ${SOURCES[0]} --dirmode lint jstests/ src/mongo",
     )
 
-sconslinters = env.Command(
-    target="#lint-sconslinters",
+
+pylinters = env.Command(
+    target="#lint-pylinters",
     source=[
         "buildscripts/pylinters.py",
     ],
-    action="$PYTHON ${SOURCES[0]} lint-scons",
+    action="$PYTHON ${SOURCES[0]} lint",
 )
 
-lint_py = env.Command(
+quickmongolint = env.Command(
     target="#lint-lint.py",
     source=["buildscripts/quickmongolint.py"],
     action="$PYTHON ${SOURCES[0]} lint",
@@ -6413,8 +6379,8 @@ lint_errorcodes = env.Command(
     action="$PYTHON ${SOURCES[0]} --quiet",
 )
 
-env.Alias("lint", [lint_py, eslint, clang_format, pylinters, sconslinters, lint_errorcodes])
-env.Alias("lint-fast", [eslint, clang_format, pylinters, sconslinters, lint_errorcodes])
+env.Alias("lint", [quickmongolint, eslint, clang_format, pylinters, lint_errorcodes])
+env.Alias("lint-fast", [eslint, clang_format, pylinters, lint_errorcodes])
 env.AlwaysBuild("lint")
 env.AlwaysBuild("lint-fast")
 

@@ -103,7 +103,8 @@ types-setuptools = "57.4.12" # latest is 68.0.0.0, but that causes pip install r
 types-requests = "2.31.0.1"
 tqdm = "*"
 colorama = "^0.4.6"
-evergreen-lint = "^0.1.6"
+evergreen-lint = "^0.1.7"
+ruff = "^0.4.4"
 
 [tool.poetry.group.platform.dependencies]
 pypiwin32 = { version = ">=223", markers = "sys_platform == 'win32'" }
@@ -174,6 +175,45 @@ libdeps = [
 # Currently this does nothing
 [tool.poetry.scripts]
 resmoke = "buildscripts.resmoke:entrypoint"
+
+[tool.ruff]
+extend-exclude = [
+    "site_scons/third_party",
+    "src/third_party",
+]
+extend-include = ["*/SConscript"]
+
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+ignore = [
+    "E402", # module-import-not-at-top-of-file
+    "E703", # useless-semicolon
+    "E711", # none-comparison
+    "E712", # true-false-comparison
+    "E713", # not-in-test
+    "E714", # not-is-test
+    "E721", # type-comparison
+    "E722", # bare-except
+    "E731", # lambda-assignment
+    "E741", # ambiguous-variable-name
+    "F401", # unused-import
+    "F402", # import-shadowed-by-loop-var
+    "F403", # undefined-local-with-import-star
+    "F405", # undefined-local-with-import-star-usage
+    "F541", # f-string-missing-placeholders
+    "F811", # redefined-while-unused
+    "F821", # undefined-name
+    "F822", # undefined-export
+    "F841", # unused-variable
+    ]
+
+[tool.ruff.format]
+exclude = [
+    # allow-list: incrementally remove as each is formatted and locked down
+    "src/*",
+    ]
 
 [build-system]
 requires = ["poetry-core"]

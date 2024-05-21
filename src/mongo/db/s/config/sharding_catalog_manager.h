@@ -89,13 +89,13 @@ struct RemoveShardProgress {
     /**
      * Used to indicate to the caller of the removeShard method whether draining of chunks for
      * a particular shard has started, is ongoing, or has been completed. When removing a catalog
-     * shard, there is a new state when waiting for range deletions of all moved away chunks.
-     * Removing other shards will skip this state.
+     * shard, there is a new state when waiting for range deletions of all moved away chunks and any
+     * in progress drops of user collections. Removing other shards will skip this state.
      */
     enum DrainingShardStatus {
         STARTED,
         ONGOING,
-        PENDING_RANGE_DELETIONS,
+        PENDING_DATA_CLEANUP,
         COMPLETED,
     };
 
@@ -112,6 +112,7 @@ struct RemoveShardProgress {
     DrainingShardStatus status;
     boost::optional<DrainingShardUsage> remainingCounts;
     boost::optional<long long> pendingRangeDeletions;
+    boost::optional<NamespaceString> firstNonEmptyCollection;
 };
 
 /**
@@ -569,11 +570,12 @@ public:
     Lock::SharedLock enterStableTopologyRegion(OperationContext* opCtx);
 
     /**
-     * Updates the "hasTwoOrMoreShard" cluster cardinality parameter based on the given number of
-     * shards. Cannot be called while holding the _kShardMembershipLock in exclusive mode since
-     * setting cluster parameters requires taking this lock in shared mode.
+     * Updates the "hasTwoOrMoreShard" cluster cardinality parameter based on the number of shards
+     * in the shard registry after reloading it. Cannot be called while holding the
+     * _kShardMembershipLock in exclusive mode since setting cluster parameters requires taking this
+     * lock in shared mode.
      */
-    Status updateClusterCardinalityParameter(OperationContext* opCtx, int numShards);
+    Status updateClusterCardinalityParameterIfNeeded(OperationContext* opCtx);
 
     //
     // Cluster Upgrade Operations
@@ -907,6 +909,17 @@ private:
                                                            const ChunkType& origChunk,
                                                            const ChunkVersion& collPlacementVersion,
                                                            const std::vector<BSONObj>& splitPoints);
+
+    /**
+     * Updates the "hasTwoOrMoreShard" cluster cardinality parameter based on the given number of
+     * shards. Can only be called while holding the _kClusterCardinalityParameterLock in exclusive
+     * mode and not holding the _kShardMembershipLock in exclusive mode since setting cluster
+     * parameters requires taking the latter in shared mode.
+     */
+    Status _updateClusterCardinalityParameter(
+        const Lock::ExclusiveLock& clusterCardinalityParameterLock,
+        OperationContext* opCtx,
+        int numShards);
 
     /**
      * Updates the "hasTwoOrMoreShard" cluster cardinality parameter after an add or remove shard

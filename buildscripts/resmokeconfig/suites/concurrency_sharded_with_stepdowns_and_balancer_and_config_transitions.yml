@@ -152,6 +152,9 @@ selector:
 
     # TODO SERVER-89841: Performs many sharding DDL operations and can time out taking the DDL lock
     # on slower variants.
+    - jstests/concurrency/fsm_workloads/agg_lookup.js
+    - jstests/concurrency/fsm_workloads/agg_lookup_in_txn.js
+    - jstests/concurrency/fsm_workloads/agg_out.js
     - jstests/concurrency/fsm_workloads/agg_sort.js
     - jstests/concurrency/fsm_workloads/map_reduce_interrupt.js
     - jstests/concurrency/fsm_workloads/map_reduce_replace.js
@@ -159,6 +162,10 @@ selector:
     - jstests/concurrency/fsm_workloads/map_reduce_replace_nonexistent.js
     - jstests/concurrency/fsm_workloads/random_DDL_operations.js
     - jstests/concurrency/fsm_workloads/rename_sharded_collection.js
+    - jstests/concurrency/fsm_workloads/rename_capped_collection_chain.js
+    - jstests/concurrency/fsm_workloads/rename_capped_collection_droptarget.js
+    - jstests/concurrency/fsm_workloads/rename_capped_collection_dbname_chain.js
+    - jstests/concurrency/fsm_workloads/rename_capped_collection_dbname_droptarget.js
 
   exclude_with_any_tags:
     - assumes_against_mongod_not_mongos
@@ -182,9 +189,6 @@ selector:
     # This suites execute random moveCollections in the background that cause open cursors on the
     # collection to be killed.
     - requires_getmore
-
-    # TODO SERVER-90239 Enable time series tests.
-    - requires_timeseries
 
 executor:
   archive:
@@ -215,6 +219,10 @@ executor:
     - class: CheckShardFilteringMetadata
     - class: CheckReplDBHash
     - class: CheckMetadataConsistencyInBackground
+      shell_options:
+        global_vars:
+          TestData:
+            transitioningConfigShard: true
     - class: CheckOrphansDeleted
     - class: CheckRoutingTableConsistency
     - class: ValidateCollections # Validation can interfere with other operations, so this goes last.
@@ -259,6 +267,7 @@ executor:
             skipMoveCollectionThreshold: 0.5
           mode: alwaysOn
         balancerMigrationsThrottlingMs: 100
+        featureFlagReshardingForTimeseries: true
     num_rs_nodes_per_shard: 3
     num_shards: 3
     num_mongos: 2
