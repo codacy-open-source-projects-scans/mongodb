@@ -48,7 +48,7 @@ namespace mongo::sbe::value {
  */
 class DeblockedTagVals {
 public:
-    DeblockedTagVals() {}
+    DeblockedTagVals() = default;
 
     // 'tags' and 'vals' point to an array of 'count' elements respectively.
     DeblockedTagVals(size_t count,
@@ -58,14 +58,6 @@ public:
                      bool isDense = false)
         : _count(count), _tags(tags), _vals(vals), _tag(tag), _isDense(isDense) {
         tassert(7949501, "Values must exist", count > 0 || (tags == nullptr && vals == nullptr));
-    }
-    DeblockedTagVals& operator=(const DeblockedTagVals& other) {
-        _count = other._count;
-        _tags = other._tags;
-        _vals = other._vals;
-        _tag = other._tag;
-        _isDense = other._isDense;
-        return *this;
     }
 
     std::pair<TypeTags, Value> operator[](size_t idx) const {
@@ -385,9 +377,7 @@ class MonoBlock final : public ValueBlock {
 public:
     static std::unique_ptr<MonoBlock> makeNothingBlock(size_t ct);
 
-    MonoBlock(size_t count, TypeTags tag, Value val) : _count(count) {
-        std::tie(_tag, _val) = copyValue(tag, val);
-    }
+    MonoBlock(size_t count, TypeTags tag, Value val) : _tag(tag), _val(val), _count(count) {}
 
     MonoBlock(const MonoBlock& o) : ValueBlock(o), _count(o._count) {
         std::tie(_tag, _val) = copyValue(o._tag, o._val);
@@ -451,7 +441,8 @@ public:
         if (*tryDense()) {
             return nullptr;
         }
-        return std::make_unique<MonoBlock>(_count, fillTag, fillVal);
+        auto [tag, val] = copyValue(fillTag, fillVal);
+        return std::make_unique<MonoBlock>(_count, tag, val);
     }
 
     std::unique_ptr<ValueBlock> fillType(uint32_t typeMask,

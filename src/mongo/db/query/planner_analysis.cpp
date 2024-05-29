@@ -87,13 +87,10 @@
 
 namespace mongo {
 
-using std::endl;
 using std::pair;
 using std::string;
 using std::unique_ptr;
 using std::vector;
-
-namespace dps = ::mongo::dotted_path_support;
 
 //
 // Helpers for bounds explosion AKA quick-and-dirty SERVER-1205.

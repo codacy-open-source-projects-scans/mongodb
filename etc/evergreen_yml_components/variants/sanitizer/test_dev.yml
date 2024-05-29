@@ -124,6 +124,8 @@ buildvariants:
     expansions:
       <<: *linux_debug_community_compile_expansions
       compile_variant: *linux-x86-dynamic-debug-compile-required
+      build_mongot: true
+      download_mongot_release: true
     tasks:
       - name: compile_test_parallel_core_stream_TG
       - name: compile_test_parallel_unittest_stream_TG
@@ -151,6 +153,8 @@ buildvariants:
         -j$(grep -c ^processor /proc/cpuinfo)
         --link-model=dynamic
         --use-diagnostic-latches=on
+      build_mongot: true
+      download_mongot_release: true
       compile_variant: *linux-debug-aubsan-compile-required
       test_flags: >-
         --excludeWithAnyTags=incompatible_aubsan
@@ -187,7 +191,11 @@ buildvariants:
       large_distro_name: rhel80-medium
       core_analyzer_distro_name: rhel80-xlarge
       compile_variant: *linux_x86_dynamic_debug_compile_variant_name
+      build_mongot: true
+      download_mongot_release: true
     tasks:
+      - name: search_end_to_end_sharded_cluster
+      - name: search_end_to_end_single_node
       - name: .development_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
       - name: .development_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
         distros:
@@ -245,6 +253,7 @@ buildvariants:
       - name: .non_deterministic .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_aubsan !.incompatible_system_allocator !.requires_all_feature_flags
         distros:
           - rhel80-large
+      - name: .search_e2e_tests
 
   - <<: *linux_debug_aubsan_compile_variant_dependency
     name: &rhel80-debug-aubsan-experimental rhel80-debug-aubsan-experimental
@@ -329,7 +338,9 @@ buildvariants:
         --ssl
         -j$(grep -c ^processor /proc/cpuinfo)
         --use-diagnostic-latches=on
-      test_flags: --excludeWithAnyTags=corrupts_data
+      test_flags: >-
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
+        --excludeWithAnyTags=corrupts_data
       resmoke_jobs_factor: 0.3 # Avoid starting too many mongod's under {A,UB}SAN build.
       hang_analyzer_dump_core: false
       scons_cache_scope: shared
@@ -369,7 +380,8 @@ buildvariants:
       # thread leaks, which we have because we don't do a clean shutdown
       # of the ServiceContext.
       #
-      san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=5:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+      san_options: TSAN_OPTIONS="abort_on_error=1:disable_coredump=0:handle_abort=1:halt_on_error=1:report_thread_leaks=0:die_after_fork=0:history_size=6:suppressions=etc/tsan.suppressions:external_symbolizer_path=/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+      build_mongot: true
       compile_flags: >-
         --variables-files=etc/scons/mongodbtoolchain_${toolchain_version}_clang.vars
         --dbg=on
@@ -391,8 +403,11 @@ buildvariants:
       multiversion_platform: rhel80
       multiversion_edition: enterprise
       test_flags: >-
+        --mongodSetParameters="{internalQueryEnableAggressiveSpillsInGroup: true}"
         --excludeWithAnyTags=tsan_incompatible
     tasks:
+      - name: search_end_to_end_sharded_cluster
+      - name: search_end_to_end_single_node
       - name: compile_test_parallel_core_stream_TG
       - name: compile_test_parallel_unittest_stream_TG
       - name: compile_test_parallel_dbtest_stream_TG
@@ -462,7 +477,7 @@ buildvariants:
     expansions:
       <<: *aubsan-lite-required-expansions
       test_flags: >-
-        --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine}"
+        --mongodSetParameters="{internalQueryFrameworkControl: forceClassicEngine, internalQueryEnableAggressiveSpillsInGroup: true}"
         --excludeWithAnyTags=requires_increased_memlock_limits,featureFlagSbeFull,incompatible_aubsan
     tasks:
       - name: .aggregation !.sbe_only

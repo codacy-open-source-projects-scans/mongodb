@@ -2,6 +2,7 @@
  * Overrides runCommand so operations that encounter errors from a config shard transitioning in and
  * out of dedicated mode retry.
  */
+import {getCommandName} from "jstests/libs/cmd_object_utils.js";
 import {OverrideHelpers} from "jstests/libs/override_methods/override_helpers.js";
 
 const kTimeout = 20 * 60 * 1000;
@@ -15,6 +16,7 @@ const kRetry = false;
 // collections don't hit MovePrimaryInProgress errors.
 const kRetryableErrors = [
     {code: ErrorCodes.MovePrimaryInProgress},
+    {code: ErrorCodes.ReshardCollectionInProgress},
     {
         code: ErrorCodes.ConflictingOperationInProgress,
         errmsg: "Another ConfigsvrCoordinator with different arguments is already running"
@@ -22,7 +24,12 @@ const kRetryableErrors = [
     // A query can be killed if it is still selecting a query plan after a config transition has
     // completed range deletion and drops the collection. Since orphanCleanUpDelaySecs is set to be
     // lower in testing than in production, dropCollection is scheduled almost immediately.
-    {code: ErrorCodes.QueryPlanKilled}
+    // Similarly, the collection rename step in resharding (moveCollection) can cause a query to
+    // get killed.
+    {code: ErrorCodes.QueryPlanKilled},
+    // TODO SERVER-90609: Stop ignoring this error. Currently an index build may fail because a
+    // concurrent movePrimary triggered by the transition hook drops the collection.
+    {code: ErrorCodes.IndexBuildAborted},
 ];
 
 // Commands known not to work with transitions so tests can fail immediately with a clear error.
@@ -50,6 +57,12 @@ function isRetryableError(error) {
 function shouldRetry(cmdObj, res) {
     if (cmdObj.hasOwnProperty("autocommit")) {
         // Retries in a transaction must come from whatever is running the transaction.
+        return false;
+    }
+
+    // getMore errors cannot be retried since a client may not know if previous getMore advanced the
+    // cursor.
+    if (getCommandName(cmdObj) === "getMore") {
         return false;
     }
 

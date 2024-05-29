@@ -29,8 +29,6 @@ DEFAULT_DBTEST_EXECUTABLE = os.path.join(os.curdir, "dbtest")
 DEFAULT_MONGO_EXECUTABLE = "mongo"
 DEFAULT_MONGOD_EXECUTABLE = "mongod"
 DEFAULT_MONGOS_EXECUTABLE = "mongos"
-# TODO SERVER-85977 potentially replace with "mongot" if possible to add a symlink from raw path
-# below as part of setup-mongot-repro.
 DEFAULT_MONGOT_EXECUTABLE = "mongot-localdev/mongot"
 
 DEFAULT_BENCHMARK_REPETITIONS = 3
@@ -150,6 +148,7 @@ DEFAULTS = {
     "version_id": None,
     "work_dir": None,
     "evg_project_config_path": "etc/evergreen.yml",
+    "requester": None,
     # WiredTiger options.
     "wt_coll_config": None,
     "wt_engine_config": None,
@@ -390,6 +389,9 @@ EVERGREEN_WORK_DIR = None
 
 # Path to evergreen project configuration yaml file
 EVERGREEN_PROJECT_CONFIG_PATH = None
+
+# What triggered the task: patch, github_pr, github_tag, commit, trigger, commit_queue, or ad_hoc
+EVERGREEN_REQUESTER = None
 
 # If set, then any jstests that have any of the specified tags will be excluded from the suite(s).
 EXCLUDE_WITH_ANY_TAGS = None

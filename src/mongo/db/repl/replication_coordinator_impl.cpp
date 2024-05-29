@@ -239,7 +239,6 @@ using CallbackArgs = executor::TaskExecutor::CallbackArgs;
 using CallbackFn = executor::TaskExecutor::CallbackFn;
 using CallbackHandle = executor::TaskExecutor::CallbackHandle;
 using EventHandle = executor::TaskExecutor::EventHandle;
-using executor::NetworkInterface;
 using NextAction = Fetcher::NextAction;
 
 void lockAndCall(stdx::unique_lock<Latch>* lk, const std::function<void()>& fn) {
@@ -2366,8 +2365,10 @@ ReplicationCoordinator::StatusAndDuration ReplicationCoordinatorImpl::awaitRepli
         if (writeConcern.wTimeout == WriteConcernOptions::kNoTimeout) {
             return Date_t::max();
         }
-        return clockSource->now() + clockSource->getPrecision() +
-            Milliseconds{writeConcern.wTimeout};
+        if (writeConcern.wTimeout == WriteConcernOptions::kNoWaiting) {
+            return clockSource->now();
+        }
+        return clockSource->now() + clockSource->getPrecision() + writeConcern.wTimeout.duration();
     }();
 
     const auto opCtxDeadline = opCtx->getDeadline();

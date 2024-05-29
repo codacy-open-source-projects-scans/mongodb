@@ -879,7 +879,7 @@ private:
             stageData.debugInfo = cacheEntry->debugInfo;
 
             auto result = releaseResult();
-            result->setDecisionWorks(cacheEntry->decisionWorks);
+            result->setDecisionWorks(cacheEntry->decisionWorks());
             result->setRecoveredPinnedCacheEntry(cacheEntry->isPinned());
             result->emplace(std::make_pair(std::move(root), std::move(stageData)));
             result->setQueryPlannerParams(std::move(_plannerParams));
@@ -943,12 +943,14 @@ public:
         CanonicalQuery* cq,
         PlanYieldPolicy::YieldPolicy policy,
         std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
-        std::unique_ptr<QueryPlannerParams> plannerParams)
+        std::unique_ptr<QueryPlannerParams> plannerParams,
+        bool useSbePlanCache)
         : PrepareExecutionHelper<CacheKey, RuntimePlanningResult>(
               opCtx, collections, cq, std::move(plannerParams)),
           _ws{std::move(ws)},
           _yieldPolicy{policy},
-          _sbeYieldPolicy{std::move(sbeYieldPolicy)} {}
+          _sbeYieldPolicy{std::move(sbeYieldPolicy)},
+          _useSbePlanCache{useSbePlanCache} {}
 
 protected:
     crp_sbe::PlannerDataForSBE makePlannerData() {
@@ -961,7 +963,8 @@ protected:
                                           std::move(this->_plannerParams),
                                           _yieldPolicy,
                                           _cachedPlanHash,
-                                          std::move(_sbeYieldPolicy)};
+                                          std::move(_sbeYieldPolicy),
+                                          _useSbePlanCache};
     }
 
     std::unique_ptr<SbeWithClassicRuntimePlanningResult> buildIdHackPlan() final {
@@ -995,7 +998,7 @@ protected:
              !this->_cq->isSearchQuery())) {
             auto result = this->releaseResult();
             result->runtimePlanner = std::make_unique<crp_sbe::MultiPlanner>(
-                this->makePlannerData(), std::move(solutions), PlanCachingMode::AlwaysCache);
+                this->makePlannerData(), std::move(solutions), true /*shouldWriteToPlanCache*/);
             return result;
         } else {
             return this->buildSingleSolutionPlan(std::move(solutions[0]));
@@ -1009,6 +1012,8 @@ protected:
     PlanYieldPolicy::YieldPolicy _yieldPolicy;
     std::unique_ptr<PlanYieldPolicySBE> _sbeYieldPolicy;
 
+    const bool _useSbePlanCache;
+
     // If there is a matching cache entry, this is the hash of that plan.
     boost::optional<size_t> _cachedPlanHash;
 };
@@ -1021,11 +1026,22 @@ class SbeWithClassicRuntimePlanningAndSbeCachePrepareExecutionHelper final
           sbe::PlanCacheKey,
           SbeWithClassicRuntimePlanningResult> {
 public:
-    // Use constructor provided by parent class.
-    using SbeWithClassicRuntimePlanningPrepareExecutionHelperBase<
-        sbe::PlanCacheKey,
-        SbeWithClassicRuntimePlanningResult>::
-        SbeWithClassicRuntimePlanningPrepareExecutionHelperBase;
+    SbeWithClassicRuntimePlanningAndSbeCachePrepareExecutionHelper(
+        OperationContext* opCtx,
+        const MultipleCollectionAccessor& collections,
+        std::unique_ptr<WorkingSet> ws,
+        CanonicalQuery* cq,
+        PlanYieldPolicy::YieldPolicy policy,
+        std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
+        std::unique_ptr<QueryPlannerParams> plannerParams)
+        : SbeWithClassicRuntimePlanningPrepareExecutionHelperBase{opCtx,
+                                                                  collections,
+                                                                  std::move(ws),
+                                                                  cq,
+                                                                  policy,
+                                                                  std::move(sbeYieldPolicy),
+                                                                  std::move(plannerParams),
+                                                                  true /*useSbePlanCache*/} {}
 
 private:
     sbe::PlanCacheKey buildPlanCacheKey() const override {
@@ -1080,11 +1096,22 @@ class SbeWithClassicRuntimePlanningAndClassicCachePrepareExecutionHelper final
           PlanCacheKey,
           SbeWithClassicRuntimePlanningResult> {
 public:
-    // Use constructor provided by parent class.
-    using SbeWithClassicRuntimePlanningPrepareExecutionHelperBase<
-        PlanCacheKey,
-        SbeWithClassicRuntimePlanningResult>::
-        SbeWithClassicRuntimePlanningPrepareExecutionHelperBase;
+    SbeWithClassicRuntimePlanningAndClassicCachePrepareExecutionHelper(
+        OperationContext* opCtx,
+        const MultipleCollectionAccessor& collections,
+        std::unique_ptr<WorkingSet> ws,
+        CanonicalQuery* cq,
+        PlanYieldPolicy::YieldPolicy policy,
+        std::unique_ptr<PlanYieldPolicySBE> sbeYieldPolicy,
+        std::unique_ptr<QueryPlannerParams> plannerParams)
+        : SbeWithClassicRuntimePlanningPrepareExecutionHelperBase{opCtx,
+                                                                  collections,
+                                                                  std::move(ws),
+                                                                  cq,
+                                                                  policy,
+                                                                  std::move(sbeYieldPolicy),
+                                                                  std::move(plannerParams),
+                                                                  false /*useSbePlanCache*/} {}
 
 private:
     PlanCacheKey buildPlanCacheKey() const override {
@@ -1145,7 +1172,7 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
     if (numSolutions > 1) {
         invariant(!needsSubplanning && !decisionWorks);
         return std::make_unique<sbe::MultiPlanner>(
-            opCtx, collections, *canonicalQuery, PlanCachingMode::AlwaysCache, yieldPolicy);
+            opCtx, collections, *canonicalQuery, true /*shouldWriteToPlanCache*/, yieldPolicy);
     }
 
     // If the query can be run as sub-queries, the needSubplanning flag will be set to true and
@@ -1170,7 +1197,7 @@ std::unique_ptr<sbe::RuntimePlanner> makeRuntimePlannerIfNeeded(
 
     if (internalQueryPlannerUseMultiplannerForSingleSolutions) {
         return std::make_unique<sbe::MultiPlanner>(
-            opCtx, collections, *canonicalQuery, PlanCachingMode::AlwaysCache, yieldPolicy);
+            opCtx, collections, *canonicalQuery, true /*shouldWriteToPlanCache*/, yieldPolicy);
     }
 
     // Runtime planning is not required.
