@@ -36,6 +36,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
@@ -52,6 +53,36 @@ int64_t getRandomIndex(const std::vector<T>& items) {
     size_t max = items.size();
     std::uniform_int_distribution<int64_t> dist(0, max - 1);
     return dist(gen);
+}
+
+/**
+ * Returns whether or not the cluster contains any sharded collections that can be balanced. If we
+ * are draining, this includes config collections, otherwise this excludes any config collections.
+ */
+bool clusterHasShardedCollections(OperationContext* opCtx, bool draining) {
+    auto client = ShardingCatalogManager::get(opCtx)->localCatalogClient();
+
+    BSONObjBuilder matchBuilder;
+    matchBuilder.append(CollectionType::kUnsplittableFieldName, BSON("$ne" << true));
+    // Skip config.system.sessions if we are not draining as it isn't balanced as part of the random
+    // migrations failpoint. If we are draining shards, though, we need to include this collection.
+    if (!draining) {
+        matchBuilder.append(CollectionType::kNssFieldName,
+                            BSON("$regex"
+                                 << "^(?!config\\.).*"));
+    }
+
+    std::vector<BSONObj> rawPipelineStages{
+        BSON("$match" << matchBuilder.obj()),
+        // We only care if one exists, not what or how many there are.
+        BSON("$limit" << 1)};
+
+    AggregateCommandRequest aggRequest{NamespaceString::kConfigsvrCollectionsNamespace,
+                                       rawPipelineStages};
+    auto aggResult = client->runCatalogAggregation(
+        opCtx, aggRequest, {repl::ReadConcernLevel::kSnapshotReadConcern});
+
+    return !aggResult.empty();
 }
 
 /**
@@ -251,7 +282,8 @@ void MoveUnshardedPolicy::applyActionResult(OperationContext* opCtx,
                 status.isA<ErrorCategory::WriteConcernError>() ||
                 status.isA<ErrorCategory::NeedRetargettingError>() ||
                 status.isA<ErrorCategory::NotPrimaryError>();
-            if (isErrorInAcceptableCategory) {
+            // ReshardingImrpovements flag is not enabled (refer to SERVER-90675)
+            if (isErrorInAcceptableCategory || status.code() == 90675) {
                 return true;
             }
 
@@ -274,6 +306,7 @@ void MoveUnshardedPolicy::applyActionResult(OperationContext* opCtx,
                 case ErrorCodes::ReshardCollectionAborted:
                 case ErrorCodes::ReshardCollectionInProgress:
                 case ErrorCodes::ReshardCollectionTruncatedError:
+                case ErrorCodes::ShardNotFound:
                 case ErrorCodes::SnapshotTooOld:
                 case ErrorCodes::StaleDbVersion:
                 case ErrorCodes::ConflictingOperationInProgress:
@@ -375,6 +408,12 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
             return result;
         }
 
+        // Don't issue moveCollection if reshardingMinimumOperationDuration is greater than 5
+        // seconds to prevent tests from taking too long.
+        if (resharding::gReshardingMinimumOperationDurationMillis.load() > 5000) {
+            return result;
+        }
+
         // Separate draining shards so they can be handled separately.
         std::vector<ShardId> randomizedAvailableShards, randomizedDrainingShards;
         for (const auto& shardStat : allShards) {
@@ -402,21 +441,13 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
             return result;
         }
 
-        // Skip random moveCollections if at least one shard is draining, so we don't starve it of
-        // available shards to migrate data to.
+
+        // Randomly skip moveCollections if there are sharded collections that could be balanced.
         auto drainingShardIter = std::find_if(
             allShards.begin(), allShards.end(), [](const auto& stat) { return stat.isDraining; });
-        if (drainingShardIter != allShards.end()) {
-            return result;
-        }
-
-        // Choosing to move a collection between shards removes them from the available shards,
-        // which prevents them from being chosen for a random chunk migration, so allow skipping a
-        // random moveCollection to avoid "starving" random chunk migrations with few shards. Note
-        // safeNumberDouble() defaults to 0 if the field is missing.
-        auto skipMoveCollectionThreshold =
-            sfp.getData()["skipMoveCollectionThreshold"].safeNumberDouble();
-        if (opCtx->getClient()->getPrng().nextCanonicalDouble() < skipMoveCollectionThreshold) {
+        bool isDraining = drainingShardIter != allShards.end();
+        if (opCtx->getClient()->getPrng().nextCanonicalDouble() < 0.5 &&
+            clusterHasShardedCollections(opCtx, isDraining)) {
             return result;
         }
 

@@ -324,16 +324,16 @@ DocumentSource::GetNextResult DocumentSourceInternalSearchMongotRemote::doGetNex
 intrusive_ptr<DocumentSource> DocumentSourceInternalSearchMongotRemote::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(31067, "Search argument must be an object.", elem.type() == BSONType::Object);
-    const BSONObj& specObj = elem.embeddedObject();
+    auto specObj = elem.embeddedObject();
     auto serviceContext = expCtx->opCtx->getServiceContext();
     auto executor = executor::getMongotTaskExecutor(serviceContext);
     // The serialization for unsharded search does not contain a 'mongotQuery' field.
-    if (!specObj.hasField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName)) {
-        return new DocumentSourceInternalSearchMongotRemote(specObj.getOwned(), expCtx, executor);
-    }
-    return new DocumentSourceInternalSearchMongotRemote(
-        InternalSearchMongotRemoteSpec::parse(IDLParserContext(kStageName), specObj),
-        expCtx,
-        executor);
+    // See note in DocumentSourceSearch::createFromBson() about making sure mongotQuery is owned
+    // within the mongot remote spec.
+    InternalSearchMongotRemoteSpec spec =
+        specObj.hasField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName)
+        ? InternalSearchMongotRemoteSpec::parse(IDLParserContext(kStageName), specObj)
+        : InternalSearchMongotRemoteSpec(specObj.getOwned());
+    return new DocumentSourceInternalSearchMongotRemote(std::move(spec), expCtx, executor);
 }
 }  // namespace mongo

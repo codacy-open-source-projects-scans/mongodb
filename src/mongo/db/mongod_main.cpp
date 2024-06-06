@@ -70,6 +70,7 @@
 #include "mongo/db/audit_interface.h"
 #include "mongo/db/auth/auth_op_observer.h"
 #include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_impl.h"
@@ -387,10 +388,8 @@ void logStartup(OperationContext* opCtx) {
 void initializeCommandHooks(ServiceContext* serviceContext) {
     class MongodCommandInvocationHooks final : public CommandInvocationHooks {
     public:
-        void onBeforeRun(OperationContext* opCtx,
-                         const OpMsgRequest& request,
-                         CommandInvocation* invocation) override {
-            _nextHook.onBeforeRun(opCtx, request, invocation);
+        void onBeforeRun(OperationContext* opCtx, CommandInvocation* invocation) override {
+            _nextHook.onBeforeRun(opCtx, invocation);
         }
 
         void onBeforeAsyncRun(std::shared_ptr<RequestExecutionContext> rec,
@@ -399,10 +398,9 @@ void initializeCommandHooks(ServiceContext* serviceContext) {
         }
 
         void onAfterRun(OperationContext* opCtx,
-                        const OpMsgRequest& request,
                         CommandInvocation* invocation,
                         rpc::ReplyBuilderInterface* response) override {
-            _nextHook.onAfterRun(opCtx, request, invocation, response);
+            _nextHook.onAfterRun(opCtx, invocation, response);
             _onAfterRunImpl(opCtx);
         }
 
@@ -1199,7 +1197,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext, int listenPort) {
         TimeElapsedBuilderScopedTimer scopedTimer(
             serviceContext->getFastClockSource(), "Magic restore", &startupTimeElapsedBuilder);
         if (getMagicRestoreMain() == nullptr) {
-            LOGV2_FATAL_NOTRACE(7180701, "--magicRestore cannot be used with a community build");
+            LOGV2_ERROR(7180701, "--magicRestore cannot be used with a community build");
+            exitCleanly(ExitCode::badOptions);
         }
         return getMagicRestoreMain()(serviceContext);
     }
@@ -1631,6 +1630,8 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
                                                    &shutdownTimeElapsedBuilder,
                                                    &shutdownInfoBuilder);
         });
+
+    UserCacheInvalidator::stop(serviceContext);
 
     // If we don't have shutdownArgs, we're shutting down from a signal, or other clean shutdown
     // path.

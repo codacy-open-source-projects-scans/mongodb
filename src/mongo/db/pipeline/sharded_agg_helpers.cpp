@@ -39,6 +39,7 @@
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
+#include <fmt/format.h>
 #include <functional>
 #include <iterator>
 #include <list>
@@ -238,14 +239,21 @@ BSONObj genericTransformForShards(MutableDocument&& cmdForShards,
         cmdForShards.reset(wrapAggAsExplain(cmdForShards.freeze(), *explainVerbosity));
     }
 
-    if (expCtx->opCtx->getTxnNumber()) {
-        invariant(
-            cmdForShards.peek()[OperationSessionInfoFromClient::kTxnNumberFieldName].missing(),
-            str::stream() << "Command for shards unexpectedly had the "
-                          << OperationSessionInfoFromClient::kTxnNumberFieldName
-                          << " field set: " << cmdForShards.peek().toString());
-        cmdForShards[OperationSessionInfoFromClient::kTxnNumberFieldName] =
-            Value(static_cast<long long>(*expCtx->opCtx->getTxnNumber()));
+    if (auto txnNumber = expCtx->opCtx->getTxnNumber()) {
+        auto cmdTxnNumber = cmdForShards.peek()[GenericArguments::kTxnNumberFieldName];
+
+        if (cmdTxnNumber.missing()) {
+            cmdForShards[GenericArguments::kTxnNumberFieldName] =
+                Value(static_cast<long long>(*expCtx->opCtx->getTxnNumber()));
+        } else {
+            massert(8579101,
+                    fmt::format("aggregate command for shards had a different value for {} than "
+                                "expected (found {}, expected {})",
+                                GenericArguments::kTxnNumberFieldName,
+                                cmdTxnNumber.coerceToInt(),
+                                *txnNumber),
+                    cmdTxnNumber.coerceToInt() == *txnNumber);
+        }
     }
 
     if (readConcern) {
@@ -1250,6 +1258,23 @@ TargetingResults targetPipeline(const boost::intrusive_ptr<ExpressionContext>& e
                                      shardQuery,
                                      shardTargetingCollation,
                                      mergeShardId);
+
+        // Check that no shard has been removed since the change stream open time to detect a
+        // possible event loss. It is important to execute it after retrieving the most recent list
+        // of shards: anyShardRemovedSince() performs a snapshot read that might miss the effects of
+        // a removeShard(sId) being committed in parallel; when this happens, the change stream
+        // opening is expected to fail at a later stage with a ShardNotFound error which will be
+        // returned to the client; upon retry, anyShardRemovedSince() will return an accurate
+        // response.
+        if (expCtx->inMongos) {
+            const auto changeStreamOpeningTime =
+                ResumeToken::parse(expCtx->initialPostBatchResumeToken).getData().clusterTime;
+            uassert(ErrorCodes::ChangeStreamHistoryLost,
+                    "Change stream events no more available due to removed shard",
+                    !Grid::get(expCtx->opCtx)
+                         ->catalogClient()
+                         ->anyShardRemovedSince(expCtx->opCtx, changeStreamOpeningTime));
+        }
     }
 
     return {std::move(shardQuery),

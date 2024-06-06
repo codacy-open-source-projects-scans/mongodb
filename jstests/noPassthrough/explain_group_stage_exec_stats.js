@@ -21,12 +21,12 @@ if (checkSbeRestrictedOrFullyEnabled(testDB)) {
 
 const bigStr = Array(1025).toString();  // 1KB of ','
 const maxMemoryLimitForGroupStage = 1024 * 300;
-const aggressiveSpilling = assert
-                               .commandWorked(testDB.adminCommand({
-                                   getParameter: 1,
-                                   internalQueryEnableAggressiveSpillsInGroup: 1,
-                               }))
-                               .internalQueryEnableAggressiveSpillsInGroup == true;
+const isAgressivelySpilling = assert
+                                  .commandWorked(testDB.adminCommand({
+                                      getParameter: 1,
+                                      internalQueryEnableAggressiveSpillsInGroup: 1,
+                                  }))
+                                  .internalQueryEnableAggressiveSpillsInGroup == true;
 const nDocs = 1000;
 const nGroups = 50;
 
@@ -80,7 +80,7 @@ function checkGroupStages(stage, expectedAccumMemUsages, isExecExplain, expected
             // Ensures that the expected accumulators are all included and the corresponding
             // memory usage is in a reasonable range. Note that if aggressive spilling is enabled,
             // data will be spilled to disk every time we add a new value to a pre-existing group.
-            if (!aggressiveSpilling && expectedAccumMemUsages.hasOwnProperty(field)) {
+            if (!isAgressivelySpilling && expectedAccumMemUsages.hasOwnProperty(field)) {
                 assert.gt(maxAccmMemUsages[field], expectedAccumMemUsages[field]);
                 assert.lt(maxAccmMemUsages[field], 5 * expectedAccumMemUsages[field]);
             }
@@ -106,7 +106,7 @@ function checkGroupStages(stage, expectedAccumMemUsages, isExecExplain, expected
 
         // Don't verify spill count if aggressive spilling is enabled, since in this case a spill
         // occurs on every duplicate id in a group.
-        if (!aggressiveSpilling) {
+        if (!isAgressivelySpilling) {
             assert.eq(stage.usedDisk, expectedSpills > 0, stage);
             assert.gte(stage.spills, expectedSpills, stage);
             assert.lte(stage.spills, 2 * expectedSpills, stage);

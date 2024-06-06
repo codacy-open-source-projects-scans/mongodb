@@ -807,53 +807,57 @@ UNDEFINED_SANITIZER_DEFINES = select({
 # However, this flag cannot be included when using the fuzzer sanitizer
 # if we want to suppress errors to uncover new ones.
 
-# this is a workaround, dive deeper with the folowing
-# TODO: https://jira.mongodb.org/browse/SERVER-90130
-
-UBSAN_EXPANSION_MINUS_VPTR = ",".join(
-    [
-        "alignment",
-        "array-bounds",
-        "bool",
-        "builtin",
-        "enum",
-        "float-cast-overflow",
-        "integer-divide-by-zero",
-        "nonnull-attribute",
-        "null",
-        "pointer-overflow",
-        "return",
-        "returns-nonnull-attribute",
-        "shift-base",
-        "shift-exponent",
-        "signed-integer-overflow",
-        "unreachable",
-        "vla-bound",
-    ],
-)
+# In dynamic builds, the `vptr` sanitizer check can
+# require additional dependency edges. That is very
+# inconvenient, because such builds can't use z,defs. The
+# result is a very fragile link graph, where refactoring
+# the link graph in one place can have surprising effects
+# in others. Instead, we just disable the `vptr` sanitizer
+# for dynamic builds. We tried some other approaches in
+# SERVER-49798 of adding a new descriptor type, but
+# that didn't address the fundamental issue that the
+# correct link graph for a dynamic+ubsan build isn't the
+# same as the correct link graph for a regular dynamic
+# build.
 
 UNDEFINED_SANITIZER_COPTS = select({
-    "//bazel/config:sanitize_undefined_static_link_settings": ["-fsanitize=" + UBSAN_EXPANSION_MINUS_VPTR + ",vptr"],
-    "//bazel/config:sanitize_undefined_dynamic_link_settings": ["-fno-sanitize=vptr", "-fsanitize=" + UBSAN_EXPANSION_MINUS_VPTR],
+    "//bazel/config:ubsan_enabled": ["-fsanitize=undefined"],
     "//conditions:default": [],
 }) + select({
-    ("//bazel/config:sanitize_undefined_without_fuzzer_settings"): ["-fno-sanitize-recover"],
-    ("//conditions:default"): [],
+    "//bazel/config:sanitize_undefined_dynamic_link_settings": ["-fno-sanitize=vptr"],
+    "//conditions:default": [],
 }) + select({
-    "//bazel/config:ubsan_enabled": [
-        "-fsanitize-blacklist=$(location //etc:ubsan_denylist_h)",
-    ],
-    "//bazel/config:ubsan_disabled": [],
-}, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "undefined")
+    "//bazel/config:sanitize_undefined_without_fuzzer_settings": ["-fno-sanitize-recover"],
+    "//conditions:default": [],
+}) + select({
+    "//bazel/config:ubsan_enabled": ["-fsanitize-blacklist=$(location //etc:ubsan_denylist_h)"],
+    "//conditions:default": [],
+})
 
 UNDEFINED_SANITIZER_LINKFLAGS = select({
-    "//bazel/config:sanitize_undefined_static_link_settings": ["-fsanitize=" + UBSAN_EXPANSION_MINUS_VPTR + ",vptr"],
-    "//bazel/config:sanitize_undefined_dynamic_link_settings": ["-fno-sanitize=vptr", "-fsanitize=" + UBSAN_EXPANSION_MINUS_VPTR],
-    "//bazel/config:ubsan_disabled": [],
+    "//bazel/config:ubsan_enabled": ["-fsanitize=undefined"],
+    "//conditions:default": [],
 }) + select({
-    ("//bazel/config:sanitize_undefined_dynamic_link_settings"): ["-fno-sanitize=vptr"],
-    ("//conditions:default"): [],
-}, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "undefined")
+    "//bazel/config:sanitize_undefined_dynamic_link_settings": ["-fno-sanitize=vptr"],
+    "//conditions:default": [],
+})
+
+# Used as both link flags and copts
+# Suppress the function sanitizer check for third party libraries, because:
+# - mongod (a C++ binary) links in WiredTiger (a C library)
+# - If/when mongod--built under ubsan--fails, the sanitizer will by default analyze the failed execution
+#   for undefined behavior related to function pointer usage
+#   (see https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html#available-checks).
+# - When this happens, the sanitizer will attempt to dynamically load to perform the analysis.
+# - However, since WT was built as a C library, is not linked with the function sanitizer library symbols
+#   despite its C++ dependencies referencing them.
+# - This will cause the sanitizer itself to fail, resulting in debug information being unavailable.
+# - So by suppressing the function ubsan check, we won't reference symbols defined in the unavailable
+#   ubsan function sanitier library and will get useful debugging information.
+UBSAN_OPTS_THIRD_PARTY = select({
+    "//bazel/config:sanitize_undefined_dynamic_link_settings": ["-fno-sanitize=function"],
+    "//conditions:default": [],
+})
 
 REQUIRED_SETTINGS_DYNAMIC_LINK_ERROR_MESSAGE = (
     "\nError:\n" +
@@ -1055,6 +1059,10 @@ MONGO_GLOBAL_ACCESSIBLE_HEADERS = ["//src/third_party/boost:headers", "//src/thi
 
 MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES
 
+MONGO_COPTS_THIRD_PARTY = UBSAN_OPTS_THIRD_PARTY
+
+MONGO_LINKFLAGS_THIRD_PARTY = UBSAN_OPTS_THIRD_PARTY
+
 def force_includes_copt(package_name, name):
     if package_name.startswith("src/mongo"):
         basic_h = "mongo/platform/basic.h"
@@ -1119,6 +1127,18 @@ def force_includes_hdr(package_name, name):
 
     return []
 
+def package_specific_copt(package_name):
+    if package_name.startswith("src/third_party"):
+        return MONGO_COPTS_THIRD_PARTY
+
+    return []
+
+def package_specific_linkflag(package_name):
+    if package_name.startswith("src/third_party"):
+        return MONGO_LINKFLAGS_THIRD_PARTY
+
+    return []
+
 def mongo_cc_library(
         name,
         srcs = [],
@@ -1179,6 +1199,8 @@ def mongo_cc_library(
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
+    package_specific_copts = package_specific_copt(native.package_name())
+    package_specific_linkflags = package_specific_linkflag(native.package_name())
 
     if mongo_api_name:
         visibility_support_defines_list = ["MONGO_USE_VISIBILITY", "MONGO_API_" + mongo_api_name]
@@ -1218,10 +1240,10 @@ def mongo_cc_library(
         deps = deps,
         visibility = visibility,
         testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
+        copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
         data = data,
         tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts,
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + visibility_support_defines + local_defines,
         defines = defines,
@@ -1240,10 +1262,10 @@ def mongo_cc_library(
         deps = deps,
         visibility = visibility,
         testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
+        copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
         data = data,
         tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts,
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + local_defines,
         defines = defines,
@@ -1264,7 +1286,7 @@ def mongo_cc_library(
         deps = [name + WITH_DEBUG_SUFFIX],
         visibility = visibility,
         tags = tags,
-        user_link_flags = MONGO_GLOBAL_LINKFLAGS + non_transitive_dyn_linkopts + rpath_flags + visibility_support_shared_flags,
+        user_link_flags = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + non_transitive_dyn_linkopts + rpath_flags + visibility_support_shared_flags,
         target_compatible_with = select({
             "//bazel/config:linkstatic_disabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
@@ -1331,6 +1353,8 @@ def mongo_cc_binary(
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
+    package_specific_copts = package_specific_copt(native.package_name())
+    package_specific_linkflags = package_specific_linkflag(native.package_name())
 
     all_deps = deps + LIBUNWIND_DEPS + TCMALLOC_DEPS
 
@@ -1353,10 +1377,10 @@ def mongo_cc_binary(
         deps = all_deps,
         visibility = visibility,
         testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + copts + fincludes_copt,
+        copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
         data = data,
         tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + linkopts + rpath_flags,
+        linkopts = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts + rpath_flags,
         linkstatic = LINKSTATIC_ENABLED,
         local_defines = MONGO_GLOBAL_DEFINES + LIBUNWIND_DEFINES + local_defines,
         defines = defines,

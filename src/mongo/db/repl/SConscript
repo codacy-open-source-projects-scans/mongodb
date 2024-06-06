@@ -183,7 +183,6 @@ env.Library(
         "repl_coordinator_interface",
         "rollback_impl",
         "rollback_source_impl",
-        "rs_rollback",
         "storage_interface",
         "sync_source_resolver",
     ],
@@ -472,35 +471,6 @@ env.Library(
     ],
 )
 
-env.Library(
-    target="rs_rollback",
-    source=[
-        "rs_rollback.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/db/catalog/database_holder",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/catalog/catalog_helpers",
-        "$BUILD_DIR/mongo/db/catalog/collection_crud",
-        "$BUILD_DIR/mongo/db/catalog/index_build_oplog_entry",
-        "$BUILD_DIR/mongo/db/dbhelpers",
-        "$BUILD_DIR/mongo/db/index_builds_coordinator_interface",
-        "$BUILD_DIR/mongo/db/multitenancy",
-        "$BUILD_DIR/mongo/db/ops/write_ops",
-        "$BUILD_DIR/mongo/db/query_exec",
-        "$BUILD_DIR/mongo/db/s/sharding_runtime_d",
-        "$BUILD_DIR/mongo/db/session/session_catalog_mongod",
-        "$BUILD_DIR/mongo/db/storage/journal_flusher",
-        "$BUILD_DIR/mongo/db/storage/remove_saver",
-        "$BUILD_DIR/mongo/util/fail_point",
-        "drop_pending_collection_reaper",
-        "oplog",
-        "replication_process",
-        "roll_back_local_operations",
-        "rollback_impl",
-    ],
-)
 
 isSelfEnv = env.Clone()
 isSelfEnv.InjectThirdParty(libraries=["asio"])
@@ -573,7 +543,6 @@ env.Library(
         "replication_process",
         "replication_recovery",
         "replmocks",
-        "rs_rollback",
         "storage_interface_impl",
     ],
     LIBDEPS_PRIVATE=[
@@ -961,11 +930,14 @@ env.Library(
 env.Library(
     "read_concern_args",
     source=[
-        "read_concern_args.cpp",
+        "read_concern_args_decoration.cpp",
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/server_base",
         "optime",
+    ],
+    LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/db/service_context",
     ],
 )
 
@@ -1968,7 +1940,6 @@ if wiredtiger:
             "rollback_checker",
             "rollback_impl",
             "rollback_test_fixture",
-            "rs_rollback",
             "scatter_gather",
             "shard_merge_recipient_service",
             "speculative_majority_read_info",
@@ -2000,8 +1971,8 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/read_write_concern_defaults_mock",
+        "$BUILD_DIR/mongo/db/server_base",
         "$BUILD_DIR/mongo/db/serverless/shard_split_utils",
-        "$BUILD_DIR/mongo/db/service_request_common",
         "$BUILD_DIR/mongo/db/storage/storage_options",
         "isself",
         "repl_coordinator_impl",

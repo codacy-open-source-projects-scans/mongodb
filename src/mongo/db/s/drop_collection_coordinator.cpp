@@ -56,6 +56,7 @@
 #include "mongo/db/s/forwardable_operation_metadata.h"
 #include "mongo/db/s/participant_block_gen.h"
 #include "mongo/db/s/range_deletion_util.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
 #include "mongo/db/s/sharding_ddl_util.h"
 #include "mongo/db/s/sharding_index_catalog_ddl_util.h"
@@ -175,8 +176,7 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
 
     // Force the refresh of the catalog cache to purge outdated information. Note also that this
     // code is indirectly used to notify to secondary nodes to clear their filtering information.
-    const auto catalog = Grid::get(opCtx)->catalogCache();
-    uassertStatusOK(catalog->getCollectionRoutingInfoWithRefresh(opCtx, nss));
+    forceShardFilteringMetadataRefresh(opCtx, nss);
     CatalogCacheLoader::get(opCtx).waitForCollectionFlush(opCtx, nss);
 
     // Ensures the remove of range deletions and the refresh of the catalog cache will be waited for
@@ -282,11 +282,11 @@ void DropCollectionCoordinator::_enterCriticalSection(
     blockCRUDOperationsRequest.setBlockType(mongo::CriticalSectionBlockTypeEnum::kReadsAndWrites);
     blockCRUDOperationsRequest.setReason(_critSecReason);
 
-    GenericArguments args;
-    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
+    generic_argument_util::setMajorityWriteConcern(blockCRUDOperationsRequest);
+    generic_argument_util::setOperationSessionInfo(blockCRUDOperationsRequest,
+                                                   getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, blockCRUDOperationsRequest, args);
+        **executor, token, blockCRUDOperationsRequest);
     sharding_ddl_util::sendAuthenticatedCommandToShards(
         opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
 
@@ -381,13 +381,13 @@ void DropCollectionCoordinator::_exitCriticalSection(
     unblockCRUDOperationsRequest.setBlockType(CriticalSectionBlockTypeEnum::kUnblock);
     unblockCRUDOperationsRequest.setReason(_critSecReason);
 
-    GenericArguments args;
-    async_rpc::AsyncRPCCommandHelpers::appendMajorityWriteConcern(args);
-    async_rpc::AsyncRPCCommandHelpers::appendOSI(args, getNewSession(opCtx));
+    generic_argument_util::setMajorityWriteConcern(unblockCRUDOperationsRequest);
+    generic_argument_util::setOperationSessionInfo(unblockCRUDOperationsRequest,
+                                                   getNewSession(opCtx));
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrParticipantBlock>>(
-        **executor, token, unblockCRUDOperationsRequest, args);
+        **executor, token, unblockCRUDOperationsRequest);
     sharding_ddl_util::sendAuthenticatedCommandToShards(
-        opCtx, opts, getAllShardsAndConfigServerIds(opCtx));
+        opCtx, opts, Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx));
 
     LOGV2_DEBUG(7038103, 2, "Released critical section", logAttrs(nss()));
 }

@@ -180,7 +180,7 @@ protected:
                 opObserver.onCreateCollection(
                     opCtx, CollectionPtr(), nss, {}, BSONObj(), OplogSlot(), false);
                 opObserver.onCollMod(opCtx, nss, uuid, BSONObj(), {}, boost::none);
-                opObserver.onDropDatabase(opCtx, nss.dbName());
+                opObserver.onDropDatabase(opCtx, nss.dbName(), false /*fromMigrate*/);
                 opObserver.onDropCollection(
                     opCtx,
                     nss,
@@ -238,7 +238,8 @@ protected:
                           AssertionException);
             ASSERT_THROWS(opObserver.onCollMod(opCtx, nss, uuid, BSONObj(), {}, boost::none),
                           AssertionException);
-            ASSERT_THROWS(opObserver.onDropDatabase(opCtx, nss.dbName()), AssertionException);
+            ASSERT_THROWS(opObserver.onDropDatabase(opCtx, nss.dbName(), false /*fromMigrate*/),
+                          AssertionException);
             ASSERT_THROWS(opObserver.onDropCollection(
                               opCtx,
                               nss,
@@ -326,7 +327,7 @@ TEST_F(UserWriteBlockModeOpObserverTest, WriteBlockingDisabledWithBypass) {
     authSession->grantInternalAuthorization(opCtx.get());
     ASSERT(authSession->mayBypassWriteBlockingMode());
 
-    WriteBlockBypass::get(opCtx.get()).setFromMetadata(opCtx.get(), BSONElement());
+    WriteBlockBypass::get(opCtx.get()).setFromMetadata(opCtx.get(), {});
     ASSERT(WriteBlockBypass::get(opCtx.get()).isWriteBlockBypassEnabled());
 
     // Ensure writes succeed
@@ -374,7 +375,7 @@ TEST_F(UserWriteBlockModeOpObserverTest, WriteBlockingEnabledWithBypass) {
     authSession->grantInternalAuthorization(opCtx.get());
     ASSERT(authSession->mayBypassWriteBlockingMode());
 
-    WriteBlockBypass::get(opCtx.get()).setFromMetadata(opCtx.get(), BSONElement());
+    WriteBlockBypass::get(opCtx.get()).setFromMetadata(opCtx.get(), {});
     ASSERT(WriteBlockBypass::get(opCtx.get()).isWriteBlockBypassEnabled());
 
     // Ensure user writes succeed

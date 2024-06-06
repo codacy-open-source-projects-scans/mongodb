@@ -42,7 +42,7 @@ structs:
       mongotQuery:
         description: The remote text search query.
         optional: false
-        type: object
+        type: object_owned
       metadataMergeProtocolVersion:
         description: The mongot protocol version.
         optional: true

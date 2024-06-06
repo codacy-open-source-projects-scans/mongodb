@@ -88,6 +88,10 @@ intrusive_ptr<DocumentSource> DocumentSourceSearch::createFromBson(
     // If kMongotQueryFieldName is present, this is the case that we re-create the
     // DocumentSource from a serialized DocumentSourceSearch that was originally parsed on a
     // router.
+    // We need to make sure that the mongotQuery BSONObj in the InternalSearchMongotRemoteSpec is
+    // owned so that it persists safely to GetMores. Since the IDL type is object_owned, using the
+    // parse() function will make sure it's owned. Manually constructing the spec does _not_ ensure
+    // the owned is owned, which is why we call specObj.getOwned().
     InternalSearchMongotRemoteSpec spec =
         specObj.hasField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName)
         ? InternalSearchMongotRemoteSpec::parse(IDLParserContext(kStageName), specObj)

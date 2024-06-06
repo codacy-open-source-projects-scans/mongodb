@@ -82,11 +82,6 @@ AggregateCommandRequest asAggregateCommandRequest(const FindCommandRequest& find
                           << " not supported in aggregation.",
             !findCommand.getReadOnce());
 
-    uassert(ErrorCodes::InvalidPipelineOperator,
-            str::stream() << "Option " << FindCommandRequest::kAllowSpeculativeMajorityReadFieldName
-                          << " not supported in aggregation.",
-            !findCommand.getAllowSpeculativeMajorityRead());
-
     // Some options are disallowed when resharding improvements are disabled.
     if (!resharding::gFeatureFlagReshardingImprovements.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
@@ -157,11 +152,12 @@ AggregateCommandRequest asAggregateCommandRequest(const FindCommandRequest& find
     if (findCommand.getQuerySettings()) {
         result.setQuerySettings(findCommand.getQuerySettings());
     }
-    if (findCommand.getReadConcern()) {
-        result.setReadConcern(findCommand.getReadConcern()->getOwned());
+    if (auto& rc = findCommand.getReadConcern()) {
+        result.setReadConcern(rc);
     }
-    if (!findCommand.getUnwrappedReadPref().isEmpty()) {
-        result.setUnwrappedReadPref(findCommand.getUnwrappedReadPref().getOwned());
+
+    if (auto& rp = findCommand.getUnwrappedReadPref(); rp && !rp->isEmpty()) {
+        result.setUnwrappedReadPref(rp);
     }
     if (findCommand.getAllowDiskUse().has_value()) {
         result.setAllowDiskUse(findCommand.getAllowDiskUse());

@@ -11,8 +11,11 @@
  *
  * All of this requires support for committed reads, so this test will be skipped if the storage
  * engine does not support them.
+ * This test requires a persistent storage engine because the makeSnapshot test command accesses
+ * the oplog's record store.
  * @tags: [
  *   requires_majority_read_concern,
+ *   requires_persistence,
  * ]
  */
 
@@ -23,8 +26,7 @@ function testReadConcernLevel(level) {
     var replTest = new ReplSetTest({
         nodes: 1,
         oplogSize: 2,
-        nodeOptions:
-            {setParameter: 'testingSnapshotBehaviorInIsolation=true', enableMajorityReadConcern: ''}
+        nodeOptions: {setParameter: 'testingSnapshotBehaviorInIsolation=true'}
     });
     replTest.startSet();
     // Cannot wait for a stable recovery timestamp with 'testingSnapshotBehaviorInIsolation'
