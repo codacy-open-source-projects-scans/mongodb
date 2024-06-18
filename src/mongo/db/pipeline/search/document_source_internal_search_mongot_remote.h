@@ -34,6 +34,7 @@
 #include "mongo/db/index/sort_key_generator.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_set_variable_from_subpipeline.h"
+#include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/visitors/docs_needed_bounds.h"
@@ -177,8 +178,14 @@ public:
     }
 
     void setDocsNeededBounds(DocsNeededBounds minBounds, DocsNeededBounds maxBounds) {
-        _minDocsNeededBounds = minBounds;
-        _maxDocsNeededBounds = maxBounds;
+        _spec.setMinDocsNeededBounds(minBounds);
+        _spec.setMaxDocsNeededBounds(maxBounds);
+    }
+
+    void setSearchIdLookupMetrics(
+        std::shared_ptr<DocumentSourceInternalSearchIdLookUp::SearchIdLookupMetrics>
+            searchIdLookupMetrics) {
+        _searchIdLookupMetrics = std::move(searchIdLookupMetrics);
     }
 
 protected:
@@ -255,8 +262,15 @@ private:
      */
     boost::optional<SortKeyGenerator> _sortKeyGen;
 
-    boost::optional<DocsNeededBounds> _minDocsNeededBounds;
-    boost::optional<DocsNeededBounds> _maxDocsNeededBounds;
+    /**
+     * SearchIdLookupMetrics between MongotRemote & SearchIdLookup DocumentSources.
+     * The state is shared between these two document sources because SearchIdLookup
+     * computes the document id lookup success rate, and MongotRemote uses it to make decisions
+     * about the batch size it requests for search responses.
+     * Note, this pointer could be null, and must be set before use.
+     */
+    std::shared_ptr<DocumentSourceInternalSearchIdLookUp::SearchIdLookupMetrics>
+        _searchIdLookupMetrics = nullptr;
 };
 
 namespace search_meta {

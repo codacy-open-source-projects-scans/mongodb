@@ -1,6 +1,5 @@
 # config selection
 load("@bazel_skylib//lib:selects.bzl", "selects")
-load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 
 # Common mongo-specific bazel build rules intended to be used in individual BUILD files in the "src/" subtree.
 load("@poetry//:dependencies.bzl", "dependency")
@@ -438,9 +437,6 @@ GCC_OR_CLANG_WARNINGS_COPTS = select({
         # This warning was added in clang-5 and flags many of our lambdas. Since it isn't actively
         # harmful to capture unused variables we are suppressing for now with a plan to fix later.
         "-Wno-unused-lambda-capture",
-
-        # Enable sized deallocation support.
-        "-fsized-deallocation",
 
         # This warning was added in Apple clang version 11 and flags many explicitly defaulted move
         # constructors and assignment operators for being implicitly deleted, which is not useful.
@@ -1003,6 +999,34 @@ DEDUPE_SYMBOL_LINKFLAGS = select({
     "//conditions:default": [],
 })
 
+DISABLE_SOURCE_WARNING_AS_ERRORS_COPTS = select({
+    "//bazel/config:disable_warnings_as_errors_linux": ["-Werror"],
+    # TODO(SERVER-90183): Enable once MacOS has a custom Bazel toolchain config.
+    # "//bazel/config:disable_warnings_as_errors_macos": ["-Werror"],
+    "//bazel/config:disable_warnings_as_errors_windows": ["/WX"],
+    "//bazel/config:warnings_as_errors_disabled": [],
+    "//conditions:default": [],
+})
+
+# Enable sized deallocation support.
+# Bazel doesn't allow for defining C++-only flags without a custom toolchain config. This is setup
+# in the Linux toolchain, but currently there is no custom MacOS toolchain. Enabling warnings-as-errors will fail
+# the build if this flag is passed to the compiler when building C code.
+# Define it here on MacOS only to allow us to configure warnings-as-errors on Linux.
+# TODO(SERVER-90183): Remove this once custom toolchain configuration is implemented on MacOS.
+FSIZED_DEALLOCATION_COPT = select({
+    "@platforms//os:macos": ["-fsized-deallocation"],
+    "//conditions:default": [],
+})
+
+DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS = select({
+    "//bazel/config:disable_warnings_as_errors_linux": ["-Wl,--fatal-warnings"],
+    # TODO(SERVER-90183): Enable once MacOS has a custom Bazel toolchain config.
+    # "//bazel/config:disable_warnings_as_errors_macos": ["-Wl,-fatal_warnings"],
+    "//bazel/config:warnings_as_errors_disabled": [],
+    "//conditions:default": [],
+})
+
 MTUNE_MARCH_COPTS = select({
     # If we are enabling vectorization in sandybridge mode, we'd
     # rather not hit the 256 wide vector instructions because the
@@ -1045,7 +1069,8 @@ MONGO_GLOBAL_COPTS = MONGO_GLOBAL_INCLUDE_DIRECTORIES + WINDOWS_COPTS + LIBCXX_C
                      GCC_OR_CLANG_WARNINGS_COPTS + GCC_OR_CLANG_GENERAL_COPTS + \
                      FLOATING_POINT_COPTS + MACOS_WARNINGS_COPTS + CLANG_WARNINGS_COPTS + \
                      CLANG_FNO_LIMIT_DEBUG_INFO + COMPRESS_DEBUG_COPTS + DEBUG_TYPES_SECTION_FLAGS + \
-                     IMPLICIT_FALLTHROUGH_COPTS + MTUNE_MARCH_COPTS
+                     IMPLICIT_FALLTHROUGH_COPTS + MTUNE_MARCH_COPTS + DISABLE_SOURCE_WARNING_AS_ERRORS_COPTS + \
+                     FSIZED_DEALLOCATION_COPT
 
 MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAGS + FUZZER_SANITIZER_LINKFLAGS + \
                          UNDEFINED_SANITIZER_LINKFLAGS + THREAD_SANITIZER_LINKFLAGS + \
@@ -1053,7 +1078,7 @@ MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAG
                          BIND_AT_LOAD_LINKFLAGS + RDYNAMIC_LINKFLAG + LINUX_PTHREAD_LINKFLAG + \
                          EXTRA_GLOBAL_LIBS_LINKFLAGS + ANY_SANITIZER_AVAILABLE_LINKFLAGS + ANY_SANITIZER_GCC_LINKFLAGS + \
                          GCC_OR_CLANG_LINKFLAGS + COMPRESS_DEBUG_LINKFLAGS + DEDUPE_SYMBOL_LINKFLAGS + \
-                         DEBUG_TYPES_SECTION_FLAGS
+                         DEBUG_TYPES_SECTION_FLAGS + DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS
 
 MONGO_GLOBAL_ACCESSIBLE_HEADERS = ["//src/third_party/boost:headers", "//src/third_party/immer:headers"]
 
@@ -1157,7 +1182,9 @@ def mongo_cc_library(
         target_compatible_with = [],
         skip_global_deps = [],
         non_transitive_dyn_linkopts = [],
-        defines = []):
+        defines = [],
+        additional_linker_inputs = [],
+        features = []):
     """Wrapper around cc_library.
 
     Args:
@@ -1183,6 +1210,7 @@ def mongo_cc_library(
         See https://jira.mongodb.org/browse/SERVER-89047 for motivation.
       defines: macro definitions added to the compile line when building any source in this target, as well as the compile
         line of targets that depend on this.
+      additional_linker_inputs: Any additional files that you may want to pass to the linker, for example, linker scripts.
     """
 
     if linkstatic == True:
@@ -1196,6 +1224,9 @@ def mongo_cc_library(
 
     if "allocator" not in skip_global_deps:
         deps += TCMALLOC_DEPS
+
+    if native.package_name().startswith("src/mongo"):
+        hdrs = hdrs + ["//:mongo_config_header"]
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
@@ -1248,11 +1279,12 @@ def mongo_cc_library(
         local_defines = MONGO_GLOBAL_DEFINES + visibility_support_defines + local_defines,
         defines = defines,
         includes = includes,
-        features = MONGO_GLOBAL_FEATURES + ["supports_pic", "pic"],
+        features = MONGO_GLOBAL_FEATURES + ["supports_pic", "pic"] + features,
         target_compatible_with = select({
             "//bazel/config:shared_archive_enabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
         }) + target_compatible_with,
+        additional_linker_inputs = additional_linker_inputs,
     )
 
     native.cc_library(
@@ -1274,8 +1306,9 @@ def mongo_cc_library(
             "//bazel/config:linkstatic_disabled": ["supports_pic", "pic"],
             "//bazel/config:shared_archive_enabled": ["supports_pic", "pic"],
             "//conditions:default": ["pie"],
-        }),
+        }) + features,
         target_compatible_with = target_compatible_with,
+        additional_linker_inputs = additional_linker_inputs,
     )
 
     # Creates a shared library version of our target only if //bazel/config:linkstatic_disabled is true.
@@ -1292,6 +1325,7 @@ def mongo_cc_library(
             "//conditions:default": ["@platforms//:incompatible"],
         }) + target_compatible_with,
         dynamic_deps = deps,
+        additional_linker_inputs = additional_linker_inputs,
     )
 
     extract_debuginfo(
@@ -1324,7 +1358,9 @@ def mongo_cc_binary(
         linkstatic = False,
         local_defines = [],
         target_compatible_with = [],
-        defines = []):
+        defines = [],
+        additional_linker_inputs = [],
+        features = []):
     """Wrapper around cc_binary.
 
     Args:
@@ -1344,12 +1380,16 @@ def mongo_cc_binary(
       local_defines: macro definitions passed to all source and header files.
       defines: macro definitions added to the compile line when building any source in this target, as well as the compile
         line of targets that depend on this.
+      additional_linker_inputs: Any additional files that you may want to pass to the linker, for example, linker scripts.
     """
 
     if linkstatic == True:
         fail("""Linking specific targets statically is not supported.
         The mongo build must link entirely statically or entirely dynamically.
         This can be configured via //config/bazel:linkstatic.""")
+
+    if native.package_name().startswith("src/mongo"):
+        srcs = srcs + ["//:mongo_config_header"]
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
@@ -1385,12 +1425,13 @@ def mongo_cc_binary(
         local_defines = MONGO_GLOBAL_DEFINES + LIBUNWIND_DEFINES + local_defines,
         defines = defines,
         includes = includes,
-        features = MONGO_GLOBAL_FEATURES + ["pie"],
+        features = MONGO_GLOBAL_FEATURES + ["pie"] + features,
         dynamic_deps = select({
             "//bazel/config:linkstatic_disabled": deps,
             "//conditions:default": [],
         }),
         target_compatible_with = target_compatible_with,
+        additional_linker_inputs = additional_linker_inputs,
     )
 
     extract_debuginfo_binary(

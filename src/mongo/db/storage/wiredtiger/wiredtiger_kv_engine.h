@@ -396,8 +396,6 @@ public:
 
     bool supportsOplogTruncateMarkers() const final;
 
-    bool supportsReadConcernMajority() const final;
-
     // wiredtiger specific
     // Calls WT_CONNECTION::reconfigure on the underlying WT_CONNECTION
     // held by this class
@@ -690,8 +688,6 @@ private:
     AtomicWord<std::uint64_t> _initialDataTimestamp;
 
     AtomicWord<std::uint64_t> _oplogNeededForCrashRecovery;
-
-    std::unique_ptr<WiredTigerEngineRuntimeConfigParameter> _runTimeConfigParam;
 
     mutable Mutex _oldestTimestampPinRequestsMutex =
         MONGO_MAKE_LATCH("WiredTigerKVEngine::_oldestTimestampPinRequestsMutex");

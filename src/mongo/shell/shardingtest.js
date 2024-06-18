@@ -529,7 +529,10 @@ var ShardingTest = function ShardingTest(params) {
     ShardingTest.prototype.stop = function(opts = {}) {
         this.checkMetadataConsistency();
         this.checkUUIDsConsistentAcrossCluster();
-        this.checkIndexesConsistentAcrossCluster();
+        // TODO (SERVER-91380): run this.checkIndexesConsistentAcrossCluster() unconditionally.
+        if (!opts.skipIndexesConsistencyCheck) {
+            this.checkIndexesConsistentAcrossCluster();
+        }
         this.checkOrphansAreDeleted();
         this.checkRoutingTableConsistency();
         this.checkShardFilteringMetadata();
@@ -1273,6 +1276,15 @@ var ShardingTest = function ShardingTest(params) {
         return numNodesPerReplSet.reduce((a, b) => a + b, 0);
     }
 
+    /**
+     * Returns all nodes in the cluster including shards, config servers and mongoses.
+     */
+    ShardingTest.prototype.getAllNodes = function() {
+        let nodes = [];
+        nodes.concat([this._configDB, this._connections, this._mongos]);
+        return [...new Set(nodes)];
+    };
+
     // ShardingTest initialization
 
     assert(isObject(params), 'ShardingTest configuration must be a JSON object');
@@ -1401,7 +1413,7 @@ var ShardingTest = function ShardingTest(params) {
     if (this._useBridge) {
         assert(
             !jsTestOptions().tlsMode,
-            'useBridge cannot be true when using TLS. Add the requires_mongobridge tag to the test to ensure it will be skipped on variants that use TLS.')
+            'useBridge cannot be true when using TLS. Add the requires_mongobridge tag to the test to ensure it will be skipped on variants that use TLS.');
     }
 
     this._unbridgedMongos = [];
@@ -2118,7 +2130,7 @@ var ShardingTest = function ShardingTest(params) {
             // replica set.
             assert.soonNoExcept(() => {
                 function getConfigShardDoc() {
-                    return csrsPrimary.getDB("config").shards.findOne({_id: "config"})
+                    return csrsPrimary.getDB("config").shards.findOne({_id: "config"});
                 }
                 const configShardDoc = this.keyFile
                     ? authutil.asCluster(csrsPrimary, this.keyFile, getConfigShardDoc)

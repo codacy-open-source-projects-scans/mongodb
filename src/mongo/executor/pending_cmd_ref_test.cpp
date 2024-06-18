@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2019-present MongoDB, Inc.
+ *    Copyright (C) 2024-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -26,25 +26,32 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include <string>
-#include <vector>
 
-#include "mongo/base/shim.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/executor/network_interface_factory.h"
+#include "mongo/executor/network_interface_tl.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/framework.h"
 
 namespace mongo {
-namespace {
+namespace executor {
 
-void reportCurrentOpsForTransactionCoordinatorsImpl(OperationContext* opCtx,
-                                                    bool includeIdle,
-                                                    std::vector<BSONObj>* ops) {
-    TransactionCoordinatorService::get(opCtx)->reportCoordinators(opCtx, includeIdle, ops);
+TEST(PendingCmdRef, BlocksShutdown) {
+    auto net = makeNetworkInterface("PendingCmdRefTest");
+    net->startup();
+    auto pendingCmdRef = std::make_unique<NetworkInterfaceTL::PendingCmdRef>(
+        dynamic_cast<NetworkInterfaceTL&>(*net));
+    bool blockingInShutdown = true;
+    auto s = net->schedule([&, pendingCmdRef = std::move(pendingCmdRef)](Status s) {
+        ASSERT_OK(s);
+        sleepmillis(30);
+        // reference is valid because guard blocks destructor
+        ASSERT_TRUE(blockingInShutdown);
+    });
+    ASSERT_OK(s);
+    // Test will block here, as shutdown() waits for pendingCmdRef to be destroyed.
+    net->shutdown();
+    blockingInShutdown = false;
 }
 
-auto reportCurrentOpsForTransactionCoordinatorsRegistration = MONGO_WEAK_FUNCTION_REGISTRATION(
-    reportCurrentOpsForTransactionCoordinators, reportCurrentOpsForTransactionCoordinatorsImpl);
-
-}  // namespace
+}  // namespace executor
 }  // namespace mongo

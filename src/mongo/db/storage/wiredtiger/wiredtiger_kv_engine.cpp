@@ -276,7 +276,8 @@ public:
     void run() override {
         ThreadClient tc(name(), getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
-        // TODO(SERVER-74657): Please revisit if this thread could be made killable.
+        // This job is primary/secondary agnostic and doesn't write to WT, stepdown won't and
+        // shouldn't interrupt it, so keep it as unkillable.
         {
             stdx::lock_guard<Client> lk(*tc.get());
             tc.get()->setSystemOperationUnkillableByStepdown(lk);
@@ -612,9 +613,10 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
     }
 
     _sizeStorer = std::make_unique<WiredTigerSizeStorer>(_conn, _sizeStorerUri);
-    _runTimeConfigParam.reset(makeServerParameter<WiredTigerEngineRuntimeConfigParameter>(
-        "wiredTigerEngineRuntimeConfig", ServerParameterType::kRuntimeOnly));
-    _runTimeConfigParam->_data.second = this;
+    auto param = std::make_unique<WiredTigerEngineRuntimeConfigParameter>(
+        "wiredTigerEngineRuntimeConfig", ServerParameterType::kRuntimeOnly);
+    param->_data.second = this;
+    registerServerParameter(std::move(param));
 }
 
 WiredTigerKVEngine::~WiredTigerKVEngine() {
@@ -629,7 +631,6 @@ WiredTigerKVEngine::~WiredTigerKVEngine() {
 
 void WiredTigerKVEngine::notifyStorageStartupRecoveryComplete() {
     unpinOldestTimestamp(kPinOldestTimestampAtStartupName);
-    WiredTigerUtil::notifyStorageStartupRecoveryComplete();
 }
 
 void WiredTigerKVEngine::notifyReplStartupRecoveryComplete(OperationContext* opCtx) {
@@ -2695,10 +2696,6 @@ void WiredTigerKVEngine::setPinnedOplogTimestamp(const Timestamp& pinnedTimestam
 }
 
 bool WiredTigerKVEngine::supportsReadConcernSnapshot() const {
-    return true;
-}
-
-bool WiredTigerKVEngine::supportsReadConcernMajority() const {
     return true;
 }
 

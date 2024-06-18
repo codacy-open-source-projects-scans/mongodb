@@ -499,10 +499,6 @@ bool isIndexBuildResumable(OperationContext* opCtx,
         return false;
     }
 
-    if (!opCtx->getServiceContext()->getStorageEngine()->supportsResumableIndexBuilds()) {
-        return false;
-    }
-
     // Only index builds with the default "all-voters" commit quorum running on voting nodes should
     // be resumable. A node that cannot contribute to the commit quorum should not be waiting for
     // the majority commit point when trying to commit the index build.
@@ -2728,7 +2724,8 @@ void runOnAlternateContext(OperationContext* opCtx, std::string name, Func func)
     auto newClient =
         opCtx->getServiceContext()->getService(ClusterRole::ShardServer)->makeClient(name);
 
-    // TODO(SERVER-74657): Please revisit if this thread could be made killable.
+    // The cleanup doesn't involve WT operations, and notifies the primary with a networking
+    // message, it's safe and better to keep it unkillable.
     {
         stdx::lock_guard<Client> lk(*newClient.get());
         newClient.get()->setSystemOperationUnkillableByStepdown(lk);

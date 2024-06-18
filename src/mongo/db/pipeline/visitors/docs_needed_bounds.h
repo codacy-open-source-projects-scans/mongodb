@@ -31,8 +31,16 @@
 
 #include <variant>
 
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/overloaded_visitor.h"
+
 namespace mongo {
 namespace docs_needed_bounds {
+static constexpr auto kNeedAllName = "NeedAll"_sd;
+static constexpr auto kUnknownName = "Unknown"_sd;
+
 struct NeedAll {
     // Nothing
 };
@@ -43,9 +51,8 @@ struct Unknown {
 
 using Bounds = std::variant<long long, NeedAll, Unknown>;
 
-// TODO SERVER-89448 add parsing and serialization functions so Bounds can be used in the
-// IDL.
-
+Bounds parseDocsNeededBoundsFromBSON(const BSONElement& elem);
+void serializeDocsNeededBounds(const Bounds& bounds, StringData fieldName, BSONObjBuilder* builder);
 }  // namespace docs_needed_bounds
 
 using DocsNeededBounds = docs_needed_bounds::Bounds;
