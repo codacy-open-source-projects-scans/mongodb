@@ -172,10 +172,13 @@ constexpr std::size_t kOplogWriteBufferSize = 256 * 1024 * 1024;
 // equal to the maximum value of 'replBatchLimitBytes'.
 constexpr std::size_t kOplogApplyBufferSize = 100 * 1024 * 1024;
 
+// The maximum count of the oplog apply buffer is set to 10000,
+// equal to 2 * default value of 'replBatchLimitOperations'.
+constexpr std::size_t kOplogApplyBufferCount = 10 * 1000;
+
 // The maximum size of the oplog apply buffer is set to 256MB,
 // for the old architecture with no oplog write buffer.
 constexpr std::size_t kOplogApplyBufferSizeLegacy = 256 * 1024 * 1024;
-
 
 // The count of items in the oplog application buffer
 OplogBufferMetrics& oplogBufferMetrics = *MetricBuilder<OplogBufferMetrics>("repl.buffer");
@@ -282,8 +285,10 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     // for downgrades to work.
     OplogBufferBlockingQueue::Options bufferOptions;
     bufferOptions.clearOnShutdown = !useOplogWriter;
+    std::size_t maxCount =
+        useOplogWriter ? kOplogApplyBufferCount : std::numeric_limits<std::size_t>::max();
     _oplogApplyBuffer = std::make_unique<OplogBufferBlockingQueue>(
-        applyBufferSize, oplogBufferMetrics.getApplyBufferCounter(), bufferOptions);
+        applyBufferSize, maxCount, oplogBufferMetrics.getApplyBufferCounter(), bufferOptions);
 
     // No need to log OplogBuffer::startup because the blocking queue and batched queue
     // implementations does not start any threads or access the storage layer.
@@ -868,14 +873,19 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalLastVoteDocument(
     try {
         // If we are casting a vote in a new election immediately after stepping down, we
         // don't want to have this process interrupted due to us stepping down, since we
-        // want to be able to cast our vote for a new primary right away. To avoid the lock
-        // acquisition getting interrupted, acquiring lock on replset.election will not acquire the
-        // RSTL.
+        // want to be able to cast our vote for a new primary right away. Both the write's lock
+        // acquisition and the "waitUntilDurable" lock acquisition must be uninterruptible.
         //
         // It is not safe to take an uninterruptible lock during STARTUP2, so we only take this lock
         // if we are primary or secondary.  We do not have the RSTL but that is OK because we never
         // move in to STARTUP2 from PRIMARY or SECONDARY, so the consequence of a stale state is
         // only that we don't take an uninterruptible lock when we should.
+        auto* replCoord = ReplicationCoordinator::get(opCtx);
+
+        boost::optional<UninterruptibleLockGuard> noInterrupt;
+        if (replCoord->isInPrimaryOrSecondaryState_UNSAFE())
+            noInterrupt.emplace(opCtx);
+
         Status status = writeConflictRetry(
             opCtx, "save replica set lastVote", NamespaceString::kLastVoteNamespace, [&] {
                 auto coll =

@@ -106,6 +106,10 @@ public:
             std::move(spec), expCtx, _taskExecutor);
     }
 
+    const InternalSearchMongotRemoteSpec& getMongotRemoteSpec() const {
+        return _spec;
+    }
+
     BSONObj getSearchQuery() const {
         return _spec.getMongotQuery().getOwned();
     }
@@ -119,15 +123,6 @@ public:
         _dispatchedQuery = true;
     }
 
-    boost::optional<long long> getMongotDocsRequested() const {
-        return _spec.getMongotDocsRequested().has_value()
-            ? boost::make_optional<long long>(*_spec.getMongotDocsRequested())
-            : boost::none;
-    }
-
-    bool getPaginationFlag() const {
-        return _spec.getRequiresSearchSequenceToken().get_value_or(false);
-    }
     /**
      * Calculate the number of documents needed to satisfy a user-defined limit. This information
      * can be used in a getMore sent to mongot.
@@ -178,8 +173,11 @@ public:
     }
 
     void setDocsNeededBounds(DocsNeededBounds minBounds, DocsNeededBounds maxBounds) {
-        _spec.setMinDocsNeededBounds(minBounds);
-        _spec.setMaxDocsNeededBounds(maxBounds);
+        if (std::holds_alternative<docs_needed_bounds::Unknown>(_spec.getMinDocsNeededBounds()) &&
+            std::holds_alternative<docs_needed_bounds::Unknown>(_spec.getMaxDocsNeededBounds())) {
+            _spec.setMinDocsNeededBounds(minBounds);
+            _spec.setMaxDocsNeededBounds(maxBounds);
+        }
     }
 
     void setSearchIdLookupMetrics(

@@ -105,6 +105,8 @@ last-continuous:
       ticket: SERVER-90334
     - test_file: jstests/sharding/change_streams_survive_move_primary.js
       ticket: SERVER-69933
+    - test_file: jstests/core/write/update/upsert_nor.js
+      ticket: SERVER-91700
     - test_file: jstests/aggregation/group_by_objectid.js
       ticket: SERVER-90173
     - test_file: jstests/aggregation/unwind_sort.js
@@ -153,6 +155,16 @@ last-continuous:
       ticket: SERVER-91339
     - test_file: jstests/core/timeseries/timeseries_shadowing_meta_project_pushdown.js
       ticket: SERVER-90995
+    - test_file: jstests/core/index/index_bounds_pipe.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/and/and3.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/explain/explain6.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/regex/regex6.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/regex/regex3.js
+      ticket: SERVER-91616
   suites: null
 last-lts:
   all:
@@ -240,6 +252,8 @@ last-lts:
       ticket: SERVER-90334
     - test_file: jstests/sharding/change_streams_survive_move_primary.js
       ticket: SERVER-69933
+    - test_file: jstests/core/write/update/upsert_nor.js
+      ticket: SERVER-91700
     - test_file: jstests/aggregation/group_by_objectid.js
       ticket: SERVER-90173
     - test_file: jstests/aggregation/unwind_sort.js
@@ -312,4 +326,18 @@ last-lts:
       ticket: SERVER-91075
     - test_file: jstests/core/timeseries/timeseries_shadowing_meta_project_pushdown.js
       ticket: SERVER-90995
+    - test_file: jstests/sharding/migration_coordinator_abort_failover.js
+      ticket: SERVER-91331
+    - test_file: jstests/sharding/migration_coordinator_commit_failover.js
+      ticket: SERVER-91331
+    - test_file: jstests/core/index/index_bounds_pipe.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/and/and3.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/explain/explain6.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/regex/regex6.js
+      ticket: SERVER-91616
+    - test_file: jstests/core/query/regex/regex3.js
+      ticket: SERVER-91616
   suites: null

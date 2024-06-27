@@ -239,10 +239,13 @@ public:
               boost::optional<std::size_t> bytes) final {
         MONGO_UNREACHABLE;
     }
-    void waitForSpace(OperationContext*, std::size_t) final {
+    void waitForSpace(OperationContext*, std::size_t, std::size_t) final {
         MONGO_UNREACHABLE;
     }
     std::size_t getMaxSize() const final {
+        MONGO_UNREACHABLE;
+    }
+    std::size_t getMaxCount() const final {
         MONGO_UNREACHABLE;
     }
     std::size_t getSize() const final {
@@ -343,14 +346,6 @@ void ReplicationRecoveryImpl::_assertNoRecoveryNeededOnUnstableCheckpoint(Operat
             "Unexpected recovery needed, appliedThrough is not at top of oplog, indicating "
             "oplog has not been fully applied",
             "appliedThrough"_attr = appliedThrough.toString());
-    }
-
-    const auto minValid = _consistencyMarkers->getMinValid(opCtx);
-    if (minValid > topOfOplog) {
-        LOGV2_FATAL_NOTRACE(31366,
-                            "Unexpected recovery needed, top of oplog is not consistent",
-                            "topOfOplog"_attr = topOfOplog,
-                            "minValid"_attr = minValid);
     }
 }
 
