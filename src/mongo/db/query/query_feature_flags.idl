@@ -86,8 +86,7 @@ feature_flags:
       description: "Feature flag for enabling support for $out to write to time-series collections"
       cpp_varname: gFeatureFlagAggOutTimeseries
       default: true
-      version: 7.1
-      shouldBeFCVGated: true
+      shouldBeFCVGated: false
 
     featureFlagQuerySettings:
       description: "Feature flag for enabling persistent query settings"
@@ -139,4 +138,11 @@ feature_flags:
       description: "Feature flag to enable batchSize tuning for search queries."
       cpp_varname: gFeatureFlagSearchBatchSizeTuning
       default: false
+      shouldBeFCVGated: true
+
+    featureFlagSearchHybridScoring:
+      description: "Feature flag to introduce MQL syntax to allow customizable scoring 
+                    of multiple ranked pipelines."
+      cpp_varname: gFeatureFlagSearchHybridScoring
+      default: false 
       shouldBeFCVGated: true

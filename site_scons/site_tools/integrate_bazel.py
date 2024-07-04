@@ -62,6 +62,7 @@ _DISTRO_PATTERN_MAP = {
     "Ubuntu 18*": "ubuntu18",
     "Ubuntu 20*": "ubuntu20",
     "Ubuntu 22*": "ubuntu22",
+    "Ubuntu 24*": "ubuntu24",
     "Amazon Linux 2": "amazon_linux_2",
     "Amazon Linux 2023": "amazon_linux_2023",
     "Debian GNU/Linux 10": "debian10",
@@ -111,8 +112,6 @@ class Globals:
     bazel_thread_terminal_output = StringIO()
 
     bazel_executable = None
-
-    bazel_fetch_thread = None
 
     max_retry_attempts: int = _LOCAL_MAX_RETRY_ATTEMPTS
 
@@ -656,36 +655,9 @@ def add_libdeps_time(env, delate_time):
     count_of_libdeps_links += 1
 
 
-ran_fetch = False
-
-
 # Required boilerplate function
 def exists(env: SCons.Environment.Environment) -> bool:
     # === Bazelisk ===
-    global ran_fetch
-
-    if not ran_fetch:
-        ran_fetch = True
-
-        def setup_bazel_thread():
-            bazel_bin_dir = (
-                env.GetOption("evergreen-tmp-dir")
-                if env.GetOption("evergreen-tmp-dir")
-                else os.path.expanduser("~/.local/bin")
-            )
-            if not os.path.exists(bazel_bin_dir):
-                os.makedirs(bazel_bin_dir)
-
-            Globals.bazel_executable = install_bazel(bazel_bin_dir)
-
-            proc = subprocess.run(
-                [Globals.bazel_executable, "fetch", "//..."], capture_output=True, text=True
-            )
-            if proc.returncode != 0:
-                print(f"ERROR: pre-fetching failed:\n{proc.stdout}\n{proc.stderr}")
-
-        Globals.bazel_fetch_thread = threading.Thread(target=setup_bazel_thread)
-        Globals.bazel_fetch_thread.start()
 
     env.AddMethod(load_bazel_builders, "LoadBazelBuilders")
     return True
@@ -764,6 +736,7 @@ def generate(env: SCons.Environment.Environment) -> None:
         f"--//bazel/config:compiler_type={env.ToolchainName()}",
         f'--//bazel/config:opt={env.GetOption("opt")}',
         f'--//bazel/config:dbg={env.GetOption("dbg") == "on"}',
+        f'--//bazel/config:thin_lto={env.GetOption("thin-lto") is not None}',
         f'--//bazel/config:separate_debug={True if env.GetOption("separate-debug") == "on" else False}',
         f'--//bazel/config:libunwind={env.GetOption("use-libunwind")}',
         f'--//bazel/config:use_gdbserver={False if env.GetOption("gdbserver") is None else True}',
@@ -788,6 +761,7 @@ def generate(env: SCons.Environment.Environment) -> None:
         f'--//bazel/config:disable_warnings_as_errors={env.GetOption("disable-warnings-as-errors") == "source"}',
         f"--platforms=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}",
         f"--host_platform=//bazel/platforms:{distro_or_os}_{normalized_arch}_{env.ToolchainName()}",
+        f'--//bazel/config:ssl={"True" if env.GetOption("ssl") == "on" else "False"}',
         "--compilation_mode=dbg",  # always build this compilation mode as we always build with -g
     ]
 
@@ -836,7 +810,16 @@ def generate(env: SCons.Environment.Environment) -> None:
         _CI_MAX_RETRY_ATTEMPTS if os.environ.get("CI") is not None else _LOCAL_MAX_RETRY_ATTEMPTS
     )
 
-    Globals.bazel_fetch_thread.join()
+    bazel_bin_dir = (
+        env.GetOption("evergreen-tmp-dir")
+        if env.GetOption("evergreen-tmp-dir")
+        else os.path.expanduser("~/.local/bin")
+    )
+    if not os.path.exists(bazel_bin_dir):
+        os.makedirs(bazel_bin_dir)
+
+    Globals.bazel_executable = install_bazel(bazel_bin_dir)
+
     Globals.bazel_base_build_command = (
         [
             os.path.abspath(Globals.bazel_executable),

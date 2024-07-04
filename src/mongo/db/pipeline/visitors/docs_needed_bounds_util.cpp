@@ -27,31 +27,28 @@
  *    it in the license file.
  */
 
-#include "mongo/executor/network_interface_factory.h"
-#include "mongo/executor/network_interface_tl.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/pipeline/visitors/docs_needed_bounds_util.h"
+#include "mongo/util/overloaded_visitor.h"
 
-namespace mongo {
-namespace executor {
-
-TEST(PendingCmdRef, BlocksShutdown) {
-    auto net = makeNetworkInterface("PendingCmdRefTest");
-    net->startup();
-    auto pendingCmdRef = std::make_unique<NetworkInterfaceTL::PendingCmdRef>(
-        dynamic_cast<NetworkInterfaceTL&>(*net));
-    bool blockingInShutdown = true;
-    auto s = net->schedule([&, pendingCmdRef = std::move(pendingCmdRef)](Status s) {
-        ASSERT_OK(s);
-        sleepmillis(30);
-        // reference is valid because guard blocks destructor
-        ASSERT_TRUE(blockingInShutdown);
-    });
-    ASSERT_OK(s);
-    // Test will block here, as shutdown() waits for pendingCmdRef to be destroyed.
-    net->shutdown();
-    blockingInShutdown = false;
+namespace mongo::docs_needed_bounds {
+boost::optional<long long> calcExtractableLimit(DocsNeededBounds docsNeededBounds) {
+    return visit(OverloadedVisitor{
+                     [](long long minVal, long long maxVal) -> boost::optional<long long> {
+                         if (minVal == maxVal) {
+                             // Both the min and the max must be the same value for
+                             // the limit of the query to be extractable.
+                             return minVal;
+                         } else {
+                             return boost::none;
+                         }
+                     },
+                     [](auto& minVal, auto& maxVal) -> boost::optional<long long> {
+                         // Catch all - unless both min and max are articulated long long values
+                         // the query has no extractable limit.
+                         return boost::none;
+                     },
+                 },
+                 docsNeededBounds.getMinBounds(),
+                 docsNeededBounds.getMaxBounds());
 }
-
-}  // namespace executor
-}  // namespace mongo
+};  // namespace mongo::docs_needed_bounds

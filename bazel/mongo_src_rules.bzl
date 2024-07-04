@@ -1052,8 +1052,14 @@ MTUNE_MARCH_COPTS = select({
     "//conditions:default": [],
 })
 
+THIN_LTO_LINKFLAGS = select({
+    "//bazel/config:thin_lto_enabled": ["-flto=thin"],
+    "//conditions:default": [],
+})
+
 MONGO_GLOBAL_INCLUDE_DIRECTORIES = [
     "-Isrc",
+    "-I$(GENDIR)/src",
     "-Isrc/third_party/boost",
     "-Isrc/third_party/immer/dist",
 ]
@@ -1078,7 +1084,7 @@ MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAG
                          BIND_AT_LOAD_LINKFLAGS + RDYNAMIC_LINKFLAG + LINUX_PTHREAD_LINKFLAG + \
                          EXTRA_GLOBAL_LIBS_LINKFLAGS + ANY_SANITIZER_AVAILABLE_LINKFLAGS + ANY_SANITIZER_GCC_LINKFLAGS + \
                          GCC_OR_CLANG_LINKFLAGS + COMPRESS_DEBUG_LINKFLAGS + DEDUPE_SYMBOL_LINKFLAGS + \
-                         DEBUG_TYPES_SECTION_FLAGS + DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS
+                         DEBUG_TYPES_SECTION_FLAGS + DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS + THIN_LTO_LINKFLAGS
 
 MONGO_GLOBAL_ACCESSIBLE_HEADERS = ["//src/third_party/boost:headers", "//src/third_party/immer:headers"]
 
@@ -1226,7 +1232,7 @@ def mongo_cc_library(
         deps += TCMALLOC_DEPS
 
     if native.package_name().startswith("src/mongo"):
-        hdrs = hdrs + ["//:mongo_config_header"]
+        hdrs = hdrs + ["//src/mongo:mongo_config_header"]
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
@@ -1389,7 +1395,7 @@ def mongo_cc_binary(
         This can be configured via //config/bazel:linkstatic.""")
 
     if native.package_name().startswith("src/mongo"):
-        srcs = srcs + ["//:mongo_config_header"]
+        srcs = srcs + ["//src/mongo:mongo_config_header"]
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)

@@ -319,23 +319,24 @@ void assertSearchMetaAccessValid(const Pipeline::SourceContainer& shardsPipeline
 std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegacyExecutor(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     Pipeline* origPipeline,
-    DocsNeededBounds minBounds,
-    DocsNeededBounds maxBounds,
+    DocsNeededBounds bounds,
     boost::optional<int64_t> userBatchSize) {
     // First, desuguar $search, and inject shard filterer.
     prepareSearchPipelineLegacyExecutor(origPipeline, true);
 
     if (expCtx->explain || !isSearchPipeline(origPipeline)) {
-        // $search doesn't return documents or metadata from explain regardless of the verbosity.
-        // $searchMeta or $vectorSearch pipelines won't need an additional pipeline since they
-        // only need one cursor.
+        // TODO SERVER-91828: Enable creation of cursors for sharded search.
+        // For sharded search, we don't return documents or metadata from explain regardless of
+        // the verbosity. Standalone search will establish its cursors later in
+        // internalSearchMongotRemote. $searchMeta or $vectorSearch pipelines won't need an
+        // additional pipeline since they only need one cursor.
         return nullptr;
     }
 
     auto origSearchStage =
         dynamic_cast<DocumentSourceInternalSearchMongotRemote*>(origPipeline->peekFront());
     tassert(6253727, "Expected search stage", origSearchStage);
-    origSearchStage->setDocsNeededBounds(minBounds, maxBounds);
+    origSearchStage->setDocsNeededBounds(bounds);
 
     // We expect to receive unmerged metadata documents from mongot if we are not in mongos and have
     // a metadata merge protocol version. However, we can ignore the meta cursor if the pipeline
@@ -365,7 +366,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
         origSearchStage->getMongotRemoteSpec(),
         origSearchStage->getTaskExecutor(),
         userBatchSize,
-        [origSearchStage] { return origSearchStage->calcDocsNeeded(); });
+        [origSearchStage] { return origSearchStage->calcDocsNeeded(); },
+        nullptr,
+        origSearchStage->getSearchIdLookupMetrics());
 
     // mongot can return zero cursors for an empty collection, one without metadata, or two for
     // results and metadata.

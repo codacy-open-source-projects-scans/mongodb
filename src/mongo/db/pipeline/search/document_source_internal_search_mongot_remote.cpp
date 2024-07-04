@@ -104,13 +104,19 @@ Value DocumentSourceInternalSearchMongotRemote::serializeWithoutMergePipeline(
             return opts.serializeLiteral(_spec.getMongotQuery());
         }
     }
+    // If the query is an explain that executed the query, we obtain the explain object from the
+    // taskExecutorCursor. Otherwise, we need to obtain the explain
+    // object now.
+    boost::optional<BSONObj> explainResponse = boost::none;
+    if (_cursor) {
+        explainResponse = _cursor->getCursorExplain();
+    }
 
-    // Explain with queryPlanner verbosity does not execute the query, so the _explainResponse
-    // may not be populated. In that case, we fetch the response here instead.
-    BSONObj explainInfo = _explainResponse.isEmpty()
-        ? mongot_cursor::getSearchExplainResponse(
-              pExpCtx.get(), _spec.getMongotQuery(), _taskExecutor.get())
-        : _explainResponse;
+    BSONObj explainInfo = explainResponse.value_or_eval([&] {
+        return mongot_cursor::getSearchExplainResponse(
+            pExpCtx.get(), _spec.getMongotQuery(), _taskExecutor.get());
+    });
+
     MutableDocument mDoc;
     mDoc.addField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName,
                   opts.serializeLiteral(_spec.getMongotQuery()));
@@ -202,11 +208,11 @@ bool DocumentSourceInternalSearchMongotRemote::shouldReturnEOF() {
         return true;
     }
 
-    if (pExpCtx->explain) {
-        _explainResponse = mongot_cursor::getSearchExplainResponse(
-            pExpCtx.get(), _spec.getMongotQuery(), _taskExecutor.get());
+    // TODO SERVER-91828 Explain execution stats not supported for sharded queries yet.
+    if (pExpCtx->needsMerge && pExpCtx->explain) {
         return true;
     }
+
     return false;
 }
 
@@ -293,7 +299,7 @@ DocumentSource::GetNextResult DocumentSourceInternalSearchMongotRemote::getNextA
 std::unique_ptr<executor::TaskExecutorCursor>
 DocumentSourceInternalSearchMongotRemote::establishCursor() {
     auto cursors = mongot_cursor::establishCursorsForSearchStage(
-        pExpCtx, _spec, _taskExecutor, boost::none, nullptr);
+        pExpCtx, _spec, _taskExecutor, boost::none, nullptr, nullptr, getSearchIdLookupMetrics());
     // Should be called only in unsharded scenario, therefore only expect a results cursor and no
     // metadata cursor.
     tassert(5253301, "Expected exactly one cursor from mongot", cursors.size() == 1);

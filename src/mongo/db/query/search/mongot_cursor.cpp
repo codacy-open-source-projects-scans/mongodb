@@ -108,8 +108,7 @@ void doThrowIfNotRunningWithMongotHostConfigured() {
 }
 
 long long computeInitialBatchSize(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                  const DocsNeededBounds minBounds,
-                                  const DocsNeededBounds maxBounds,
+                                  const DocsNeededBounds& bounds,
                                   const boost::optional<int64_t> userBatchSize,
                                   bool isStoredSource) {
     // TODO SERVER-63765 Allow cursor establishment for sharded clusters when userBatchSize is 0.
@@ -148,8 +147,8 @@ long long computeInitialBatchSize(const boost::intrusive_ptr<ExpressionContext>&
                          return applyOversubscription(kDefaultMongotBatchSize);
                      },
                  },
-                 minBounds,
-                 maxBounds);
+                 bounds.getMinBounds(),
+                 bounds.getMaxBounds());
 }
 }  // namespace
 
@@ -165,6 +164,41 @@ executor::RemoteCommandRequest getRemoteCommandRequest(OperationContext* opCtx,
     rcr.sslMode = transport::ConnectSSLMode::kDisableSSL;
     return rcr;
 }
+// TODO SERVER-91594 makeTaskExecutorCursorForExplain() can be removed when mongot will always
+// return a cursor.
+std::unique_ptr<executor::TaskExecutorCursor> makeTaskExecutorCursorForExplain(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const executor::RemoteCommandRequest& command,
+    std::shared_ptr<executor::TaskExecutor> taskExecutor,
+    std::unique_ptr<executor::TaskExecutorCursorGetMoreStrategy> getMoreStrategy,
+    std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
+    auto response =
+        runSearchCommandWithRetries(expCtx, command.cmdObj, makeRetryOnNetworkErrorPolicy());
+    auto responseData = response.data;
+    // We may query a version of mongot that only returns the explain object. Since creating a
+    // TaskExecutorCursor (TEC) with no cursor will error, we manually create a dummy cursor to
+    // create the TEC here.
+    if (responseData[CursorInitialReply::kCursorFieldName].type() != BSONType::Object) {
+        auto nss = expCtx->ns;
+        auto cursorBSON =
+            BSON(AnyCursor::kCursorIdFieldName
+                 << CursorId(0) << AnyCursor::kNsFieldName
+                 << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())
+                 << AnyCursor::kFirstBatchFieldName << BSONArray());
+        BSONObjBuilder cursorBuilder(std::move(responseData));
+        cursorBuilder << CursorInitialReply::kCursorFieldName << cursorBSON;
+        responseData = cursorBuilder.obj();
+    }
+    auto cursorResponse = CursorResponse::parseFromBSON(std::move(responseData));
+    executor::TaskExecutorCursorOptions options = {std::move(getMoreStrategy),
+                                                   std::move(yieldPolicy)};
+    return std::make_unique<executor::TaskExecutorCursor>(
+        taskExecutor,
+        nullptr,
+        uassertStatusOK(std::move(cursorResponse)),
+        command,
+        std::move(options));
+}
 
 std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -173,14 +207,25 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursors(
     std::unique_ptr<executor::TaskExecutorCursorGetMoreStrategy> getMoreStrategy,
     std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
     std::vector<std::unique_ptr<executor::TaskExecutorCursor>> cursors;
-    auto initialCursor =
-        makeTaskExecutorCursor(expCtx->opCtx,
-                               taskExecutor,
-                               command,
-                               {std::move(getMoreStrategy), std::move(yieldPolicy)},
-                               makeRetryOnNetworkErrorPolicy());
 
-    auto additionalCursors = initialCursor->releaseAdditionalCursors();
+    std::unique_ptr<executor::TaskExecutorCursor> initialCursor;
+    std::vector<std::unique_ptr<executor::TaskExecutorCursor>> additionalCursors;
+
+    if (expCtx->explain) {
+        tassert(8431800,
+                "Sharded $search queries should not establishCursors() for explain.",
+                !expCtx->needsMerge);
+        initialCursor = makeTaskExecutorCursorForExplain(
+            expCtx, command, taskExecutor, std::move(getMoreStrategy), std::move(yieldPolicy));
+
+    } else {
+        initialCursor = makeTaskExecutorCursor(expCtx->opCtx,
+                                               taskExecutor,
+                                               command,
+                                               {std::move(getMoreStrategy), std::move(yieldPolicy)},
+                                               makeRetryOnNetworkErrorPolicy());
+        additionalCursors = initialCursor->releaseAdditionalCursors();
+    }
     cursors.push_back(std::move(initialCursor));
     // Preserve cursor order. Expect cursors to be labeled, so this may not be necessary.
     for (auto& thisCursor : additionalCursors) {
@@ -196,7 +241,9 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
     std::shared_ptr<executor::TaskExecutor> taskExecutor,
     boost::optional<int64_t> userBatchSize,
     std::function<boost::optional<long long>()> calcDocsNeededFn,
-    std::unique_ptr<PlanYieldPolicy> yieldPolicy) {
+    std::unique_ptr<PlanYieldPolicy> yieldPolicy,
+    std::shared_ptr<DocumentSourceInternalSearchIdLookUp::SearchIdLookupMetrics>
+        searchIdLookupMetrics) {
     // UUID is required for mongot queries. If not present, no results for the query as the
     // collection has not been created yet.
     if (!expCtx->uuid) {
@@ -205,19 +252,16 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
 
     const auto& query = spec.getMongotQuery();
 
-    boost::optional<DocsNeededBounds> minDocsNeededBounds = spec.getMinDocsNeededBounds();
-    boost::optional<DocsNeededBounds> maxDocsNeededBounds = spec.getMaxDocsNeededBounds();
-
+    auto bounds = spec.getDocsNeededBounds();
     boost::optional<long long> batchSize = boost::none;
     // We should only use batchSize if the batchSize feature flag (featureFlagSearchBatchSizeTuning)
     // is enabled and we've already computed min/max bounds.
     if (feature_flags::gFeatureFlagSearchBatchSizeTuning.isEnabled(
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
-        minDocsNeededBounds.has_value() && maxDocsNeededBounds.has_value()) {
+        bounds.has_value()) {
         const auto storedSourceElem = query[kReturnStoredSourceArg];
         bool isStoredSource = !storedSourceElem.eoo() && storedSourceElem.Bool();
-        batchSize = computeInitialBatchSize(
-            expCtx, *minDocsNeededBounds, *maxDocsNeededBounds, userBatchSize, isStoredSource);
+        batchSize = computeInitialBatchSize(expCtx, *bounds, userBatchSize, isStoredSource);
     }
 
     boost::optional<long long> docsRequested = spec.getMongotDocsRequested().has_value()
@@ -235,17 +279,19 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
         calcDocsNeededFn = nullptr;
     } else {
         // If we're enabling the docsRequested option, min/max bounds can be set to the
-        // docsRequested value (either the extracted limit value, or boost::none).
-        minDocsNeededBounds = docsRequested;
-        maxDocsNeededBounds = docsRequested;
+        // docsRequested value.
+        if (docsRequested.has_value()) {
+            bounds = DocsNeededBounds(*docsRequested, *docsRequested);
+        }
     }
 
     auto getMoreStrategy = std::make_unique<executor::MongotTaskExecutorCursorGetMoreStrategy>(
         calcDocsNeededFn,
         batchSize,
-        minDocsNeededBounds.value_or(docs_needed_bounds::Unknown()),
-        maxDocsNeededBounds.value_or(docs_needed_bounds::Unknown()),
-        expCtx->ns.tenantId());
+        bounds.value_or(
+            DocsNeededBounds(docs_needed_bounds::Unknown(), docs_needed_bounds::Unknown())),
+        expCtx->ns.tenantId(),
+        searchIdLookupMetrics);
 
     // If it turns out that this stage is not running on a sharded collection, we don't want
     // to send the protocol version to mongot. If the protocol version is sent, mongot will

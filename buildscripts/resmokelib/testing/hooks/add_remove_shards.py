@@ -19,6 +19,9 @@ from buildscripts.resmokelib.testing.retry import (
     retryable_code_names as retryable_network_err_names,
 )
 
+# The possible number of seconds to wait before initiating a transition.
+TRANSITION_INTERVALS = [10]
+
 
 class ContinuousAddRemoveShard(interface.Hook):
     DESCRIPTION = (
@@ -39,6 +42,7 @@ class ContinuousAddRemoveShard(interface.Hook):
         transition_configsvr=False,
         add_remove_random_shards=False,
         move_primary_comment=None,
+        transition_intervals=TRANSITION_INTERVALS,
     ):
         interface.Hook.__init__(self, hook_logger, fixture, ContinuousAddRemoveShard.DESCRIPTION)
         self._fixture = fixture
@@ -48,6 +52,7 @@ class ContinuousAddRemoveShard(interface.Hook):
         self._transition_configsvr = transition_configsvr
         self._add_remove_random_shards = add_remove_random_shards
         self._move_primary_comment = move_primary_comment
+        self._transition_intervals = transition_intervals
 
     def before_suite(self, test_report):
         """Before suite."""
@@ -73,6 +78,7 @@ class ContinuousAddRemoveShard(interface.Hook):
             self._transition_configsvr,
             self._add_remove_random_shards,
             self._move_primary_comment,
+            self._transition_intervals,
         )
         self.logger.info("Starting the add/remove shard thread.")
         self._add_remove_thread.start()
@@ -99,8 +105,6 @@ class ContinuousAddRemoveShard(interface.Hook):
 class _AddRemoveShardThread(threading.Thread):
     CONFIG_SHARD = "config shard mode"
     DEDICATED = "dedicated config server mode"
-    # The possible number of seconds to wait before initiating a transition.
-    TRANSITION_INTERVALS = [0, 1, 1, 1, 1, 3, 5, 10]
     TRANSITION_TIMEOUT_SECS = float(900)  # 15 minutes
     # Error codes, taken from mongo/base/error_codes.yml.
     _NAMESPACE_NOT_FOUND = 26
@@ -132,6 +136,7 @@ class _AddRemoveShardThread(threading.Thread):
         transition_configsvr,
         add_remove_random_shards,
         move_primary_comment,
+        transition_intervals,
     ):
         threading.Thread.__init__(self, name="AddRemoveShardThread")
         self.logger = logger
@@ -142,6 +147,7 @@ class _AddRemoveShardThread(threading.Thread):
         self._transition_configsvr = transition_configsvr
         self._add_remove_random_shards = add_remove_random_shards
         self._move_primary_comment = move_primary_comment
+        self._transition_intervals = transition_intervals
         self._client = fixture_interface.build_client(self._fixture, self._auth_options)
         self._current_config_mode = self._current_fixture_mode()
         self._should_wait_for_balancer_round = False
@@ -189,7 +195,7 @@ class _AddRemoveShardThread(threading.Thread):
                 # Pick the shard to add/remove this round
                 shard_id, shard_host = self._pick_shard_to_add_remove()
 
-                wait_secs = random.choice(self.TRANSITION_INTERVALS)
+                wait_secs = random.choice(self._transition_intervals)
                 msg = (
                     "transition to dedicated."
                     if shard_id == "config"
@@ -218,7 +224,7 @@ class _AddRemoveShardThread(threading.Thread):
 
                 # Wait a random interval before transitioning back, unless the test already ended.
                 if not self.__lifecycle.poll_for_idle_request():
-                    wait_secs = random.choice(self.TRANSITION_INTERVALS)
+                    wait_secs = random.choice(self._transition_intervals)
                     msg = (
                         "transition to config shard."
                         if shard_id == "config"
@@ -357,7 +363,8 @@ class _AddRemoveShardThread(threading.Thread):
 
         while True:
             if time.time() - start_time > self.TRANSITION_TIMEOUT_SECS:
-                self.logger.error("Timed out waiting for removed shard to finish data clean up")
+                msg = "Timed out waiting for removed shard to finish data clean up"
+                self.logger.error(msg)
                 raise errors.ServerFailure(msg)
 
             direct_shard_conn = pymongo.MongoClient(shard_obj.get_driver_connection_url())
@@ -386,12 +393,15 @@ class _AddRemoveShardThread(threading.Thread):
                 time.sleep(1)
                 continue
 
-            if len(list(direct_shard_conn.config.rangeDeletions.find())) != 0:
+            # TODO SERVER-91474 Wait for ongoing transactions to finish on participants
+            if self._get_number_of_ongoing_transactions(direct_shard_conn) != 0:
                 self.logger.info(
-                    "Waiting for config.rangeDeletions to be empty before decomissioning."
+                    "Waiting for ongoing transactions to commit or abort before decomissioning."
                 )
                 time.sleep(1)
                 continue
+
+            # TODO SERVER-50144 Wait for config.rangeDeletions to be empty before decomissioning
 
             all_dbs = direct_shard_conn.admin.command({"listDatabases": 1})
             for db in all_dbs["databases"]:
@@ -407,6 +417,7 @@ class _AddRemoveShardThread(threading.Thread):
             break
 
         teardown_handler = fixture_interface.FixtureTeardownHandler(self.logger)
+        shard_obj.removeshard_teardown_marker = True
         teardown_handler.teardown(shard_obj, "shard")
         if not teardown_handler.was_successful():
             msg = "Error when decomissioning shard."
@@ -801,6 +812,24 @@ class _AddRemoveShardThread(threading.Thread):
 
     def _get_other_shard_id(self, shard_id):
         return self._get_other_shard_info(shard_id)["_id"]
+
+    def _get_number_of_ongoing_transactions(self, shard_conn):
+        res = list(
+            shard_conn.admin.aggregate(
+                [
+                    {
+                        "$currentOp": {
+                            "allUsers": True,
+                            "idleConnections": True,
+                            "idleSessions": True,
+                        }
+                    },
+                    {"$match": {"transaction": {"$exists": True}}},
+                    {"$count": "num_ongoing_txns"},
+                ]
+            )
+        )
+        return res[0]["num_ongoing_txns"] if res else 0
 
     def _run_post_remove_shard_checks(self, removed_shard_fixture, removed_shard_name):
         while True:
