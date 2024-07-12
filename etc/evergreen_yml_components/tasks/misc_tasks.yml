@@ -993,32 +993,31 @@ tasks:
             - "--binary-dir=./"
             - "lint-all"
 
-  # TODO SERVER-91492 make sbom.json compliant with the linter and turn on the linter
-  # - name: lint_sbom
-  #   tags:
-  #     [
-  #       "assigned_to_jira_team_devprod_correctness",
-  #       "development_critical_single_variant",
-  #       "lint",
-  #     ]
-  #   commands:
-  #   - command: timeout.update
-  #     params:
-  #       # 40 minutes
-  #       exec_timeout_secs: 2400
-  #   - func: "f_expansions_write"
-  #   - command: manifest.load
-  #   - func: "git get project and add git tag"
-  #   - func: "f_expansions_write"
-  #   - func: "kill processes"
-  #   - func: "cleanup environment"
-  #   - func: "set up venv"
-  #   - command: subprocess.exec
-  #     params:
-  #       binary: bash
-  #       args:
-  #       - "src/evergreen/run_python_script.sh"
-  #       - "buildscripts/sbom_linter.py"
+  - name: lint_sbom
+    tags:
+      [
+        "assigned_to_jira_team_devprod_correctness",
+        "development_critical_single_variant",
+        "lint",
+      ]
+    commands:
+      - command: timeout.update
+        params:
+          # 40 minutes
+          exec_timeout_secs: 2400
+      - func: "f_expansions_write"
+      - command: manifest.load
+      - func: "git get project and add git tag"
+      - func: "f_expansions_write"
+      - func: "kill processes"
+      - func: "cleanup environment"
+      - func: "set up venv"
+      - command: subprocess.exec
+        params:
+          binary: bash
+          args:
+            - "src/evergreen/run_python_script.sh"
+            - "buildscripts/sbom_linter.py"
 
   - name: lint_pylinters
     tags:
@@ -1106,10 +1105,7 @@ tasks:
         params:
           binary: bash
           args:
-            - "src/evergreen/run_python_script.sh"
-            - "buildscripts/monitor_build_status/cli.py"
-            - "--is-patch"
-            - "${is_patch}"
+            - "src/evergreen/monitor_build_status.sh"
           env:
             JIRA_AUTH_ACCESS_TOKEN: ${jira_auth_access_token}
             JIRA_AUTH_ACCESS_TOKEN_SECRET: ${jira_auth_access_token_secret}

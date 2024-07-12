@@ -1029,7 +1029,6 @@ env.Library(
         "s/sharding_migration_critical_section.cpp",
         "s/sharding_statistics.cpp",
         "s/sharding_write_router.cpp",
-        "s/transaction_coordinator_factory.cpp",
         "s/transaction_coordinator_worker_curop_repository.cpp",
         "transaction_resources.cpp",
     ],
@@ -3055,9 +3054,9 @@ env.Benchmark(
 )
 
 env.Benchmark(
-    target="service_entry_point_common_bm",
+    target="service_entry_point_shard_role_bm",
     source=[
-        "service_entry_point_common_bm.cpp",
+        "service_entry_point_shard_role_bm.cpp",
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/util/periodic_runner_factory",

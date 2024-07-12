@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2024-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,20 +27,31 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/shim.h"
-#include "mongo/db/s/transaction_coordinator_factory.h"
+#include "mongo/db/service_entry_point_bm_fixture.h"
+#include "mongo/s/service_entry_point_router_role.h"
 
 namespace mongo {
 
-void createTransactionCoordinator(OperationContext* opCtx,
-                                  TxnNumber clientTxnNumber,
-                                  boost::optional<TxnRetryCounter> txnRetryCounter) {
-    static auto w = MONGO_WEAK_FUNCTION_DEFINITION(createTransactionCoordinator);
-    w(opCtx, clientTxnNumber, txnRetryCounter);
+class ServiceEntryPointRouterRoleBenchmarkFixture : public ServiceEntryPointBenchmarkFixture {
+public:
+    void setServiceEntryPoint(ServiceContext* service) const override {
+        service->getService()->setServiceEntryPoint(
+            std::make_unique<ServiceEntryPointRouterRole>());
+    }
+};
+
+BENCHMARK_DEFINE_F(ServiceEntryPointRouterRoleBenchmarkFixture, BM_SEP_PING)
+(benchmark::State& state) {
+    runBenchmark(state, makePingCommand());
 }
+
+BENCHMARK_REGISTER_F(ServiceEntryPointRouterRoleBenchmarkFixture, BM_SEP_PING)
+    ->ThreadRange(1, kSEPBMMaxThreads);
+
+// Needed in the initializers chain, but we don't need its behavior. Make it no-op.
+MONGO_INITIALIZER_GENERAL(CoreOptions_Store,
+                          ("BeginStartupOptionStorage"),
+                          ("EndStartupOptionStorage"))
+(InitializerContext* context) {}
 
 }  // namespace mongo

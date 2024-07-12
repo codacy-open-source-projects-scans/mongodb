@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2024-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,43 +27,36 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
+#include <map>
+#include <vector>
 
-#include "mongo/base/shim.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/s/transaction_coordinator_service.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/transaction/transaction_participant_gen.h"
-#include "mongo/idl/mutable_observer_registry.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/time_support.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
 
 namespace mongo {
-namespace {
 
-void createTransactionCoordinatorImpl(OperationContext* opCtx,
-                                      TxnNumber clientTxnNumber,
-                                      boost::optional<TxnRetryCounter> clientTxnRetryCounter) {
-    auto clientLsid = opCtx->getLogicalSessionId().value();
-    auto clockSource = opCtx->getServiceContext()->getFastClockSource();
+/**
+ * Utility functions to get or set boolean flags from/to a storage engine options object
+ * (see `CollectionOptions::storageEngine`).
+ *
+ * The idea is that for exceptional (workaround) purposes, we can use the storage engine
+ * options object as a flexible structure where new fields can be added retroactively,
+ * unlike the other parts of the catalog which generally have non-flexible / strict validations.
+ * For more information, see: SERVER-91195, SERVER-92186.
+ */
 
-    // If this shard has been selected as the coordinator, set up the coordinator state
-    // to be ready to receive votes.
-    TransactionCoordinatorService::get(opCtx)->createCoordinator(
-        opCtx,
-        clientLsid,
-        {clientTxnNumber, clientTxnRetryCounter ? *clientTxnRetryCounter : 0},
-        clockSource->now() + Seconds(gTransactionLifetimeLimitSeconds.load()));
-}
+std::map<StringData, boost::optional<bool>> getFlagsFromStorageEngineBson(
+    const BSONObj& storageEngineOptions, const std::vector<StringData>& flagNames);
 
-auto createTransactionCoordinatorRegistration = MONGO_WEAK_FUNCTION_REGISTRATION(
-    createTransactionCoordinator, createTransactionCoordinatorImpl);
+boost::optional<bool> getFlagFromStorageEngineBson(const BSONObj& storageEngineOptions,
+                                                   StringData flagName);
 
-}  // namespace
+BSONObj setFlagsToStorageEngineBson(const BSONObj& storageEngineOptions,
+                                    const std::map<StringData, boost::optional<bool>>& flags);
+
+BSONObj setFlagToStorageEngineBson(const BSONObj& storageEngineOptions,
+                                   StringData flagName,
+                                   boost::optional<bool> flagValue);
+
 }  // namespace mongo

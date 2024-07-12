@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2024-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -27,17 +27,33 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "service_entry_point_bm_fixture.h"
 
-#include <boost/optional/optional.hpp>
-
-#include "mongo/db/operation_context.h"
-#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/service_entry_point_shard_role.h"
 
 namespace mongo {
 
-void createTransactionCoordinator(OperationContext* opCtx,
-                                  TxnNumber clientTxnNumber,
-                                  boost::optional<TxnRetryCounter> txnRetryCounter);
+class ServiceEntryPointShardRoleBenchmarkFixture : public ServiceEntryPointBenchmarkFixture {
+public:
+    void setServiceEntryPoint(ServiceContext* service) const override {
+        service->getService()->setServiceEntryPoint(std::make_unique<ServiceEntryPointShardRole>());
+    }
+
+    void setupImpl(ServiceContext* service) override {
+        auto replCoordMock = std::make_unique<repl::ReplicationCoordinatorMock>(service);
+        // Transition to primary so that the server can accept writes.
+        invariant(replCoordMock->setFollowerMode(repl::MemberState::RS_PRIMARY));
+        repl::ReplicationCoordinator::set(service, std::move(replCoordMock));
+    }
+};
+
+BENCHMARK_DEFINE_F(ServiceEntryPointShardRoleBenchmarkFixture, BM_SEP_PING)
+(benchmark::State& state) {
+    runBenchmark(state, makePingCommand());
+}
+
+BENCHMARK_REGISTER_F(ServiceEntryPointShardRoleBenchmarkFixture, BM_SEP_PING)
+    ->ThreadRange(1, kSEPBMMaxThreads);
 
 }  // namespace mongo

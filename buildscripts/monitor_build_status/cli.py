@@ -51,10 +51,12 @@ def iterable_to_jql(entries: Iterable[str]) -> str:
 
 
 JIRA_PROJECTS = {"Build Failures"}
-END_STATUSES = {"Closed", "Resolved"}
+END_STATUSES = {"Needs Triage", "Open", "In Progress", "Waiting for Bug Fix"}
+PRIORITIES = {"Blocker - P1", "Critical - P2", "Major - P3", "Minor - P4"}
 ACTIVE_BFS_QUERY = (
     f"project in ({iterable_to_jql(JIRA_PROJECTS)})"
-    f" AND status not in ({iterable_to_jql(END_STATUSES)})"
+    f" AND status in ({iterable_to_jql(END_STATUSES)})"
+    f" AND priority in ({iterable_to_jql(PRIORITIES)})"
 )
 
 
@@ -277,13 +279,9 @@ def main(
     branch: Annotated[
         str, typer.Option(help="Branch name that Evergreen projects track")
     ] = DEFAULT_BRANCH,
-    is_patch: Annotated[
-        str,
-        typer.Option(
-            help="Is this script being called from a patch build."
-            " This should align with the `is_patch` environment variable set within Evergreen"
-        ),
-    ] = "true",  # default to the more "quiet" setting
+    notify: Annotated[
+        bool, typer.Option(help="Whether to send slack notification with the results")
+    ] = False,  # default to the more "quiet" setting
 ) -> None:
     """
     Analyze Jira BFs count and Evergreen redness data.
@@ -312,14 +310,6 @@ def main(
     orchestrator = MonitorBuildStatusOrchestrator(
         jira_service=jira_service, evg_service=evg_service
     )
-
-    # Notify when this is not being run in a patch
-    # In Evergreen waterfall `is_patch` is undefined and here we should get an empty string
-    if len(is_patch) == 0:
-        is_patch = "false"
-    # Explicitly match "false" instead of not "true" (the default),
-    # so that developer iterations at the command line won't so easily spam the channel
-    notify = is_patch == "false"
 
     orchestrator.evaluate_build_redness(github_repo, branch, notify)
 

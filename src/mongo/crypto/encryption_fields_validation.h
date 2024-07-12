@@ -41,6 +41,9 @@ class EncryptedField;
 class EncryptedFieldConfig;
 class QueryTypeConfig;
 
+constexpr int kFLERangeSparsityDefault = 2;
+constexpr int kFLERangeTrimFactorDefault = 6;
+
 /*
  * Value: Value to attempt to coerce to field's type.
  * BSONType: Type of the field being queryed against.
