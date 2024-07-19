@@ -17,11 +17,6 @@ variables:
       - name: package_new_compile
         variant: amazon2-arm64-compile
 
-  - &amazon_linux2_arm64_openssl111_compile_variant_dependency
-    depends_on:
-      - name: package_new_compile
-        variant: amazon2-arm64-openssl111-compile
-
   - &amazon_linux2_x86_streams_compile_variant_dependency
     depends_on:
       - name: package_new_compile
@@ -855,6 +850,7 @@ buildvariants:
       - name: ycsb_rolling_restarts.2023-09
       - name: ycsb_non_retryable_writes_stepdowns.2023-09
       - name: ycsb_non_retryable_writes_rolling_restarts.2023-09
+      - name: ycsb-update_force_stepdowns.2023-09
       - name: linkbench_stepdowns
       - name: linkbench_rolling_restarts
       - name: linkbench_non_retryable_writes_stepdowns
