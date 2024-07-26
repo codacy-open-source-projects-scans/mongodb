@@ -1,0 +1,11 @@
+version: 1.0.0
+filters:
+  - "field_set*":
+    approvers:
+      - 10gen/query-execution
+  - "pcre*":
+    approvers:
+      - 10gen/query-execution
+  - "regex_util*":
+    approvers:
+      - 10gen/query-execution

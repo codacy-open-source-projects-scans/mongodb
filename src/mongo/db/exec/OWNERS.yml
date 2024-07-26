@@ -1,0 +1,14 @@
+version: 1.0.0
+filters:
+  - "*":
+    approvers:
+      - 10gen/query-execution
+  - "*timeseries*":
+    approvers:
+      - 10gen/query-integration
+  - "text_*":
+    approvers:
+      - 10gen/query-integration
+  - "geo_*":
+    approvers:
+      - 10gen/query-integration
