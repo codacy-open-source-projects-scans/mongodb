@@ -29,51 +29,74 @@
 
 #include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/catalog/index_catalog_impl.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/unittest/barrier.h"
 #include "mongo/util/time_support.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest;
 
 namespace mongo {
 namespace {
 
 using IndexCatalogImplTest = CatalogTestFixture;
 
-}
+}  // namespace
 
 TEST_F(IndexCatalogImplTest, IndexRebuildHandlesTransientEbusy) {
     const NamespaceString nss =
         NamespaceString::createNamespaceString_forTest("IndexCatalogImplTest.RebuildForRecovery");
     ASSERT_OK(storageInterface()->createCollection(operationContext(), nss, CollectionOptions()));
-    AutoGetCollection autoColl(operationContext(), nss, MODE_X);
-    WriteUnitOfWork wuow(operationContext());
-    auto collWriter = autoColl.getWritableCollection(operationContext());
 
-    // Ensure we have 1 in-progress index build.
-    IndexSpec spec;
-    spec.version(1).name("x_1").addKeys(BSON("x" << 1));
-    auto desc = IndexDescriptor(IndexNames::BTREE, spec.toBSON());
-    ASSERT_OK(collWriter->prepareForIndexBuild(operationContext(), &desc, boost::none, false));
-    IndexCatalogEntry* entry = collWriter->getIndexCatalog()->createIndexEntry(
-        operationContext(), collWriter, std::move(desc), CreateIndexEntryFlags::kNone);
-    ASSERT_FALSE(entry->isReady());
+    // Create an index which has not been built.
+    {
+        AutoGetCollection autoColl(operationContext(), nss, MODE_X);
+        WriteUnitOfWork wuow(operationContext());
+        auto collWriter = autoColl.getWritableCollection(operationContext());
+        IndexSpec spec;
+        spec.version(1).name("x_1").addKeys(BSON("x" << 1));
+        IndexDescriptor desc = IndexDescriptor(IndexNames::BTREE, spec.toBSON());
+        ASSERT_OK(collWriter->prepareForIndexBuild(operationContext(), &desc, boost::none, false));
+        collWriter->getIndexCatalog()->createIndexEntry(
+            operationContext(), collWriter, std::move(desc), CreateIndexEntryFlags::kNone);
+        wuow.commit();
+    }
 
     // Make the index's underlying table busy.
     //
     // In production there may be transient operations that cause this. In tests we simulate
-    // that with an open cursor that we close asynchronously with a delay.
-    std::unique_ptr<SortedDataInterface::Cursor> cursor =
-        entry->accessMethod()->asSortedData()->newCursor(operationContext());
-    stdx::thread async_close_cursor([&] {
-        sleepmillis(1);
-        cursor.reset();
+    // that with an open cursor on a concurrent thread that we close with a delay.
+    mongo::Service* service = operationContext()->getService();
+    unittest::Barrier initBarrier(2);  // Main and concurrent.
+    stdx::thread async_close_cursor([service, &nss, &initBarrier] {
+        ServiceContext::UniqueClient newClient = service->makeClient("PretendClient");
+        ServiceContext::UniqueOperationContext newOpCtx = newClient->makeOperationContext();
+        std::shared_ptr<const CollectionCatalog> latestCatalog =
+            CollectionCatalog::latest(newOpCtx.get());
+        const IndexCatalog* newIdxCatalog =
+            latestCatalog->lookupCollectionByNamespace(newOpCtx.get(), nss)->getIndexCatalog();
+        const IndexDescriptor* desc = newIdxCatalog->findIndexByName(
+            newOpCtx.get(), "x_1", IndexCatalog::InclusionPolicy::kUnfinished);
+        const IndexCatalogEntry* entry = newIdxCatalog->getEntry(desc);
+        std::unique_ptr<SortedDataInterface::Cursor> cursor =
+            entry->accessMethod()->asSortedData()->newCursor(newOpCtx.get());
+        initBarrier.countDownAndWait();
+        sleepmillis(3);
+        // The cursor goes out-of-scope here, allowing the retry to succeed.
     });
 
     // Start rebuilding the index while the underlying table is busy. It will become
     // not-busy asynchronously.
-    ASSERT_OK(collWriter->getIndexCatalog()->resetUnfinishedIndexForRecovery(
-        operationContext(), collWriter, entry));
+    {
+        AutoGetCollection autoColl(operationContext(), nss, MODE_X);
+        WriteUnitOfWork wuow(operationContext());
+        auto collWriter = autoColl.getWritableCollection(operationContext());
+        IndexCatalogEntry* entry = collWriter->getIndexCatalog()->getWritableEntryByName(
+            operationContext(), "x_1", IndexCatalog::InclusionPolicy::kUnfinished);
+        ASSERT_FALSE(entry->isReady());
+        initBarrier.countDownAndWait();
+        ASSERT_OK(collWriter->getIndexCatalog()->resetUnfinishedIndexForRecovery(
+            operationContext(), collWriter, entry));
+    }
 
     async_close_cursor.join();
 }

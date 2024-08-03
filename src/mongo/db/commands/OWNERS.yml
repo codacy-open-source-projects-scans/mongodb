@@ -1,14 +1,26 @@
 version: 1.0.0
 filters:
+  - "authentication_commands.*":
+    approvers:
+      - 10gen/server-security
+  - "cluster_server_parameter_cmds.idl":
+    approvers:
+      - 10gen/server-security
+  - "connection_status.*":
+    approvers:
+      - 10gen/server-security
   - "create_indexes*":
     approvers:
       - 10gen/server-storage-execution
+  - "fle2_*":
+    approvers:
+      - 10gen/server-security
   - "fsync*":
     approvers:
       - 10gen/server-storage-execution
-  - "profile*":
+  - "user_management_commands*":
     approvers:
-      - 10gen/query-integration
+      - 10gen/server-security
   - "search_*":
     approvers:
       - 10gen/query-integration
@@ -19,6 +31,24 @@ filters:
   - "vote*index_build*":
     approvers:
       - 10gen/server-storage-execution
+  - "rotate_certificates*":
+    approvers:
+      - 10gen/server-security
   - "profile*":
     approvers:
       - 10gen/query-execution
+  - "create*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "list*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "rename*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "set_cluster*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "set_profiling_filter_globally_cmd*":
+    approvers:
+      - 10gen/query-integration

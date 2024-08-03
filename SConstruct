@@ -1081,6 +1081,18 @@ env_vars.Add(
 )
 
 env_vars.Add(
+    "NON_CONF_CCFLAGS",
+    help="Sets flags for the C and C++ compiler that are not used in configure checks",
+    converter=variable_shlex_converter,
+)
+
+env_vars.Add(
+    "NON_CONF_LINKFLAGS",
+    help="Sets flags for the C and C++ linker that are not used in configure checks",
+    converter=variable_shlex_converter,
+)
+
+env_vars.Add(
     "ASFLAGS",
     help="Sets assembler specific flags",
     converter=variable_shlex_converter,
@@ -1822,6 +1834,25 @@ env.Append(
     LINKFLAGS_GENERATE_WERROR=create_werror_generator("$LINKFLAGS_WERROR"),
 )
 
+
+def non_conf_ccflags_gen(target, source, env, for_signature):
+    if "conftest" in str(target[0]):
+        return ""
+    return "$NON_CONF_CCFLAGS"
+
+
+def non_conf_linkflags_gen(target, source, env, for_signature):
+    if "conftest" in str(target[0]):
+        return ""
+    return "$NON_CONF_LINKFLAGS"
+
+
+env["_NON_CONF_CCFLAGS_GEN"] = non_conf_ccflags_gen
+env["_NON_CONF_LINKFLAGS_GEN"] = non_conf_linkflags_gen
+
+env.Append(CCFLAGS="$_NON_CONF_CCFLAGS_GEN")
+env.Append(LINKFLAGS="$_NON_CONF_LINKFLAGS_GEN")
+
 for var in ["CC", "CXX"]:
     if var not in env:
         continue
@@ -2125,9 +2156,7 @@ if env.TargetOSIs("posix"):
         env.Append(
             CCFLAGS_WERROR=["-Werror"],
             CXXFLAGS_WERROR=["-Werror=unused-result"] if env.ToolchainIs("clang") else [],
-            LINKFLAGS_WERROR=[
-                "-Wl,-fatal_warnings" if env.TargetOSIs("darwin") else "-Wl,--fatal-warnings"
-            ],
+            LINKFLAGS_WERROR=["-Wl,--fatal-warnings"] if not env.TargetOSIs("darwin") else [],
         )
 elif env.TargetOSIs("windows"):
     env.Append(CCFLAGS_WERROR=["/WX"])
@@ -3259,12 +3288,12 @@ if env.TargetOSIs("posix"):
     # SERVER-9761: Ensure early detection of missing symbols in dependent
     # libraries at program startup. For non-release dynamic builds we disable
     # this behavior in the interest of improved mongod startup times.
+
+    # Xcode15 removed bind_at_load functionality so we cannot have a selection for macosx here
+    # ld: warning: -bind_at_load is deprecated on macOS
     if has_option("release") or get_option("link-model") != "dynamic":
-        env.Append(
-            LINKFLAGS=[
-                "-Wl,-bind_at_load" if env.TargetOSIs("macOS") else "-Wl,-z,now",
-            ],
-        )
+        if not env.TargetOSIs("macOS"):
+            env.Append(LINKFLAGS=["-Wl,-z,now"])
 
     # We need to use rdynamic for backtraces with glibc unless we have libunwind.
     nordyn = env.TargetOSIs("darwin") or use_libunwind
@@ -3917,6 +3946,11 @@ def doConfigure(myenv):
         # will enforce that you don't use APIs from ZZZ.
         if env.TargetOSIs("darwin"):
             env.AddToCCFLAGSIfSupported("-Wunguarded-availability")
+            env.AddToCCFLAGSIfSupported("-Wno-enum-constexpr-conversion")
+            # TODO SERVER-54659 - ASIO depends on std::result_of which was removed in C++ 20
+            myenv.Append(CPPDEFINES=["ASIO_HAS_STD_INVOKE_RESULT"])
+            # This is needed to compile boost on the newer xcodes
+            myenv.Append(CPPDEFINES=["BOOST_NO_CXX98_FUNCTION_BASE"])
 
     if get_option("runtime-hardening") == "on":
         # Enable 'strong' stack protection preferentially, but fall back to 'all' if it is not
@@ -6533,7 +6567,6 @@ else:
         ],
         action="$PYTHON ${SOURCES[0]} --dirmode lint jstests/ src/mongo",
     )
-
 
 pylinters = env.Command(
     target="#lint-pylinters",

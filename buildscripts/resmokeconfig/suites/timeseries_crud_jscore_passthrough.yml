@@ -142,11 +142,11 @@ selector:
     - jstests/core/long_index_rename.js # rename
     - jstests/core/positional_projection_multiple_array_fields.js # $slice
     - jstests/core/query/elemmatch/**/*.js # $elemMatch
+    - jstests/core/query/plan_cache/elem_match_index_diff_types.js # $elemMatch
     - jstests/core/query/plan_cache/match_or_duplicate_predicate_plan_cache.js # locking
     - jstests/core/query/plan_cache/query_solution_hash.js # locking
     - jstests/core/sbe_plan_cache_autoparameterize_collscan.js # locking
     - jstests/core/slice1.js # $slice
-    - jstests/core/write/collection_truncate.js # emptycapped
     - jstests/core/write/find_and_modify/find_and_modify_server6865.js # $elemMatch
     # Time-series collections are views which don't support map-reduce
     - jstests/core/commands_namespace_parsing.js

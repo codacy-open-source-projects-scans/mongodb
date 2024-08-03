@@ -203,7 +203,6 @@ tasks:
         vars:
           targets: >-
             install-all
-            prove-unittests
             archive-all
           task_compile_flags: >-
             ICECC=
@@ -222,6 +221,16 @@ tasks:
           permissions: public-read
           content_type: application/gzip
           display_name: Binaries
+      - func: "scons compile"
+        vars:
+          targets: >-
+            prove-unittests
+          task_compile_flags: >-
+            ICECC=
+            CCACHE=
+            --build-profile=opt
+            --ninja=disabled
+            --keep-going
 
   # TODO(SERVER-82195): simplify this to avoid duplication of parameters in other tests.
   - name: compile_bazel_dist_test
@@ -858,11 +867,6 @@ tasks:
     commands:
       - func: "do scons setup"
       - func: "f_expansions_write"
-      - command: subprocess.exec
-        params:
-          binary: bash
-          args:
-            - "src/evergreen/libdeps_setup.sh"
 
       - func: "scons compile"
         vars:
@@ -871,6 +875,11 @@ tasks:
             --force-macos-dynamic-link
             --build-tools=next
           targets: generate-libdeps-graph
+      - command: subprocess.exec
+        params:
+          binary: bash
+          args:
+            - "src/evergreen/libdeps_setup.sh"
 
       - command: subprocess.exec
         params:

@@ -92,11 +92,11 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/query/bson/dotted_path_support.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
@@ -287,13 +287,6 @@ public:
     void run() override {
         ThreadClient tc(name(), getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
-        // This job is primary/secondary agnostic and doesn't write to WT, stepdown won't and
-        // shouldn't interrupt it, so keep it as unkillable.
-        {
-            stdx::lock_guard<Client> lk(*tc.get());
-            tc.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
-
         LOGV2_DEBUG(22303, 1, "starting {name} thread", "name"_attr = name());
 
         while (!_shuttingDown.load()) {
@@ -464,7 +457,7 @@ WiredTigerKVEngine::WiredTigerKVEngine(const std::string& canonicalName,
     if constexpr (kThreadSanitizerEnabled) {
         // TSAN builds may take longer for certain operations, increase or disable the relevant
         // timeouts.
-        ss << "cache_stuck_timeout_ms=600000,";
+        ss << "cache_stuck_timeout_ms=900000,";
         ss << "generation_drain_timeout_ms=0,";
     }
     if (TestingProctor::instance().isEnabled()) {

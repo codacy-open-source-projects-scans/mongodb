@@ -187,7 +187,6 @@ void abortIndexBuilds(OperationContext* opCtx,
                commandType == OplogEntry::CommandType::kDropIndexes ||
                commandType == OplogEntry::CommandType::kDeleteIndexes ||
                commandType == OplogEntry::CommandType::kCollMod ||
-               commandType == OplogEntry::CommandType::kEmptyCapped ||
                commandType == OplogEntry::CommandType::kRenameCollection) {
         const boost::optional<UUID> collUUID =
             CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, nss);
@@ -983,8 +982,13 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
               opCtx, applicationMode, swOplogEntry.getValue());
           return Status::OK();
       },
+      // These index related error codes needs to be ignored during initial sync because these
+      // indexes can already be cloned during initial sync database cloning and the oplogs become
+      // no-op. During steady state, since DDL oplogs are applied in serial, we should never see
+      // these errors.
       {ErrorCodes::IndexAlreadyExists,
        ErrorCodes::IndexBuildAlreadyInProgress,
+       ErrorCodes::IndexKeySpecsConflict,
        ErrorCodes::NamespaceNotFound}}},
     {"commitIndexBuild",
      {[](OperationContext* opCtx, const ApplierOperation& op, OplogApplication::Mode mode)
@@ -1153,15 +1157,6 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
                           extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd),
                           cmd["size"].safeNumberLong());
           return Status::OK();
-      },
-      {ErrorCodes::NamespaceNotFound}}},
-    {"emptycapped",
-     {[](OperationContext* opCtx, const ApplierOperation& op, OplogApplication::Mode mode)
-          -> Status {
-          const auto& entry = *op;
-          return emptyCapped(
-              opCtx,
-              extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), entry.getObject()));
       },
       {ErrorCodes::NamespaceNotFound}}},
     {"commitTransaction",
