@@ -1,6 +1,7 @@
 # Common mongo-specific bazel build rules intended to be used in individual BUILD files in the "src/" subtree.
 load("@poetry//:dependencies.bzl", "dependency")
 load("//bazel:separate_debug.bzl", "CC_SHARED_LIBRARY_SUFFIX", "SHARED_ARCHIVE_SUFFIX", "WITH_DEBUG_SUFFIX", "extract_debuginfo", "extract_debuginfo_binary")
+load("//bazel:header_deps.bzl", "HEADER_DEP_SUFFIX", "create_header_dep")
 
 # https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library?view=msvc-170
 #   /MD defines _MT and _DLL and links in MSVCRT.lib into each .obj file
@@ -307,6 +308,8 @@ MACOS_DEFINES = select({
         # TODO SERVER-54659 - ASIO depends on std::result_of which was removed in C++ 20
         # xcode15 does not have backwards compatibility
         "ASIO_HAS_STD_INVOKE_RESULT",
+        # This is needed to compile boost on the newer xcodes
+        "BOOST_NO_CXX98_FUNCTION_BASE",
     ],
     "//conditions:default": [],
 })
@@ -447,10 +450,6 @@ GCC_OR_CLANG_WARNINGS_COPTS = select({
         # This warning was added in Apple clang version 11 and flags many explicitly defaulted move
         # constructors and assignment operators for being implicitly deleted, which is not useful.
         "-Wno-defaulted-function-deleted",
-
-        # This may have compatibility issues since it was disabled conditionally on a compile check in
-        # the SCons implementation. Disable if this is causing issues.
-        "-Wnon-virtual-dtor",
     ],
     "//conditions:default": [],
 })
@@ -1059,8 +1058,23 @@ THIN_LTO_FLAGS = select({
 MONGO_GLOBAL_INCLUDE_DIRECTORIES = [
     "-Isrc",
     "-I$(GENDIR)/src",
-    "-Isrc/third_party/boost",
     "-Isrc/third_party/immer/dist",
+    "-Isrc/third_party/SafeInt",
+]
+
+MONGO_GLOBAL_ACCESSIBLE_HEADERS = [
+    "//src/third_party/immer:headers",
+    "//src/third_party/SafeInt:headers",
+]
+
+MONGO_GLOBAL_SRC_DEPS = [
+    "//src/third_party/abseil-cpp:absl_base",
+    "//src/third_party/boost:boost_system",
+    "//src/third_party/croaring:croaring",
+    "//src/third_party/fmt:fmt",
+    "//src/third_party/libstemmer_c:stemmer",
+    "//src/third_party/murmurhash3:murmurhash3",
+    "//src/third_party/tomcrypt-1.18.2:tomcrypt",
 ]
 
 MONGO_GLOBAL_DEFINES = DEBUG_DEFINES + LIBCXX_DEFINES + ADDRESS_SANITIZER_DEFINES + \
@@ -1084,8 +1098,6 @@ MONGO_GLOBAL_LINKFLAGS = MEMORY_SANITIZER_LINKFLAGS + ADDRESS_SANITIZER_LINKFLAG
                          EXTRA_GLOBAL_LIBS_LINKFLAGS + ANY_SANITIZER_AVAILABLE_LINKFLAGS + ANY_SANITIZER_GCC_LINKFLAGS + \
                          GCC_OR_CLANG_LINKFLAGS + COMPRESS_DEBUG_LINKFLAGS + DEDUPE_SYMBOL_LINKFLAGS + \
                          DEBUG_TYPES_SECTION_FLAGS + DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS + THIN_LTO_FLAGS
-
-MONGO_GLOBAL_ACCESSIBLE_HEADERS = ["//src/third_party/boost:headers", "//src/third_party/immer:headers"]
 
 MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES
 
@@ -1174,6 +1186,7 @@ def mongo_cc_library(
         srcs = [],
         hdrs = [],
         deps = [],
+        header_deps = [],
         testonly = False,
         visibility = None,
         data = [],
@@ -1197,6 +1210,7 @@ def mongo_cc_library(
       srcs: The source files to build.
       hdrs: The headers files of the target library.
       deps: The targets the library depends on.
+      header_deps: The targets the library depends on only for headers, omits linking.
       testonly: Whether or not the target is purely for tests.
       visibility: The visibility of the target library.
       data: Data targets the library depends on.
@@ -1231,6 +1245,8 @@ def mongo_cc_library(
 
     if native.package_name().startswith("src/mongo"):
         hdrs = hdrs + ["//src/mongo:mongo_config_header"]
+        if name != "boost_assert_shim":
+            deps += MONGO_GLOBAL_SRC_DEPS
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
@@ -1267,12 +1283,17 @@ def mongo_cc_library(
         "//bazel/config:macos_aarch64": macos_rpath_flags,
     })
 
+    create_header_dep(
+        name = name + HEADER_DEP_SUFFIX,
+        header_deps = header_deps,
+    )
+
     # Create a cc_library entry to generate a shared archive of the target.
     native.cc_library(
         name = name + SHARED_ARCHIVE_SUFFIX,
         srcs = srcs + SANITIZER_DENYLIST_HEADERS,
         hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
-        deps = deps,
+        deps = deps + [name + HEADER_DEP_SUFFIX],
         visibility = visibility,
         testonly = testonly,
         copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
@@ -1295,7 +1316,7 @@ def mongo_cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs + SANITIZER_DENYLIST_HEADERS,
         hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
-        deps = deps,
+        deps = deps + [name + HEADER_DEP_SUFFIX],
         visibility = visibility,
         testonly = testonly,
         copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
@@ -1345,13 +1366,14 @@ def mongo_cc_library(
             "//bazel/config:shared_archive_enabled": ":" + name + SHARED_ARCHIVE_SUFFIX,
             "//conditions:default": None,
         }),
-        deps = deps,
+        deps = deps + [name + HEADER_DEP_SUFFIX],
     )
 
 def mongo_cc_binary(
         name,
         srcs = [],
         deps = [],
+        header_deps = [],
         testonly = False,
         visibility = None,
         data = [],
@@ -1371,6 +1393,7 @@ def mongo_cc_binary(
       name: The name of the library the target is compiling.
       srcs: The source files to build.
       deps: The targets the library depends on.
+      header_deps: The targets the library depends on only for headers, omits linking.
       testonly: Whether or not the target is purely for tests.
       visibility: The visibility of the target library.
       data: Data targets the library depends on.
@@ -1394,6 +1417,7 @@ def mongo_cc_binary(
 
     if native.package_name().startswith("src/mongo"):
         srcs = srcs + ["//src/mongo:mongo_config_header"]
+        deps += MONGO_GLOBAL_SRC_DEPS
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
@@ -1415,10 +1439,15 @@ def mongo_cc_binary(
         "//bazel/config:macos_aarch64": macos_rpath_flags,
     })
 
+    create_header_dep(
+        name = name + HEADER_DEP_SUFFIX,
+        header_deps = header_deps,
+    )
+
     native.cc_binary(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS + SANITIZER_DENYLIST_HEADERS,
-        deps = all_deps,
+        deps = all_deps + [name + HEADER_DEP_SUFFIX],
         visibility = visibility,
         testonly = testonly,
         copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,

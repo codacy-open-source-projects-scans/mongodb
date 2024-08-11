@@ -1,0 +1,70 @@
+load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(
+    glob([
+        "*.h",
+        "*.cpp",
+    ]),
+)
+
+mongo_cc_library(
+    name = "cluster_auth_mode",
+    srcs = [
+        "cluster_auth_mode.cpp",
+    ],
+    hdrs = [
+        "cluster_auth_mode.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+    ],
+)
+
+idl_generator(
+    name = "action_type_gen",
+    src = "action_type.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+idl_generator(
+    name = "access_checks_gen",
+    src = "access_checks.idl",
+)
+
+idl_generator(
+    name = "auth_types_gen",
+    src = "auth_types.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+idl_generator(
+    name = "parsed_privilege_gen",
+    src = "parsed_privilege.idl",
+    deps = [
+        ":auth_types_gen",
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+idl_generator(
+    name = "address_restriction_gen",
+    src = "address_restriction.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+idl_generator(
+    name = "user_management_commands_parser_gen",
+    src = "user_management_commands_parser.idl",
+    deps = [
+        ":auth_types_gen",
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
