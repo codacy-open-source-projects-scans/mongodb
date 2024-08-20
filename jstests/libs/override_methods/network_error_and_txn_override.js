@@ -1012,7 +1012,7 @@ function shouldRetryTxnOnException(cmdName, cmdObj, exception) {
 // Note that a transaction may fail and be retried up to this many times on
 // each call to runCommand, for a total number of retries on the order of
 // maxOpsInTransaction * kMaxNumTxnErrorRetries.
-const kMaxNumTxnErrorRetries = 5;
+const kMaxNumTxnErrorRetries = TestData.overrideRetryAttempts || 5;
 const kMaxTxnRetryTimeout = 5 * 60 * 1000;
 
 function txnRetryOverrideBody(conn, dbName, cmdName, cmdObj, lsid, clientFunction, makeFuncArgs) {
@@ -1115,9 +1115,11 @@ function txnRunCommandOverride(conn, dbName, cmdName, cmdObj, clientFunction, ma
             // so pass it down to the next override directly.
             const res = clientFunction.apply(conn, makeFuncArgs(cmdObj));
 
-            logMsgFull(
-                "Txn override passthrough got response",
-                `res: ${tojsononeline(res)}, cmdName: ${cmdName} cmd: ${tojsononeline(cmdObj)}`);
+            if (!isSuccess(res)) {
+                logMsgFull("Txn override passthrough got error response",
+                           `res: ${tojsononeline(res)}, cmdName: ${cmdName} cmd: ${
+                               tojsononeline(cmdObj)}`);
+            }
             // Record non-transaction agg cursor IDs so subsequent getMores for this cursor
             // can also avoid being forced into an ongoing transaction.
             if (isSuccess(res) && TransactionsUtil.commandIsNonTxnAggregation(cmdName, cmdObj)) {
@@ -1132,11 +1134,11 @@ function txnRunCommandOverride(conn, dbName, cmdName, cmdObj, clientFunction, ma
     try {
         if (!configuredForTxnOverride()) {
             // Not currently enabled - but tests can change this at runtime, so it must be
-            // checked for each operation.
-            logMsgFull(
-                "Txn override not enabled",
-                `Will not apply override to cmdName: ${cmdName} cmd: ${tojsononeline(cmdObj)}`);
-            return passthrough();
+            // checked for each operation. It is down to the test to ensure changing the config is
+            // valid.
+            // No logging is performed on this path; tests with the override loaded but not
+            // enabled should not suffer performance hits from the logging.
+            return clientFunction.apply(conn, makeFuncArgs(cmdObj));
         }
 
         // Record this operation, starting a new transaction if not currently in one.
@@ -1236,6 +1238,10 @@ if (configuredForTxnOverride()) {
             "startParallelShell()");
     };
 }
+
+print(`${kLogPrefix} network_error_and_txn_override.js :: configuredForNetworkRetry:${
+    Boolean(configuredForNetworkRetry())}, configuredForTxnOverride:${
+    Boolean(configuredForTxnOverride())}`);
 
 OverrideHelpers.overrideRunCommand(networkRunCommandOverride);
 OverrideHelpers.overrideRunCommand(txnRunCommandOverride);

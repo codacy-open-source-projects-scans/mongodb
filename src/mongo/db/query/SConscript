@@ -10,12 +10,12 @@ Import(
 env = env.Clone()
 
 env.SConscript(
+    must_exist=1,
     dirs=[
         "boolean_simplification",
         "bson",
         "ce",
         "collation",
-        "cost_model",
         "datetime",
         "optimizer",
         "plan_cache",
@@ -72,7 +72,7 @@ env.Library(
 env.Library(
     target="query_planner",
     source=[
-        "expression_index_knobs.idl",
+        "expression_index_knobs_gen.cpp",
         "expression_index.cpp",
         "index_bounds_builder.cpp",
         "interval_evaluation_tree.cpp",
@@ -242,13 +242,13 @@ env.Library(
 env.Library(
     target="command_request_response",
     source=[
-        "analyze_command.idl",
+        "analyze_command_gen.cpp",
         "count_command_as_aggregation_command.cpp",
-        "count_command.idl",
+        "count_command_gen.cpp",
         "count_request.cpp",
         "cursor_request.cpp",
         "cursor_response.cpp",
-        "kill_cursors.idl",
+        "kill_cursors_gen.cpp",
         "view_response_formatter.cpp",
     ],
     LIBDEPS=[
@@ -272,7 +272,7 @@ env.Library(
     source=[
         "distinct_command_gen.cpp",
         "find_command_gen.cpp",
-        "getmore_command.idl",
+        "getmore_command_gen.cpp",
         "query_request_helper.cpp",
         "tailable_mode.cpp",
         "tailable_mode_gen.cpp",
@@ -300,7 +300,6 @@ env.Library(
     target="query_knobs",
     source=[
         "ce_mode_parameter.cpp",
-        "cost_model/cost_model_on_update.cpp",
         "explain_version_validator.cpp",
         "framework_control.cpp",
         "query_feature_flags_gen.cpp",
@@ -357,17 +356,6 @@ env.Library(
 )
 
 env.Library(
-    target="hint_parser",
-    source=[
-        "hint_parser.cpp",
-        "hint_gen.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
-)
-
-env.Library(
     target="sort_pattern",
     source=[
         "sort_pattern.cpp",
@@ -376,16 +364,6 @@ env.Library(
         "$BUILD_DIR/mongo/base",
         "$BUILD_DIR/mongo/db/exec/document_value/document_value",
         "$BUILD_DIR/mongo/db/query_expressions",
-    ],
-)
-
-env.Library(
-    target="str_trim_utils",
-    source=[
-        "str_trim_utils.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
     ],
 )
 

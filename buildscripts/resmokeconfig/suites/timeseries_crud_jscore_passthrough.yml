@@ -142,6 +142,7 @@ selector:
     - jstests/core/long_index_rename.js # rename
     - jstests/core/positional_projection_multiple_array_fields.js # $slice
     - jstests/core/query/elemmatch/**/*.js # $elemMatch
+    - jstests/core/query/plan_cache/elem_match_index_diff_types.js # $elemMatch
     - jstests/core/query/plan_cache/match_or_duplicate_predicate_plan_cache.js # locking
     - jstests/core/query/plan_cache/query_solution_hash.js # locking
     - jstests/core/sbe_plan_cache_autoparameterize_collscan.js # locking
@@ -270,6 +271,8 @@ selector:
     - jstests/core/write/bypass_empty_ts_replacement_timeseries.js
     # Assumes collection options do not change
     - jstests/core/rename_system_buckets_collections.js
+    # Inserts documents that are too large for a timeseries collection.
+    - jstests/core/query/bson_size_limit.js
 
   exclude_with_any_tags:
     - requires_sharding

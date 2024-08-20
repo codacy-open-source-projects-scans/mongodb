@@ -178,14 +178,6 @@ tasks:
           use_large_distro: "true"
 
   - <<: *gen_task_template
-    name: bulk_write_sharded_causally_consistent_jscore_passthrough_gen
-    tags: ["assigned_to_jira_team_server_repl", "default", "bulk_write"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
     name: bulk_write_sharded_collections_jscore_passthrough_gen
     tags: ["assigned_to_jira_team_server_repl", "default", "bulk_write"]
     commands:
@@ -229,15 +221,6 @@ tasks:
     commands:
       - func: "generate resmoke tasks"
         vars:
-          resmoke_jobs_max: 1
-
-  - <<: *gen_task_template
-    name: concurrency_sharded_replication_bulk_write_gen
-    tags: ["assigned_to_jira_team_server_repl", "default", "bulk_write"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
           resmoke_jobs_max: 1
 
   - <<: *gen_task_template
@@ -1863,12 +1846,14 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_execution",
-        "default",
+        "concurrency",
         "config_fuzzer",
+        "default",
         "large",
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1888,6 +1873,7 @@ tasks:
         "config_fuzzer",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
         "incompatible_mac",
         "incompatible_ppc",
         "incompatible_s390x",
@@ -1915,13 +1901,15 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_execution",
-        "default",
+        "concurrency",
         "config_fuzzer",
+        "default",
         "large",
         "sharded",
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1940,12 +1928,14 @@ tasks:
     tags:
       [
         "assigned_to_jira_team_server_execution",
-        "default",
+        "concurrency",
         "config_fuzzer",
+        "default",
         "large",
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1959,7 +1949,13 @@ tasks:
 
   - <<: *task_template
     name: config_fuzzer_jsCore
-    tags: ["assigned_to_jira_team_server_execution", "default", "config_fuzzer"]
+    tags:
+      [
+        "assigned_to_jira_team_server_execution",
+        "default",
+        "config_fuzzer",
+        "incompatible_inmemory",
+      ]
     commands:
       - func: "do setup"
       - func: "run tests"
@@ -1981,6 +1977,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2003,6 +2000,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2027,15 +2025,19 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
       ]
     commands:
       - func: "generate resmoke tasks"
         vars:
           suite: simulate_crash_concurrency_replication
+          # We disable encryption fuzzing because it increases the runtime of this task
+          # significantly (over 5x in testing). It does not cause correctness issues.
           resmoke_args: >-
             --fuzzMongodConfigs=normal
             --fuzzRuntimeParams
             --excludeWithAnyTags=does_not_support_config_fuzzer
+            --disableEncryptionFuzzing
           use_large_distro: "true"
 
   - <<: *gen_task_template

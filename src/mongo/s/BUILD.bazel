@@ -171,3 +171,57 @@ idl_generator(
     name = "mongos_options_gen",
     src = "mongos_options.idl",
 )
+
+idl_generator(
+    name = "database_version_gen",
+    src = "database_version.idl",
+    deps = [
+        ":database_version_base_gen",
+    ],
+)
+
+idl_generator(
+    name = "index_version_gen",
+    src = "index_version.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+idl_generator(
+    name = "shard_version_gen",
+    src = "shard_version.idl",
+    deps = [
+        ":chunk_version_gen",
+        ":index_version_gen",
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+idl_generator(
+    name = "chunk_range_gen",
+    src = "chunk_range.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+mongo_cc_library(
+    name = "resource_yielders",
+    srcs = [
+        "resource_yielders.cpp",
+    ],
+    hdrs = [
+        "//src/mongo/db/transaction:transaction_participant_resource_yielder.h",
+        "//src/mongo/s:resource_yielders.h",
+        "//src/mongo/s:transaction_router_resource_yielder.h",
+    ],
+    header_deps = [
+        "//src/mongo/db/pipeline/process_interface:mongo_process_interface",
+        "//src/mongo/executor:async_rpc_error_info",
+        "//src/mongo/idl:idl_parser",
+    ],
+    deps = [
+        "//src/mongo:base",
+    ],
+)

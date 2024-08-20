@@ -1,7 +1,7 @@
 # Common mongo-specific bazel build rules intended to be used in individual BUILD files in the "src/" subtree.
 load("@poetry//:dependencies.bzl", "dependency")
 load("//bazel:separate_debug.bzl", "CC_SHARED_LIBRARY_SUFFIX", "SHARED_ARCHIVE_SUFFIX", "WITH_DEBUG_SUFFIX", "extract_debuginfo", "extract_debuginfo_binary")
-load("//bazel:header_deps.bzl", "HEADER_DEP_SUFFIX", "create_header_dep")
+load("//bazel:header_deps.bzl", "HEADER_DEP_SUFFIX", "LINK_DEP_SUFFIX", "create_header_dep", "create_link_deps")
 
 # https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library?view=msvc-170
 #   /MD defines _MT and _DLL and links in MSVCRT.lib into each .obj file
@@ -82,6 +82,9 @@ WINDOWS_GENERAL_COPTS = select({
 
         # Don't send error reports in case of internal compiler error
         "/errorReport:none",
+
+        # Generate debug info into the object files
+        "/Z7",
     ],
     "//conditions:default": [],
 })
@@ -1060,6 +1063,7 @@ MONGO_GLOBAL_INCLUDE_DIRECTORIES = [
     "-I$(GENDIR)/src",
     "-Isrc/third_party/immer/dist",
     "-Isrc/third_party/SafeInt",
+    "-Isrc/mongo/db/modules/enterprise/src",
 ]
 
 MONGO_GLOBAL_ACCESSIBLE_HEADERS = [
@@ -1288,6 +1292,15 @@ def mongo_cc_library(
         header_deps = header_deps,
     )
 
+    create_link_deps(
+        name = name + LINK_DEP_SUFFIX,
+        link_deps = [name] + deps,
+        target_compatible_with = select({
+            "//bazel/config:scons_query_enabled": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }) + target_compatible_with,
+    )
+
     # Create a cc_library entry to generate a shared archive of the target.
     native.cc_library(
         name = name + SHARED_ARCHIVE_SUFFIX,
@@ -1350,6 +1363,10 @@ def mongo_cc_library(
             "//conditions:default": ["@platforms//:incompatible"],
         }) + target_compatible_with,
         dynamic_deps = deps,
+        features = select({
+            "@platforms//os:windows": ["generate_pdb_file"],
+            "//conditions:default": [],
+        }),
         additional_linker_inputs = additional_linker_inputs,
     )
 
@@ -1357,6 +1374,7 @@ def mongo_cc_library(
         name = name,
         binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
         type = "library",
+        tags = tags,
         enabled = SEPARATE_DEBUG_ENABLED,
         cc_shared_library = select({
             "//bazel/config:linkstatic_disabled": ":" + name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX,
@@ -1458,7 +1476,10 @@ def mongo_cc_binary(
         local_defines = MONGO_GLOBAL_DEFINES + local_defines,
         defines = defines,
         includes = includes,
-        features = MONGO_GLOBAL_FEATURES + ["pie"] + features,
+        features = MONGO_GLOBAL_FEATURES + ["pie"] + features + select({
+            "@platforms//os:windows": ["generate_pdb_file"],
+            "//conditions:default": [],
+        }),
         dynamic_deps = select({
             "//bazel/config:linkstatic_disabled": deps,
             "//conditions:default": [],
@@ -1471,6 +1492,7 @@ def mongo_cc_binary(
         name = name,
         binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
         type = "program",
+        tags = tags,
         enabled = SEPARATE_DEBUG_ENABLED,
         deps = all_deps,
     )
@@ -1478,6 +1500,7 @@ def mongo_cc_binary(
 IdlInfo = provider(
     fields = {
         "idl_deps": "depset of idl files",
+        "header_output": "header output of the idl",
     },
 )
 
@@ -1489,6 +1512,7 @@ def idl_generator_impl(ctx):
     python = ctx.toolchains["@bazel_tools//tools/python:toolchain_type"].py3_runtime
     idlc_path = ctx.attr.idlc.files.to_list()[0].path
     dep_depsets = [dep[IdlInfo].idl_deps for dep in ctx.attr.deps]
+    transitive_header_outputs = [dep[IdlInfo].header_output for dep in ctx.attr.deps]
 
     # collect deps from python modules and setup the corresponding
     # path so all modules can be found by the toolchain.
@@ -1505,14 +1529,16 @@ def idl_generator_impl(ctx):
         python.files,
     ] + dep_depsets + py_depsets)
 
+    include_directives = ["--include", "src"]
+    if "src/mongo/db/modules/enterprise/src" in ctx.attr.src.files.to_list()[0].path:
+        include_directives += ["--include", "src/mongo/db/modules/enterprise/src"]
+
     ctx.actions.run(
         executable = python.interpreter.path,
         outputs = [gen_source, gen_header],
         inputs = inputs,
         arguments = [
             "buildscripts/idl/idlc.py",
-            "--include",
-            "src",
             "--base_dir",
             ctx.bin_dir.path + "/src",
             "--target_arch",
@@ -1522,17 +1548,18 @@ def idl_generator_impl(ctx):
             "--output",
             gen_source.path,
             ctx.attr.src.files.to_list()[0].path,
-        ],
+        ] + include_directives,
         mnemonic = "IdlcGenerator",
         env = {"PYTHONPATH": ctx.configuration.host_path_separator.join(python_path)},
     )
 
     return [
         DefaultInfo(
-            files = depset([gen_source, gen_header]),
+            files = depset([gen_source, gen_header], transitive = [depset(transitive_header_outputs)]),
         ),
         IdlInfo(
             idl_deps = depset(ctx.attr.src.files.to_list(), transitive = [dep[IdlInfo].idl_deps for dep in ctx.attr.deps]),
+            header_output = gen_header,
         ),
     ]
 
@@ -1563,13 +1590,12 @@ idl_generator = rule(
 )
 
 def symlink_impl(ctx):
-    output = ctx.actions.declare_file(ctx.bin_dir.path + "/" + ctx.attr.output.files.to_list()[0].path)
     ctx.actions.symlink(
-        output = output,
+        output = ctx.outputs.output,
         target_file = ctx.attr.input.files.to_list()[0],
     )
 
-    return [DefaultInfo(files = depset([output]))]
+    return [DefaultInfo(files = depset([ctx.outputs.output]))]
 
 symlink = rule(
     symlink_impl,
@@ -1578,9 +1604,8 @@ symlink = rule(
             doc = "The File that the output symlink will point to.",
             allow_single_file = True,
         ),
-        "output": attr.label(
+        "output": attr.output(
             doc = "The output of this rule.",
-            allow_single_file = True,
         ),
     },
 )

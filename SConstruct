@@ -18,6 +18,7 @@ import textwrap
 import threading
 import time
 import uuid
+import warnings
 from datetime import datetime
 from glob import glob
 
@@ -71,6 +72,11 @@ atexit.register(mongo.print_build_failures)
 # (https://github.com/SCons/scons/issues/4187). Upon a future upgrade to SCons
 # that incorporates #4187, we should replace this solution with that.
 _parser = SCons.Script.SConsOptions.Parser("")
+
+# TODO：SERVER-93552： Bumping pymongo to the new version
+warnings.filterwarnings(
+    "ignore", message="Properties that return a naïve datetime", category=UserWarning
+)
 
 
 def add_option(name, **kwargs):
@@ -939,8 +945,6 @@ def variable_tools_converter(val):
     return tool_list + [
         "distsrc",
         "gziptool",
-        "idl_tool",
-        "jsheader",
         "mongo_test_execution",
         "mongo_test_list",
         "mongo_benchmark",
@@ -2303,7 +2307,6 @@ env["BUILDERS"]["SharedArchive"] = SCons.Builder.Builder(
 
 # Teach object builders how to build underlying generated types
 for builder in ["SharedObject", "StaticObject"]:
-    env["BUILDERS"][builder].add_src_builder("Idlc")
     env["BUILDERS"][builder].add_src_builder("Protoc")
 
 
@@ -4692,7 +4695,7 @@ def doConfigure(myenv):
             ) or not myenv.AddToLINKFLAGSIfSupported("-flto=thin"):
                 myenv.ConfError("Failed to enable thin LTO")
 
-        if linker_ld != "gold" and not env.TargetOSIs("darwin", "macOS"):
+        if linker_ld != "gold" and not env.TargetOSIs("darwin", "macOS") and optBuild != "off":
             if has_option("pgo"):
                 print("WARNING: skipping symbol ordering as pgo is enabled")
             else:
@@ -5536,7 +5539,14 @@ if get_option("ninja") != "disabled":
         dependencies = env.Flatten(
             [
                 "SConstruct",
+                "WORKSPACE.bazel",
+                "BUILD.bazel",
+                ".bazelrc",
+                ".bazelignore",
                 glob(os.path.join("src", "**", "SConscript"), recursive=True),
+                glob(os.path.join("src", "**", "BUILD.bazel"), recursive=True),
+                glob(os.path.join("buildscripts", "**", "*.py"), recursive=True),
+                glob(os.path.join("bazel", "**", "*.bzl"), recursive=True),
                 glob(os.path.join(os.path.expanduser("~/.scons/"), "**", "*.py"), recursive=True),
                 glob(os.path.join("site_scons", "**", "*.py"), recursive=True),
                 glob(os.path.join("buildscripts", "**", "*.py"), recursive=True),
@@ -5671,32 +5681,6 @@ if get_option("ninja") != "disabled":
         base_emitter = builder.emitter
         new_emitter = SCons.Builder.ListEmitter([base_emitter, winlink_workaround_emitter])
         builder.emitter = new_emitter
-
-    # idlc.py has the ability to print its implicit dependencies
-    # while generating. Ninja can consume these prints using the
-    # deps=msvc method.
-    env.AppendUnique(
-        IDLCFLAGS=[
-            "--write-dependencies-inline",
-        ]
-    )
-    env.NinjaRule(
-        rule="IDLC",
-        command="cmd /c $cmd" if env.TargetOSIs("windows") else "$cmd",
-        description="Generated $out",
-        deps="msvc",
-        pool="local_pool",
-    )
-
-    def get_idlc_command(env, node, action, targets, sources, executor=None):
-        _, variables, _ = env.NinjaGetGenericShellCommand(
-            node, action, targets, sources, executor=executor
-        )
-        variables["msvc_deps_prefix"] = "import file:"
-        return "IDLC", variables, env.subst(env["IDLC"]).split()
-
-    env.NinjaRuleMapping("$IDLCCOM", get_idlc_command)
-    env.NinjaRuleMapping(env["IDLCCOM"], get_idlc_command)
 
     # We can create empty files for FAKELIB in Ninja because it
     # does not care about content signatures. We have to
@@ -6529,16 +6513,16 @@ else:
 
 
 def injectMongoIncludePaths(thisEnv):
-    thisEnv.AppendUnique(CPPPATH=["$BUILD_DIR"])
     if thisEnv.get("BAZEL_OUT_DIR"):
         thisEnv.AppendUnique(CPPPATH=["#$BAZEL_OUT_DIR/src"])
+    thisEnv.AppendUnique(CPPPATH=["$BUILD_DIR"])
 
 
 env.AddMethod(injectMongoIncludePaths, "InjectMongoIncludePaths")
 
 gen_header_paths = [
-    (pathlib.Path(env.Dir("$BUILD_DIR").path) / "mongo").as_posix(),
     (pathlib.Path(env.Dir("$BAZEL_OUT_DIR").path) / "src" / "mongo").as_posix(),
+    (pathlib.Path(env.Dir("$BUILD_DIR").path) / "mongo").as_posix(),
 ]
 
 replacements = {
@@ -6556,173 +6540,10 @@ clang_tidy_config = env.Substfile(
 env.Alias("generated-sources", clang_tidy_config)
 
 if get_option("bazel-includes-info"):
-    target_library = get_option("bazel-includes-info").replace("\\", "/")
-
-    header_map = {}
-    bazel_query = ["aquery"] + env["BAZEL_FLAGS_STR"] + ['mnemonic("CppArchive", //src/...)']
-
-    results = env.RunBazelQuery(bazel_query, "getting all bazel libraries")
-    targets = set()
-    for line in results.stdout.split("\n"):
-        if "  Target: //src" in line:
-            target = line.split("  Target: ")[-1]
-            targets.add(target)
-
-    for target in targets:
-        print(f"getting headers for {target}")
-        bazel_query = (
-            ["cquery"]
-            + env["BAZEL_FLAGS_STR"]
-            + [
-                f"labels(hdrs, @{target})",
-                "--output",
-                "files",
-            ]
-        )
-        results = env.RunBazelQuery(bazel_query, f"getting {target} headers")
-
-        bazel_query = (
-            ["cquery"]
-            + env["BAZEL_FLAGS_STR"]
-            + [
-                f'kind("extract_debuginfo", rdeps(@//src/mongo/..., @{target},  1))',
-            ]
-        )
-        target_results = env.RunBazelQuery(bazel_query, "getting real target")
-        target = target_results.stdout.split(" ")[0]
-        header_map[target] = []
-        for line in results.stdout.split("\n"):
-            if not line.endswith("src/mongo/config.h"):
-                header_map[target] += [line]
-
-    bazel_query = (
-        ["aquery"]
-        + env["BAZEL_FLAGS_STR"]
-        + ['mnemonic("IdlcGenerator|TemplateRenderer|ConfigHeaderGen", //src/...)']
-    )
-
-    source_gen_targets = set()
-    results = env.RunBazelQuery(bazel_query, "getting all source gen targets")
-    for line in results.stdout.split("\n"):
-        if "  Target: //src" in line:
-            target = line.split("  Target: ")[-1]
-            source_gen_targets.add(target)
-
-    for target in source_gen_targets:
-        print(f"getting headers for {target}")
-        bazel_query = (
-            ["cquery"]
-            + env["BAZEL_FLAGS_STR"]
-            + [
-                f"@{target}",
-                "--output",
-                "files",
-            ]
-        )
-        results = env.RunBazelQuery(bazel_query, f"getting {target} headers")
-        header_map[target] = []
-        for line in results.stdout.split("\n"):
-            if line.endswith(".h") and not line.endswith("src/mongo/config.h"):
-                header_map[target] += [line]
-
-    bazel_include_info = {
-        "header_map": header_map,
-        "bazel_exec": env["SCONS2BAZEL_TARGETS"].bazel_executable,
-        "config": env["BAZEL_FLAGS_STR"] + ["--config=local"],
-    }
-
-    with open(".bazel_include_info.json", "w") as f:
-        json.dump(bazel_include_info, f)
-
-    def bazel_includes_emitter(target, source, env):
-        rel_target = os.path.relpath(str(target[0].abspath), start=env.Dir("#").abspath).replace(
-            "\\", "/"
-        )
-
-        if rel_target == target_library:
-            objsuffix = (
-                env.subst("$OBJSUFFIX")
-                if not env.TargetOSIs("linux")
-                else env.subst("$SHOBJSUFFIX")
-            )
-            builder_name = (
-                "StaticLibrary" if not env.TargetOSIs("linux") == "nt" else "SharedLibrary"
-            )
-            os.makedirs(os.path.dirname(str(target[0].abspath)), exist_ok=True)
-            with open(str(target[0].abspath) + ".obj_files", "w") as f:
-                for s in source:
-                    if str(s).endswith(objsuffix):
-                        f.write(os.path.relpath(str(s.abspath), start=env.Dir("#").abspath) + "\n")
-            with open(str(target[0].abspath) + ".env_vars", "w") as f:
-                json.dump(env["ENV"], f)
-
-            with (
-                open(str(target[0].abspath) + ".bazel_headers", "w") as fheaders,
-                open(str(target[0].abspath) + ".bazel_deps", "w") as fdeps,
-            ):
-                # note we can't know about LIBDEPS_DEPDENDENTS (reverse deps) in an emitter
-                # however we do co-opt the libdeps linter to check for these at the end of reading
-                # sconscripts
-
-                deps = []
-                for s in (
-                    env.get("LIBDEPS", [])
-                    + env.get("LIBDEPS_PRIVATE", [])
-                    + env.get("LIBDEPS_INTERFACE", [])
-                ):
-                    if not s:
-                        continue
-
-                    libnode = libdeps._get_node_with_ixes(env, s, builder_name)
-
-                    libnode_path = os.path.relpath(
-                        str(libnode.abspath), start=env.Dir("#").abspath
-                    ).replace("\\", "/")
-                    if (
-                        libnode.has_builder()
-                        and libnode.get_builder().get_name(env) != "ThinTarget"
-                    ):
-                        print(
-                            f"ERROR: can generate correct bazel header list because {target[0]} has non-bazel dependency: {libnode}"
-                        )
-                        sys.exit(1)
-                    if str(libnode_path) in env["SCONS2BAZEL_TARGETS"].scons2bazel_targets:
-                        bazel_target = env["SCONS2BAZEL_TARGETS"].bazel_target(str(libnode_path))
-                        # new query to run, run and cache it
-                        deps.append(bazel_target)
-                        bazel_query = (
-                            ["cquery"]
-                            + env["BAZEL_FLAGS_STR"]
-                            + [
-                                f'filter("[\\.h,\\.ipp,\\.hpp].*$", kind("source", deps(@{bazel_target})))',
-                                "--output",
-                                "files",
-                            ]
-                        )
-                        results = env.RunBazelQuery(bazel_query, "getting bazel headers")
-
-                        if results.returncode != 0:
-                            print("ERROR: bazel libdeps query failed:")
-                            print(results)
-                            sys.exit(1)
-                        results = set(
-                            [line for line in results.stdout.split("\n") if line.startswith("src/")]
-                        )
-
-                        for header in results:
-                            fheaders.write(header + "\n")
-                        for dep in deps:
-                            fdeps.write(dep + "\n")
-
-        return target, source
-
-    for builder_name in ["SharedLibrary", "StaticLibrary", "Program"]:
-        builder = env["BUILDERS"][builder_name]
-        base_emitter = builder.emitter
-        new_emitter = SCons.Builder.ListEmitter([base_emitter, bazel_includes_emitter])
-        builder.emitter = new_emitter
+    env.Tool("bazel_includes_info")
 
 env.SConscript(
+    must_exist=1,
     dirs=[
         "src",
     ],
@@ -6736,6 +6557,7 @@ env.SConscript(
 # TODO: find a way to consolidate SConscript calls to one call in
 # SConstruct so they all use variant_dir
 env.SConscript(
+    must_exist=1,
     dirs=[
         "jstests",
     ],

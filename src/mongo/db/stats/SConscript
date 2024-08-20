@@ -5,16 +5,6 @@ Import("env")
 env = env.Clone()
 
 env.Library(
-    target="timer_stats",
-    source=[
-        "timer_stats.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/base",
-    ],
-)
-
-env.Library(
     target="top",
     source=[
         "top.cpp",
@@ -59,8 +49,8 @@ env.Library(
     source=[
         "server_read_concern_metrics.cpp",
         "server_write_concern_metrics.cpp",
-        "read_concern_stats.idl",
-        "server_write_concern_metrics.idl",
+        "read_concern_stats_gen.cpp",
+        "server_write_concern_metrics_gen.cpp",
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/repl/read_concern_args",
@@ -75,7 +65,7 @@ env.Library(
     target="read_preference_metrics",
     source=[
         "read_preference_metrics.cpp",
-        "read_preference_metrics.idl",
+        "read_preference_metrics_gen.cpp",
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/client/read_preference",
@@ -90,7 +80,7 @@ env.Library(
     target="resource_consumption_metrics",
     source=[
         "resource_consumption_metrics.cpp",
-        "operation_resource_consumption.idl",
+        "operation_resource_consumption_gen.cpp",
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/db/commands/server_status_core",

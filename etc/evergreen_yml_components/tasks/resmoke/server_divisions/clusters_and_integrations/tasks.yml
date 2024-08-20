@@ -106,6 +106,7 @@ variables:
   # THIS HAS COPIES IN
   # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
   # - etc/evergreen_yml_components/tasks/compile_tasks.yml
+  # - etc/evergreen_yml_components/tasks/compile_tasks_shared.yml
   # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
   - &compile_task_group_template
     name: compile_task_group_template
@@ -415,7 +416,7 @@ tasks:
     commands:
       - func: "generate resmoke tasks"
         vars:
-          use_large_distro: "true"
+          use_xlarge_distro: "true"
           resmoke_jobs_max: 1
 
   - <<: *gen_task_template
@@ -785,180 +786,11 @@ tasks:
       - func: "run tests"
 
   - <<: *task_template
-    name: serverless_MTM
-    # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-    tags:
-      [
-        "assigned_to_jira_team_server_servicearch",
-        "default",
-        "incompatible_debug_mode",
-        "requires_large_host_debug_mode",
-        "requires_large_host_tsan",
-        "serverless",
-      ]
-    commands:
-      - func: "do setup"
-      - func: "run tests"
-
-  - <<: *task_template
     name: session_jscore_passthrough
     tags: ["assigned_to_jira_team_server_servicearch", "default"]
     commands:
       - func: "do setup"
       - func: "run tests"
-
-  - <<: *gen_task_template
-    name: shard_merge_causally_consistent_jscore_passthrough_gen
-    # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-    tags:
-      [
-        "assigned_to_jira_team_server_servicearch",
-        "default",
-        "incompatible_debug_mode",
-        "serverless",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: shard_merge_jscore_passthrough_gen
-    # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-    tags:
-      [
-        "assigned_to_jira_team_server_servicearch",
-        "default",
-        "incompatible_debug_mode",
-        "serverless",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: shard_merge_multi_stmt_txn_jscore_passthrough_gen
-    # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-    tags:
-      [
-        "assigned_to_jira_team_server_servicearch",
-        "default",
-        "incompatible_debug_mode",
-        "serverless",
-        "txn",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: shard_split_causally_consistent_jscore_passthrough_gen
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "shard_split"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: shard_split_jscore_passthrough_gen
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "shard_split"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: shard_split_kill_primary_jscore_passthrough_gen
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "shard_split"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-          fallback_num_sub_suites: 10
-
-  - <<: *gen_task_template
-    name: shard_split_multi_stmt_txn_jscore_passthrough_gen
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "shard_split"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: shard_split_stepdown_jscore_passthrough_gen
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "shard_split"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: shard_split_terminate_primary_jscore_passthrough_gen
-    tags: ["assigned_to_jira_team_server_servicearch", "default", "shard_split"]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-          fallback_num_sub_suites: 10
-
-  # TODO(SERVER-88891): Delete these tenant migration suites
-  # - <<: *gen_task_template
-  #   name: tenant_migration_causally_consistent_jscore_passthrough_gen
-  #   # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-  #   tags: ["assigned_to_jira_team_server_servicearch", "default", "incompatible_debug_mode", "serverless"]
-  #   commands:
-  #   - func: "generate resmoke tasks"
-  #     vars:
-  #       use_large_distro: "true"
-
-  # - <<: *gen_task_template
-  #   name: tenant_migration_jscore_passthrough_gen
-  #   # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-  #   tags: ["assigned_to_jira_team_server_servicearch", "default", "incompatible_debug_mode", "serverless"]
-  #   commands:
-  #   - func: "generate resmoke tasks"
-  #     vars:
-  #       use_large_distro: "true"
-
-  # - <<: *gen_task_template
-  #   name: tenant_migration_kill_primary_jscore_passthrough_gen
-  #   # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-  #   tags: ["assigned_to_jira_team_server_servicearch", "default", "incompatible_debug_mode", "serverless"]
-  #   commands:
-  #   - func: "generate resmoke tasks"
-  #     vars:
-  #       use_large_distro: "true"
-  #       fallback_num_sub_suites: 10
-
-  # - <<: *gen_task_template
-  #   name: tenant_migration_multi_stmt_txn_jscore_passthrough_gen
-  #   # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-  #   tags: ["assigned_to_jira_team_server_servicearch", "default", "incompatible_debug_mode", "serverless", "txn"]
-  #   commands:
-  #   - func: "generate resmoke tasks"
-  #     vars:
-  #       use_large_distro: "true"
-
-  # - <<: *gen_task_template
-  #   name: tenant_migration_stepdown_jscore_passthrough_gen
-  #   # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-  #   tags: ["assigned_to_jira_team_server_servicearch", "default", "incompatible_debug_mode", "serverless"]
-  #   commands:
-  #   - func: "generate resmoke tasks"
-  #     vars:
-  #       use_large_distro: "true"
-
-  # - <<: *gen_task_template
-  #   name: tenant_migration_terminate_primary_jscore_passthrough_gen
-  #   # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
-  #   tags: ["assigned_to_jira_team_server_servicearch", "default", "incompatible_debug_mode", "serverless"]
-  #   commands:
-  #   - func: "generate resmoke tasks"
-  #     vars:
-  #       use_large_distro: "true"
-  #       fallback_num_sub_suites: 10
 
   # This is a separate task because it is only supported on Ubuntu 16.04+ which are not inmemory builders
   - <<: *task_template
@@ -1400,46 +1232,6 @@ tasks:
         vars:
           resmoke_jobs_max: 1
 
-  - <<: *gen_task_template
-    name: replica_sets_max_mirroring_large_txns_format_ese_gcm_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_security",
-        "release_critical",
-        "incompatible_community",
-        "incompatible_mac",
-        "incompatible_windows",
-        "incompatible_debug_mode",
-        "replica_sets",
-        "encrypt",
-        "san",
-        "gcm",
-        "multi_oplog",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: replica_sets_max_mirroring_large_txns_format_ese_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_security",
-        "release_critical",
-        "incompatible_community",
-        "incompatible_mac",
-        "incompatible_debug_mode",
-        "replica_sets",
-        "encrypt",
-        "san",
-        "multi_oplog",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
   - <<: *task_template
     name: sasl
     tags:
@@ -1497,44 +1289,6 @@ tasks:
         "incompatible_windows",
         "incompatible_ppc",
         "incompatible_s390x",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_security",
-        "release_critical",
-        "incompatible_community",
-        "incompatible_mac",
-        "incompatible_windows",
-        "incompatible_debug_mode",
-        "sharding",
-        "common",
-        "encrypt",
-        "gcm",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-
-  - <<: *gen_task_template
-    name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_security",
-        "release_critical",
-        "incompatible_community",
-        "incompatible_mac",
-        "incompatible_debug_mode",
-        "sharding",
-        "common",
-        "encrypt",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2854,6 +2608,7 @@ tasks:
         "config_fuzzer",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "incompatible_inmemory",
         "incompatible_tsan",
         "jstestfuzz",
         "non_deterministic",

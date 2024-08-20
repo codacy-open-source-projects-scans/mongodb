@@ -4,6 +4,7 @@ Import("env")
 env = env.Clone()
 
 env.SConscript(
+    must_exist=1,
     dirs=[
         "devnull",
         "kv",
@@ -37,16 +38,6 @@ env.Library(
         "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
         "$BUILD_DIR/mongo/db/server_base",
         "recovery_unit_base",
-    ],
-)
-
-env.Library(
-    target="duplicate_key_error_info",
-    source=[
-        "duplicate_key_error_info.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
     ],
 )
 
@@ -206,7 +197,7 @@ env.Library(
     target="storage_options",
     source=[
         "storage_options.cpp",
-        "storage_parameters.idl",
+        "storage_parameters_gen.cpp",
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/db/server_base",
@@ -420,16 +411,6 @@ env.Library(
 )
 
 env.Library(
-    target="storage_file_util",
-    source=[
-        "storage_file_util.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/base",
-    ],
-)
-
-env.Library(
     target="disk_space_util",
     source=[
         "disk_space_util.cpp",
@@ -494,7 +475,7 @@ env.Library(
 env.Library(
     target="flow_control_parameters",
     source=[
-        "flow_control_parameters.idl",
+        "flow_control_parameters_gen.cpp",
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/db/server_base",
@@ -633,7 +614,7 @@ env.Library(
 env.Library(
     target="two_phase_index_build_knobs_idl",
     source=[
-        "two_phase_index_build_knobs.idl",
+        "two_phase_index_build_knobs_gen.cpp",
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/db/server_base",
