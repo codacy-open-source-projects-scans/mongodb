@@ -1421,7 +1421,7 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: resharding-fuzzer
-          jstestfuzz_vars: --opType moveCollection --electionMech stepup --electionRole donor --electionRole recipient --useEsModules
+          jstestfuzz_vars: --opType moveCollection --electionMech stepup --electionRole donor --electionRole recipient
           suite: resharding_fuzzer
 
   - <<: *gen_task_template
@@ -1544,7 +1544,7 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: resharding-fuzzer
-          jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no --useEsModules
+          jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no
           suite: resharding_fuzzer_idempotency
 
   - <<: *jstestfuzz_template
@@ -1564,7 +1564,7 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: resharding-fuzzer
-          jstestfuzz_vars: --numDonors 2 --numRecipients 2 --inPlace yes --useEsModules
+          jstestfuzz_vars: --numDonors 2 --numRecipients 2 --inPlace yes
           suite: resharding_fuzzer
 
   - <<: *jstestfuzz_template
@@ -1584,7 +1584,7 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: resharding-fuzzer
-          jstestfuzz_vars: --numDonors 2 --numRecipients 1 --inPlace no --useEsModules
+          jstestfuzz_vars: --numDonors 2 --numRecipients 1 --inPlace no
           suite: resharding_fuzzer
 
   - <<: *jstestfuzz_template
@@ -1604,7 +1604,7 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: resharding-fuzzer
-          jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no --useEsModules
+          jstestfuzz_vars: --numDonors 3 --numRecipients 3 --inPlace no
           suite: resharding_fuzzer
 
   - <<: *jstestfuzz_template
@@ -1624,7 +1624,7 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: resharding-fuzzer
-          jstestfuzz_vars: --numDonors 1 --numRecipients 2 --inPlace no --useEsModules
+          jstestfuzz_vars: --numDonors 1 --numRecipients 2 --inPlace no
           suite: resharding_fuzzer
 
   - <<: *jstestfuzz_template
@@ -1647,7 +1647,6 @@ tasks:
           jstestfuzz_vars: >-
             --numDonors 3 --numRecipients 3 --inPlace yes
             --electionMech stepup --electionRole donor --electionRole recipient
-            --useEsModules
           suite: resharding_fuzzer
 
   - <<: *task_template
@@ -2048,7 +2047,7 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: resharding-fuzzer
-          jstestfuzz_vars: --opType unshardCollection --inPlace yes --numDonors 3 --electionMech stepup --electionRole donor --electionRole recipient --useEsModules
+          jstestfuzz_vars: --opType unshardCollection --inPlace yes --numDonors 3 --electionMech stepup --electionRole donor --electionRole recipient
           suite: resharding_fuzzer
 
   - <<: *jstestfuzz_template
@@ -2072,7 +2071,6 @@ tasks:
           jstestfuzz_vars: >-
             --opType timeseriesReshardCollection --numDonors 3 --numRecipients 3 --inPlace yes
             --electionMech stepup --electionRole donor --electionRole recipient
-            --useEsModules
           suite: resharding_fuzzer_idempotency
 
   ################################################
@@ -2139,8 +2137,8 @@ tasks:
         # The hardcoded timeout is to overrule history-based timeout after test number increases,
         # which could be removed after gaining enough history for the new tests.
         vars:
-          exec_timeout_secs: 4800 # 80min
-          timeout_secs: 4800 # 80min
+          exec_timeout_secs: 7200 # 120min
+          timeout_secs: 7200 # 120min
 
   - <<: *gen_task_template
     name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
@@ -2156,8 +2154,8 @@ tasks:
         # The hardcoded timeout is to overrule history-based timeout after test number increases,
         # which could be removed after gaining enough history for the new tests.
         vars:
-          exec_timeout_secs: 4800 # 80min
-          timeout_secs: 4800 # 80min
+          exec_timeout_secs: 7200 # 120min
+          timeout_secs: 7200 # 120min
 
   - <<: *gen_task_template
     name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen

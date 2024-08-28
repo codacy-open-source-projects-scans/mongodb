@@ -16,16 +16,6 @@ env.SConscript(
 )
 
 env.Library(
-    target="change_stream_preimage",
-    source=[
-        "change_stream_preimage_gen.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/server_base",
-    ],
-)
-
-env.Library(
     target="aggregation",
     source=[
         "aggregation.cpp",
@@ -111,6 +101,8 @@ env.Library(
         "accumulator_std_dev.cpp",
         "accumulator_sum.cpp",
         "map_reduce_options_gen.cpp",
+        "percentile_algo_accurate.cpp",
+        "percentile_algo_continuous.cpp",
         "percentile_algo_discrete.cpp",
         "percentile_algo_tdigest.cpp",
         "percentile_algo_tdigest_distributed.cpp",
@@ -167,6 +159,7 @@ env.Library(
 env.Library(
     target="sharded_agg_helpers",
     source=[
+        "split_pipeline.cpp",
         "sharded_agg_helpers.cpp",
     ],
     LIBDEPS=[
@@ -607,8 +600,6 @@ env.Library(
 env.Benchmark(
     target="abt_translation_bm",
     source=[
-        "abt/abt_fallback_mechanism_cq_bm.cpp",
-        "abt/abt_fallback_mechanism_pipeline_bm.cpp",
         "abt/abt_translate_cq_bm.cpp",
         "abt/abt_translate_pipeline_bm.cpp",
     ],
@@ -770,7 +761,6 @@ env.CppUnitTest(
         "$BUILD_DIR/mongo/db/change_stream_pre_image_util",
         "$BUILD_DIR/mongo/db/change_stream_pre_images_collection_manager",
         "$BUILD_DIR/mongo/db/change_streams_cluster_parameter",
-        "$BUILD_DIR/mongo/db/cst/cst",
         "$BUILD_DIR/mongo/db/exec/document_value/document_value",
         "$BUILD_DIR/mongo/db/exec/document_value/document_value_test_util",
         "$BUILD_DIR/mongo/db/mongohasher",
@@ -819,6 +809,7 @@ env.CppUnitTest(
 env.CppUnitTest(
     target="db_percentile_algo_test",
     source=[
+        "percentile_algo_continuous_test.cpp",
         "percentile_algo_discrete_test.cpp",
         "percentile_algo_tdigest_test.cpp",
         "percentile_algo_tdigest_distributed_test.cpp",

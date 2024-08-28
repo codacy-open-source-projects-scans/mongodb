@@ -76,6 +76,7 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/command_diagnostic_printer.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
@@ -121,12 +122,13 @@
 namespace mongo {
 namespace {
 
-CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
-                                   const NamespaceString& nss,
-                                   const BSONObj& cmdObj,
-                                   const ExtensionsCallback& extensionsCallback,
-                                   const CollatorInterface* defaultCollator,
-                                   boost::optional<ExplainOptions::Verbosity> verbosity) {
+std::unique_ptr<CanonicalQuery> parseDistinctCmd(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const BSONObj& cmdObj,
+    const ExtensionsCallback& extensionsCallback,
+    const CollatorInterface* defaultCollator,
+    boost::optional<ExplainOptions::Verbosity> verbosity) {
     const auto vts = auth::ValidatedTenancyScope::get(opCtx);
     const auto serializationContext = vts != boost::none
         ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
@@ -160,7 +162,8 @@ CanonicalDistinct parseDistinctCmd(OperationContext* opCtx,
     // on mongod if present.
     expCtx->setQuerySettingsIfNotPresent(
         query_settings::lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
-    return CanonicalDistinct::parse(std::move(expCtx), std::move(parsedDistinct));
+    return parsed_distinct_command::parseCanonicalQuery(std::move(expCtx),
+                                                        std::move(parsedDistinct));
 }
 
 namespace dps = dotted_path_support;
@@ -170,7 +173,7 @@ namespace {
 // specific to the distinct() command and shouldn't be blindly reused in other "distinct" contexts.
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> createExecutorForDistinctCommand(
     OperationContext* opCtx,
-    CanonicalDistinct canonicalDistinct,
+    std::unique_ptr<CanonicalQuery> canonicalQuery,
     const CollectionAcquisition& coll) {
     const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
     const auto& collectionPtr = coll.getCollectionPtr();
@@ -180,26 +183,46 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> createExecutorForDistinctCo
     // the query.
     if (!collectionPtr) {
         return uassertStatusOK(
-            getExecutorFind(opCtx, collections, canonicalDistinct.releaseQuery(), yieldPolicy));
+            getExecutorFind(opCtx, collections, std::move(canonicalQuery), yieldPolicy));
     }
 
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    bool isDistinctMultiplanningEnabled = feature_flags::gFeatureFlagShardFilteringDistinctScan
+                                              .isEnabledUseLastLTSFCVWhenUninitialized(fcvSnapshot);
+
     // Try creating a plan that does DISTINCT_SCAN.
-    auto executor =
-        tryGetExecutorDistinct(collections, QueryPlannerParams::DEFAULT, canonicalDistinct);
-    if (executor.isOK()) {
-        return std::move(executor.getValue());
+    auto swQuerySolution = tryGetQuerySolutionForDistinct(
+        collections, QueryPlannerParams::DEFAULT, *canonicalQuery, isDistinctMultiplanningEnabled);
+    if (swQuerySolution.isOK()) {
+        return uassertStatusOK(getExecutorDistinct(collections,
+                                                   QueryPlannerParams::DEFAULT,
+                                                   std::move(canonicalQuery),
+                                                   std::move(swQuerySolution.getValue())));
+    }
+
+    // TODO SERVER-93059: Investigate whether to keep the projection field of the canonical query
+    // when multiplanning is enabled.
+    if (isDistinctMultiplanningEnabled) {
+        return uassertStatusOK(
+            getExecutorFind(opCtx,
+                            collections,
+                            std::move(canonicalQuery),
+                            yieldPolicy,
+                            // TODO SERVER-93018: Investigate why we prefer a collection scan
+                            // against a GENERATE_COVERED_IXSCANS when no filter is present.
+                            QueryPlannerParams::DEFAULT));
     }
 
     // If there is no DISTINCT_SCAN plan, create whatever non-distinct plan is appropriate, because
     // 'distinct()' command is capable of de-duplicating and unwinding its inputs. Note: In order to
     // allow a covered DISTINCT_SCAN we've inserted a projection -- there is no point of keeping it
     // if a DISTINCT_SCAN didn't bake out.
-    auto cq = canonicalDistinct.getQuery();
-    auto findCommand = std::make_unique<FindCommandRequest>(cq->getFindCommandRequest());
+    auto findCommand =
+        std::make_unique<FindCommandRequest>(canonicalQuery->getFindCommandRequest());
     findCommand->setProjection(BSONObj());
 
     auto cqWithoutProjection = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
-        .expCtx = cq->getExpCtx(),
+        .expCtx = canonicalQuery->getExpCtx(),
         .parsedFind =
             ParsedFindCommandParams{
                 .findCommand = std::move(findCommand),
@@ -324,18 +347,18 @@ public:
             ? collectionOrView->getCollectionPtr()->getDefaultCollator()
             : nullptr;
 
-        auto canonicalDistinct = parseDistinctCmd(
+        auto canonicalQuery = parseDistinctCmd(
             opCtx, nss, cmdObj, ExtensionsCallbackReal(opCtx, &nss), defaultCollator, verbosity);
 
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
-            runDistinctOnView(opCtx, canonicalDistinct, verbosity, replyBuilder);
+            runDistinctOnView(opCtx, std::move(canonicalQuery), verbosity, replyBuilder);
             return Status::OK();
         }
 
         auto executor = createExecutorForDistinctCommand(
-            opCtx, std::move(canonicalDistinct), collectionOrView->getCollection());
+            opCtx, std::move(canonicalQuery), collectionOrView->getCollection());
         SerializationContext serializationCtx = request.getSerializationContext();
         auto bodyBuilder = replyBuilder->getBodyBuilder();
         Explain::explainStages(executor.get(),
@@ -353,6 +376,15 @@ public:
                              const BSONObj& cmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) override {
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
+
+        // Capture diagnostics for tassert and invariant failures that may occur during query
+        // parsing, planning or execution. No work is done on the hot-path, all computation of
+        // these diagnostics is done lazily during failure handling. This line just creates an
+        // RAII object which holds references to objects on this stack frame, which will be used
+        // to print diagnostics in the event of a tassert or invariant.
+        ScopedDebugInfo distinctCmdDiagnostics("commandDiagnostics",
+                                               command_diagnostics::Printer{opCtx});
+
         // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
 
@@ -407,8 +439,9 @@ public:
             ? collectionOrView->getCollectionPtr()->getDefaultCollator()
             : nullptr;
 
-        auto canonicalDistinct = parseDistinctCmd(
+        auto canonicalQuery = parseDistinctCmd(
             opCtx, nss, cmdObj, ExtensionsCallbackReal(opCtx, &nss), defaultCollation, {});
+        const CanonicalDistinct& canonicalDistinct = *canonicalQuery->getDistinct();
 
         if (canonicalDistinct.isMirrored()) {
             const auto& invocation = CommandInvocation::get(opCtx);
@@ -418,17 +451,19 @@ public:
                        nss,
                        analyze_shard_key::SampledCommandNameEnum::kDistinct,
                        canonicalDistinct)) {
-            auto cq = canonicalDistinct.getQuery();
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
-                ->addDistinctQuery(
-                    *sampleId, nss, cq->getQueryObj(), cq->getFindCommandRequest().getCollation())
+                ->addDistinctQuery(*sampleId,
+                                   nss,
+                                   canonicalQuery->getQueryObj(),
+                                   canonicalQuery->getFindCommandRequest().getCollation())
                 .getAsync([](auto) {});
         }
 
         if (collectionOrView->isView()) {
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
-            runDistinctOnView(opCtx, canonicalDistinct, boost::none /* verbosity */, replyBuilder);
+            runDistinctOnView(
+                opCtx, std::move(canonicalQuery), boost::none /* verbosity */, replyBuilder);
             return true;
         }
 
@@ -438,7 +473,7 @@ public:
             opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
         auto executor = createExecutorForDistinctCommand(
-            opCtx, std::move(canonicalDistinct), collectionOrView->getCollection());
+            opCtx, std::move(canonicalQuery), collectionOrView->getCollection());
 
         {
             stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -545,23 +580,24 @@ public:
     }
 
     void runDistinctOnView(OperationContext* opCtx,
-                           const CanonicalDistinct& canonicalDistinct,
+                           std::unique_ptr<CanonicalQuery> canonicalQuery,
                            boost::optional<ExplainOptions::Verbosity> verbosity,
                            rpc::ReplyBuilderInterface* replyBuilder) const {
-        const auto& cq = *canonicalDistinct.getQuery();
-        const auto& nss = cq.nss();
+        const auto& nss = canonicalQuery->nss();
         const auto& dbName = nss.dbName();
         const auto& vts = auth::ValidatedTenancyScope::get(opCtx);
         const auto viewAggCmd =
             OpMsgRequestBuilder::create(
-                vts, dbName, uassertStatusOK(canonicalDistinct.asAggregationCommand()))
+                vts,
+                dbName,
+                uassertStatusOK(parsed_distinct_command::asAggregation(*canonicalQuery)))
                 .body;
         const auto serializationContext = vts != boost::none
             ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
             : SerializationContext::stateCommandRequest();
         auto viewAggRequest = aggregation_request_helper::parseFromBSON(
             viewAggCmd, vts, verbosity, serializationContext);
-        viewAggRequest.setQuerySettings(cq.getExpCtx()->getQuerySettings());
+        viewAggRequest.setQuerySettings(canonicalQuery->getExpCtx()->getQuerySettings());
 
         // If running explain distinct on view, then aggregate is executed without privilege checks
         // and without response formatting.

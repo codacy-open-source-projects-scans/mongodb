@@ -150,9 +150,11 @@ globals:
   _fnvHashToHexString: true
   _resultSetsEqualUnordered: true
   getStringWidth: true
+  _compareStringsWithCollation: true
 
   # likely could be replaced with `path`
   _copyFileRange: true
+  appendFile: true
   copyFile: true
   writeFile: true
   fileExists: true
@@ -183,7 +185,6 @@ globals:
   shellPrintHelper: true
   shellAutocomplete: true
   __autocomplete__: true
-  getActiveCommands: true
   defaultPrompt: true
   ___it___: true
   __promptWrapper__: true

@@ -40,40 +40,6 @@ env.Library(
 )
 
 env.Library(
-    target="document_validation",
-    source=[
-        "document_validation.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/service_context",
-    ],
-)
-
-env.Library(
-    target="index_build_entry_idl",
-    source=[
-        "index_build_entry_gen.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/server_base",
-        "$BUILD_DIR/mongo/util/net/network",
-        "commit_quorum_options",
-    ],
-)
-
-env.Library(
-    target="health_log_interface",
-    source=[
-        "health_log_gen.cpp",
-        "health_log_interface.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/server_base",
-        "$BUILD_DIR/mongo/db/service_context",
-    ],
-)
-
-env.Library(
     target="health_log",
     source=[
         "health_log.cpp",
@@ -155,18 +121,6 @@ env.Library(
 )
 
 env.Library(
-    target="index_catalog",
-    source=[
-        "index_catalog.cpp",
-        "index_catalog_entry.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/server_base",
-        "$BUILD_DIR/mongo/db/storage/storage_options",
-    ],
-)
-
-env.Library(
     target="index_build_block",
     source=[
         "index_build_block.cpp",
@@ -194,6 +148,7 @@ env.Library(
         "collection_write_path.cpp",
     ],
     LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/db/op_observer/op_observer_util",
         "$BUILD_DIR/mongo/db/query/query_stats/query_stats",
         "$BUILD_DIR/mongo/db/record_id_helpers",
         "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
@@ -206,17 +161,6 @@ env.Library(
         "$BUILD_DIR/mongo/util/fail_point",
         "document_validation",
         "local_oplog_info",
-    ],
-)
-
-env.Library(
-    target="database_holder",
-    source=[
-        "database_holder.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/service_context",
     ],
 )
 
@@ -468,17 +412,6 @@ env.Library(
 )
 
 env.Library(
-    target="capped_visibility",
-    source=[
-        "capped_visibility.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/storage/recovery_unit_base",
-    ],
-)
-
-env.Library(
     target="local_oplog_info",
     source=[
         "local_oplog_info.cpp",
@@ -624,7 +557,6 @@ if wiredtiger:
             "collection_validation_test.cpp",
             "collection_writer_test.cpp",
             "coll_mod_test.cpp",
-            "column_index_consistency_test.cpp",
             "commit_quorum_options_test.cpp",
             "create_collection_test.cpp",
             "database_test.cpp",

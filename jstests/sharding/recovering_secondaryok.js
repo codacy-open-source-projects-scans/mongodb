@@ -12,6 +12,8 @@
 TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
 import {awaitRSClientHosts} from "jstests/replsets/rslib.js";
+import {ReplSetTest} from "jstests/libs/replsettest.js";
+import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 var shardTest =
     new ShardingTest({name: "recovering_secondaryok", shards: 2, mongos: 2, other: {rs: true}});
@@ -91,11 +93,14 @@ assert.eq(2, collSOk.find().itcount());
 
 print("8: restart both our secondaries clean");
 
-rsA.restart(rsA.getSecondaries(), {remember: true, startClean: true}, undefined, 5 * 60 * 1000);
+rsA.getSecondaries().forEach(
+    secondary =>
+        rsA.restart(secondary, {remember: true, startClean: true}, undefined, 5 * 60 * 1000));
 
 print("9: wait for recovery");
 
-rsA.waitForState(rsA.getSecondaries(), ReplSetTest.State.SECONDARY, 5 * 60 * 1000);
+rsA.getSecondaries().forEach(
+    secondary => rsA.waitForState(secondary, ReplSetTest.State.SECONDARY, 5 * 60 * 1000));
 
 print("10: check our regular and secondaryOk query");
 

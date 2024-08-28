@@ -129,10 +129,8 @@ MONGO_SERVER_CPP_JS_FILES = [
     "data_consistency_checker.js",
     "feature_compatibility_version.js",
     "keyvault.js",
-    "replsettest.js",
     "servers.js",
     "servers_misc.js",
-    "shardingtest.js",
 ]
 
 render_template(
@@ -160,5 +158,15 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
+    ],
+)
+
+mongo_cc_library(
+    name = "kms_idl",
+    srcs = [
+        ":kms_gen",
+    ],
+    deps = [
+        "//src/mongo/db:server_base",
     ],
 )

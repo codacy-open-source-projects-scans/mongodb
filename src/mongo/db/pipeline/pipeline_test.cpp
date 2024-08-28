@@ -1204,6 +1204,35 @@ TEST(PipelineOptimizationTest, DoNotRemoveSkipOne) {
     assertPipelineOptimizesAndSerializesTo("[{$skip: 1}]", "[{$skip: 1}]");
 }
 
+TEST(PipelineOptimizationTest, RemoveReplaceRootWithRoot) {
+    assertPipelineOptimizesAndSerializesTo("[{$replaceRoot: {newRoot: '$$ROOT'}}]", "[]");
+}
+
+TEST(PipelineOptimizationTest, RemoveReplaceRootWithRootAfterExprIsOptimized) {
+    assertPipelineOptimizesAndSerializesTo(
+        "[{$replaceRoot: {newRoot: {$cond: {if: true, then: '$$ROOT', else: '$$ROOT'}}}}]", "[]");
+}
+
+TEST(PipelineOptimizationTest, DoNotRemoveReplaceRootWithNonRoot) {
+    assertPipelineOptimizesAndSerializesTo("[{$replaceRoot: {newRoot: {notTheRoot: '$$ROOT'}}}]",
+                                           "[{$replaceRoot: {newRoot: {notTheRoot: '$$ROOT'}}}]");
+}
+
+TEST(PipelineOptimizationTest, RemoveReplaceWithRoot) {
+    assertPipelineOptimizesAndSerializesTo("[{$replaceWith: '$$ROOT'}]", "[]");
+}
+
+TEST(PipelineOptimizationTest, OptimizeOutReplaceRootInMultiStagePipeline) {
+    std::string inputPipe =
+        "["
+        " {$replaceWith: '$$ROOT'},"
+        " {$match: {x: 2}}"
+        "]";
+    std::string outputPipe = "[{$match: {x: {$eq: 2}}}]";
+    std::string serializedPipe = "[{$match: {x: 2}}]";
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
+}
+
 TEST(PipelineOptimizationTest, RemoveEmptyMatch) {
     assertPipelineOptimizesAndSerializesTo("[{$match: {}}]", "[]");
 }
@@ -4163,26 +4192,6 @@ TEST(PipelineOptimizationTest, MatchNotPushedBeforeMultipleReplaceWithsSamePredN
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
 }
 
-// TODO SERVER-88464: Optimize out $replaceRoot stage if newRoot is $$ROOT
-TEST(PipelineOptimizationTest, NoReplaceWithMatchOptWhenReplaceWithIsRoot) {
-    std::string inputPipe =
-        "["
-        " {$replaceWith: '$$ROOT'},"
-        " {$match: {x: 2}}"
-        "]";
-    std::string outputPipe =
-        "["
-        " {$replaceRoot: {newRoot: '$$ROOT'}},"
-        " {$match: {x: {$eq: 2}}}"
-        "]";
-    std::string serializedPipe =
-        "["
-        " {$replaceRoot: {newRoot: '$$ROOT'}},"
-        " {$match: {x: 2}}"
-        "]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
 TEST(PipelineOptimizationTest, internalAllCollectionStatsAbsorbsMatchOnNs) {
     std::string inputPipe =
         "["
@@ -4588,7 +4597,7 @@ public:
         mergePipe = Pipeline::parse(request.getPipeline(), ctx);
         mergePipe->optimizePipeline();
 
-        auto splitPipeline = sharded_agg_helpers::splitPipeline(std::move(mergePipe));
+        auto splitPipeline = sharded_agg_helpers::SplitPipeline::split(std::move(mergePipe));
         const auto explain = SerializationOptions{
             .verbosity = boost::make_optional(ExplainOptions::Verbosity::kQueryPlanner)};
         ASSERT_VALUE_EQ(Value(splitPipeline.shardsPipeline->writeExplainOps(explain)),
@@ -5135,7 +5144,7 @@ DEATH_TEST_F(PipelineMustRunOnMongoSTest,
     // $_internalSplitPipeline.
     ASSERT_FALSE(pipeline->requiredToRunOnMongos());
 
-    auto splitPipeline = sharded_agg_helpers::splitPipeline(std::move(pipeline));
+    auto splitPipeline = sharded_agg_helpers::SplitPipeline::split(std::move(pipeline));
     ASSERT(splitPipeline.shardsPipeline);
     ASSERT(splitPipeline.mergePipeline);
 
@@ -5168,7 +5177,7 @@ TEST_F(PipelineMustRunOnMongoSTest, SplitMongoSMergePipelineAssertsIfShardStageP
     // $_internalSplitPipeline.
     ASSERT_FALSE(pipeline->requiredToRunOnMongos());
 
-    auto splitPipeline = sharded_agg_helpers::splitPipeline(std::move(pipeline));
+    auto splitPipeline = sharded_agg_helpers::SplitPipeline::split(std::move(pipeline));
 
     // The merge pipeline must run on mongoS, but $out needs to run on  the primary shard.
     ASSERT_TRUE(splitPipeline.mergePipeline->requiredToRunOnMongos());
