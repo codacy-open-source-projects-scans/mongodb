@@ -4,6 +4,7 @@ Import(
     [
         "env",
         "get_option",
+        "have_sasl_lib",
         "has_option",
         "version_extra",
         "version_parts",
@@ -94,20 +95,6 @@ env.Library(
 )
 
 env.Library(
-    target="multitenancy",
-    source=[
-        "multitenancy.cpp",
-    ],
-    LIBDEPS=[
-        "server_base",
-    ],
-    LIBDEPS_PRIVATE=[
-        "auth/auth",
-        "auth/security_token",
-    ],
-)
-
-env.Library(
     target="dbmessage",
     source=[
         "dbmessage.cpp",
@@ -170,17 +157,6 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/util/concurrency/spin_lock",
-    ],
-)
-
-env.Library(
-    target="mongohasher",
-    source=[
-        "hasher.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/util/md5",
     ],
 )
 
@@ -494,6 +470,7 @@ env.CppUnitTest(
     source=[
         "change_stream_pre_images_remover_test.cpp",
         "change_stream_pre_images_truncate_manager_test.cpp",
+        "change_stream_pre_images_truncate_markers_per_nsUUID_test.cpp",
     ],
     LIBDEPS=[
         "catalog/catalog_test_fixture",
@@ -510,18 +487,6 @@ env.CppUnitTest(
         "op_observer/operation_logger_impl",
         "shard_role",
         "storage/record_store_base",
-    ],
-)
-
-env.Library(
-    target="write_block_bypass",
-    source=[
-        "write_block_bypass.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "auth/auth",
-        "auth/authprivilege",
-        "service_context",
     ],
 )
 
@@ -549,46 +514,14 @@ env.CppUnitTest(
     ],
 )
 
-env.Library(
-    target="prepare_conflict_tracker",
+env.CppUnitTest(
+    target="prepare_conflict_tracker_test",
     source=[
-        "prepare_conflict_tracker.cpp",
+        "prepare_conflict_tracker_test.cpp",
     ],
     LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/service_context",
-    ],
-)
-
-env.Library(
-    target="not_primary_error_tracker",
-    source=[
-        "not_primary_error_tracker.cpp",
-    ],
-    LIBDEPS=[
-        "service_context",
-    ],
-)
-
-env.Clone().InjectModule("enterprise").Library(
-    target="audit",
-    source=[
-        "audit.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "service_context",
-    ],
-)
-
-env.Library(
-    target="client_out_of_line_executor",
-    source=[
-        "client_out_of_line_executor.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/service_context",
+        "$BUILD_DIR/mongo/unittest/unittest",
+        "prepare_conflict_tracker",
     ],
 )
 
@@ -728,20 +661,6 @@ env.Library(
         "stats/resource_consumption_metrics",
         "stats/timer_stats",
         "timeseries/timeseries_options",
-    ],
-)
-
-env.Library(
-    target="command_can_run_here",
-    source=[
-        "command_can_run_here.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/client/read_preference",
-        "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
-        "commands/test_commands_enabled",
-        "service_context",
     ],
 )
 
@@ -1017,9 +936,9 @@ env.Library(
         "commands/txn_cmd_request",
         "curop_metrics",
         "default_max_time_ms_cluster_parameter",
-        "introspect",
         "multitenancy",
         "not_primary_error_tracker",
+        "profile_collection",
         "read_concern_d_impl",
         "repl/repl_server_parameters",
         "repl/replica_set_messages",
@@ -1078,6 +997,9 @@ env.Library(
         "index_builds_coordinator_mongod.cpp",
     ],
     LIBDEPS=[
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/audit/audit_enterprise"
+        if "audit" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
         "$BUILD_DIR/mongo/util/concurrency/thread_pool",
         "index_builds_coordinator_interface",
     ],
@@ -1203,9 +1125,9 @@ env.Library(
 )
 
 env.Library(
-    target="introspect",
+    target="profile_collection",
     source=[
-        "introspect.cpp",
+        "profile_collection.cpp",
     ],
     LIBDEPS_PRIVATE=[
         "$BUILD_DIR/mongo/util/concurrency/spin_lock",
@@ -1552,17 +1474,6 @@ execEnv.Library(
 )
 
 env.Library(
-    target="disk_use_options_idl",
-    source=[
-        "exec/disk_use_options_gen.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "query/query_knobs",
-        "server_base",
-    ],
-)
-
-env.Library(
     target="sbe_values",
     source=[
         "exec/sbe/values/arith_common.cpp",
@@ -1649,6 +1560,7 @@ env.Library(
         "pipeline/expression_dependencies.cpp",
         "pipeline/expression_function.cpp",
         "pipeline/expression_js_emit.cpp",
+        "pipeline/expression_let.cpp",
         "pipeline/expression_parser_gen.cpp",
         "pipeline/expression_test_api_version.cpp",
         "pipeline/expression_trigonometric.cpp",
@@ -1779,32 +1691,6 @@ env.Library(
         "$BUILD_DIR/mongo/transport/transport_layer_common",
         "api_parameters",
         "commands",
-    ],
-)
-
-env.Library(
-    target="operation_time_tracker",
-    source=[
-        "operation_time_tracker.cpp",
-    ],
-    LIBDEPS_PRIVATE=[
-        "server_base",
-        "service_context",
-    ],
-)
-
-env.Library(
-    target="operation_killer",
-    source=[
-        "operation_killer.cpp",
-    ],
-    LIBDEPS=[
-        "service_context",
-    ],
-    LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/auth/auth",
-        "$BUILD_DIR/mongo/db/auth/authprivilege",
-        "server_base",
     ],
 )
 
@@ -2011,32 +1897,6 @@ env.Library(
     ],
 )
 
-env.Library(
-    target="generic_cursor",
-    source=[
-        "allocate_cursor_id.cpp",
-        "generic_cursor_gen.cpp",
-    ],
-    LIBDEPS=[
-        "repl/optime",
-        "service_context",
-    ],
-    LIBDEPS_PRIVATE=[
-        "server_base",
-    ],
-)
-
-env.Library(
-    target="ttl_collection_cache",
-    source=[
-        "ttl_collection_cache.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-        "$BUILD_DIR/mongo/db/service_context",
-    ],
-)
-
 asioEnv = env.Clone()
 asioEnv.InjectThirdParty("asio")
 
@@ -2106,6 +1966,62 @@ env.Library(
     LIBDEPS_PRIVATE=[
         # NOTE: If you need to add a static or mongo initializer to mongod startup,
         # please add that library here, as a private library dependency.
+        "$BUILD_DIR/mongo/db/modules/enterprise/kmip_configuration"
+        if "MONGO_ENTERPRISE_FEATURES" in env
+        and (
+            "encryptdb" in env["MONGO_ENTERPRISE_FEATURES"]
+            or "audit" in env["MONGO_ENTERPRISE_FEATURES"]
+        )
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/audit/audit_configuration"
+        if "audit" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/audit/audit_mongod_proxy"
+        if "audit" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/encryptdb/encryption_key_manager_aux"
+        if "encryptdb" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/fcbis/file_copy_based_initial_syncer"
+        if "fcbis" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/fips/fips_mode_server"
+        if "fips" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/hot_backups/backup_docs_needed_bounds"
+        if "hot_backups" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/hot_backups/hot_backups"
+        if "hot_backups" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/inmemory/storage_inmemory"
+        if "inmemory" in env.get("MONGO_ENTERPRISE_FEATURES", []) and wiredtiger
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/ldap/ldap_manager_init"
+        if "ldap" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/ldap/ldap_options_mongod"
+        if "ldap" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/magic_restore/magic_restore"
+        if "magic_restore" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/queryable/queryable_wt/queryable_wt"
+        if "queryable" in env.get("MONGO_ENTERPRISE_FEATURES", []) and wiredtiger
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/sasl/auth_delay"
+        if "sasl" in env.get("MONGO_ENTERPRISE_FEATURES", []) and have_sasl_lib
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/sasl/authz_manager_factory_external"
+        if "sasl" in env.get("MONGO_ENTERPRISE_FEATURES", []) and have_sasl_lib
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/sasl/mongosaslservercommon"
+        if "sasl" in env.get("MONGO_ENTERPRISE_FEATURES", []) and have_sasl_lib
+        else "",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/streams/commands/streams_commands"
+        if "streams" in env.get("MONGO_ENTERPRISE_FEATURES", []) and env.ShouldBuildStreams()
+        else "",
+        "$BUILD_DIR/mongo/db/storage/wiredtiger/storage_wiredtiger" if wiredtiger else "",
         "$BUILD_DIR/mongo/executor/async_rpc_error_info",
         "$BUILD_DIR/mongo/executor/network_interface_factory",
         "$BUILD_DIR/mongo/rpc/rpc",
@@ -2130,6 +2046,9 @@ env.Library(
         "$BUILD_DIR/mongo/util/options_parser/options_parser_init",
         "$BUILD_DIR/mongo/util/periodic_runner_factory",
         "$BUILD_DIR/mongo/util/pin_code_segments" if env.TargetOSIs("linux") else [],
+        "$BUILD_DIR/mongo/util/tcmalloc_set_parameter"
+        if env["MONGO_ALLOCATOR"] in ["tcmalloc-google", "tcmalloc-gperf"]
+        else "",
         "$BUILD_DIR/mongo/util/testing_options",
         "$BUILD_DIR/mongo/util/tracing_profiler/tracing_profiler"
         if get_option("use-tracing-profiler") == "on"
@@ -2161,7 +2080,6 @@ env.Library(
         "fts/ftsmongod",
         "index/index_access_method",
         "index_builds_coordinator_mongod",
-        "introspect",
         "keys_collection_client_direct",
         "logical_time_metadata_hook",
         "matcher/expressions_mongod_only",
@@ -2171,6 +2089,7 @@ env.Library(
         "periodic_runner_job_abort_expired_transactions",
         "pipeline/aggregation",
         "pipeline/process_interface/mongod_process_interface_factory",
+        "profile_collection",
         "query/bson/dotted_path_support",
         "query_exec",
         "read_concern_d_impl",
@@ -2236,6 +2155,9 @@ env.Library(
         # private libdep of mongod_initializers.
         "$BUILD_DIR/mongo/client/clientdriver_minimal",
         "$BUILD_DIR/mongo/db/auth/user_cache_invalidator",
+        "$BUILD_DIR/mongo/db/modules/enterprise/src/audit/audit_enterprise"
+        if "audit" in env.get("MONGO_ENTERPRISE_FEATURES", [])
+        else "",
         "$BUILD_DIR/mongo/idl/cluster_server_parameter",
         "$BUILD_DIR/mongo/idl/cluster_server_parameter_initializer",
         "$BUILD_DIR/mongo/idl/cluster_server_parameter_op_observer",
@@ -2505,6 +2427,7 @@ if wiredtiger:
             "curop_stats_test.cpp",
         ],
         LIBDEPS=[
+            "$BUILD_DIR/mongo/db/prepare_conflict_tracker",
             "$BUILD_DIR/mongo/transport/transport_layer_mock",
             "auth/auth",
             "auth/authmocks",

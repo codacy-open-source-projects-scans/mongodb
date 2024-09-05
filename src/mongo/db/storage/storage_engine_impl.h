@@ -401,6 +401,10 @@ public:
     void waitForAllEarlierOplogWritesToBeVisible(OperationContext* opCtx,
                                                  RecordStore* oplogRecordStore) const override;
 
+    bool waitUntilDurable(OperationContext* opCtx) override;
+
+    bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx, bool stableCheckpoint) override;
+
     BSONObj getSanitizedStorageOptionsForSecondaryReplication(
         const BSONObj& options) const override;
 
@@ -461,7 +465,7 @@ private:
                               const std::string& ident,
                               LastShutdownState lastShutdownState,
                               ReconcileResult* reconcileResult,
-                              std::set<std::string>* internalIdentsToDrop,
+                              std::set<std::string>* internalIdentsToKeep,
                               std::set<std::string>* allInternalIdents);
 
     class RemoveDBChange;

@@ -40,7 +40,7 @@ variables:
   # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
   - &linux_x86_dynamic_compile_variant_dependency
     depends_on:
-      - name: archive_dist_test_debug
+      - name: archive_dist_test
         variant: &linux_x86_dynamic_compile_variant_name linux-x86-dynamic-compile
       - name: version_gen
         variant: generate-tasks-for-version
@@ -104,7 +104,7 @@ variables:
 
   - &linux_x86_dynamic_debug_compile_variant_dependency
     depends_on:
-      - name: archive_dist_test_debug
+      - name: archive_dist_test
         variant: &linux_x86_dynamic_debug_compile_variant_name linux-x86-dynamic-debug-compile-required
       - name: version_gen
         variant: generate-tasks-for-version
@@ -120,7 +120,7 @@ variables:
   # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
   - &linux_debug_aubsan_compile_variant_dependency
     depends_on:
-      - name: archive_dist_test_debug
+      - name: archive_dist_test
         variant: &linux_debug_aubsan_compile_variant_name linux-debug-aubsan-compile-required
       - name: archive_jstestshell
         variant: *linux_debug_aubsan_compile_variant_name
@@ -176,7 +176,7 @@ variables:
   # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
   - &enterprise-rhel8-debug-tsan-compile-dependency
     depends_on:
-      - name: archive_dist_test_debug
+      - name: archive_dist_test
         variant: &enterprise-rhel8-debug-tsan-compile enterprise-rhel8-debug-tsan-compile
       - name: archive_jstestshell
         variant: *enterprise-rhel8-debug-tsan-compile
@@ -322,12 +322,12 @@ buildvariants:
     tasks:
       - name: search_end_to_end_sharded_cluster
       - name: search_end_to_end_single_node
-      - name: .development_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
-      - name: .development_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
+      - name: .development_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
+      - name: .development_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
         distros:
           - rhel8.8-medium
-      - name: .release_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
-      - name: .release_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags
+      - name: .release_critical !.requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
+      - name: .release_critical .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.incompatible_community !.requires_all_feature_flags !.suggested_excluding_required__for_devprod_mitigation_only
         distros:
           - rhel8.8-medium
 
@@ -598,7 +598,6 @@ buildvariants:
       - name: .sharding .jscore !.wo_snapshot !.feature_flag_guarded
       - name: .sharding .common !.csrs !.jstestfuzz !.feature_flag_guarded
       - name: .updatefuzzer
-      - name: .serverless
       - name: unittest_shell_hang_analyzer_gen
       - name: .watchdog
 
