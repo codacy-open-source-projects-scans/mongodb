@@ -198,19 +198,19 @@ std::vector<RoleName> filterAndMapRole(BSONObjBuilder* builder,
             for (const auto& roleName : elem.Obj()) {
                 subRoles.push_back(RoleName::parseFromBSON(roleName, tenant));
             }
-            if ((option & ResolveRoleOption::kRoles) == 0) {
+            if (!option.shouldMineRoles()) {
                 continue;
             }
         }
 
         if ((elem.fieldNameStringData() == kPrivilegesFieldName) &&
-            ((option & ResolveRoleOption::kPrivileges) == 0)) {
+            (!option.shouldMinePrivileges())) {
             continue;
         }
 
         if (elem.fieldNameStringData() == kAuthenticationRestrictionFieldName) {
             sawRestrictions = true;
-            if (option & ResolveRoleOption::kRestrictions) {
+            if (option.shouldMineRestrictions()) {
                 if (liftAuthenticationRestrictions) {
                     // For a rolesInfo invocation, we need to lift ARs up into a container.
                     BSONArrayBuilder arBuilder(
@@ -228,7 +228,7 @@ std::vector<RoleName> filterAndMapRole(BSONObjBuilder* builder,
         builder->append(elem);
     }
 
-    if (!sawRestrictions && (option & ResolveRoleOption::kRestrictions)) {
+    if (!sawRestrictions && (option.shouldMineRestrictions())) {
         builder->append(kAuthenticationRestrictionFieldName, BSONArray());
     }
 
@@ -237,12 +237,12 @@ std::vector<RoleName> filterAndMapRole(BSONObjBuilder* builder,
 
 ResolveRoleOption makeResolveRoleOption(PrivilegeFormat showPrivileges,
                                         AuthenticationRestrictionsFormat showRestrictions) {
-    auto option = ResolveRoleOption::kRoles;
+    auto option = ResolveRoleOption::kRoles();
     if (showPrivileges != PrivilegeFormat::kOmit) {
-        option = static_cast<ResolveRoleOption>(option | ResolveRoleOption::kPrivileges);
+        option.setPrivileges(true /* shouldEnable */);
     }
     if (showRestrictions != AuthenticationRestrictionsFormat::kOmit) {
-        option = static_cast<ResolveRoleOption>(option | ResolveRoleOption::kRestrictions);
+        option.setRestrictions(true /* shouldEnable */);
     }
 
     return option;
@@ -331,13 +331,19 @@ StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(
     OperationContext* opCtx,
     const UserRequest& userReq,
     const SharedUserAcquisitionStats& userAcquisitionStats) try {
-    const UserName& userName = userReq.name;
     std::vector<RoleName> directRoles;
-    User user(userReq);
+    User user(userReq.clone());
+
+    const UserRequest* request = user.getUserRequest();
+    const UserName& userName = request->getUserName();
 
     auto rolesLock = _lockRoles(opCtx, userName.tenantId());
 
-    if (!userReq.roles) {
+    // Set ResolveRoleOption to mine all information from role tree.
+    auto options = ResolveRoleOption::kAllInfo();
+
+    bool hasExternalRoles = request->getRoles().has_value();
+    if (!hasExternalRoles) {
         // Normal path: Acquire a user from the local store by UserName.
         BSONObj userDoc;
         auto status =
@@ -352,7 +358,7 @@ StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(
         }
 
         V2UserDocumentParser userDocParser;
-        userDocParser.setTenantId(userReq.name.tenantId());
+        userDocParser.setTenantId(request->getUserName().tenantId());
         uassertStatusOK(userDocParser.initializeUserFromUserDocument(userDoc, &user));
         for (auto iter = user.getRoles(); iter.more();) {
             directRoles.push_back(iter.next());
@@ -362,11 +368,17 @@ StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(
         // a base user definition with a set of immediate roles.
         // We're being asked to use the local roles collection to derive privileges,
         // subordinate roles, and authentication restrictions.
-        directRoles = std::vector<RoleName>(userReq.roles->cbegin(), userReq.roles->cend());
+        const auto& requestRoles = *request->getRoles();
+        directRoles.assign(requestRoles.begin(), requestRoles.end());
+
         User::CredentialData credentials;
         credentials.isExternal = true;
         user.setCredentials(credentials);
         user.setRoles(makeRoleNameIteratorForContainer(directRoles));
+
+        // Update ResolveRoleOption to skip emitting warning logs for unknown roles, since they came
+        // from an external source.
+        options.setIgnoreUnknown(true /* shouldEnable */);
     }
 
     if (auto tenant = userName.tenantId()) {
@@ -378,7 +390,7 @@ StatusWith<User> AuthzManagerExternalStateLocal::getUserObject(
 
     handleAuthLocalGetSubRolesFailPoint(directRoles);
 
-    auto data = uassertStatusOK(resolveRoles(opCtx, directRoles, ResolveRoleOption::kAll));
+    auto data = uassertStatusOK(resolveRoles(opCtx, directRoles, options));
     data.roles->insert(directRoles.cbegin(), directRoles.cend());
     user.setIndirectRoles(makeRoleNameIteratorForContainer(data.roles.value()));
     user.addPrivileges(data.privileges.value());
@@ -400,13 +412,16 @@ Status AuthzManagerExternalStateLocal::getUserDescription(
     const UserRequest& userReq,
     BSONObj* result,
     const SharedUserAcquisitionStats& userAcquisitionStats) try {
-    const UserName& userName = userReq.name;
+
+    const UserName& userName = userReq.getUserName();
     std::vector<RoleName> directRoles;
     BSONObjBuilder resultBuilder;
 
     auto rolesLock = _lockRoles(opCtx, userName.tenantId());
 
-    if (!userReq.roles) {
+    auto options = ResolveRoleOption::kAllInfo();
+    bool hasExternalRoles = userReq.getRoles().has_value();
+    if (!hasExternalRoles) {
         BSONObj userDoc;
         auto status =
             findOne(opCtx, getUsersCollection(userName.tenantId()), userName.toBSON(), &userDoc);
@@ -419,9 +434,13 @@ Status AuthzManagerExternalStateLocal::getUserDescription(
             return status;
         }
 
-        directRoles = filterAndMapRole(
-            &resultBuilder, userDoc, ResolveRoleOption::kAll, false, userName.tenantId());
+        directRoles =
+            filterAndMapRole(&resultBuilder, userDoc, options, false, userName.tenantId());
     } else {
+        // Set ResolveRoleOption to include the ignoreUnknownFlag so that external roles that don't
+        // exist do not generate warning logs.
+        options.setIgnoreUnknown(true /* shouldEnable */);
+
         uassert(ErrorCodes::BadValue,
                 "Illegal combination of pre-defined roles with tenant identifier",
                 userName.tenantId() == boost::none);
@@ -432,7 +451,8 @@ Status AuthzManagerExternalStateLocal::getUserDescription(
         resultBuilder.append("db", userName.getDB());
         resultBuilder.append("credentials", BSON("external" << true));
 
-        directRoles = std::vector<RoleName>(userReq.roles->cbegin(), userReq.roles->cend());
+        directRoles =
+            std::vector<RoleName>(userReq.getRoles()->cbegin(), userReq.getRoles()->cend());
         BSONArrayBuilder rolesBuilder(resultBuilder.subarrayStart("roles"));
         for (const RoleName& role : directRoles) {
             rolesBuilder.append(role.toBSON());
@@ -449,7 +469,7 @@ Status AuthzManagerExternalStateLocal::getUserDescription(
 
     handleAuthLocalGetSubRolesFailPoint(directRoles);
 
-    auto data = uassertStatusOK(resolveRoles(opCtx, directRoles, ResolveRoleOption::kAll));
+    auto data = uassertStatusOK(resolveRoles(opCtx, directRoles, options));
     data.roles->insert(directRoles.cbegin(), directRoles.cend());
     serializeResolvedRoles(&resultBuilder, data);
     *result = resultBuilder.obj();
@@ -482,10 +502,11 @@ using ResolvedRoleData = AuthzManagerExternalState::ResolvedRoleData;
 StatusWith<ResolvedRoleData> AuthzManagerExternalStateLocal::resolveRoles(
     OperationContext* opCtx, const std::vector<RoleName>& roleNames, ResolveRoleOption option) try {
     using RoleNameSet = typename decltype(ResolvedRoleData::roles)::value_type;
-    const bool processRoles = option & ResolveRoleOption::kRoles;
-    const bool processPrivs = option & ResolveRoleOption::kPrivileges;
-    const bool processRests = option & ResolveRoleOption::kRestrictions;
-    const bool walkIndirect = (option & ResolveRoleOption::kDirectOnly) == 0;
+    const bool processRoles = option.shouldMineRoles();
+    const bool processPrivs = option.shouldMinePrivileges();
+    const bool processRests = option.shouldMineRestrictions();
+    const bool walkIndirect = !option.shouldMineDirectOnly();
+    const bool skipUnknownRolesLog = option.shouldIgnoreUnknown();
     IDLParserContext idlctx("resolveRoles");
 
     RoleNameSet inheritedRoles;
@@ -511,7 +532,10 @@ StatusWith<ResolvedRoleData> AuthzManagerExternalStateLocal::resolveRoles(
                 findOne(opCtx, getRolesCollection(role.tenantId()), role.toBSON(), &roleDoc);
             if (!status.isOK()) {
                 if (status.code() == ErrorCodes::NoMatchingDocument) {
-                    LOGV2(5029200, "Role does not exist", "role"_attr = role);
+                    if (!skipUnknownRolesLog) {
+                        LOGV2(5029200, "Role does not exist", "role"_attr = role);
+                    }
+
                     continue;
                 }
                 return status;

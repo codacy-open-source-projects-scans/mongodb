@@ -79,16 +79,17 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/generic_argument_util.h"
 #include "mongo/db/keys_collection_document_gen.h"
 #include "mongo/db/keys_collection_util.h"
 #include "mongo/db/list_collections_gen.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/write_ops_gen.h"
-#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/hello_gen.h"
 #include "mongo/db/repl/optime_with.h"
@@ -173,6 +174,7 @@ namespace {
 
 MONGO_FAIL_POINT_DEFINE(hangAddShardBeforeUpdatingClusterCardinalityParameter);
 MONGO_FAIL_POINT_DEFINE(hangAfterDroppingDatabaseInTransitionToDedicatedConfigServer);
+MONGO_FAIL_POINT_DEFINE(hangRemoveShardAfterSettingDrainingFlag);
 MONGO_FAIL_POINT_DEFINE(hangRemoveShardAfterDrainingDDL);
 MONGO_FAIL_POINT_DEFINE(hangRemoveShardBeforeUpdatingClusterCardinalityParameter);
 MONGO_FAIL_POINT_DEFINE(skipUpdatingClusterCardinalityParameterAfterAddShard);
@@ -1451,6 +1453,8 @@ RemoveShardProgress ShardingCatalogManager::removeShard(OperationContext* opCtx,
     shardMembershipLock.unlock();
     clusterCardinalityParameterLock.unlock();
 
+    hangRemoveShardAfterSettingDrainingFlag.pauseWhileSet(opCtx);
+
     // Draining has already started, now figure out how many chunks and databases are still on the
     // shard.
     const auto getDrainingProgress = [&]() -> RemoveShardProgress::DrainingShardUsage {
@@ -1779,12 +1783,13 @@ void ShardingCatalogManager::_setUserWriteBlockingStateOnNewShard(OperationConte
             NamespaceString::kUserWritesCriticalSectionsNamespace);
         write_ops::DeleteOpEntry query({}, true /*multi*/);
         deleteOp.setDeletes({query});
+        generic_argument_util::setMajorityWriteConcern(deleteOp);
 
         const auto swCommandResponse =
             _runCommandForAddShard(opCtx,
                                    targeter,
                                    NamespaceString::kUserWritesCriticalSectionsNamespace.dbName(),
-                                   CommandHelpers::appendMajorityWriteConcern(deleteOp.toBSON()));
+                                   deleteOp.toBSON());
         uassertStatusOK(swCommandResponse.getStatus());
         uassertStatusOK(getStatusFromWriteCommandReply(swCommandResponse.getValue().response));
     }
@@ -1804,9 +1809,9 @@ void ShardingCatalogManager::_setUserWriteBlockingStateOnNewShard(OperationConte
             shardsvrSetUserWriteBlockModeCmd.setSetUserWriteBlockModeRequest(
                 std::move(setUserWriteBlockModeRequest));
             shardsvrSetUserWriteBlockModeCmd.setPhase(phase);
+            generic_argument_util::setMajorityWriteConcern(shardsvrSetUserWriteBlockModeCmd);
 
-            return CommandHelpers::appendMajorityWriteConcern(
-                shardsvrSetUserWriteBlockModeCmd.toBSON());
+            return shardsvrSetUserWriteBlockModeCmd.toBSON();
         };
 
         if (doc.getBlockNewUserShardedDDL()) {
@@ -2031,12 +2036,10 @@ void ShardingCatalogManager::_removeAllClusterParametersFromShard(OperationConte
         write_ops::DeleteCommandRequest deleteOp(nss);
         write_ops::DeleteOpEntry query({}, true /*multi*/);
         deleteOp.setDeletes({query});
+        generic_argument_util::setMajorityWriteConcern(deleteOp);
 
         const auto swCommandResponse =
-            _runCommandForAddShard(opCtx,
-                                   targeter.get(),
-                                   nss.dbName(),
-                                   CommandHelpers::appendMajorityWriteConcern(deleteOp.toBSON()));
+            _runCommandForAddShard(opCtx, targeter.get(), nss.dbName(), deleteOp.toBSON());
         uassertStatusOK(swCommandResponse.getStatus());
         uassertStatusOK(getStatusFromWriteCommandReply(swCommandResponse.getValue().response));
     }
@@ -2063,12 +2066,10 @@ void ShardingCatalogManager::_pushClusterParametersToNewShard(
             setClusterParamsCmd.setDbName(dbName);
             setClusterParamsCmd.setClusterParameterTime(
                 parameter["clusterParameterTime"].timestamp());
+            generic_argument_util::setMajorityWriteConcern(setClusterParamsCmd);
 
-            const auto cmdResponse = _runCommandForAddShard(
-                opCtx,
-                targeter.get(),
-                dbName,
-                CommandHelpers::appendMajorityWriteConcern(setClusterParamsCmd.toBSON()));
+            const auto cmdResponse =
+                _runCommandForAddShard(opCtx, targeter.get(), dbName, setClusterParamsCmd.toBSON());
             uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(cmdResponse));
         }
     }

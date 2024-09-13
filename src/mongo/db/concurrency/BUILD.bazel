@@ -15,6 +15,26 @@ idl_generator(
 )
 
 mongo_cc_library(
+    name = "exception_util",
+    srcs = [
+        "exception_util.cpp",
+        ":exception_util_gen",
+    ],
+    hdrs = [
+        "exception_util.h",
+    ],
+    deps = [
+        "//src/mongo/db:server_base",
+        "//src/mongo/db:server_options_servers",
+        "//src/mongo/db/commands:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/query/query_stats",
+        "//src/mongo/db/storage:recovery_unit_base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/util:log_and_backoff",
+    ],
+)
+
+mongo_cc_library(
     name = "lock_manager",
     srcs = [
         "cond_var_lock_grant_notification.cpp",
@@ -99,6 +119,7 @@ mongo_cc_library(
         "//src/mongo/db/auth:auth_name.h",
         "//src/mongo/db/auth:cluster_auth_mode.h",
         "//src/mongo/db/auth:privilege.h",
+        "//src/mongo/db/auth:resolve_role_option.h",
         "//src/mongo/db/auth:resource_pattern.h",
         "//src/mongo/db/auth:restriction_environment.h",
         "//src/mongo/db/auth:role_name.h",

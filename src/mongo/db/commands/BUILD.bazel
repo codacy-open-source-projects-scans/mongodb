@@ -170,6 +170,17 @@ idl_generator(
     ],
 )
 
+mongo_cc_library(
+    name = "rwc_defaults_commands",
+    srcs = [
+        ":rwc_defaults_commands_gen",
+    ],
+    deps = [
+        "//src/mongo/db:read_write_concern_defaults",
+        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
+    ],
+)
+
 idl_generator(
     name = "authentication_commands_gen",
     src = "authentication_commands.idl",
@@ -227,6 +238,25 @@ idl_generator(
         "//src/mongo/db/pipeline:change_stream_pre_and_post_images_options_gen",
         "//src/mongo/db/timeseries:timeseries_gen",
         "//src/mongo/idl:generic_argument_gen",
+    ],
+)
+
+mongo_cc_library(
+    name = "create_command",
+    srcs = [
+        "create_gen",
+    ],
+    hdrs = [
+        "create_command_validation.h",
+    ],
+    deps = [
+        "//src/mongo/crypto:encrypted_field_config",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db:server_options",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/auth:authprivilege",
+        "//src/mongo/db/catalog:collection_options",
+        "//src/mongo/db/query:query_knobs",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/timeseries:timeseries_options",  # TODO(SERVER-93876): Remove.
     ],
 )
 
@@ -513,8 +543,6 @@ mongo_cc_library(
         "//src/mongo/db/matcher:expression_hasher.h",
         "//src/mongo/db/matcher:matcher.h",
         "//src/mongo/db/matcher/schema:encrypt_schema_gen",
-        "//src/mongo/db/ops:single_write_result_gen",
-        "//src/mongo/db/ops:write_ops_gen",
         "//src/mongo/db/pipeline:accumulation_statement.h",
         "//src/mongo/db/pipeline:accumulator.h",
         "//src/mongo/db/pipeline:accumulator_for_window_functions.h",
@@ -528,11 +556,13 @@ mongo_cc_library(
         "//src/mongo/db/pipeline:document_source_set_window_fields_gen",
         "//src/mongo/db/pipeline:expression_dependencies.h",
         "//src/mongo/db/pipeline:expression_from_accumulator_quantile.h",
+        "//src/mongo/db/pipeline:group_from_first_document_transformation.h",
         "//src/mongo/db/pipeline:legacy_runtime_constants_gen",
         "//src/mongo/db/pipeline:match_processor.h",
         "//src/mongo/db/pipeline:memory_token_container_util.h",
         "//src/mongo/db/pipeline:stage_constraints.h",
         "//src/mongo/db/pipeline:storage_stats_spec_gen",
+        "//src/mongo/db/pipeline:transformer_interface.h",
         "//src/mongo/db/pipeline/window_function:window_bounds.h",
         "//src/mongo/db/pipeline/window_function:window_function.h",
         "//src/mongo/db/pipeline/window_function:window_function_avg.h",
@@ -544,6 +574,8 @@ mongo_cc_library(
         "//src/mongo/db/query:canonical_distinct.h",
         "//src/mongo/db/query:canonical_query.h",
         "//src/mongo/db/query:canonical_query_encoder.h",
+        "//src/mongo/db/query:count_command_gen",
+        "//src/mongo/db/query:count_request.h",
         "//src/mongo/db/query:cursor_response_gen",
         "//src/mongo/db/query:distinct_command_gen",
         "//src/mongo/db/query:explain_verbosity_gen",
@@ -580,10 +612,12 @@ mongo_cc_library(
         "//src/mongo/db/query/query_shape:shape_helpers.h",
         "//src/mongo/db/query/query_stats:key.h",
         "//src/mongo/db/query/query_stats:transform_algorithm_gen",
-        "//src/mongo/db/query/stats:stats_gen",
+        "//src/mongo/db/query/stats:stats_gen_for_histograms",
         "//src/mongo/db/query/stats:value_utils.h",
         "//src/mongo/db/query/timeseries:bucket_spec.h",
         "//src/mongo/db/query/util:named_enum.h",
+        "//src/mongo/db/query/write_ops:single_write_result_gen",
+        "//src/mongo/db/query/write_ops:write_ops_gen",
         "//src/mongo/db/repl:apply_ops_gen",
         "//src/mongo/db/repl:member_config_gen",
         "//src/mongo/db/repl:oplog_entry_gen",
@@ -656,6 +690,20 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
+    name = "server_status_servers",
+    srcs = [
+        "server_status_servers.cpp",
+    ],
+    deps = [
+        ":server_status_core",
+        "//src/mongo/db/stats:counters",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/transport:message_compressor",
+        "//src/mongo/transport:service_executor",
+        "//src/mongo/util/net:ssl_manager",  # TODO(SERVER-93876): Remove.
+    ],
+)
+
+mongo_cc_library(
     name = "set_user_write_block_mode_idl",
     srcs = [
         ":set_user_write_block_mode_gen",
@@ -705,6 +753,24 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo/db:server_base",
+    ],
+)
+
+# TODO SERVER-83663 - move this library back to servers below.
+mongo_cc_library(
+    name = "umc_commands_idl",
+    srcs = [
+        ":user_management_commands_gen",
+    ],
+    hdrs = [
+        "//src/mongo/db/auth:umc_info_command_arg.h",
+    ],
+    deps = [
+        "//src/mongo/db:common",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db/auth:address_restriction",
+        "//src/mongo/db/auth:authprivilege",
+        "//src/mongo/db/auth:role_name_or_string",
     ],
 )
 

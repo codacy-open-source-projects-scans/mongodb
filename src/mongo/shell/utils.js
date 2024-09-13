@@ -517,6 +517,7 @@ jsTestOptions = function() {
             backupOnRestartDir: TestData.backupOnRestartDir || false,
 
             evergreenTaskId: TestData.evergreenTaskId || null,
+            evergreenVariantName: TestData.evergreenVariantName || null,
             configShard: TestData.configShard || false,
 
             useAutoBootstrapProcedure: TestData.useAutoBootstrapProcedure || false,
@@ -526,6 +527,7 @@ jsTestOptions = function() {
 
             performTimeseriesCompressionIntermediateDataIntegrityCheckOnInsert: true,
             fuzzMongodConfigs: TestData.fuzzMongodConfigs || false,
+            mozJSGCZeal: TestData.mozJSGCZeal || "",
         });
     }
     return _jsTestOptions;

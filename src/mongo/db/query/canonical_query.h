@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <boost/logic/tribool.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -171,6 +172,10 @@ public:
         return _distinct;
     }
 
+    CanonicalDistinct* getDistinct() {
+        return _distinct.get_ptr();
+    }
+
     const CollatorInterface* getCollator() const {
         return _expCtx->getCollator();
     }
@@ -239,7 +244,7 @@ public:
     void setCollator(std::unique_ptr<CollatorInterface> collator);
 
     void setDistinct(CanonicalDistinct&& distinct) {
-        _distinct.emplace(distinct);
+        _distinct.emplace(std::move(distinct));
     }
 
     /**
@@ -276,6 +281,18 @@ public:
 
     bool isSbeCompatible() const {
         return _sbeCompatible;
+    }
+
+    void setUsingSbePlanCache(bool usingSbePlanCache) {
+        _usingSbePlanCache = usingSbePlanCache;
+    }
+
+    // setUsingSbePlanCache() must be invoked before this function.
+    bool isUsingSbePlanCache() const {
+        tassert(9421201,
+                "_usingSbePlanCache should be initialized",
+                !boost::indeterminate(_usingSbePlanCache));
+        return static_cast<bool>(_usingSbePlanCache);
     }
 
     void setUseCqfIfEligible(bool useCqfIfEligible) {
@@ -456,6 +473,12 @@ private:
 
     // True if this query can be executed by the SBE.
     bool _sbeCompatible = false;
+
+    // Indicate whether this query will be cached using the SBE plan cache.
+    // Use a tribool because this value is uninitialized for a large part of the life of a
+    // CanonicalQuery. If this value is not boost::indeterminate, that means it has been not set.
+    // We chose to use a tribool instead of optional<bool> to avoid confusion of operator bool.
+    boost::tribool _usingSbePlanCache = boost::indeterminate;
 
     // If true, indicates that we should use CQF if this query is eligible (see the
     // isEligibleForBonsai() function for eligiblitly requirements).

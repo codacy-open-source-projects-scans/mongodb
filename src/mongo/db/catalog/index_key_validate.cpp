@@ -59,6 +59,7 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/column_key_generator.h"
 #include "mongo/db/index/columns_access_method.h"
+#include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index/wildcard_validation.h"
@@ -100,6 +101,7 @@ namespace {
 // names will be disabled. This will allow for creation of indexes with invalid field names in their
 // specification.
 MONGO_FAIL_POINT_DEFINE(skipIndexCreateFieldNameValidation);
+MONGO_FAIL_POINT_DEFINE(skipIndexCreateWeightsFieldValidation);
 
 // When the skipTTLIndexExpireAfterSecondsValidation failpoint is enabled,
 // validation for TTL index 'expireAfterSeconds' will be disabled in certain codepaths.
@@ -717,10 +719,12 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
     }
 
     if (indexType != IndexNames::TEXT && hasWeightsField) {
-        return {ErrorCodes::CannotCreateIndex,
-                str::stream() << "Invalid index specification " << indexSpec << "; the field '"
-                              << IndexDescriptor::kWeightsFieldName
-                              << "' can only be specified with text indexes"};
+        if (!skipIndexCreateWeightsFieldValidation.shouldFail()) {
+            return {ErrorCodes::CannotCreateIndex,
+                    str::stream() << "Invalid index specification " << indexSpec << "; the field '"
+                                  << IndexDescriptor::kWeightsFieldName
+                                  << "' can only be specified with text indexes"};
+        }
     }
 
     if (unique && prepareUnique) {
@@ -1059,7 +1063,7 @@ bool isIndexAllowedInAPIVersion1(const IndexDescriptor& indexDesc) {
 }
 
 BSONObj parseAndValidateIndexSpecs(OperationContext* opCtx, const BSONObj& indexSpecObj) {
-    constexpr auto k_id_ = "_id_"_sd;
+    constexpr auto k_id_ = IndexConstants::kIdIndexName;
     constexpr auto kStar = "*"_sd;
 
     BSONObj parsedIndexSpec = indexSpecObj;

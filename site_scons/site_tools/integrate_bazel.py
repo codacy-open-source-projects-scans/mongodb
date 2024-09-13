@@ -697,7 +697,9 @@ def auto_install_bazel(env, libdep, shlib_suffix):
             bazel_debug(f"Bazel AutoInstalling {bazel_node}")
         installed_files = getattr(bazel_libdep.attributes, "AIB_INSTALLED_FILES", [])
         setattr(
-            bazel_libdep.attributes, "AIB_INSTALLED_FILES", new_installed_files + installed_files
+            bazel_libdep.attributes,
+            "AIB_INSTALLED_FILES",
+            list(set(new_installed_files + installed_files)),
         )
 
 
@@ -841,6 +843,7 @@ def generate(env: SCons.Environment.Environment) -> None:
         f"--platforms=//bazel/platforms:{distro_or_os}_{normalized_arch}",
         f"--host_platform=//bazel/platforms:{distro_or_os}_{normalized_arch}",
         f'--//bazel/config:ssl={"True" if env.GetOption("ssl") == "on" else "False"}',
+        f'--//bazel/config:js_engine={env.GetOption("js-engine")}',
         "--define",
         f"MONGO_VERSION={env['MONGO_VERSION']}",
         "--compilation_mode=dbg",  # always build this compilation mode as we always build with -g
@@ -970,6 +973,10 @@ def generate(env: SCons.Environment.Environment) -> None:
         action=BazelCopyOutputsAction,
         emitter=SCons.Builder.ListEmitter([bazel_target_emitter]),
     )
+
+    # TODO(SERVER-94605): remove when Windows temp directory is cleared between task runs
+    if normalized_os == "windows" and os.environ.get("CI"):
+        subprocess.run(["bazel", "clean", "--expunge"])
 
     cmd = (
         ["aquery"]

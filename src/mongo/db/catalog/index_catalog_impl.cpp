@@ -66,6 +66,7 @@
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/s2_access_method.h"
 #include "mongo/db/index/s2_bucket_access_method.h"
@@ -1216,7 +1217,7 @@ BSONObj IndexCatalogImpl::getDefaultIdIndexSpec(const CollectionPtr& collection)
 
     BSONObjBuilder b;
     b.append("v", static_cast<int>(indexVersion));
-    b.append("name", "_id_");
+    b.append("name", IndexConstants::kIdIndexName);
     b.append("key", _idObj);
     if (collection->getDefaultCollator() && indexVersion >= IndexVersion::kV2) {
         // Creating an index with the "collation" option requires a v=2 index.
@@ -1598,6 +1599,7 @@ IndexCatalogEntry* IndexCatalogImpl::_getWritableEntry(const IndexDescriptor* de
 
     auto getWritableEntry = [&](auto& container) -> IndexCatalogEntry* {
         std::shared_ptr<const IndexCatalogEntry> oldEntry = container.release(descriptor);
+        invariant(oldEntry);
 
         // This collection instance already uniquely owns this IndexCatalogEntry, return it.
         if (oldEntry.use_count() == 1) {
@@ -2097,9 +2099,9 @@ StatusWith<BSONObj> IndexCatalogImpl::_fixIndexSpec(OperationContext* opCtx,
     BSONObj key = fixIndexKey(o["key"].Obj());
     b.append("key", key);
 
-    string name = o["name"].String();
+    StringData name = o["name"].checkAndGetStringData();
     if (IndexDescriptor::isIdIndexPattern(key)) {
-        name = "_id_";
+        name = IndexConstants::kIdIndexName;
     }
     b.append("name", name);
 

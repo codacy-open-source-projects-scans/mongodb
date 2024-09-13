@@ -83,7 +83,6 @@ BSONObj getDistinctProjection(const std::string& field);
  */
 std::unique_ptr<ParsedDistinctCommand> parse(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const BSONObj& cmd,
     std::unique_ptr<DistinctCommandRequest> distinctCommand,
     const ExtensionsCallback& extensionsCallback,
     MatchExpressionParser::AllowedFeatureSet allowedFeatures);
@@ -99,8 +98,7 @@ StatusWith<BSONObj> asAggregation(const CanonicalQuery& query);
 std::unique_ptr<CanonicalQuery> parseCanonicalQuery(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<ParsedDistinctCommand> parsedDistinct,
-    const CollatorInterface* defaultCollator = nullptr,
-    bool isDistinctMultiplanningEnabled = false);
+    const CollatorInterface* defaultCollator = nullptr);
 
 }  // namespace parsed_distinct_command
 }  // namespace mongo

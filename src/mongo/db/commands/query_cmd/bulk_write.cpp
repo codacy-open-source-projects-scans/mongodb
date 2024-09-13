@@ -85,17 +85,6 @@
 #include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
-#include "mongo/db/ops/delete_request_gen.h"
-#include "mongo/db/ops/insert.h"
-#include "mongo/db/ops/parsed_writes_common.h"
-#include "mongo/db/ops/single_write_result_gen.h"
-#include "mongo/db/ops/update_request.h"
-#include "mongo/db/ops/update_result.h"
-#include "mongo/db/ops/write_ops_exec.h"
-#include "mongo/db/ops/write_ops_exec_util.h"
-#include "mongo/db/ops/write_ops_gen.h"
-#include "mongo/db/ops/write_ops_parsers.h"
-#include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
@@ -107,6 +96,17 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/write_ops/delete_request_gen.h"
+#include "mongo/db/query/write_ops/insert.h"
+#include "mongo/db/query/write_ops/parsed_writes_common.h"
+#include "mongo/db/query/write_ops/single_write_result_gen.h"
+#include "mongo/db/query/write_ops/update_request.h"
+#include "mongo/db/query/write_ops/update_result.h"
+#include "mongo/db/query/write_ops/write_ops_exec.h"
+#include "mongo/db/query/write_ops/write_ops_exec_util.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/query/write_ops/write_ops_retryability.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -799,8 +799,8 @@ bool handleGroupedInserts(OperationContext* opCtx,
 
         auto stmtId = opCtx->isRetryableWrite() ? bulk_write_common::getStatementId(req, idx)
                                                 : kUninitializedStmtId;
-        const bool wasAlreadyExecuted = opCtx->isRetryableWrite() &&
-            txnParticipant.checkStatementExecutedNoOplogEntryFetch(opCtx, stmtId);
+        const bool wasAlreadyExecuted =
+            opCtx->isRetryableWrite() && txnParticipant.checkStatementExecuted(opCtx, stmtId);
 
         if (!fixedDoc.isOK()) {
             // Handled after we insert anything in the batch to be sure we report errors in the
@@ -1078,7 +1078,7 @@ bool handleDeleteOp(OperationContext* opCtx,
             : kUninitializedStmtId;
         if (opCtx->isRetryableWrite()) {
             const auto txnParticipant = TransactionParticipant::get(opCtx);
-            if (txnParticipant.checkStatementExecutedNoOplogEntryFetch(opCtx, stmtId)) {
+            if (txnParticipant.checkStatementExecuted(opCtx, stmtId)) {
                 RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
                 // Since multi:true is not allowed with retryable writes if the statement was
                 // executed there will always be 1 document deleted.
@@ -1660,7 +1660,8 @@ bool handleUpdateOp(OperationContext* opCtx,
         // Handle retryable non-timeseries updates.
         if (opCtx->isRetryableWrite()) {
             const auto txnParticipant = TransactionParticipant::get(opCtx);
-            if (auto entry = txnParticipant.checkStatementExecuted(opCtx, stmtId)) {
+            if (auto entry =
+                    txnParticipant.checkStatementExecutedAndFetchOplogEntry(opCtx, stmtId)) {
                 RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
 
                 auto [numMatched, numDocsModified, upserted] =

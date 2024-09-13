@@ -73,7 +73,6 @@
 #include "mongo/db/query/optimizer/algebra/polyvalue.h"
 #include "mongo/db/query/optimizer/comparison_op.h"
 #include "mongo/db/query/optimizer/containers.h"
-#include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/syntax/path.h"
 #include "mongo/db/query/optimizer/utils/path_utils.h"
@@ -261,10 +260,9 @@ void visit(ABTDocumentSourceTranslationVisitorContext* visitorCtx,
     AlgebrizerContext& ctx = visitorCtx->algCtx;
     const ProjectionName& scanProjName = ctx.getNextId("scan");
 
-    ABT pipelineABT = visitorCtx->metadata._scanDefs.at(scanDefName).exists()
-        ? make<ScanNode>(scanProjName, scanDefName)
-        : make<ValueScanNode>(ProjectionNameVector{scanProjName},
-                              createInitialScanProps(scanProjName, scanDefName));
+    // This assumes that the inner collection exists. If this is not the case, we will produce an
+    // invalid SBE plan.
+    ABT pipelineABT = make<ScanNode>(scanProjName, scanDefName);
 
     const ProjectionName& localIdProjName = ctx.getNextId("localId");
     auto entry = ctx.getNode();
@@ -421,14 +419,11 @@ void visit(ABTDocumentSourceTranslationVisitorContext* visitorCtx,
     std::string scanDefName = involvedNss.coll().toString();
     const ProjectionName& scanProjName = ctx.getNextId("scan");
 
-    const Metadata& metadata = visitorCtx->metadata;
-    ABT initialNode = metadata._scanDefs.at(scanDefName).exists()
-        ? make<ScanNode>(scanProjName, scanDefName)
-        : make<ValueScanNode>(ProjectionNameVector{scanProjName},
-                              createInitialScanProps(scanProjName, scanDefName));
+    // This assumes that the second collection in the $unionWith exists. If this is not the case, we
+    // will produce an invalid SBE plan.
+    ABT initialNode = make<ScanNode>(scanProjName, scanDefName);
 
-    ABT pipelineABT = translatePipelineToABT(metadata,
-                                             pipeline,
+    ABT pipelineABT = translatePipelineToABT(pipeline,
                                              scanProjName,
                                              std::move(initialNode),
                                              ctx.getPrefixId(),
@@ -438,7 +433,7 @@ void visit(ABTDocumentSourceTranslationVisitorContext* visitorCtx,
     ABT pipelineABTWithoutRoot = pipelineABT.cast<RootNode>()->getChild();
     // Pull out the root projection(s) from the inner pipeline.
     const ProjectionNameVector& rootProjections =
-        pipelineABT.cast<RootNode>()->getProperty().getProjections().getVector();
+        pipelineABT.cast<RootNode>()->getProjections().getVector();
     uassert(6624426,
             "Expected a single projection for inner union branch",
             rootProjections.size() == 1);
@@ -555,15 +550,14 @@ const ServiceContext::ConstructorActionRegisterer abtTranslationRegisterer{
         registerMongodVisitor<ABTDocumentSourceTranslationVisitorContext>(service);
     }};
 
-ABT translatePipelineToABT(const Metadata& metadata,
-                           const Pipeline& pipeline,
+ABT translatePipelineToABT(const Pipeline& pipeline,
                            ProjectionName scanProjName,
                            ABT initialNode,
                            PrefixId& prefixId,
                            QueryParameterMap& queryParameters,
                            size_t maxFilterDepth) {
     AlgebrizerContext ctx(prefixId, {scanProjName, std::move(initialNode)}, queryParameters);
-    ABTDocumentSourceTranslationVisitorContext visitorCtx(ctx, metadata, maxFilterDepth);
+    ABTDocumentSourceTranslationVisitorContext visitorCtx(ctx, maxFilterDepth);
 
     ServiceContext* serviceCtx = pipeline.getContext()->opCtx->getServiceContext();
     auto& reg = getDocumentSourceVisitorRegistry(serviceCtx);
@@ -571,9 +565,8 @@ ABT translatePipelineToABT(const Metadata& metadata,
     walker.walk(pipeline);
 
     auto entry = ctx.getNode();
-    return make<RootNode>(
-        properties::ProjectionRequirement{ProjectionNameVector{std::move(entry._rootProjection)}},
-        std::move(entry._node));
+    return make<RootNode>(ProjectionNameVector{std::move(entry._rootProjection)},
+                          std::move(entry._node));
 }
 
 }  // namespace mongo::optimizer

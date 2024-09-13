@@ -71,9 +71,9 @@
 #include "mongo/db/keypattern.h"
 #include "mongo/db/list_collections_gen.h"
 #include "mongo/db/list_indexes_gen.h"
-#include "mongo/db/ops/write_ops_gen.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/repl/change_stream_oplog_notification.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
@@ -1210,16 +1210,23 @@ boost::optional<UUID> createCollectionAndIndexes(
             translatedRequestParams->getTimeseries(),
             isUpdatedCoordinatorDoc);
     } else {
-        uassert(6373200,
-                "Must have an index compatible with the proposed shard key",
-                validShardKeyIndexExists(
-                    opCtx,
-                    translatedNss,
-                    shardKeyPattern,
-                    translatedRequestParams->getCollation(),
-                    request.getUnique().value_or(false) &&
-                        request.getEnforceUniquenessCheck().value_or(true),
-                    shardkeyutil::ValidationBehaviorsShardCollection(opCtx, dataShard)));
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        const bool isIndexOptional = shardKeyPattern.isHashedPattern() &&
+            fcvSnapshot.isVersionInitialized() &&
+            feature_flags::gFeatureFlagHashedShardKeyIndexOptionalUponShardingCollection.isEnabled(
+                fcvSnapshot);
+        if (!isIndexOptional) {
+            uassert(6373200,
+                    "Must have an index compatible with the proposed shard key",
+                    validShardKeyIndexExists(
+                        opCtx,
+                        translatedNss,
+                        shardKeyPattern,
+                        translatedRequestParams->getCollation(),
+                        request.getUnique().value_or(false) &&
+                            request.getEnforceUniquenessCheck().value_or(true),
+                        shardkeyutil::ValidationBehaviorsShardCollection(opCtx, dataShard)));
+        }
     }
 
     auto replClientInfo = repl::ReplClientInfo::forClient(opCtx->getClient());

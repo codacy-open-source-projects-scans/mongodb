@@ -45,13 +45,13 @@
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/update_result.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/query/restore_context.h"
+#include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
@@ -558,6 +558,10 @@ public:
      * CollectionPtr/AutoGet approach.
      */
     virtual bool usesCollectionAcquisitions() const = 0;
+
+    virtual bool isUsingDistinctScan() const {
+        return false;
+    }
 
 private:
     // Used by 'executeWrite()'.

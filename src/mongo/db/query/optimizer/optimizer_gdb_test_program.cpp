@@ -29,8 +29,6 @@
 
 #include "mongo/db/query/optimizer/containers.h"
 #include "mongo/db/query/optimizer/explain.h"
-#include "mongo/db/query/optimizer/metadata.h"
-#include "mongo/db/query/optimizer/metadata_factory.h"
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
 #include "mongo/db/query/optimizer/node_defs.h"
 #include "mongo/db/query/optimizer/partial_schema_requirements.h"
@@ -54,7 +52,6 @@
 #pragma GCC optimize("O0")
 
 using namespace mongo::optimizer;
-using namespace mongo::optimizer::properties;
 using namespace mongo::optimizer::unit_test_abt_literals;
 
 int clang_optnone main(int argc, char** argv) {

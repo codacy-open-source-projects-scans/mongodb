@@ -314,117 +314,6 @@ private:
     int32_t lastNodeGenerated = 0;
 };
 
-TEST_F(ABTPlanGeneration, LowerShardFiltering) {
-    GoldenTestContext ctx(&goldenTestConfig);
-    ctx.printTestHeader(GoldenTestContext::HeaderFormat::Text);
-
-    const std::string shardKeyName = "SHARDKEYNAME";
-    {
-        // In shard filtering-related tests, mock the global and unconditional creation of a shard
-        // filtering slot in the runtime environment.
-        sbe::RuntimeEnvironment runtimeEnv;
-        sbe::value::SlotIdGenerator ids = sbe::value::SlotIdGenerator{};
-        runtimeEnv.registerSlot(
-            kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &ids);
-        // Create node properties which allow the lowering to access information about the Shard
-        // Key.
-        LoweringNodeProps filterLoweringNodeProps = makeNodeProp();
-        filterLoweringNodeProps._indexScanDefName = shardKeyName;
-
-        stdx::unordered_map<std::string, LoweringScanDefinition> scanDefs{std::make_pair(
-            shardKeyName,
-            buildLoweringScanDefinition(
-                {LoweringIndexCollationEntry{_get("a", _id())._n, CollationOp::Ascending},
-                 LoweringIndexCollationEntry{_get("b", _id())._n, CollationOp::Ascending},
-                 LoweringIndexCollationEntry{_get("c", _id())._n, CollationOp::Ascending}}))};
-
-        // Create the ABT to be lowered, starting with the shardFilter FunctionCall.
-        auto functionCallNode = make<FunctionCall>(
-            "shardFilter",
-            makeSeq(make<Variable>("proj0"), make<Variable>("proj1"), make<Variable>("proj2")));
-
-        auto filterNode =
-            _node(make<FilterNode>(
-                      std::move(functionCallNode),
-                      _node(make<PhysicalScanNode>(
-                          FieldProjectionMap{{},
-                                             {ProjectionName{"scan0"}},
-                                             {{FieldNameType{"a"}, ProjectionName{"proj0"}},
-                                              {FieldNameType{"b"}, ProjectionName{"proj1"}},
-                                              {FieldNameType{"c"}, ProjectionName{"proj2"}}}},
-                          "collName",
-                          false))),
-                  filterLoweringNodeProps);
-        runNodeVariation(
-            ctx, "Shard Filtering with Top Level Fields", filterNode, &runtimeEnv, &ids, scanDefs);
-    }
-
-    {
-        sbe::RuntimeEnvironment runtimeEnv;
-        sbe::value::SlotIdGenerator ids = sbe::value::SlotIdGenerator{};
-        runtimeEnv.registerSlot(
-            kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &ids);
-
-        LoweringNodeProps filterLoweringNodeProps = makeNodeProp();
-        filterLoweringNodeProps._indexScanDefName = shardKeyName;
-
-        // "a.b" is the shard Key in this variation of the test.
-        auto pathABT = _get("a", _get("b", _id()))._n;
-        stdx::unordered_map<std::string, LoweringScanDefinition> scanDefs{
-            std::make_pair(shardKeyName,
-                           buildLoweringScanDefinition(
-                               {LoweringIndexCollationEntry{pathABT, CollationOp::Ascending}}))};
-
-        auto evalPathABT =
-            make<EvalPath>(std::move(pathABT), make<Variable>(ProjectionName("scan0")));
-        auto evalNode = _node(make<EvaluationNode>(
-            ProjectionName("proj0"), _path(std::move(evalPathABT)), _node(scanForTest())));
-
-        // Create the ABT to be lowered, starting with the shardFilter FunctionCall.
-        auto functionCallNode = make<FunctionCall>("shardFilter", makeSeq(make<Variable>("proj0")));
-        auto filterNode = _node(make<FilterNode>(std::move(functionCallNode), std::move(evalNode)),
-                                filterLoweringNodeProps);
-        runNodeVariation(
-            ctx, "Shard Filtering with Dotted Field Path", filterNode, &runtimeEnv, &ids, scanDefs);
-    }
-
-    {
-        // Test lowering for a shardFilter with expressions other than Variables as children.
-        sbe::RuntimeEnvironment runtimeEnv;
-        sbe::value::SlotIdGenerator ids = sbe::value::SlotIdGenerator{};
-        runtimeEnv.registerSlot(
-            kshardFiltererSlotName, sbe::value::TypeTags::Nothing, 0, false, &ids);
-
-        LoweringNodeProps filterLoweringNodeProps = makeNodeProp();
-        filterLoweringNodeProps._indexScanDefName = shardKeyName;
-
-        stdx::unordered_map<std::string, LoweringScanDefinition> scanDefs{std::make_pair(
-            shardKeyName,
-            buildLoweringScanDefinition(
-                {LoweringIndexCollationEntry{_get("a", _id())._n, CollationOp::Ascending},
-                 LoweringIndexCollationEntry{_get("b", _id())._n, CollationOp::Ascending}}))};
-
-        auto functionCallNode = make<FunctionCall>(
-            "shardFilter",
-            makeSeq(_path(make<EvalPath>(make<PathGet>("a", make<PathIdentity>()),
-                                         make<Variable>("scan0"))),
-                    make<Variable>("proj_b")));
-
-        auto filterNode =
-            _node(make<FilterNode>(
-                      std::move(functionCallNode),
-                      _node(make<PhysicalScanNode>(
-                          FieldProjectionMap{{},
-                                             {ProjectionName{"scan0"}},
-                                             {{FieldNameType{"b"}, ProjectionName{"proj_b"}}}},
-                          "collName",
-                          false))),
-                  filterLoweringNodeProps);
-        runNodeVariation(
-            ctx, "Shard Filtering with Inlined path", filterNode, &runtimeEnv, &ids, scanDefs);
-    }
-}
-
 TEST_F(ABTPlanGeneration, LowerConstantExpression) {
     GoldenTestContext ctx(&goldenTestConfig);
     ctx.printTestHeader(GoldenTestContext::HeaderFormat::Text);
@@ -455,10 +344,10 @@ TEST_F(ABTPlanGeneration, LowerCollationNode) {
                                         ._skip = 0,
                                         ._ridProjName = boost::none};
 
-    auto node = _node(
-        make<CollationNode>(properties::CollationRequirement({{"sortA", CollationOp::Ascending}}),
-                            createBindings({{"a", "sortA"}, {"b", "proj0"}, {"c", "proj1"}})),
-        collationNodeProp);
+    auto node =
+        _node(make<CollationNode>(ProjectionCollationSpec({{"sortA", CollationOp::Ascending}}),
+                                  createBindings({{"a", "sortA"}, {"b", "proj0"}, {"c", "proj1"}})),
+              collationNodeProp);
 
     runNodeVariation(
         ctx,
@@ -475,11 +364,11 @@ TEST_F(ABTPlanGeneration, LowerCollationNode) {
                                          ._skip = 0,
                                          ._ridProjName = boost::none};
 
-    auto node2 = _node(
-        make<CollationNode>(properties::CollationRequirement({{"sortA", CollationOp::Ascending},
-                                                              {"sortB", CollationOp::Descending}}),
-                            createBindings({{"a", "sortA"}, {"b", "sortB"}, {"c", "proj0"}})),
-        collationNodeProp2);
+    auto node2 =
+        _node(make<CollationNode>(ProjectionCollationSpec({{"sortA", CollationOp::Ascending},
+                                                           {"sortB", CollationOp::Descending}}),
+                                  createBindings({{"a", "sortA"}, {"b", "sortB"}, {"c", "proj0"}})),
+              collationNodeProp2);
     runNodeVariation(
         ctx,
         "Lower collation node with two fields",
@@ -974,13 +863,12 @@ TEST_F(ABTPlanGeneration, LowerSortedMergeNode) {
                                                              std::move(child5)))));
     };
     for (auto& op : ops) {
-        runVariations(properties::CollationRequirement(
-                          ProjectionCollationSpec({{ProjectionName{"proj0"}, op}})),
+        runVariations(ProjectionCollationSpec({{ProjectionName{"proj0"}, op}}),
                       op,
                       str::stream() << "sorted on `a` " << toStringData(op));
         for (auto& op2 : ops) {
-            runVariations(properties::CollationRequirement(ProjectionCollationSpec(
-                              {{ProjectionName{"proj0"}, op}, {ProjectionName{"proj1"}, op2}})),
+            runVariations(ProjectionCollationSpec(
+                              {{ProjectionName{"proj0"}, op}, {ProjectionName{"proj1"}, op2}}),
                           op,
                           str::stream() << "sorted on `a` " << toStringData(op) << " and `b` "
                                         << toStringData(op2));

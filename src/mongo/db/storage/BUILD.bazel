@@ -10,6 +10,24 @@ exports_files(
 )
 
 mongo_cc_library(
+    name = "bson_collection_catalog_entry",
+    srcs = [
+        "bson_collection_catalog_entry.cpp",
+    ],
+    hdrs = [
+        "bson_collection_catalog_entry.h",
+    ],
+    deps = [
+        "//src/mongo/db:common",
+        "//src/mongo/db:multitenancy",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:server_options",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/catalog:collection_options",
+    ],
+)
+
+mongo_cc_library(
     name = "recovery_unit_base",
     srcs = [
         "recovery_unit.cpp",
@@ -184,6 +202,24 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
+    name = "storage_repair_observer",
+    srcs = [
+        "storage_repair_observer.cpp",
+    ],
+    hdrs = [
+        "storage_repair_observer.h",
+    ],
+    deps = [
+        ":storage_file_util",
+        "//src/mongo:base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:service_context",
+        "//src/mongo/db/repl:replica_set_messages",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/repl:storage_interface",
+        "//src/mongo/db/storage:journal_flusher",
+    ],
+)
+
+mongo_cc_library(
     name = "duplicate_key_error_info",
     srcs = [
         "duplicate_key_error_info.cpp",
@@ -258,8 +294,6 @@ mongo_cc_library(
         "//src/mongo/db/exec:projection_executor_builder.h",
         "//src/mongo/db/index:column_key_generator.h",
         "//src/mongo/db/matcher/schema:encrypt_schema_gen",
-        "//src/mongo/db/ops:single_write_result_gen",
-        "//src/mongo/db/ops:write_ops_gen",
         "//src/mongo/db/pipeline:change_stream_pre_and_post_images_options_gen",
         "//src/mongo/db/pipeline:document_source_change_stream_gen",
         "//src/mongo/db/pipeline:legacy_runtime_constants_gen",
@@ -274,6 +308,8 @@ mongo_cc_library(
         "//src/mongo/db/query:query_knobs_gen",
         "//src/mongo/db/query:tailable_mode_gen",
         "//src/mongo/db/query/query_settings:query_settings_gen",
+        "//src/mongo/db/query/write_ops:single_write_result_gen",
+        "//src/mongo/db/query/write_ops:write_ops_gen",
         "//src/mongo/db/repl:apply_ops_gen",
         "//src/mongo/db/repl:member_config_gen",
         "//src/mongo/db/repl:oplog_entry_gen",
@@ -365,10 +401,31 @@ mongo_cc_library(
         ":storage_parameters_gen",
     ],
     hdrs = [
+        "storage_engine_interface.h",
         "storage_options.h",
     ],
     deps = [
         "//src/mongo/db:server_base",
+    ],
+)
+
+mongo_cc_library(
+    name = "durable_catalog",
+    srcs = [
+        "durable_catalog.cpp",
+        "//src/mongo/db/catalog:import_options.h",
+        "//src/mongo/db/storage/kv:kv_engine.h",
+    ],
+    hdrs = [
+        "durable_catalog.h",
+    ],
+    deps = [
+        ":bson_collection_catalog_entry",
+        ":record_store_base",
+        ":storage_options",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db:multitenancy",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db/concurrency:lock_manager",
     ],
 )
 

@@ -63,15 +63,15 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/write_ops_exec.h"
-#include "mongo/db/ops/write_ops_gen.h"
-#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
 #include "mongo/db/pipeline/storage_stats_spec_gen.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/write_ops/write_ops_exec.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
@@ -329,6 +329,12 @@ public:
                                         const NamespaceString& nss,
                                         BSONObjBuilder* builder) const = 0;
 
+    /**
+     * Appends the operation stats for "nss" to "builder".
+     */
+    virtual void appendOperationStats(OperationContext* opCtx,
+                                      const NamespaceString& nss,
+                                      BSONObjBuilder* builder) const = 0;
     /**
      * Gets the collection options for the collection given by 'nss'. If the nss represents a view,
      * we will return the user spec that was used to create the view. Future callers may want to

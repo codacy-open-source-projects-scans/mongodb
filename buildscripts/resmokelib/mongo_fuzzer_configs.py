@@ -215,10 +215,14 @@ def generate_encryption_config(rng: random.Random):
     chance_to_encrypt = 0.33
     if rng.random() < chance_to_encrypt:
         ret["enableEncryption"] = ""
-        # Use absolute path to ensure file is found during Jepsen tests
-        encryption_key_file = os.path.abspath(
-            "src/mongo/db/modules/enterprise/jstests/encryptdb/libs/ekf2"
-        )
+        encryption_key_file = "src/mongo/db/modules/enterprise/jstests/encryptdb/libs/ekf2"
+
+        # Antithesis runs mongo processes in a docker container separate from the resmoke process.
+        # It cannot use the absolute path from the machine that resmoke running on.
+        # Other applications, such as Jepsen, can be run in a different directory than the root
+        # of the mongo directory so we use the absolute path.
+        if not config.NOOP_MONGO_D_S_PROCESSES:
+            encryption_key_file = os.path.abspath(encryption_key_file)
 
         # Set file permissions to avoid "too open" error.
         # MongoDB requires keyfiles to have restricted permissions.
@@ -328,6 +332,30 @@ def generate_special_mongod_parameters(rng, ret, fuzzer_stress_mode, params):
         ret["logicalSessionRefreshMillis"] = rng.choice(
             params["logicalSessionRefreshMillis"]["choices"]
         )
+    if rng.random() >= 0.1:
+        ret["failpoint.hangAfterPreCommittingCatalogUpdates"] = {"mode": "off"}
+        ret["failpoint.hangBeforePublishingCatalogUpdates"] = {"mode": "off"}
+    else:
+        waitMillisMax = params["failpoint.hangAfterPreCommittingCatalogUpdates"][
+            "pauseEntireCommitMillis"
+        ]["max"]
+        waitMillisMin = params["failpoint.hangAfterPreCommittingCatalogUpdates"][
+            "pauseEntireCommitMillis"
+        ]["min"]
+        ret["failpoint.hangAfterPreCommittingCatalogUpdates"] = {
+            "mode": {"activationProbability": random.uniform(0, 0.5)},
+            "data": {"pauseEntireCommitMillis": rng.randint(waitMillisMin, waitMillisMax)},
+        }
+        waitMillisMax = params["failpoint.hangBeforePublishingCatalogUpdates"][
+            "pauseEntireCommitMillis"
+        ]["max"]
+        waitMillisMin = params["failpoint.hangBeforePublishingCatalogUpdates"][
+            "pauseEntireCommitMillis"
+        ]["min"]
+        ret["failpoint.hangBeforePublishingCatalogUpdates"] = {
+            "mode": {"activationProbability": random.uniform(0, 0.5)},
+            "data": {"pauseEntireCommitMillis": rng.randint(waitMillisMin, waitMillisMax)},
+        }
     return ret
 
 
@@ -376,6 +404,8 @@ def generate_mongod_parameters(rng, fuzzer_stress_mode):
         "wiredTigerConcurrentReadTransactions",
         "wiredTigerConcurrentWriteTransactions",
         "wiredTigerStressConfig",
+        "failpoint.hangAfterPreCommittingCatalogUpdates",
+        "failpoint.hangBeforePublishingCatalogUpdates",
     ]
     # TODO (SERVER-75632): Remove/comment out the below line to enable passthrough testing.
     excluded_normal_params.append("lockCodeSegmentsInMemory")

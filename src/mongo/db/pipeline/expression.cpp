@@ -81,8 +81,10 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/random_utils.h"
 #include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/str_trim_utils.h"
+#include "mongo/db/query/substr_utils.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/stats/counters.h"
@@ -5632,34 +5634,7 @@ Value ExpressionSubstrCP::evaluate(const Document& root, Variables* variables) c
             str::stream() << getOpName() << ": the starting index must be nonnegative integer.",
             startIndexCodePoints >= 0);
 
-    size_t startIndexBytes = 0;
-
-    for (int i = 0; i < startIndexCodePoints; i++) {
-        if (startIndexBytes >= str.size()) {
-            return Value(StringData());
-        }
-        uassert(34456,
-                str::stream() << getOpName() << ": invalid UTF-8 string",
-                !str::isUTF8ContinuationByte(str[startIndexBytes]));
-        size_t codePointLength = str::getCodePointLength(str[startIndexBytes]);
-        uassert(
-            34457, str::stream() << getOpName() << ": invalid UTF-8 string", codePointLength <= 4);
-        startIndexBytes += codePointLength;
-    }
-
-    size_t endIndexBytes = startIndexBytes;
-
-    for (int i = 0; i < length && endIndexBytes < str.size(); i++) {
-        uassert(34458,
-                str::stream() << getOpName() << ": invalid UTF-8 string",
-                !str::isUTF8ContinuationByte(str[endIndexBytes]));
-        size_t codePointLength = str::getCodePointLength(str[endIndexBytes]);
-        uassert(
-            34459, str::stream() << getOpName() << ": invalid UTF-8 string", codePointLength <= 4);
-        endIndexBytes += codePointLength;
-    }
-
-    return Value(std::string(str, startIndexBytes, endIndexBytes - startIndexBytes));
+    return Value(substr_utils::getSubstringCP(str, startIndexCodePoints, length));
 }
 
 REGISTER_STABLE_EXPRESSION(substrCP, ExpressionSubstrCP::parse);
@@ -8016,11 +7991,7 @@ Value ExpressionRegexMatch::evaluate(const Document& root, Variables* variables)
 /* -------------------------- ExpressionRandom ------------------------------ */
 REGISTER_STABLE_EXPRESSION(rand, ExpressionRandom::parse);
 
-static thread_local PseudoRandom threadLocalRNG(SecureRandom().nextInt64());
-
-ExpressionRandom::ExpressionRandom(ExpressionContext* const expCtx) : Expression(expCtx) {
-    expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
-}
+ExpressionRandom::ExpressionRandom(ExpressionContext* const expCtx) : Expression(expCtx) {}
 
 intrusive_ptr<Expression> ExpressionRandom::parse(ExpressionContext* const expCtx,
                                                   BSONElement exprElement,
@@ -8039,7 +8010,7 @@ const char* ExpressionRandom::getOpName() const {
 }
 
 double ExpressionRandom::getRandomValue() const {
-    return kMinValue + (kMaxValue - kMinValue) * threadLocalRNG.nextCanonicalDouble();
+    return kMinValue + (kMaxValue - kMinValue) * random_utils::getRNG().nextCanonicalDouble();
 }
 
 Value ExpressionRandom::evaluate(const Document& root, Variables* variables) const {

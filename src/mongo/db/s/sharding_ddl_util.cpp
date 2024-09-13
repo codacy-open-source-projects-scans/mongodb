@@ -67,9 +67,9 @@
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/ops/write_ops_gen.h"
-#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/resource_yielder.h"
@@ -386,12 +386,13 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONOb
         entry.setMulti(true);
         return entry;
     }()});
+    generic_argument_util::setMajorityWriteConcern(deleteCmd);
 
     const auto deleteResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
         DatabaseName::kConfig,
-        CommandHelpers::appendMajorityWriteConcern(deleteCmd.toBSON()),
+        deleteCmd.toBSON(),
         Shard::RetryPolicy::kIdempotent);
 
     uassertStatusOKWithContext(

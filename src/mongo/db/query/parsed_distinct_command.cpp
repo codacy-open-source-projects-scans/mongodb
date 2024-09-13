@@ -131,7 +131,6 @@ BSONObj getDistinctProjection(const std::string& field) {
 
 std::unique_ptr<ParsedDistinctCommand> parse(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const BSONObj& cmd,
     std::unique_ptr<DistinctCommandRequest> distinctCommand,
     const ExtensionsCallback& extensionsCallback,
     MatchExpressionParser::AllowedFeatureSet allowedFeatures) {
@@ -235,8 +234,7 @@ StatusWith<BSONObj> asAggregation(const CanonicalQuery& query) {
 std::unique_ptr<CanonicalQuery> parseCanonicalQuery(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<ParsedDistinctCommand> parsedDistinct,
-    const CollatorInterface* defaultCollator,
-    bool isDistinctMultiplanningEnabled) {
+    const CollatorInterface* defaultCollator) {
     auto& distinctRequest = *parsedDistinct->distinctCommandRequest;
     uassert(31032,
             "Key field cannot contain an embedded null byte",
@@ -247,6 +245,8 @@ std::unique_ptr<CanonicalQuery> parseCanonicalQuery(
         findRequest->setFilter(query->getOwned());
     }
     auto projection = getDistinctProjection(std::string(distinctRequest.getKey()));
+    const bool isDistinctMultiplanningEnabled =
+        expCtx->isFeatureFlagShardFilteringDistinctScanEnabled();
     if (!isDistinctMultiplanningEnabled) {
         findRequest->setProjection(projection);
     }

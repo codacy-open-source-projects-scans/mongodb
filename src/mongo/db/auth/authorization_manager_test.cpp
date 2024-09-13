@@ -73,6 +73,8 @@
 namespace mongo {
 namespace {
 
+using ResolveRoleOption = AuthorizationManager::ResolveRoleOption;
+
 #ifdef MONGO_CONFIG_SSL
 // Construct a simple, structured X509 name equivalent to "CN=mongodb.com"
 SSLX509Name buildX509Name() {
@@ -229,34 +231,35 @@ public:
 };
 
 TEST_F(AuthorizationManagerTest, testAcquireV2User) {
-    ASSERT_OK(externalState->insertPrivilegeDocument(opCtx.get(),
-                                                     BSON("_id"
-                                                          << "admin.v2read"
-                                                          << "user"
-                                                          << "v2read"
-                                                          << "db"
-                                                          << "test"
-                                                          << "credentials" << credentials << "roles"
-                                                          << BSON_ARRAY(BSON("role"
-                                                                             << "read"
-                                                                             << "db"
-                                                                             << "test"))),
-                                                     BSONObj()));
-    ASSERT_OK(externalState->insertPrivilegeDocument(opCtx.get(),
-                                                     BSON("_id"
-                                                          << "admin.v2cluster"
-                                                          << "user"
-                                                          << "v2cluster"
-                                                          << "db"
-                                                          << "admin"
-                                                          << "credentials" << credentials << "roles"
-                                                          << BSON_ARRAY(BSON("role"
-                                                                             << "clusterAdmin"
-                                                                             << "db"
-                                                                             << "admin"))),
-                                                     BSONObj()));
+    ASSERT_OK(externalState->insertUserDocument(opCtx.get(),
+                                                BSON("_id"
+                                                     << "admin.v2read"
+                                                     << "user"
+                                                     << "v2read"
+                                                     << "db"
+                                                     << "test"
+                                                     << "credentials" << credentials << "roles"
+                                                     << BSON_ARRAY(BSON("role"
+                                                                        << "read"
+                                                                        << "db"
+                                                                        << "test"))),
+                                                BSONObj()));
+    ASSERT_OK(externalState->insertUserDocument(opCtx.get(),
+                                                BSON("_id"
+                                                     << "admin.v2cluster"
+                                                     << "user"
+                                                     << "v2cluster"
+                                                     << "db"
+                                                     << "admin"
+                                                     << "credentials" << credentials << "roles"
+                                                     << BSON_ARRAY(BSON("role"
+                                                                        << "clusterAdmin"
+                                                                        << "db"
+                                                                        << "admin"))),
+                                                BSONObj()));
 
-    auto swu = authzManager->acquireUser(opCtx.get(), {{"v2read", "test"}, boost::none});
+    auto swu = authzManager->acquireUser(
+        opCtx.get(), std::make_unique<UserRequestGeneral>(UserName("v2read", "test"), boost::none));
     ASSERT_OK(swu.getStatus());
     auto v2read = std::move(swu.getValue());
     ASSERT_EQUALS(UserName("v2read", "test"), v2read->getName());
@@ -269,7 +272,9 @@ TEST_F(AuthorizationManagerTest, testAcquireV2User) {
     ASSERT(testDBPrivilege.getActions().contains(ActionType::find));
     // Make sure user's refCount is 0 at the end of the test to avoid an assertion failure
 
-    swu = authzManager->acquireUser(opCtx.get(), {{"v2cluster", "admin"}, boost::none});
+    swu = authzManager->acquireUser(
+        opCtx.get(),
+        std::make_unique<UserRequestGeneral>(UserName("v2cluster", "admin"), boost::none));
     ASSERT_OK(swu.getStatus());
     auto v2cluster = std::move(swu.getValue());
     ASSERT_EQUALS(UserName("v2cluster", "admin"), v2cluster->getName());
@@ -286,9 +291,10 @@ TEST_F(AuthorizationManagerTest, testAcquireV2User) {
 #ifdef MONGO_CONFIG_SSL
 TEST_F(AuthorizationManagerTest, testLocalX509Authorization) {
     std::set<RoleName> roles({{"read", "test"}, {"readWrite", "test"}});
-    UserRequest request(UserName("CN=mongodb.com", "$external"), roles);
+    std::unique_ptr<UserRequest> request =
+        std::make_unique<UserRequestGeneral>(UserName("CN=mongodb.com", "$external"), roles);
 
-    auto swu = authzManager->acquireUser(opCtx.get(), request);
+    auto swu = authzManager->acquireUser(opCtx.get(), std::move(request));
     ASSERT_OK(swu.getStatus());
     auto x509User = std::move(swu.getValue());
     ASSERT(x509User.isValid());
@@ -312,48 +318,54 @@ TEST_F(AuthorizationManagerTest, testLocalX509AuthorizationInvalidUser) {
                                 boost::none,
                                 {RoleName("read", "test"), RoleName("write", "test")}));
 
-    ASSERT_NOT_OK(
-        authzManager->acquireUser(opCtx.get(), {{"CN=10gen.com", "$external"}, boost::none})
-            .getStatus());
+    ASSERT_NOT_OK(authzManager
+                      ->acquireUser(opCtx.get(),
+                                    std::make_unique<UserRequestGeneral>(
+                                        UserName("CN=10gen.com", "$external"), boost::none))
+                      .getStatus());
 }
 
 TEST_F(AuthorizationManagerTest, testLocalX509AuthenticationNoAuthorization) {
     setX509PeerInfo(session, {});
 
-    ASSERT_NOT_OK(
-        authzManager->acquireUser(opCtx.get(), {{"CN=mongodb.com", "$external"}, boost::none})
-            .getStatus());
+    ASSERT_NOT_OK(authzManager
+                      ->acquireUser(opCtx.get(),
+                                    std::make_unique<UserRequestGeneral>(
+                                        UserName("CN=mongodb.com", "$external"), boost::none))
+                      .getStatus());
 }
 
 #endif
 
 // Tests SERVER-21535, unrecognized actions should be ignored rather than causing errors.
 TEST_F(AuthorizationManagerTest, testAcquireV2UserWithUnrecognizedActions) {
-    ASSERT_OK(externalState->insertPrivilegeDocument(
-        opCtx.get(),
-        BSON("_id"
-             << "admin.myUser"
-             << "user"
-             << "myUser"
-             << "db"
-             << "test"
-             << "credentials" << credentials << "roles"
-             << BSON_ARRAY(BSON("role"
-                                << "myRole"
-                                << "db"
-                                << "test"))
-             << "inheritedPrivileges"
-             << BSON_ARRAY(BSON("resource" << BSON("db"
-                                                   << "test"
-                                                   << "collection"
-                                                   << "")
-                                           << "actions"
-                                           << BSON_ARRAY("find"
-                                                         << "fakeAction"
-                                                         << "insert")))),
-        BSONObj()));
+    ASSERT_OK(
+        externalState->insertUserDocument(opCtx.get(),
+                                          BSON("_id"
+                                               << "admin.myUser"
+                                               << "user"
+                                               << "myUser"
+                                               << "db"
+                                               << "test"
+                                               << "credentials" << credentials << "roles"
+                                               << BSON_ARRAY(BSON("role"
+                                                                  << "myRole"
+                                                                  << "db"
+                                                                  << "test"))
+                                               << "inheritedPrivileges"
+                                               << BSON_ARRAY(BSON("resource"
+                                                                  << BSON("db"
+                                                                          << "test"
+                                                                          << "collection"
+                                                                          << "")
+                                                                  << "actions"
+                                                                  << BSON_ARRAY("find"
+                                                                                << "fakeAction"
+                                                                                << "insert")))),
+                                          BSONObj()));
 
-    auto swu = authzManager->acquireUser(opCtx.get(), {{"myUser", "test"}, boost::none});
+    auto swu = authzManager->acquireUser(
+        opCtx.get(), std::make_unique<UserRequestGeneral>(UserName("myUser", "test"), boost::none));
     ASSERT_OK(swu.getStatus());
     auto myUser = std::move(swu.getValue());
     ASSERT_EQUALS(UserName("myUser", "test"), myUser->getName());
@@ -422,7 +434,7 @@ TEST_F(AuthorizationManagerTest, testRefreshExternalV2User) {
                                            << "test")};
 
     for (const auto& userDoc : userDocs) {
-        ASSERT_OK(externalState->insertPrivilegeDocument(opCtx.get(), userDoc, BSONObj()));
+        ASSERT_OK(externalState->insertUserDocument(opCtx.get(), userDoc, BSONObj()));
     }
 
     // Acquire these users to force the AuthorizationManager to load these users into the user
@@ -432,7 +444,8 @@ TEST_F(AuthorizationManagerTest, testRefreshExternalV2User) {
     for (const auto& userDoc : userDocs) {
         const UserName userName(userDoc.getStringField(kUserFieldName),
                                 userDoc.getStringField(kDbFieldName));
-        auto swUser = authzManager->acquireUser(opCtx.get(), {userName, boost::none});
+        auto swUser = authzManager->acquireUser(
+            opCtx.get(), std::make_unique<UserRequestGeneral>(userName, boost::none));
         ASSERT_OK(swUser.getStatus());
         auto user = std::move(swUser.getValue());
         ASSERT_EQUALS(userName, user->getName());
@@ -477,7 +490,8 @@ TEST_F(AuthorizationManagerTest, testRefreshExternalV2User) {
     for (const auto& userDoc : userDocs) {
         const UserName userName(userDoc.getStringField(kUserFieldName),
                                 userDoc.getStringField(kDbFieldName));
-        auto swUser = authzManager->acquireUser(opCtx.get(), {userName, boost::none});
+        auto swUser = authzManager->acquireUser(
+            opCtx.get(), std::make_unique<UserRequestGeneral>(userName, boost::none));
         ASSERT_OK(swUser.getStatus());
         auto user = std::move(swUser.getValue());
         ASSERT_EQUALS(userName, user->getName());
@@ -589,6 +603,85 @@ TEST_F(AuthorizationManagerTest, testLogTenantInvalidateInWuowAbandon) {
         assertInvalidateCounts(0, 0, 0);
     }
     assertInvalidateCounts(0, 0, 0);
+}
+
+TEST_F(AuthorizationManagerTest, testAuthzManagerExternalStateResolveRoles) {
+    BSONObj innerCustomRole{BSON("_id"
+                                 << "admin.innerTestRole"
+                                 << "db"
+                                 << "admin"
+                                 << "role"
+                                 << "innerTestRole"
+                                 << "roles"
+                                 << BSON_ARRAY(BSON("db"
+                                                    << "test"
+                                                    << "role"
+                                                    << "read")))};
+    BSONObj middleCustomRole{BSON("_id"
+                                  << "admin.middleTestRole"
+                                  << "db"
+                                  << "admin"
+                                  << "role"
+                                  << "middleTestRole"
+                                  << "roles" << BSON_ARRAY(innerCustomRole))};
+    BSONObj outerCustomRole{BSON("_id"
+                                 << "admin.outerTestRole"
+                                 << "db"
+                                 << "admin"
+                                 << "role"
+                                 << "outerTestRole"
+                                 << "roles" << BSON_ARRAY(middleCustomRole) << "privileges"
+                                 << BSON_ARRAY(BSON("resource" << BSON("cluster" << true)
+                                                               << "actions"
+                                                               << BSON_ARRAY("shutdown")))
+                                 << "authenticationRestrictions"
+                                 << BSON_ARRAY(BSON("clientSource" << BSON_ARRAY("127.0.0.1/8"))))};
+    std::vector<BSONObj> customRoleDocuments{innerCustomRole, middleCustomRole, outerCustomRole};
+
+    for (const auto& roleDoc : customRoleDocuments) {
+        ASSERT_OK(externalState->insertRoleDocument(opCtx.get(), roleDoc, BSONObj()));
+    }
+
+    // First, resolve all roles (but no privileges or restrictions).
+    ResolveRoleOption option{ResolveRoleOption::kRoles()};
+    std::vector<RoleName> roleNames{RoleName{"outerTestRole", "admin"}};
+    auto swResolvedData = externalState->resolveRoles(opCtx.get(), roleNames, option);
+    ASSERT_OK(swResolvedData.getStatus());
+    auto resolvedData = swResolvedData.getValue();
+    ASSERT_TRUE(resolvedData.roles.has_value());
+    ASSERT_EQ(resolvedData.roles->size(), 3);
+    ASSERT_FALSE(resolvedData.privileges.has_value());
+    ASSERT_FALSE(resolvedData.restrictions.has_value());
+
+    // Resolve privileges and roles, no restrictions.
+    option.setPrivileges(true /* shouldEnable */);
+    swResolvedData = externalState->resolveRoles(opCtx.get(), roleNames, option);
+    ASSERT_OK(swResolvedData.getStatus());
+    resolvedData = swResolvedData.getValue();
+    ASSERT_TRUE(resolvedData.roles.has_value());
+    ASSERT_EQ(resolvedData.roles->size(), 3);
+    ASSERT_TRUE(resolvedData.privileges.has_value());
+    ASSERT_FALSE(resolvedData.restrictions.has_value());
+
+    // Resolve all roles, privileges, and restrictions.
+    option.setRestrictions(true /* shouldEnable */);
+    swResolvedData = externalState->resolveRoles(opCtx.get(), roleNames, option);
+    ASSERT_OK(swResolvedData.getStatus());
+    resolvedData = swResolvedData.getValue();
+    ASSERT_TRUE(resolvedData.roles.has_value());
+    ASSERT_EQ(resolvedData.roles->size(), 3);
+    ASSERT_TRUE(resolvedData.privileges.has_value());
+    ASSERT_TRUE(resolvedData.restrictions.has_value());
+
+    // Resolve only direct roles, privileges, and restrictions.
+    option.setDirectOnly(true /* shouldEnable */);
+    swResolvedData = externalState->resolveRoles(opCtx.get(), roleNames, option);
+    ASSERT_OK(swResolvedData.getStatus());
+    resolvedData = swResolvedData.getValue();
+    ASSERT_TRUE(resolvedData.roles.has_value());
+    ASSERT_EQ(resolvedData.roles->size(), 1);
+    ASSERT_TRUE(resolvedData.privileges.has_value());
+    ASSERT_TRUE(resolvedData.restrictions.has_value());
 }
 
 }  // namespace

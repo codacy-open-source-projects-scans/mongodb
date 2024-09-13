@@ -42,15 +42,13 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/optimizer/node.h"  // IWYU pragma: keep
-#include "mongo/db/query/optimizer/props.h"
 #include "mongo/db/query/optimizer/syntax/expr.h"
 #include "mongo/db/query/optimizer/utils/path_utils.h"
 #include "mongo/util/intrusive_counter.h"
 
 namespace mongo::optimizer {
 
-ABT translateCanonicalQueryToABT(const Metadata& metadata,
-                                 const CanonicalQuery& canonicalQuery,
+ABT translateCanonicalQueryToABT(const CanonicalQuery& canonicalQuery,
                                  ProjectionName scanProjName,
                                  ABT initialNode,
                                  PrefixId& prefixId,
@@ -89,8 +87,7 @@ ABT translateCanonicalQueryToABT(const Metadata& metadata,
                                    std::move(ctx.getNode()._node));
     }
 
-    return make<RootNode>(properties::ProjectionRequirement{ProjectionNameVector{
-                              std::move(ctx.getNode()._rootProjection)}},
+    return make<RootNode>(ProjectionNameVector{std::move(ctx.getNode()._rootProjection)},
                           std::move(ctx.getNode()._node));
 }
 

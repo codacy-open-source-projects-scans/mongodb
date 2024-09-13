@@ -94,13 +94,13 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/write_ops.h"
-#include "mongo/db/ops/write_ops_gen.h"
-#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/write_ops/write_ops.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -189,7 +189,8 @@ Status getCurrentUserRoles(OperationContext* opCtx,
                            AuthorizationManager* authzManager,
                            const UserName& userName,
                            stdx::unordered_set<RoleName>* roles) {
-    auto swUser = authzManager->acquireUser(opCtx, UserRequest(userName, boost::none));
+    auto swUser = authzManager->acquireUser(
+        opCtx, std::make_unique<UserRequestGeneral>(userName, boost::none));
     if (!swUser.isOK()) {
         return swUser.getStatus();
     }
@@ -232,7 +233,7 @@ Status checkOkayToGrantRolesToRole(OperationContext* opCtx,
     }
 
     auto swData = authzManager->resolveRoles(
-        opCtx, rolesToAdd, AuthorizationManager::ResolveRoleOption::kRoles);
+        opCtx, rolesToAdd, AuthorizationManager::ResolveRoleOption::kRoles());
     if (!swData.isOK()) {
         return {swData.getStatus().code(),
                 str::stream() << "Cannot grant roles to '" << role
@@ -1528,8 +1529,8 @@ UsersInfoReply CmdUMCTyped<UsersInfoCommand, UMCInfoParams>::Invocation::typedRu
             } else {
                 // Custom data is not required in the output, so it can be generated from a cached
                 // user object.
-                auto swUserHandle =
-                    authzManager->acquireUser(opCtx, UserRequest(userName, boost::none));
+                auto swUserHandle = authzManager->acquireUser(
+                    opCtx, std::make_unique<UserRequestGeneral>(userName, boost::none));
                 if (swUserHandle.getStatus().code() == ErrorCodes::UserNotFound) {
                     continue;
                 }
@@ -1798,7 +1799,10 @@ void CmdUMCTyped<GrantPrivilegesToRoleCommand>::Invocation::typedRun(OperationCo
 
     // Add additional privileges to existing set.
     auto data = uassertStatusOK(authzManager->resolveRoles(
-        opCtx, {roleName}, AuthorizationManager::ResolveRoleOption::kDirectPrivileges));
+        opCtx,
+        {roleName},
+        AuthorizationManager::ResolveRoleOption::kPrivileges().setDirectOnly(
+            true /* shouldEnable */)));
     auto privileges = std::move(data.privileges.get());
     for (const auto& priv : newPrivileges) {
         Privilege::addPrivilegeToPrivilegeVector(&privileges, priv);
@@ -1848,7 +1852,10 @@ void CmdUMCTyped<RevokePrivilegesFromRoleCommand>::Invocation::typedRun(Operatio
         dbname.tenantId(), cmd.getPrivileges(), &unrecognizedActions);
     uassertNoUnrecognizedActions(unrecognizedActions);
     auto data = uassertStatusOK(authzManager->resolveRoles(
-        opCtx, {roleName}, AuthorizationManager::ResolveRoleOption::kDirectPrivileges));
+        opCtx,
+        {roleName},
+        AuthorizationManager::ResolveRoleOption::kPrivileges().setDirectOnly(
+            true /* shouldEnable */)));
     auto privileges = std::move(data.privileges.get());
     for (const auto& rmPriv : rmPrivs) {
         for (auto it = privileges.begin(); it != privileges.end(); ++it) {
@@ -1908,7 +1915,9 @@ void CmdUMCTyped<GrantRolesToRoleCommand>::Invocation::typedRun(OperationContext
 
     // Add new roles to existing roles
     auto data = uassertStatusOK(authzManager->resolveRoles(
-        opCtx, {roleName}, AuthorizationManager::ResolveRoleOption::kDirectRoles));
+        opCtx,
+        {roleName},
+        AuthorizationManager::ResolveRoleOption::kRoles().setDirectOnly(true /* shouldEnable */)));
     auto directRoles = std::move(data.roles.get());
     directRoles.insert(rolesToAdd.cbegin(), rolesToAdd.cend());
 
@@ -1945,7 +1954,9 @@ void CmdUMCTyped<RevokeRolesFromRoleCommand>::Invocation::typedRun(OperationCont
 
     // Remove roles from existing set.
     auto data = uassertStatusOK(authzManager->resolveRoles(
-        opCtx, {roleName}, AuthorizationManager::ResolveRoleOption::kDirectRoles));
+        opCtx,
+        {roleName},
+        AuthorizationManager::ResolveRoleOption::kRoles().setDirectOnly(true /* shouldEnable */)));
     auto roles = std::move(data.roles.get());
     for (const auto& roleToRemove : rolesToRemove) {
         roles.erase(roleToRemove);

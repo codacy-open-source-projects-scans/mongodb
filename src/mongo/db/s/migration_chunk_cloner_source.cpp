@@ -61,10 +61,10 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/ops/write_ops_retryability.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/write_ops/write_ops_retryability.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -1224,7 +1224,9 @@ Status MigrationChunkClonerSource::_checkRecipientCloningStatus(OperationContext
                   "response"_attr = redact(res),
                   "memoryUsedBytes"_attr = _memoryUsed,
                   "docsCloned"_attr = _jumboChunkCloneState->docsCloned,
-                  "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes);
+                  "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes,
+                  "sessionCatalogSourceInCatchupPhase"_attr = sessionCatalogSourceInCatchupPhase,
+                  "estimateUntransferredSessionsSize"_attr = estimateUntransferredSessionsSize);
         } else {
             LOGV2(21993,
                   "moveChunk data transfer progress",
@@ -1232,7 +1234,9 @@ Status MigrationChunkClonerSource::_checkRecipientCloningStatus(OperationContext
                   "memoryUsedBytes"_attr = _memoryUsed,
                   "docsRemainingToClone"_attr =
                       _cloneList.size() - _numRecordsCloned - _numRecordsPassedOver,
-                  "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes);
+                  "untransferredModsSizeBytes"_attr = untransferredModsSizeBytes,
+                  "sessionCatalogSourceInCatchupPhase"_attr = sessionCatalogSourceInCatchupPhase,
+                  "estimateUntransferredSessionsSize"_attr = estimateUntransferredSessionsSize);
         }
 
         if (res["state"].String() == "steady" && sessionCatalogSourceInCatchupPhase &&

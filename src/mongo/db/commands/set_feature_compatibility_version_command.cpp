@@ -79,15 +79,16 @@
 #include "mongo/db/drop_gen.h"
 #include "mongo/db/feature_compatibility_version_documentation.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/generic_argument_util.h"
 #include "mongo/db/index_builds_coordinator.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/write_ops.h"
-#include "mongo/db/ops/write_ops_gen.h"
-#include "mongo/db/ops/write_ops_parsers.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/write_ops/write_ops.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/repl_client_info.h"
@@ -1102,10 +1103,9 @@ private:
         requestPhase.setFromConfigServer(true);
         requestPhase.setPhase(phase);
         requestPhase.setChangeTimestamp(changeTimestamp);
+        generic_argument_util::setMajorityWriteConcern(requestPhase);
         uassertStatusOK(ShardingCatalogManager::get(opCtx)->setFeatureCompatibilityVersionOnShards(
-            opCtx,
-            CommandHelpers::appendMajorityWriteConcern(
-                CommandHelpers::filterCommandRequestForPassthrough(requestPhase.toBSON()))));
+            opCtx, CommandHelpers::filterCommandRequestForPassthrough(requestPhase.toBSON())));
     }
 
     // This helper function is for any uasserts for users to clean up user collections. Uasserts for

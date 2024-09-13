@@ -542,7 +542,10 @@ enum class Builtin : uint16_t {
     bitTestMask,      // test bitwise mask & value is mask
     bitTestPosition,  // test BinData with a bit position list
     bsonSize,         // implements $bsonSize
-    strLenBytes,
+    strLenBytes,      // implements $strLenBytes
+    strLenCP,         // implements $strLenCP
+    substrBytes,      // implements $substrBytes
+    substrCP,         // implements $substrCP
     toUpper,
     toLower,
     coerceToBool,
@@ -578,6 +581,7 @@ enum class Builtin : uint16_t {
     sinh,
     tan,
     tanh,
+    rand,  // implements $rand
     round,
     isMember,
     collIsMember,
@@ -641,6 +645,12 @@ enum class Builtin : uint16_t {
     objectToArray,
     setToArray,
     arrayToObject,
+    avgOfArray,  // Returns the $avg of an array.
+    maxOfArray,  // Returns the $max element of an array.
+    minOfArray,  // Returns the $min element of an array.
+    stdDevPop,   // Returns the $stdDevPop of an array.
+    stdDevSamp,  // Returns the $stdDevSamp of an array.
+    sumOfArray,  // Returns the $sum of an array
     unwindArray,
     arrayToSet,
     collArrayToSet,
@@ -899,7 +909,6 @@ int32_t updateAndCheckMemUsage(value::Array* state,
 class CodeFragment;
 
 struct ProduceObjContext {
-    int fieldsStackOffset = 0;
     int argsStackOffset = 0;
     const CodeFragment* code;
 };
@@ -1700,28 +1709,20 @@ private:
                                                         value::Value rootVal) {
         using TypeTags = value::TypeTags;
 
-        const auto& fields = spec->fields;
-
         // Invoke produceBsonObject<CursorT>() with the appropriate cursor type. For
         // SBE objects, we use ObjectCursor. For all other types, we use BsonObjCursor.
         if (rootTag == TypeTags::Object) {
             auto obj = value::getObjectView(rootVal);
 
-            produceBsonObject(ctx, spec, bob, ObjectCursor(fields, obj));
+            produceBsonObject(ctx, spec, bob, ObjectCursor(obj));
         } else {
             const char* obj = rootTag == TypeTags::bsonObject
                 ? value::bitcastTo<const char*>(rootVal)
                 : BSONObj::kEmptyObject.objdata();
 
-            produceBsonObject(ctx, spec, bob, BsonObjCursor(fields, obj));
+            produceBsonObject(ctx, spec, bob, BsonObjCursor(obj));
         }
     }
-
-    void produceBsonObjectWithInputFields(const ProduceObjContext& ctx,
-                                          const MakeObjSpec* spec,
-                                          UniqueBSONObjBuilder& bob,
-                                          value::TypeTags objTag,
-                                          value::Value objVal);
 
     template <typename CursorT>
     void produceBsonObject(const ProduceObjContext& ctx,
@@ -1881,6 +1882,9 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinBitTestPosition(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinBsonSize(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinStrLenBytes(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinStrLenCP(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinSubstrBytes(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinSubstrCP(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinToUpper(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinToLower(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCoerceToBool(ArityType arity);
@@ -1900,6 +1904,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinSinh(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTan(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTanh(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinRand(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinRound(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcat(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcatArrays(ArityType arity);
@@ -1981,6 +1986,17 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinISOWeek(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinObjectToArray(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinArrayToObject(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinAvgOfArray(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinMaxOfArray(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinMinOfArray(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> maxMinArrayHelper(ArityType arity, bool isMax);
+    FastTuple<bool, value::TypeTags, value::Value> builtinStdDevPop(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinStdDevSamp(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> stdDevHelper(ArityType arity, bool isSamp);
+    FastTuple<bool, value::TypeTags, value::Value> builtinSumOfArray(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> avgOrSumOfArrayHelper(ArityType arity,
+                                                                         bool isAvg);
+
     /**
      * Implementation of the builtin function 'unwindArray'. It accepts 1 argument that must be one
      * of the SBE array types (BSONArray, Array, ArraySet, ArrayMultiSet) and returns an Array
@@ -2545,32 +2561,9 @@ protected:
     boost::optional<value::ValueGuard> _valueGuard;
 };
 
-class MakeObjCursorInputFields {
-public:
-    MakeObjCursorInputFields(ByteCode& bytecode, int startOffset, size_t numFields)
-        : _getFieldFn(bytecode, startOffset), _numFields(numFields) {}
-
-    size_t size() const {
-        return _numFields;
-    }
-
-    FastTuple<bool, value::TypeTags, value::Value> operator[](size_t idx) const {
-        return _getFieldFn(idx);
-    }
-
-private:
-    ByteCode::GetFromStackFunctor _getFieldFn;
-    size_t _numFields;
-};
-
 std::pair<value::TypeTags, value::Value> initializeDoubleDoubleSumState();
 
-class InputFieldsOnlyCursor;
-class BsonObjWithInputFieldsCursor;
-class ObjWithInputFieldsCursor;
-
-// There are five instantiations of the templated produceBsonObject() method, one for each
-// type of MakeObj input cursor.
+// Instantiations of the templated produceBsonObject() method.
 extern template void ByteCode::produceBsonObject<BsonObjCursor>(const ProduceObjContext& ctx,
                                                                 const MakeObjSpec* spec,
                                                                 UniqueBSONObjBuilder& bob,
@@ -2580,24 +2573,6 @@ extern template void ByteCode::produceBsonObject<ObjectCursor>(const ProduceObjC
                                                                const MakeObjSpec* spec,
                                                                UniqueBSONObjBuilder& bob,
                                                                ObjectCursor cursor);
-
-extern template void ByteCode::produceBsonObject<InputFieldsOnlyCursor>(
-    const ProduceObjContext& ctx,
-    const MakeObjSpec* spec,
-    UniqueBSONObjBuilder& bob,
-    InputFieldsOnlyCursor cursor);
-
-extern template void ByteCode::produceBsonObject<BsonObjWithInputFieldsCursor>(
-    const ProduceObjContext& ctx,
-    const MakeObjSpec* spec,
-    UniqueBSONObjBuilder& bob,
-    BsonObjWithInputFieldsCursor cursor);
-
-extern template void ByteCode::produceBsonObject<ObjWithInputFieldsCursor>(
-    const ProduceObjContext& ctx,
-    const MakeObjSpec* spec,
-    UniqueBSONObjBuilder& bob,
-    ObjWithInputFieldsCursor cursor);
 }  // namespace vm
 }  // namespace sbe
 }  // namespace mongo

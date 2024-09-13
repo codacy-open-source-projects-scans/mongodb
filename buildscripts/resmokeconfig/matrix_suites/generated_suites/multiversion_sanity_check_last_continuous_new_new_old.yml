@@ -4,7 +4,7 @@
 # AND REGENERATE THE MATRIX SUITES.
 #
 # matrix suite mapping file: buildscripts/resmokeconfig/matrix_suites/mappings/multiversion_sanity_check_last_continuous_new_new_old.yml
-# regenerate matrix suites: buildscripts/resmoke.py generate-matrix-suites
+# regenerate matrix suites: buildscripts/resmoke.py generate-matrix-suites && bazel run //:format
 ##########################################################
 executor:
   archive:
@@ -50,6 +50,7 @@ selector:
     - jstests/core/fsync.js
     - jstests/core/txns/prepare_conflict.js
     - jstests/core/txns/prepare_conflict_aggregation_behavior.js
+    - jstests/core/timeseries/timeseries_update_multi.js
   exclude_with_any_tags:
     - assumes_standalone_mongod
     - requires_profiling

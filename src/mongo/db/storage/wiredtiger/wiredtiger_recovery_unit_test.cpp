@@ -45,8 +45,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id.h"
@@ -217,8 +215,6 @@ private:
 };
 
 TEST_F(WiredTigerRecoveryUnitTestFixture, SetReadSource) {
-    // Storage engine operations require at least Global IS.
-    Lock::GlobalLock lk(clientAndCtx1.second.get(), MODE_IS);
     ru1->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided, Timestamp(1, 1));
     ASSERT_EQ(RecoveryUnit::ReadSource::kProvided, ru1->getTimestampReadSource());
     ASSERT_EQ(Timestamp(1, 1), ru1->getPointInTimeReadTimestamp());
@@ -227,11 +223,6 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, SetReadSource) {
 TEST_F(WiredTigerRecoveryUnitTestFixture, NoOverlapReadSource) {
     OperationContext* opCtx1 = clientAndCtx1.second.get();
     OperationContext* opCtx2 = clientAndCtx2.second.get();
-
-    // Hold the global locks throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock1(opCtx1, MODE_IX);
-    Lock::GlobalLock globalLock2(opCtx2, MODE_IX);
 
     std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx1, "a.b"));
 
@@ -439,6 +430,45 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, WriteOnADocumentBeingPreparedTriggersW
 
     ru1->abortUnitOfWork();
     ru2->abortUnitOfWork();
+}
+
+DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
+                   PrepareTimestampOlderThanStableTimestamp,
+                   "prepare timestamp .* is not newer than the stable timestamp") {
+    ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
+    harnessHelper->getEngine()->setStableTimestamp({2, 1}, false);
+    ru1->setPrepareTimestamp({1, 1});
+    // It is illegal to set the prepare timestamp older than the stable timestamp.
+    ru1->prepareUnitOfWork();
+}
+
+DEATH_TEST_REGEX_F(WiredTigerRecoveryUnitTestFixture,
+                   CommitTimestampOlderThanPrepareTimestamp,
+                   "commit timestamp .* is less than the prepare timestamp") {
+    ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
+    ru1->setDurableTimestamp({4, 1});  // Newer than the prepare timestamp.
+    harnessHelper->getEngine()->setStableTimestamp({2, 1}, false);
+    ru1->setPrepareTimestamp({3, 1});  // Newer than the stable timestamp.
+    ru1->prepareUnitOfWork();
+    ru1->setCommitTimestamp({1, 1});
+    // It is illegal to set the commit timestamp older than the prepare timestamp.
+    ru1->commitUnitOfWork();
+}
+
+TEST_F(WiredTigerRecoveryUnitTestFixture, RoundUpPreparedTimestamps) {
+    ru1->beginUnitOfWork(clientAndCtx1.second->readOnly());
+    RecoveryUnit::OpenSnapshotOptions roundUp{.roundUpPreparedTimestamps = true};
+    ru1->preallocateSnapshot(roundUp);
+    ru1->setDurableTimestamp({4, 1});
+    harnessHelper->getEngine()->setStableTimestamp({3, 1}, false);
+    // Check setting a prepared transaction timestamp earlier than the
+    // stable timestamp is valid with roundUpPreparedTimestamps option.
+    ru1->setPrepareTimestamp({2, 1});
+    ru1->prepareUnitOfWork();
+    // Check setting a commit timestamp earlier than the prepared transaction
+    // timestamp is valid with roundUpPreparedTimestamps option.
+    ru1->setCommitTimestamp({1, 1});
+    ru1->commitUnitOfWork();
 }
 
 TEST_F(WiredTigerRecoveryUnitTestFixture,
@@ -722,9 +752,6 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CommitTimestampAfterSetTimestampOnAbor
 TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsAreNotCached) {
     auto opCtx = clientAndCtx1.second.get();
 
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx, MODE_IX);
     auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
 
     std::unique_ptr<RecordStore> rs(
@@ -783,9 +810,6 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorsAreNotCached) {
 TEST_F(WiredTigerRecoveryUnitTestFixture, ReadOnceCursorsCached) {
     auto opCtx = clientAndCtx1.second.get();
 
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx, MODE_IX);
     auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
 
     std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx, "test.read_once"));
@@ -839,9 +863,6 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CacheMixedOverwrite) {
     std::unique_ptr<RecordStore> rs(harnessHelper->createRecordStore(opCtx, "test.A"));
     auto uri = dynamic_cast<WiredTigerRecordStore*>(rs.get())->getURI();
 
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx, MODE_IX);
     auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
 
     // Close all cached cursors to establish a 'before' state.
@@ -917,10 +938,6 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorNotChanged) {
     auto opCtx1 = clientAndCtx1.second.get();
     auto opCtx2 = clientAndCtx2.second.get();
 
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx1, MODE_IX);
-    Lock::GlobalLock globalLock2(opCtx2, MODE_IX);
     auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx1));
     auto ru2 = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx2));
 
@@ -985,10 +1002,6 @@ TEST_F(WiredTigerRecoveryUnitTestFixture, CheckpointCursorGetId) {
     auto opCtx1 = clientAndCtx1.second.get();
     auto opCtx2 = clientAndCtx2.second.get();
 
-    // Hold the global lock throughout the test to avoid having the global lock destructor
-    // prematurely abandon snapshots.
-    Lock::GlobalLock globalLock(opCtx1, MODE_IX);
-    Lock::GlobalLock globalLock2(opCtx2, MODE_IX);
     auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx1));
     auto ru2 = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx2));
 
@@ -1268,8 +1281,6 @@ DEATH_TEST_F(WiredTigerRecoveryUnitTestFixture,
              MayNotChangeReadSourceWhilePinned,
              "Cannot change ReadSource as it is pinned.") {
 
-    // Storage engine operations require at least Global IS.
-    Lock::GlobalLock lk(clientAndCtx1.second.get(), MODE_IS);
     ru1->pinReadSource();
     ru1->setTimestampReadSource(RecoveryUnit::ReadSource::kNoOverlap);
 }

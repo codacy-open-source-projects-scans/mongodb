@@ -49,7 +49,6 @@
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/ops/update_result.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/plan_executor.h"
@@ -57,6 +56,7 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/restore_context.h"
+#include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/storage/snapshot.h"
@@ -214,7 +214,27 @@ public:
 
     bool usesCollectionAcquisitions() const final;
 
+    /**
+     * It is used to detect if the plan excutor obtained after multiplanning is using a distinct
+     * scan stage. That's because in this scenario modifications to the pipeline in the context of
+     * aggregation need to be made.
+     */
+    bool isUsingDistinctScan() const final {
+        auto soln = getQuerySolution();
+        return soln && soln->root()->hasNode(STAGE_DISTINCT_SCAN);
+    }
+
 private:
+    const QuerySolution* getQuerySolution() const {
+        if (_qs) {
+            return _qs.get();
+        }
+        if (const MultiPlanStage* mps = getMultiPlanStage()) {
+            return mps->bestSolution();
+        }
+        return nullptr;
+    }
+
     ExecState _getNextImpl(Snapshotted<Document>* objOut, RecordId* dlOut);
 
     // Helper for handling the NEED_YIELD stage state.

@@ -96,8 +96,6 @@
 #include "mongo/db/matcher/extensions_callback.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
-#include "mongo/db/ops/delete_request_gen.h"
-#include "mongo/db/ops/update_request.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
@@ -152,6 +150,8 @@
 #include "mongo/db/query/stage_types.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
+#include "mongo/db/query/write_ops/delete_request_gen.h"
+#include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/yield_policy_callbacks_impl.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/operation_sharding_state.h"
@@ -676,8 +676,7 @@ private:
 
     std::unique_ptr<ClassicRuntimePlannerResult> buildIdHackPlan() final {
         const auto& mainCollection = getCollections().getMainCollection();
-        if (!isIdHackEligibleQuery(
-                mainCollection, _cq->getFindCommandRequest(), _cq->getCollator())) {
+        if (!isIdHackEligibleQuery(mainCollection, *_cq)) {
             return nullptr;
         }
 
@@ -1113,12 +1112,25 @@ bool shouldUseRegularSbe(OperationContext* opCtx, const CanonicalQuery& cq, cons
     return cq.getExpCtx()->sbeCompatibility >= minRequiredCompatibility;
 }
 
-bool shouldAttemptSBE(const CanonicalQuery* canonicalQuery) {
-    if (!canonicalQuery->isSbeCompatible()) {
+bool shouldUseSbePlanCache(const QueryPlannerParams& params) {
+    // The logic in this funtion depends on the fact that we clear the SBE plan cache on index
+    // creation.
+
+    // SBE feature flag guards SBE plan cache use. Check this first to avoid doing potentially
+    // expensive checks unnecessarily.
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (!feature_flags::gFeatureFlagSbeFull.isEnabled(fcvSnapshot)) {
         return false;
     }
 
-    return !canonicalQuery->getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled();
+    // SBE plan cache does not support partial indexes.
+    // TODO SERVER-94392: Remove this restriction once they are supported.
+    for (const auto& idx : params.mainCollectionInfo.indexes) {
+        if (idx.filterExpr) {
+            return false;
+        }
+    }
+    return true;
 }
 
 boost::optional<ScopedCollectionFilter> getScopedCollectionFilter(
@@ -1133,34 +1145,6 @@ boost::optional<ScopedCollectionFilter> getScopedCollectionFilter(
         return collFilter;
     }
     return boost::none;
-}
-
-std::unique_ptr<PlanYieldPolicySBE> tryGetSbeParams(OperationContext* opCtx,
-                                                    CanonicalQuery* canonicalQuery,
-                                                    const MultipleCollectionAccessor& collections,
-                                                    PlanYieldPolicy::YieldPolicy yieldPolicy,
-                                                    Pipeline* pipeline,
-                                                    bool needsMerge) {
-    if (!shouldAttemptSBE(canonicalQuery)) {
-        return nullptr;
-    }
-
-    // Add the stages that are candidates for SBE lowering from the 'pipeline' into the
-    // 'canonicalQuery'. This must be done _before_ checking shouldUseRegularSbe() or
-    // creating SbeWithClassicRuntimePlanningAndSbeCachePrepareExecutionHelper /
-    // SbeWithClassicRuntimePlanningAndClassicCachePrepareExecutionHelper because both inspect the
-    // pipeline on the canonical query.
-    attachPipelineStages(collections, pipeline, needsMerge, canonicalQuery);
-
-    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    const bool sbeFull = feature_flags::gFeatureFlagSbeFull.isEnabled(fcvSnapshot);
-    const bool canUseRegularSbe = shouldUseRegularSbe(opCtx, *canonicalQuery, sbeFull);
-    const bool canUseSbe = canUseRegularSbe || sbeFull;
-    if (!canUseSbe) {
-        return nullptr;
-    }
-
-    return PlanYieldPolicySBE::make(opCtx, yieldPolicy, collections, canonicalQuery->nss());
 }
 
 void setCurOpQueryFramework(const PlanExecutor* executor) {
@@ -1258,34 +1242,50 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
         }
     }
 
-    // Set whether the query is suitable for SBE. This will be later needed for eligibility checks.
-    canonicalQuery->setSbeCompatible(isQuerySbeCompatible(&mainColl, canonicalQuery.get()));
+    const bool useSbeEngine = [&] {
+        const bool forceClassic =
+            canonicalQuery->getExpCtx()->getQueryKnobConfiguration().isForceClassicEngineEnabled();
+        if (forceClassic || !isQuerySbeCompatible(&mainColl, canonicalQuery.get())) {
+            return false;
+        }
 
-    // None of the previous paths are viable, so generate one of the following three plan executor
-    // planners:
-    //     * SBE, with classic planner.
-    //     * SBE, with SBE planner.
-    //     * Classic, with classic planner.
+        // Add the stages that are candidates for SBE lowering from the 'pipeline' into the
+        // 'canonicalQuery'. This must be done _before_ checking shouldUseRegularSbe() or
+        // creating the planner.
+        attachPipelineStages(collections, pipeline, needsMerge, canonicalQuery.get());
+
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        const bool sbeFull = feature_flags::gFeatureFlagSbeFull.isEnabled(fcvSnapshot);
+        return sbeFull || shouldUseRegularSbe(opCtx, *canonicalQuery, sbeFull);
+    }();
+
+    if (useSbeEngine) {
+        // Commit to using SBE by removing the pushed-down aggregation stages from the original
+        // pipeline and by mutating the canonical query with search specific metadata.
+        finalizePipelineStages(pipeline, unavailableMetadata, canonicalQuery.get());
+        canonicalQuery->setSbeCompatible(true);
+
+    } else {
+        // There's a special case of the projection optimization being skipped when a query has any
+        // user-defined "let" variable and the query may be run with SBE. Here we make sure the
+        // projection is optimized for the classic engine.
+        canonicalQuery->optimizeProjection();
+        canonicalQuery->setSbeCompatible(false);
+    }
+
     auto makePlanner = [&](std::unique_ptr<QueryPlannerParams> plannerParams)
         -> std::unique_ptr<PlannerInterface> {
-        // Prioritize using SBE if allowed. This implies having a query with greater compatibility
-        // levels than the configured thresholds.
-        if (auto sbeYieldPolicy = tryGetSbeParams(
-                opCtx, canonicalQuery.get(), collections, yieldPolicy, pipeline, needsMerge)) {
-
-            // Push down compatible stages to SBE land and fill out secondary collections
-            // planner parameters.
-            finalizePipelineStages(pipeline, unavailableMetadata, canonicalQuery.get());
+        if (useSbeEngine) {
+            auto sbeYieldPolicy =
+                PlanYieldPolicySBE::make(opCtx, yieldPolicy, collections, canonicalQuery->nss());
 
             plannerParams->fillOutSecondaryCollectionsPlannerParams(
                 opCtx, *canonicalQuery, collections);
 
             plannerParams->setTargetSbeStageBuilder(opCtx, *canonicalQuery, collections);
 
-            const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-            const bool useSbePlanCache = feature_flags::gFeatureFlagSbeFull.isEnabled(fcvSnapshot);
-
-            if (useSbePlanCache) {
+            if (shouldUseSbePlanCache(*plannerParams)) {
+                canonicalQuery->setUsingSbePlanCache(true);
                 return getClassicPlannerForSbe<
                     SbeWithClassicRuntimePlanningAndSbeCachePrepareExecutionHelper>(
                     opCtx,
@@ -1295,6 +1295,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
                     std::move(sbeYieldPolicy),
                     std::move(plannerParams));
             } else {
+                canonicalQuery->setUsingSbePlanCache(false);
                 return getClassicPlannerForSbe<
                     SbeWithClassicRuntimePlanningAndClassicCachePrepareExecutionHelper>(
                     opCtx,
@@ -1306,13 +1307,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
             }
         }
 
-        // If we are here, it means the query cannot run in SBE and we should fallback to classic.
-        canonicalQuery->setSbeCompatible(false);
-
-        // There's a special case of the projection optimization being skipped when a query has any
-        // user-defined "let" variable and the query may be run with SBE. Here we make sure the
-        // projection is optimized for the classic engine.
-        canonicalQuery->optimizeProjection();
+        // This codepath will use the classic runtime planner with classic PlanStages, so will not
+        // use the SBE plan cache.
+        canonicalQuery->setUsingSbePlanCache(false);
 
         // Default to using the classic executor with the classic runtime planner.
         return getClassicPlanner(
@@ -1846,39 +1843,24 @@ bool turnIxscanIntoCount(QuerySolution* soln) {
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCount(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const CollectionPtr* coll,
-    const CountCommandRequest& request,
-    const NamespaceString& nss) {
+    std::unique_ptr<ParsedFindCommand> parsedFind,
+    const CountCommandRequest& count) {
     const auto& collection = *coll;
 
     OperationContext* opCtx = expCtx->opCtx;
     std::unique_ptr<WorkingSet> ws = std::make_unique<WorkingSet>();
-    auto findCommand = std::make_unique<FindCommandRequest>(nss);
 
-    findCommand->setFilter(request.getQuery());
-    auto collation = request.getCollation().value_or(BSONObj());
-    findCommand->setCollation(collation);
-    findCommand->setHint(request.getHint());
-
-    auto& extensionsCallback = collection
-        ? static_cast<const ExtensionsCallback&>(ExtensionsCallbackReal(opCtx, &collection->ns()))
-        : static_cast<const ExtensionsCallback&>(ExtensionsCallbackNoop());
     auto statusWithCQ = CanonicalQuery::make(
-        {.expCtx = expCtx,
-         .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand),
-                                               .extensionsCallback = std::move(extensionsCallback),
-                                               .allowedFeatures =
-                                                   MatchExpressionParser::kAllowAllSpecialFeatures},
-         .isCountLike = true});
+        {.expCtx = expCtx, .parsedFind = std::move(parsedFind), .isCountLike = true});
     if (!statusWithCQ.isOK()) {
         return statusWithCQ.getStatus();
     }
-
     auto cq = std::move(statusWithCQ.getValue());
 
     const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
 
-    const auto skip = request.getSkip().value_or(0);
-    const auto limit = request.getLimit().value_or(0);
+    const auto skip = count.getSkip().value_or(0);
+    const auto limit = count.getLimit().value_or(0);
 
     ON_BLOCK_EXIT([&] {
         // Stop the query planning timer once we have an execution plan.
@@ -1903,7 +1885,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
                                            &CollectionPtr::null,
                                            yieldPolicy,
                                            false, /* whether we must return owned BSON */
-                                           nss);
+                                           cq->getFindCommandRequest().getNamespaceOrUUID().nss());
     }
 
     // If the query is empty, then we can determine the count by just asking the collection
@@ -1914,7 +1896,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
     const bool isEmptyQueryPredicate =
         cq->getPrimaryMatchExpression()->matchType() == MatchExpression::AND &&
         cq->getPrimaryMatchExpression()->numChildren() == 0;
-    const bool useRecordStoreCount = isEmptyQueryPredicate && request.getHint().isEmpty();
+    const bool useRecordStoreCount =
+        isEmptyQueryPredicate && cq->getFindCommandRequest().getHint().isEmpty();
 
     if (useRecordStoreCount) {
         std::unique_ptr<PlanStage> root =
@@ -1926,7 +1909,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCoun
                                            &CollectionPtr::null,
                                            yieldPolicy,
                                            false, /* whether we must returned owned BSON */
-                                           nss);
+                                           cq->getFindCommandRequest().getNamespaceOrUUID().nss());
     }
 
     size_t plannerOptions = QueryPlannerParams::DEFAULT;
@@ -1956,7 +1939,6 @@ StatusWith<std::unique_ptr<QuerySolution>> tryGetQuerySolutionForDistinct(
     const MultipleCollectionAccessor& collections,
     size_t plannerOptions,
     const CanonicalQuery& canonicalQuery,
-    bool isDistinctMultiplanningEnabled,
     bool flipDistinctScanDirection) {
     tassert(9245500, "Expected distinct property on CanonicalQuery", canonicalQuery.getDistinct());
 
@@ -1982,10 +1964,8 @@ StatusWith<std::unique_ptr<QuerySolution>> tryGetQuerySolutionForDistinct(
         if (plannerParams->mainCollectionInfo.indexes.empty()) {
             return nullptr;
         }
-        return createDistinctScanSolution(canonicalQuery,
-                                          *plannerParams,
-                                          isDistinctMultiplanningEnabled,
-                                          flipDistinctScanDirection);
+        return createDistinctScanSolution(
+            canonicalQuery, *plannerParams, flipDistinctScanDirection);
     };
     auto soln = getQuerySolution(plannerOptions);
     if (!soln) {
