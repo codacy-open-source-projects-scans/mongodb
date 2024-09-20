@@ -98,6 +98,7 @@
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/pipeline/visitors/document_source_visitor_docs_needed_bounds.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -708,11 +709,16 @@ Status runAggregateOnView(AggExState& aggExState,
                                                         resolvedView.getNamespace()};
 
         sharding::router::CollectionRouter router(aggExState.getOpCtx()->getServiceContext(),
-                                                  resolvedView.getNamespace());
+                                                  resolvedView.getNamespace(),
+                                                  false  // retryOnStaleShard=false
+        );
         status = router.route(
             aggExState.getOpCtx(),
             "runAggregateOnView",
             [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
+                // TODO: SERVER-77402 Use a ShardRoleLoop here and remove this usage of
+                // CollectionRouter's retryOnStaleShard=false.
+
                 // Setup the opCtx's OperationShardingState with the expected placement versions for
                 // the underlying collection. Use the same 'placementConflictTime' from the original
                 // request, if present.
@@ -1070,7 +1076,8 @@ Status _runAggregate(AggExState& aggExState, rpc::ReplyBuilderInterface* result)
                 aggExState.getExecutionNss(),
                 Top::LockType::NotLocked,
                 AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                catalog->getDatabaseProfileLevel(aggExState.getExecutionNss().dbName()));
+                DatabaseProfileSettings::get(aggExState.getOpCtx()->getServiceContext())
+                    .getDatabaseProfileLevel(aggExState.getExecutionNss().dbName()));
             auto [collator, match] =
                 resolveCollator(aggExState.getOpCtx(),
                                 aggExState.getRequest().getCollation().get_value_or(BSONObj()),

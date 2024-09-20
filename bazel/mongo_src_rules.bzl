@@ -4,6 +4,10 @@ BUILD files in the "src/" subtree.
 
 load("@poetry//:dependencies.bzl", "dependency")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@com_github_grpc_grpc//bazel:generate_cc.bzl", "generate_cc")
+load("@com_github_grpc_grpc//bazel:protobuf.bzl", "well_known_proto_libs")
+load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load(
     "//bazel:header_deps.bzl",
     "HEADER_DEP_SUFFIX",
@@ -18,6 +22,7 @@ load(
     "WITH_DEBUG_SUFFIX",
     "extract_debuginfo",
     "extract_debuginfo_binary",
+    "extract_debuginfo_test",
 )
 
 # https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library?view=msvc-170
@@ -392,6 +397,17 @@ BOOST_DEFINES = [
     "//conditions:default": [],
 }) + select({
     "@platforms//os:windows": ["BOOST_ALL_NO_LIB"],
+    "//conditions:default": [],
+})
+
+ENTERPRISE_DEFINES = select({
+    "//bazel/config:build_enterprise_enabled": ["MONGO_ENTERPRISE_VERSION=1"],
+    "//conditions:default": [],
+}) + select({
+    "//bazel/config:enterprise_feature_audit_enabled": ["MONGO_ENTERPRISE_AUDIT=1"],
+    "//conditions:default": [],
+}) + select({
+    "//bazel/config:enterprise_feature_encryptdb_enabled": ["MONGO_ENTERPRISE_ENCRYPTDB=1"],
     "//conditions:default": [],
 })
 
@@ -1199,7 +1215,8 @@ MONGO_GLOBAL_DEFINES = (
     BOOST_DEFINES +
     ABSEIL_DEFINES +
     PCRE2_DEFINES +
-    SAFEINT_DEFINES
+    SAFEINT_DEFINES +
+    ENTERPRISE_DEFINES
 )
 
 MONGO_GLOBAL_COPTS = (
@@ -1327,6 +1344,7 @@ def mongo_cc_library(
         hdrs = [],
         textual_hdrs = [],
         deps = [],
+        cc_deps = [],
         header_deps = [],
         testonly = False,
         visibility = None,
@@ -1353,6 +1371,7 @@ def mongo_cc_library(
       textual_hdrs: Textual headers. Might be used to include cpp files without
         compiling them.
       deps: The targets the library depends on.
+      cc_deps: Same as deps, but doesn't get added as shared library dep.
       header_deps: The targets the library depends on only for headers, omits
         linking.
       testonly: Whether or not the target is purely for tests.
@@ -1459,11 +1478,10 @@ def mongo_cc_library(
 
     create_link_deps(
         name = name + LINK_DEP_SUFFIX,
-        link_deps = [name] + deps,
-        target_compatible_with = select({
-            "//bazel/config:scons_query_enabled": [],
-            "//conditions:default": ["@platforms//:incompatible"],
-        }) + target_compatible_with + enterprise_compatible,
+        target_name = name,
+        link_deps = [name] + deps + cc_deps,
+        tags = ["scons_link_lists"],
+        target_compatible_with = target_compatible_with + enterprise_compatible,
     )
 
     # Create a cc_library entry to generate a shared archive of the target.
@@ -1471,7 +1489,7 @@ def mongo_cc_library(
         name = name + SHARED_ARCHIVE_SUFFIX,
         srcs = srcs + SANITIZER_DENYLIST_HEADERS,
         hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
-        deps = deps + [name + HEADER_DEP_SUFFIX],
+        deps = deps + cc_deps + [name + HEADER_DEP_SUFFIX],
         textual_hdrs = textual_hdrs,
         visibility = visibility,
         testonly = testonly,
@@ -1494,7 +1512,7 @@ def mongo_cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs + SANITIZER_DENYLIST_HEADERS,
         hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
-        deps = deps + [name + HEADER_DEP_SUFFIX],
+        deps = deps + cc_deps + [name + HEADER_DEP_SUFFIX],
         textual_hdrs = textual_hdrs,
         visibility = visibility,
         testonly = testonly,
@@ -1509,7 +1527,7 @@ def mongo_cc_library(
         features = MONGO_GLOBAL_FEATURES + select({
             "//bazel/config:linkstatic_disabled": ["supports_pic", "pic"],
             "//bazel/config:shared_archive_enabled": ["supports_pic", "pic"],
-            "//conditions:default": ["pie"],
+            "//conditions:default": ["-pic", "pie"],
         }) + features,
         target_compatible_with = target_compatible_with + enterprise_compatible,
         additional_linker_inputs = additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
@@ -1552,8 +1570,122 @@ def mongo_cc_library(
             "//conditions:default": None,
         }),
         visibility = visibility,
-        deps = deps + [name + HEADER_DEP_SUFFIX],
+        deps = deps + cc_deps + [name + HEADER_DEP_SUFFIX],
     )
+
+def _mongo_cc_binary_and_program(
+        name,
+        srcs = [],
+        deps = [],
+        header_deps = [],
+        testonly = False,
+        visibility = None,
+        data = [],
+        tags = [],
+        copts = [],
+        linkopts = [],
+        includes = [],
+        linkstatic = False,
+        local_defines = [],
+        target_compatible_with = [],
+        defines = [],
+        additional_linker_inputs = [],
+        features = [],
+        _program_type = ""):
+    if linkstatic == True:
+        fail("""Linking specific targets statically is not supported.
+        The mongo build must link entirely statically or entirely dynamically.
+        This can be configured via //config/bazel:linkstatic.""")
+
+    if native.package_name().startswith("src/mongo"):
+        srcs = srcs + ["//src/mongo:mongo_config_header"]
+        deps += MONGO_GLOBAL_SRC_DEPS
+
+    if "modules/enterprise" in native.package_name():
+        enterprise_compatible = select({
+            "//bazel/config:build_enterprise_enabled": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        })
+    else:
+        enterprise_compatible = []
+
+    fincludes_copt = force_includes_copt(native.package_name(), name)
+    fincludes_hdr = force_includes_hdr(native.package_name(), name)
+    package_specific_copts = package_specific_copt(native.package_name())
+    package_specific_linkflags = package_specific_linkflag(native.package_name())
+
+    all_deps = deps + LIBUNWIND_DEPS + TCMALLOC_DEPS
+
+    linux_rpath_flags = [
+        "-Wl,-z,origin",
+        "-Wl,--enable-new-dtags",
+        "-Wl,-rpath,\\$$ORIGIN/../lib",
+    ]
+    macos_rpath_flags = ["-Wl,-rpath,\\$$ORIGIN/../lib"]
+
+    rpath_flags = select({
+        "//bazel/config:linux_aarch64": linux_rpath_flags,
+        "//bazel/config:linux_ppc64le": linux_rpath_flags,
+        "//bazel/config:linux_s390x": linux_rpath_flags,
+        "//bazel/config:linux_x86_64": linux_rpath_flags,
+        "//bazel/config:macos_aarch64": macos_rpath_flags,
+        "//bazel/config:macos_x86_64": macos_rpath_flags,
+        "//bazel/config:windows_x86_64": [],
+    })
+
+    create_header_dep(
+        name = name + HEADER_DEP_SUFFIX,
+        header_deps = header_deps,
+    )
+
+    args = {
+        "name": name + WITH_DEBUG_SUFFIX,
+        "srcs": srcs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS + SANITIZER_DENYLIST_HEADERS,
+        "deps": all_deps + [name + HEADER_DEP_SUFFIX],
+        "visibility": visibility,
+        "testonly": testonly,
+        "copts": MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
+        "data": data,
+        "tags": tags,
+        "linkopts": MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts + rpath_flags,
+        "linkstatic": LINKSTATIC_ENABLED,
+        "local_defines": MONGO_GLOBAL_DEFINES + local_defines,
+        "defines": defines,
+        "includes": includes,
+        "features": MONGO_GLOBAL_FEATURES + ["-pic", "pie"] + features + select({
+            "@platforms//os:windows": ["generate_pdb_file"],
+            "//conditions:default": [],
+        }),
+        "dynamic_deps": select({
+            "//bazel/config:linkstatic_disabled": deps,
+            "//conditions:default": [],
+        }),
+        "target_compatible_with": target_compatible_with + enterprise_compatible,
+        "additional_linker_inputs": additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
+    }
+
+    if _program_type == "binary":
+        cc_binary(**args)
+        extract_debuginfo_binary(
+            name = name,
+            binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
+            type = "program",
+            tags = tags,
+            enabled = SEPARATE_DEBUG_ENABLED,
+            deps = all_deps,
+            visibility = visibility,
+        )
+    else:
+        native.cc_test(**args)
+        extract_debuginfo_test(
+            name = name,
+            binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
+            type = "program",
+            tags = tags,
+            enabled = SEPARATE_DEBUG_ENABLED,
+            deps = all_deps,
+            visibility = visibility,
+        )
 
 def mongo_cc_binary(
         name,
@@ -1600,86 +1732,89 @@ def mongo_cc_binary(
       additional_linker_inputs: Any additional files that you may want to pass
         to the linker, for example, linker scripts.
     """
-
-    if linkstatic == True:
-        fail("""Linking specific targets statically is not supported.
-        The mongo build must link entirely statically or entirely dynamically.
-        This can be configured via //config/bazel:linkstatic.""")
-
-    if native.package_name().startswith("src/mongo"):
-        srcs = srcs + ["//src/mongo:mongo_config_header"]
-        deps += MONGO_GLOBAL_SRC_DEPS
-
-    if "modules/enterprise" in native.package_name():
-        enterprise_compatible = select({
-            "//bazel/config:build_enterprise_enabled": [],
-            "//conditions:default": ["@platforms//:incompatible"],
-        })
-    else:
-        enterprise_compatible = []
-
-    fincludes_copt = force_includes_copt(native.package_name(), name)
-    fincludes_hdr = force_includes_hdr(native.package_name(), name)
-    package_specific_copts = package_specific_copt(native.package_name())
-    package_specific_linkflags = package_specific_linkflag(native.package_name())
-
-    all_deps = deps + LIBUNWIND_DEPS + TCMALLOC_DEPS
-
-    linux_rpath_flags = [
-        "-Wl,-z,origin",
-        "-Wl,--enable-new-dtags",
-        "-Wl,-rpath,\\$$ORIGIN/../lib",
-    ]
-    macos_rpath_flags = ["-Wl,-rpath,\\$$ORIGIN/../lib"]
-
-    rpath_flags = select({
-        "//bazel/config:linux_aarch64": linux_rpath_flags,
-        "//bazel/config:linux_ppc64le": linux_rpath_flags,
-        "//bazel/config:linux_s390x": linux_rpath_flags,
-        "//bazel/config:linux_x86_64": linux_rpath_flags,
-        "//bazel/config:macos_aarch64": macos_rpath_flags,
-        "//bazel/config:macos_x86_64": macos_rpath_flags,
-        "//bazel/config:windows_x86_64": [],
-    })
-
-    create_header_dep(
-        name = name + HEADER_DEP_SUFFIX,
-        header_deps = header_deps,
-    )
-    cc_binary(
-        name = name + WITH_DEBUG_SUFFIX,
-        srcs = srcs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS + SANITIZER_DENYLIST_HEADERS,
-        deps = all_deps + [name + HEADER_DEP_SUFFIX],
-        visibility = visibility,
-        testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
-        data = data,
-        tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts + rpath_flags,
-        linkstatic = LINKSTATIC_ENABLED,
-        local_defines = MONGO_GLOBAL_DEFINES + local_defines,
-        defines = defines,
-        includes = includes,
-        features = MONGO_GLOBAL_FEATURES + ["pie"] + features + select({
-            "@platforms//os:windows": ["generate_pdb_file"],
-            "//conditions:default": [],
-        }),
-        dynamic_deps = select({
-            "//bazel/config:linkstatic_disabled": deps,
-            "//conditions:default": [],
-        }),
-        target_compatible_with = target_compatible_with + enterprise_compatible,
-        additional_linker_inputs = additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
+    _mongo_cc_binary_and_program(
+        name,
+        srcs,
+        deps,
+        header_deps,
+        testonly,
+        visibility,
+        data,
+        tags,
+        copts,
+        linkopts,
+        includes,
+        linkstatic,
+        local_defines,
+        target_compatible_with,
+        defines,
+        additional_linker_inputs,
+        features,
+        _program_type = "binary",
     )
 
-    extract_debuginfo_binary(
-        name = name,
-        binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
-        type = "program",
-        tags = tags,
-        enabled = SEPARATE_DEBUG_ENABLED,
-        deps = all_deps,
-        visibility = visibility,
+def mongo_cc_test(
+        name,
+        srcs = [],
+        deps = [],
+        header_deps = [],
+        visibility = None,
+        data = [],
+        tags = [],
+        copts = [],
+        linkopts = [],
+        includes = [],
+        linkstatic = False,
+        local_defines = [],
+        target_compatible_with = [],
+        defines = [],
+        additional_linker_inputs = [],
+        features = []):
+    """Wrapper around cc_test.
+
+    Args:
+      name: The name of the test target.
+      srcs: The source files to build.
+      deps: The targets the library depends on.
+      header_deps: The targets the library depends on only for headers, omits
+        linking.
+      visibility: The visibility of the target library.
+      data: Data targets the library depends on.
+      tags: Tags to add to the rule.
+      copts: Any extra compiler options to pass in.
+      linkopts: Any extra link options to pass in.
+      includes: Any directory which should be exported to dependents, will be
+        prefixed with the package path
+      linkstatic: Whether or not linkstatic should be passed to the native bazel
+        cc_test rule. This argument is currently not supported. The mongo build
+        must link entirely statically or entirely dynamically. This can be
+        configured via //config/bazel:linkstatic.
+      local_defines: macro definitions passed to all source and header files.
+      defines: macro definitions added to the compile line when building any
+        source in this target, as well as the compile line of targets that
+        depend on this.
+      additional_linker_inputs: Any additional files that you may want to pass
+        to the linker, for example, linker scripts.
+    """
+    _mongo_cc_binary_and_program(
+        name,
+        srcs,
+        deps,
+        header_deps,
+        True,
+        visibility,
+        data,
+        tags,
+        copts,
+        linkopts,
+        includes,
+        linkstatic,
+        local_defines,
+        target_compatible_with,
+        defines,
+        additional_linker_inputs,
+        features,
+        _program_type = "test",
     )
 
 IdlInfo = provider(
@@ -1797,3 +1932,118 @@ symlink = rule(
         ),
     },
 )
+
+def strip_deps_impl(ctx):
+    cc_toolchain = find_cpp_toolchain(ctx)
+    feature_configuration = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = cc_toolchain,
+        requested_features = ctx.features,
+        unsupported_features = ctx.disabled_features,
+    )
+
+    linker_input = ctx.attr.input[CcInfo].linking_context.linker_inputs.to_list()[0]
+    linking_context = cc_common.create_linking_context(linker_inputs = depset(direct = [linker_input], transitive = []))
+
+    return [DefaultInfo(files = ctx.attr.input.files), CcInfo(
+        compilation_context = ctx.attr.input[CcInfo].compilation_context,
+        linking_context = linking_context,
+    )]
+
+strip_deps = rule(
+    strip_deps_impl,
+    attrs = {
+        "input": attr.label(
+            providers = [CcInfo],
+        ),
+    },
+    provides = [CcInfo],
+    toolchains = ["@bazel_tools//tools/cpp:toolchain_type"],
+    fragments = ["cpp"],
+)
+
+def dummy_file_impl(ctx):
+    ctx.actions.write(
+        output = ctx.outputs.output,
+        content = "",
+    )
+
+    return [DefaultInfo(files = depset([ctx.outputs.output]))]
+
+dummy_file = rule(
+    dummy_file_impl,
+    attrs = {
+        "output": attr.output(
+            doc = "The output of this rule.",
+        ),
+    },
+)
+
+def mongo_proto_library(
+        name,
+        srcs,
+        **kwargs):
+    proto_library(
+        name = name,
+        srcs = srcs,
+        **kwargs
+    )
+
+    dummy_file(
+        name = name + "_dummy_debug_symbol",
+        output = "lib" + name + ".so.debug",
+    )
+
+def mongo_cc_proto_library(
+        name,
+        deps,
+        **kwargs):
+    native.cc_proto_library(
+        name = name,
+        deps = deps,
+        **kwargs
+    )
+
+    dummy_file(
+        name = name + "_dummy_debug_symbol",
+        output = "lib" + name + ".so.debug",
+    )
+
+def mongo_cc_grpc_library(
+        name,
+        srcs,
+        cc_proto,
+        deps = [],
+        grpc_only = True,
+        proto_only = False,
+        well_known_protos = False,
+        generate_mocks = False,
+        **kwargs):
+    codegen_grpc_target = "_" + name + "_grpc_codegen"
+    generate_cc(
+        name = codegen_grpc_target,
+        srcs = srcs,
+        plugin = "//src/third_party/grpc:grpc_cpp_plugin",
+        well_known_protos = well_known_protos,
+        generate_mocks = generate_mocks,
+        **kwargs
+    )
+
+    # cc_proto_library tacks on unnecessary link-time dependencies to
+    # @com_google_protobuf and @com_google_absl, forcefully remove them
+    # to avoid intefering with thin targets link line generation.
+    cc_proto_target = "_" + name + "_cc_proto_stripped_deps"
+    strip_deps(
+        name = cc_proto_target,
+        input = cc_proto,
+    )
+
+    mongo_cc_library(
+        name = name,
+        srcs = [":" + codegen_grpc_target],
+        hdrs = [":" + codegen_grpc_target],
+        deps = deps +
+               ["//src/third_party/grpc:grpc++_codegen_proto"],
+        cc_deps = [":" + cc_proto_target],
+        **kwargs
+    )

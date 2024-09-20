@@ -256,9 +256,9 @@ env.Library(
         "service_entry_point_router_role.cpp",
     ],
     LIBDEPS_PRIVATE=[
-        "$BUILD_DIR/mongo/db/catalog/collection_catalog",
         "$BUILD_DIR/mongo/db/curop_metrics",
         "$BUILD_DIR/mongo/db/not_primary_error_tracker",
+        "$BUILD_DIR/mongo/db/profile_settings",
         "$BUILD_DIR/mongo/db/session/session_catalog",
         "$BUILD_DIR/mongo/db/stats/top",
         "$BUILD_DIR/mongo/transport/session_manager",
@@ -345,9 +345,6 @@ env.Library(
         "$BUILD_DIR/mongo/transport/transport_layer_manager",
         "$BUILD_DIR/mongo/util/clock_sources",
         "$BUILD_DIR/mongo/util/fail_point",
-        "$BUILD_DIR/mongo/util/latch_analyzer"
-        if get_option("use-diagnostic-latches") == "on"
-        else [],
         "$BUILD_DIR/mongo/util/net/http_client_impl",
         "$BUILD_DIR/mongo/util/net/ssl_options_server" if get_option("ssl") == "on" else "",
         "$BUILD_DIR/mongo/util/ntservice",
@@ -406,6 +403,7 @@ env.Library(
         "$BUILD_DIR/mongo/db/auth/authserver",
         "$BUILD_DIR/mongo/db/change_stream_options_manager",
         "$BUILD_DIR/mongo/db/change_streams_cluster_parameter",
+        "$BUILD_DIR/mongo/db/commands/profile_common",
         "$BUILD_DIR/mongo/db/commands/rwc_defaults_commands",
         "$BUILD_DIR/mongo/db/exec/scoped_timer",
         "$BUILD_DIR/mongo/db/ftdc/ftdc_mongos",
@@ -426,9 +424,6 @@ env.Library(
         "$BUILD_DIR/mongo/transport/session_manager",
         "$BUILD_DIR/mongo/transport/transport_layer_manager",
         "$BUILD_DIR/mongo/util/allocator_thread",
-        "$BUILD_DIR/mongo/util/latch_analyzer"
-        if get_option("use-diagnostic-latches") == "on"
-        else [],
         "$BUILD_DIR/mongo/util/periodic_runner_factory",
         "$BUILD_DIR/mongo/util/signal_handlers",
         "$BUILD_DIR/mongo/util/tracing_profiler/tracing_profiler"

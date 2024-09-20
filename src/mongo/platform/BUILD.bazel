@@ -1,4 +1,4 @@
-load("//bazel:mongo_src_rules.bzl", "mongo_cc_binary", "mongo_cc_library")
+load("//bazel:mongo_src_rules.bzl", "mongo_cc_library", "mongo_cc_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -46,7 +46,22 @@ mongo_cc_library(
     ],
 )
 
-mongo_cc_binary(
+# Run it as an executable:
+#   bazel run //src/mongo/platform:visibility_test1
+#
+# Execute as a test (this will parallelize the runs and accept test-specific options):
+#   bazel test //src/mongo/platform:visibility_test1 --test_output=all
+#
+# Test and collect code coverage (notice the "_with_debug" suffix):
+#   bazel coverage //src/mongo/platform:visibility_test1_with_debug --test_output=all --config=local --combined_report=lcov
+#
+# View coverage reports locally
+#   genhtml --branch-coverage --output coverage "$(bazel info output_path)/_coverage/_coverage_report.dat"
+# That creates a file-tree inside a top-level “coverage” folder. To view the rendered HTML report
+# in VSCode, install the [Live HTML Previewer](https://marketplace.visualstudio.com/items?itemName=hdg.live-html-previewer)
+# VSCode extension. Once installed, open the coverage/index.html file and click the “Show Preview”
+# widget that comes from the extension.
+mongo_cc_test(
     name = "visibility_test1",
     srcs = [
         "visibility_test1.cpp",

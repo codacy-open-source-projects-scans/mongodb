@@ -68,7 +68,6 @@
 #include "mongo/db/exec/sbe/sort_spec.h"
 #include "mongo/db/exec/sbe/stages/agg_project.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/exec/sbe/stages/column_scan.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/hash_join.h"
@@ -84,6 +83,7 @@
 #include "mongo/db/exec/sbe/stages/union.h"
 #include "mongo/db/exec/sbe/stages/unique.h"
 #include "mongo/db/exec/sbe/stages/unwind.h"
+#include "mongo/db/exec/sbe/stages/virtual_scan.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value.h"
@@ -1051,7 +1051,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                              getCurrentCollection(reqs),
                                              csn,
                                              std::move(fields),
-                                             _yieldPolicy,
                                              reqs.getIsTailableCollScanResumeBranch());
 
     if (reqs.has(kReturnKey)) {
@@ -1085,15 +1084,27 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     inputGuard.reset();
-    auto [scanSlots, stage] = generateVirtualScanMulti(&_slotIdGenerator,
-                                                       vsn->hasRecordId ? 2 : 1,
-                                                       inputTag,
-                                                       inputVal,
-                                                       _yieldPolicy,
-                                                       vsn->nodeId());
-    invariant(scanSlots.size() == (vsn->hasRecordId ? 2 : 1));
 
-    SbSlot resultSlot = vsn->hasRecordId ? SbSlot{scanSlots[1]} : SbSlot{scanSlots[0]};
+    // Make a VirtualScanStage, and then make a ProjectStage to unpack the elements of the array
+    // produced by the scan.
+    auto [scanStage, arraySlot] = b.makeVirtualScan(inputTag, inputVal);
+
+    SbExprOptSbSlotVector projects;
+
+    int32_t resultIdx = vsn->hasRecordId ? 1 : 0;
+    auto getResultExpr = b.makeFunction("getElement"_sd, arraySlot, b.makeInt32Constant(resultIdx));
+    projects.emplace_back(std::move(getResultExpr), boost::none);
+
+    if (vsn->hasRecordId) {
+        auto getRecordIdExpr = b.makeFunction("getElement"_sd, arraySlot, b.makeInt32Constant(0));
+        projects.emplace_back(std::move(getRecordIdExpr), boost::none);
+    }
+
+    auto [stage, scanSlots] = b.makeProject(std::move(scanStage), std::move(projects));
+
+    SbSlot resultSlot = scanSlots[0];
+    boost::optional<SbSlot> recordIdSlot =
+        vsn->hasRecordId ? boost::make_optional(scanSlots[1]) : boost::none;
 
     PlanStageSlots outputs;
 
@@ -1102,10 +1113,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     if (reqs.has(kRecordId)) {
-        invariant(vsn->hasRecordId);
-        auto recordIdSlot = SbSlot{scanSlots[0]};
-
-        outputs.set(kRecordId, recordIdSlot);
+        invariant(recordIdSlot.has_value());
+        outputs.set(kRecordId, *recordIdSlot);
     }
 
     if (vsn->filter) {
@@ -1125,76 +1134,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     auto ixn = static_cast<const IndexScanNode*>(root);
     invariant(reqs.has(kReturnKey) || !ixn->addKeyMetadata);
 
-    StringDataSet indexKeyPatternSet;
-    for (const auto& elt : ixn->index.keyPattern) {
-        indexKeyPatternSet.emplace(elt.fieldNameStringData());
-    }
-
-    sbe::IndexKeysInclusionSet fieldBitset, sortKeyBitset;
-    auto [fields, additionalFields] = splitVector(
-        reqs.getFields(), [&](const std::string& s) { return indexKeyPatternSet.count(s); });
-
-    auto fieldsSet = StringDataSet{fields.begin(), fields.end()};
-
-    size_t i = 0;
-    for (const auto& elt : ixn->index.keyPattern) {
-        StringData name = elt.fieldNameStringData();
-        if (fieldsSet.count(name)) {
-            fieldBitset.set(i);
-        }
-        ++i;
-    }
-
-    if (reqs.hasSortKeys()) {
-        auto sortKeys = reqs.getSortKeys();
-        auto sortKeysSet = StringDataSet{sortKeys.begin(), sortKeys.end()};
-
-        for (auto&& key : sortKeys) {
-            tassert(7097208,
-                    str::stream() << "Expected sort key '" << key
-                                  << "' to be part of index pattern",
-                    indexKeyPatternSet.count(key));
-        }
-
-        i = 0;
-        for (const auto& elt : ixn->index.keyPattern) {
-            StringData name = elt.fieldNameStringData();
-            if (sortKeysSet.count(name)) {
-                sortKeyBitset.set(i);
-            }
-            ++i;
-        }
-    }
-
-    bool reqResult = reqs.hasResult() || !additionalFields.empty();
-
-    if (reqs.has(kReturnKey) || reqResult) {
-        // If 'reqs' requires result or kReturnKey, or if 'additionalFields' is not empty, then we
-        // need to get all parts of the index key so that we can create the inflated index key.
-        for (int j = 0; j < ixn->index.keyPattern.nFields(); ++j) {
-            fieldBitset.set(j);
-        }
-    }
-
-    // Create a new PlanStageReqs object to pass the relevant reqs to the "generateIndexScan"
-    // function.
-    PlanStageReqs indexScanReqs;
-    indexScanReqs.set(PlanStageSlots::kRecordId)
-        .setIf(PlanStageSlots::kSnapshotId, reqs.has(PlanStageSlots::kSnapshotId))
-        .setIf(PlanStageSlots::kIndexIdent, reqs.has(PlanStageSlots::kIndexIdent))
-        .setIf(PlanStageSlots::kIndexKey, reqs.has(PlanStageSlots::kIndexKey))
-        .setIf(PlanStageSlots::kIndexKeyPattern, reqs.has(PlanStageSlots::kIndexKeyPattern))
-        .setIf(PlanStageSlots::kPrefetchedResult, reqs.has(PlanStageSlots::kPrefetchedResult));
-
     const auto generateIndexScanFunc =
         ixn->iets.empty() ? generateIndexScan : generateIndexScanWithDynamicBounds;
-    auto&& [scanStage, scanOutputs] = generateIndexScanFunc(_state,
-                                                            getCurrentCollection(reqs),
-                                                            ixn,
-                                                            fieldBitset,
-                                                            sortKeyBitset,
-                                                            _yieldPolicy,
-                                                            indexScanReqs);
+    auto&& [scanStage, scanOutputs] =
+        generateIndexScanFunc(_state, getCurrentCollection(reqs), ixn, reqs);
 
     auto stage = std::move(scanStage);
     auto outputs = std::move(scanOutputs);
@@ -1202,35 +1145,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     // Remove the RecordId from the output if we were not requested to produce it.
     if (!reqs.has(PlanStageSlots::kRecordId) && outputs.has(kRecordId)) {
         outputs.clear(kRecordId);
-    }
-
-    if (reqs.has(PlanStageSlots::kReturnKey)) {
-        SbExpr::Vector args;
-        for (auto&& elem : ixn->index.keyPattern) {
-            StringData name = elem.fieldNameStringData();
-            args.emplace_back(b.makeStrConstant(name));
-            args.emplace_back(outputs.get(std::make_pair(PlanStageSlots::kField, name)));
-        }
-
-        auto [outStage, outSlots] =
-            b.makeProject(std::move(stage), b.makeFunction("newObj"_sd, std::move(args)));
-        stage = std::move(outStage);
-
-        outputs.set(PlanStageSlots::kReturnKey, outSlots[0]);
-    }
-
-    if (reqResult) {
-        SbSlotVector indexKeySlots;
-        for (auto&& elem : ixn->index.keyPattern) {
-            StringData name = elem.fieldNameStringData();
-            indexKeySlots.emplace_back(outputs.get(std::make_pair(PlanStageSlots::kField, name)));
-        }
-
-        auto [outStage, outSlots] = b.makeProject(
-            std::move(stage), rehydrateIndexKey(_state, ixn->index.keyPattern, indexKeySlots));
-        stage = std::move(outStage);
-
-        outputs.setResultObj(outSlots[0]);
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -1276,6 +1190,9 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         isPointInterval = ietsArePointInterval(csn->iets);
     }
 
+    PlanStageReqs ixScanReqs;
+    ixScanReqs.set(kRecordId);
+
     auto [stage, planStageSlots, indexScanBoundsSlots] =
         generateSingleIntervalIndexScanAndSlots(_state,
                                                 collection,
@@ -1284,10 +1201,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
                                                 true /* forward */,
                                                 std::move(lowKey),
                                                 std::move(highKey),
-                                                {} /* indexKeysToInclude */,
-                                                {} /* indexKeySlots */,
-                                                reqs,
-                                                _yieldPolicy,
+                                                ixScanReqs,
                                                 csn->nodeId(),
                                                 false /* lowPriority */,
                                                 isPointInterval);
@@ -1302,8 +1216,8 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
             indexAccessMethod->getSortedDataInterface()->getOrdering(),
             1 /* direction */,
             csn->iets,
-            {ParameterizedIndexScanSlots::SingleIntervalPlan{indexScanBoundsSlots->first,
-                                                             indexScanBoundsSlots->second}}});
+            {ParameterizedIndexScanSlots::SingleIntervalPlan{
+                indexScanBoundsSlots->first.getId(), indexScanBoundsSlots->second.getId()}}});
     }
 
     if (csn->index.multikey ||
@@ -1319,287 +1233,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
     }
 
     return {std::move(stage), std::move(planStageSlots)};
-}
-
-namespace {
-SbExpr generatePerColumnPredicate(StageBuilderState& state,
-                                  const MatchExpression* me,
-                                  SbExpr expr) {
-    SbExprBuilder b(state);
-    switch (me->matchType()) {
-        // These are always safe since they will never match documents missing their field, or where
-        // the element is an object or array.
-        case MatchExpression::REGEX:
-            return generateRegexExpr(
-                state, checked_cast<const RegexMatchExpression*>(me), std::move(expr));
-        case MatchExpression::MOD:
-            return generateModExpr(
-                state, checked_cast<const ModMatchExpression*>(me), std::move(expr));
-        case MatchExpression::BITS_ALL_SET:
-            return generateBitTestExpr(state,
-                                       checked_cast<const BitTestMatchExpression*>(me),
-                                       sbe::BitTestBehavior::AllSet,
-                                       std::move(expr));
-        case MatchExpression::BITS_ALL_CLEAR:
-            return generateBitTestExpr(state,
-                                       checked_cast<const BitTestMatchExpression*>(me),
-                                       sbe::BitTestBehavior::AllClear,
-                                       std::move(expr));
-        case MatchExpression::BITS_ANY_SET:
-            return generateBitTestExpr(state,
-                                       checked_cast<const BitTestMatchExpression*>(me),
-                                       sbe::BitTestBehavior::AnySet,
-                                       std::move(expr));
-        case MatchExpression::BITS_ANY_CLEAR:
-            return generateBitTestExpr(state,
-                                       checked_cast<const BitTestMatchExpression*>(me),
-                                       sbe::BitTestBehavior::AnyClear,
-                                       std::move(expr));
-        case MatchExpression::EXISTS:
-            return b.makeBoolConstant(true);
-        case MatchExpression::LT:
-            return generateComparisonExpr(state,
-                                          checked_cast<const ComparisonMatchExpression*>(me),
-                                          sbe::EPrimBinary::less,
-                                          std::move(expr));
-        case MatchExpression::GT:
-            return generateComparisonExpr(state,
-                                          checked_cast<const ComparisonMatchExpression*>(me),
-                                          sbe::EPrimBinary::greater,
-                                          std::move(expr));
-        case MatchExpression::EQ:
-            return generateComparisonExpr(state,
-                                          checked_cast<const ComparisonMatchExpression*>(me),
-                                          sbe::EPrimBinary::eq,
-                                          std::move(expr));
-        case MatchExpression::LTE:
-            return generateComparisonExpr(state,
-                                          checked_cast<const ComparisonMatchExpression*>(me),
-                                          sbe::EPrimBinary::lessEq,
-                                          std::move(expr));
-        case MatchExpression::GTE:
-            return generateComparisonExpr(state,
-                                          checked_cast<const ComparisonMatchExpression*>(me),
-                                          sbe::EPrimBinary::greaterEq,
-                                          std::move(expr));
-        case MatchExpression::MATCH_IN: {
-            const auto* ime = checked_cast<const InMatchExpression*>(me);
-            tassert(6988583,
-                    "Push-down of non-scalar values in $in is not supported.",
-                    !ime->hasNonScalarOrNonEmptyValues());
-            return generateInExpr(state, ime, std::move(expr));
-        }
-        case MatchExpression::TYPE_OPERATOR: {
-            const auto* tme = checked_cast<const TypeMatchExpression*>(me);
-            const MatcherTypeSet& ts = tme->typeSet();
-            return b.makeFunction(
-                "typeMatch", std::move(expr), b.makeInt32Constant(ts.getBSONTypeMask()));
-        }
-
-        default:
-            uasserted(6733605,
-                      std::string("Expression ") + me->serialize().toString() +
-                          " should not be pushed down as a per-column filter");
-    }
-    MONGO_UNREACHABLE;
-}
-
-SbExpr generateLeafExpr(StageBuilderState& state,
-                        const MatchExpression* me,
-                        sbe::FrameId lambdaFrameId,
-                        SbSlot inputSlot) {
-    SbExprBuilder b(state);
-
-    auto lambdaParam = SbLocalVar{lambdaFrameId, 0};
-    const MatchExpression::MatchType mt = me->matchType();
-
-    if (mt == MatchExpression::NOT) {
-        // NOT cannot be pushed into the cell traversal because for arrays, it should behave as
-        // conjunction of negated child predicate on each element of the aray, but if we pushed it
-        // into the traversal it would become a disjunction.
-        const auto& notMe = checked_cast<const NotMatchExpression*>(me);
-        uassert(7040601, "Should have exactly one child under $not", notMe->numChildren() == 1);
-        const auto child = notMe->getChild(0);
-        auto lambdaExpr =
-            b.makeLocalLambda(lambdaFrameId, generatePerColumnPredicate(state, child, lambdaParam));
-
-        const MatchExpression::MatchType mtChild = child->matchType();
-        auto traverserName =
-            (mtChild == MatchExpression::EXISTS || mtChild == MatchExpression::TYPE_OPERATOR)
-            ? "traverseCsiCellTypes"
-            : "traverseCsiCellValues";
-        return b.makeNot(b.makeFunction(traverserName, inputSlot, std::move(lambdaExpr)));
-    } else {
-        auto lambdaExpr =
-            b.makeLocalLambda(lambdaFrameId, generatePerColumnPredicate(state, me, lambdaParam));
-
-        auto traverserName = (mt == MatchExpression::EXISTS || mt == MatchExpression::TYPE_OPERATOR)
-            ? "traverseCsiCellTypes"
-            : "traverseCsiCellValues";
-        return b.makeFunction(traverserName, inputSlot, std::move(lambdaExpr));
-    }
-}
-
-SbExpr generatePerColumnLogicalAndExpr(StageBuilderState& state,
-                                       const AndMatchExpression* me,
-                                       sbe::FrameId lambdaFrameId,
-                                       SbSlot inputSlot) {
-    const auto cTerms = me->numChildren();
-    tassert(7072600, "AND should have at least one child", cTerms > 0);
-
-    SbExpr::Vector leaves;
-    leaves.reserve(cTerms);
-    for (size_t i = 0; i < cTerms; i++) {
-        leaves.push_back(generateLeafExpr(state, me->getChild(i), lambdaFrameId, inputSlot));
-    }
-    SbExprBuilder b(state);
-    // Create the balanced binary tree to keep the tree shallow and safe for recursion.
-    return b.makeBalancedBooleanOpTree(sbe::EPrimBinary::logicAnd, std::move(leaves));
-}
-
-SbExpr generatePerColumnFilterExpr(StageBuilderState& state,
-                                   const MatchExpression* me,
-                                   SbSlot inputSlot) {
-    auto lambdaFrameId = state.frameIdGenerator->generate();
-
-    if (me->matchType() == MatchExpression::AND) {
-        return generatePerColumnLogicalAndExpr(
-            state, checked_cast<const AndMatchExpression*>(me), lambdaFrameId, inputSlot);
-    }
-
-    return generateLeafExpr(state, me, lambdaFrameId, inputSlot);
-}
-}  // namespace
-
-std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildColumnScan(
-    const QuerySolutionNode* root, const PlanStageReqs& reqs) {
-    tassert(6023403, "buildColumnScan() does not support kSortKey", !reqs.hasSortKeys());
-
-    SbBuilder b(_state, root->nodeId());
-
-    auto csn = static_cast<const ColumnIndexScanNode*>(root);
-    tassert(6312405,
-            "Unexpected filter provided for column scan stage. Expected 'filtersByPath' or "
-            "'postAssemblyFilter' to be used instead.",
-            !csn->filter);
-
-    PlanStageSlots outputs;
-
-    auto reconstructedRecordSlot = SbSlot{_slotIdGenerator.generate()};
-    outputs.setResultObj(reconstructedRecordSlot);
-
-    boost::optional<SbSlot> ridSlot;
-
-    if (reqs.has(kRecordId)) {
-        ridSlot = SbSlot{_slotIdGenerator.generate()};
-        outputs.set(kRecordId, *ridSlot);
-    }
-
-    auto rowStoreSlot = SbSlot{_slotIdGenerator.generate()};
-
-    // Get all the paths but make sure "_id" comes first (the order of paths given to the
-    // column_scan stage defines the order of fields in the reconstructed record).
-    std::vector<std::string> paths;
-    paths.reserve(csn->allFields.size());
-    bool densePathIncludeInFields = false;
-    if (csn->allFields.find("_id") != csn->allFields.end()) {
-        paths.push_back("_id");
-        densePathIncludeInFields = true;
-    }
-    for (const auto& path : csn->allFields) {
-        if (path != "_id") {
-            paths.push_back(path);
-        }
-    }
-
-    // Identify the filtered columns, if any, and create slots/expressions for them.
-    std::vector<sbe::ColumnScanStage::PathFilter> filteredPaths;
-    filteredPaths.reserve(csn->filtersByPath.size());
-    for (size_t i = 0; i < paths.size(); i++) {
-        auto itFilter = csn->filtersByPath.find(paths[i]);
-        if (itFilter != csn->filtersByPath.end()) {
-            auto filterInputSlot = SbSlot{_slotIdGenerator.generate()};
-
-            filteredPaths.emplace_back(
-                i,
-                generatePerColumnFilterExpr(_state, itFilter->second.get(), filterInputSlot)
-                    .extractExpr(_state),
-                filterInputSlot.getId());
-        }
-    }
-
-    // Tag which of the paths should be included into the output.
-    std::vector<bool> includeInOutput(paths.size(), false);
-    OrderedPathSet fieldsToProject;  // projection when falling back to the row store
-    for (size_t i = 0; i < paths.size(); i++) {
-        if (csn->outputFields.find(paths[i]) != csn->outputFields.end()) {
-            includeInOutput[i] = true;
-            fieldsToProject.insert(paths[i]);
-        }
-    }
-
-    const optimizer::ProjectionName rootStr = getABTVariableName(rowStoreSlot);
-    optimizer::FieldMapBuilder builder(rootStr, true);
-
-    // When building its output document (in 'recordSlot'), the 'ColumnStoreStage' should not try to
-    // separately project both a document and its sub-fields (e.g., both 'a' and 'a.b'). Compute the
-    // the subset of 'csn->allFields' that only includes a field if no other field in
-    // 'csn->allFields' is its prefix.
-    fieldsToProject = DepsTracker::simplifyDependencies(std::move(fieldsToProject),
-                                                        DepsTracker::TruncateToRootLevel::no);
-    for (const std::string& field : fieldsToProject) {
-        builder.integrateFieldPath(FieldPath(field),
-                                   [](const bool isLastElement, optimizer::FieldMapEntry& entry) {
-                                       entry._hasLeadingObj = true;
-                                       entry._hasKeep = true;
-                                   });
-    }
-
-    // Generate the expression that is applied to the row store record (in the case when the result
-    // cannot be reconstructed from the index).
-    SbExpr rowStoreExpr;
-
-    // Avoid generating the row store expression if the projection is not necessary, as indicated by
-    // the extraFieldsPermitted flag of the column store node.
-    if (boost::optional<optimizer::ABT> abt;
-        !csn->extraFieldsPermitted && (abt = builder.generateABT())) {
-        // We might get null abt if no paths were added to the builder. It means we should be
-        // projecting an empty object.
-        tassert(
-            6935000, "ABT must be valid if have fields to project", fieldsToProject.empty() || abt);
-        if (abt) {
-            rowStoreExpr = SbExpr{abt::wrap(std::move(*abt))};
-        } else {
-            rowStoreExpr = SbSlot{_state.getEmptyObjSlot()};
-        }
-    }
-
-    auto coll = getCurrentCollection(reqs);
-    std::unique_ptr<sbe::PlanStage> stage =
-        std::make_unique<sbe::ColumnScanStage>(coll->uuid(),
-                                               coll->ns().dbName(),
-                                               csn->indexEntry.identifier.catalogName,
-                                               std::move(paths),
-                                               densePathIncludeInFields,
-                                               std::move(includeInOutput),
-                                               b.lower(ridSlot),
-                                               reconstructedRecordSlot.getId(),
-                                               rowStoreSlot.getId(),
-                                               rowStoreExpr.extractExpr(_state),
-                                               std::move(filteredPaths),
-                                               _yieldPolicy,
-                                               csn->nodeId());
-
-    // Generate post assembly filter.
-    if (csn->postAssemblyFilter) {
-        auto filterExpr =
-            generateFilter(_state, csn->postAssemblyFilter.get(), reconstructedRecordSlot, outputs);
-        if (!filterExpr.isNull()) {
-            stage = b.makeFilter(std::move(stage), std::move(filterExpr));
-        }
-    }
-
-    return {std::move(stage), std::move(outputs)};
 }
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildFetch(
@@ -1814,17 +1447,16 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
 std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder::buildSkip(
     const QuerySolutionNode* root, const PlanStageReqs& reqs) {
+    SbBuilder b(_state, root->nodeId());
+
     const auto sn = static_cast<const SkipNode*>(root);
     auto [stage, outputs] = build(sn->children[0].get(), reqs);
 
     if (!reqs.getIsTailableCollScanResumeBranch()) {
-        stage = std::make_unique<sbe::LimitSkipStage>(
-            std::move(stage),
-            nullptr,
-            buildLimitSkipAmountExpression(
-                sn->canBeParameterized, sn->skip, _data->limitSkipSlots.skip)
-                .extractExpr(_state),
-            root->nodeId());
+        stage = b.makeLimitSkip(std::move(stage),
+                                SbExpr{},
+                                buildLimitSkipAmountExpression(
+                                    sn->canBeParameterized, sn->skip, _data->limitSkipSlots.skip));
     }
 
     return {std::move(stage), std::move(outputs)};
@@ -4088,7 +3720,7 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 }
 
 namespace {
-const Expression* getNExprFromAccumulatorN(const WindowFunctionStatement& wfStmt) {
+Expression* getNExprFromAccumulatorN(const WindowFunctionStatement& wfStmt) {
     auto opName = wfStmt.expr->getOpName();
     if (opName == AccumulatorTop::getName()) {
         return dynamic_cast<window_function::ExpressionN<WindowFunctionTop, AccumulatorTop>*>(
@@ -4481,7 +4113,11 @@ public:
             initInputs = std::make_unique<InitIntegralInputs>(std::move(unitExpr));
         } else if (isAccumulatorN(opName)) {
             auto nExprPtr = getNExprFromAccumulatorN(outputField);
-            auto maxSizeExpr = generateExpression(state, nExprPtr, rootSlotOpt, outputs);
+
+            // Verify that our 'nExprPtr' evaluates to an integral constant.
+            // TODO SERVER-94694 Support allowing 'n' expression to reference the partition key.
+            AccumulatorN::validateN(nExprPtr->evaluate({}, &state.expCtx->variables));
+            auto maxSizeExpr = getArgExpr(nExprPtr);
 
             initInputs = std::make_unique<InitAccumNInputs>(std::move(maxSizeExpr),
                                                             b.makeBoolConstant(false));
@@ -5304,26 +4940,24 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         return b.makeFunction(functionName, std::move(args));
     };
 
-    auto childReqs = reqs.copyForChild()
-                         .set(kRecordId)
-                         .set(kSnapshotId)
-                         .set(kIndexIdent)
-                         .set(kIndexKey)
-                         .set(kIndexKeyPattern);
-    auto [idxScanStage, idxOutputs] = generateSingleIntervalIndexScan(
-        _state,
-        collection,
-        kIdIndexName.toString(),
-        indexDescriptor->keyPattern(),
-        makeNewKeyFunc(key_string::Discriminator::kExclusiveBefore).extractExpr(_state),
-        makeNewKeyFunc(key_string::Discriminator::kExclusiveAfter).extractExpr(_state),
-        {} /* indexKeysToInclude */,
-        {} /* indexKeySlots */,
-        childReqs,
-        _yieldPolicy,
-        sn->nodeId(),
-        true /* forward */,
-        false /* lowPriority */);
+    PlanStageReqs ixScanReqs;
+    ixScanReqs.set(kRecordId)
+        .set(kSnapshotId)
+        .set(kIndexIdent)
+        .set(kIndexKey)
+        .set(kIndexKeyPattern);
+
+    auto [idxScanStage, idxOutputs] =
+        generateSingleIntervalIndexScan(_state,
+                                        collection,
+                                        kIdIndexName.toString(),
+                                        indexDescriptor->keyPattern(),
+                                        true /* forward */,
+                                        makeNewKeyFunc(key_string::Discriminator::kExclusiveBefore),
+                                        makeNewKeyFunc(key_string::Discriminator::kExclusiveAfter),
+                                        ixScanReqs,
+                                        sn->nodeId(),
+                                        false /* lowPriority */);
 
     // Join the idx scan stage with fetch stage.
     auto [outStage, outputDocSlot, _, topLevelFieldSlots] =
@@ -5469,7 +5103,6 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
         {STAGE_COUNT_SCAN, &SlotBasedStageBuilder::buildCountScan},
         {STAGE_VIRTUAL_SCAN, &SlotBasedStageBuilder::buildVirtualScan},
         {STAGE_IXSCAN, &SlotBasedStageBuilder::buildIndexScan},
-        {STAGE_COLUMN_SCAN, &SlotBasedStageBuilder::buildColumnScan},
         {STAGE_FETCH, &SlotBasedStageBuilder::buildFetch},
         {STAGE_LIMIT, &SlotBasedStageBuilder::buildLimit},
         {STAGE_MATCH, &SlotBasedStageBuilder::buildMatch},
@@ -5651,11 +5284,10 @@ std::pair<std::unique_ptr<sbe::PlanStage>, PlanStageSlots> SlotBasedStageBuilder
 
     // Clear non-required slots (excluding ~10 stages to preserve legacy behavior for now),
     // and also clear ResultInfo if it's not required.
-    bool clearSlots = stageType != STAGE_VIRTUAL_SCAN && stageType != STAGE_COLUMN_SCAN &&
-        stageType != STAGE_LIMIT && stageType != STAGE_SKIP && stageType != STAGE_TEXT_MATCH &&
-        stageType != STAGE_RETURN_KEY && stageType != STAGE_AND_HASH &&
-        stageType != STAGE_AND_SORTED && stageType != STAGE_GROUP && stageType != STAGE_SEARCH &&
-        stageType != STAGE_UNPACK_TS_BUCKET;
+    bool clearSlots = stageType != STAGE_VIRTUAL_SCAN && stageType != STAGE_LIMIT &&
+        stageType != STAGE_SKIP && stageType != STAGE_TEXT_MATCH && stageType != STAGE_RETURN_KEY &&
+        stageType != STAGE_AND_HASH && stageType != STAGE_AND_SORTED && stageType != STAGE_GROUP &&
+        stageType != STAGE_SEARCH && stageType != STAGE_UNPACK_TS_BUCKET;
 
     if (clearSlots) {
         // To preserve legacy behavior, in some cases we unconditionally retain the result object.

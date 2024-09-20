@@ -101,7 +101,17 @@ env.Benchmark(
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/commands/profile_common",
         "$BUILD_DIR/mongo/util/processinfo",
-        "profile_filter",
+        "profile_settings",
+    ],
+)
+
+env.CppUnitTest(
+    target="profile_settings_test",
+    source=[
+        "profile_settings_test.cpp",
+    ],
+    LIBDEPS=[
+        "profile_settings",
     ],
 )
 
@@ -443,6 +453,7 @@ env.Library(
     LIBDEPS=[
         "catalog/collection_catalog",
         "catalog/database_holder",
+        "profile_settings",
         "shard_role_api",
     ],
     LIBDEPS_PRIVATE=[
@@ -1526,9 +1537,6 @@ env.Library(
         "$BUILD_DIR/mongo/util/clock_sources",
         "$BUILD_DIR/mongo/util/elapsed_tracker",
         "$BUILD_DIR/mongo/util/fail_point",
-        "$BUILD_DIR/mongo/util/latch_analyzer"
-        if get_option("use-diagnostic-latches") == "on"
-        else [],
         "$BUILD_DIR/mongo/util/net/network",
         "$BUILD_DIR/mongo/util/ntservice",
         "$BUILD_DIR/mongo/util/options_parser/options_parser_init",
@@ -1662,9 +1670,6 @@ env.Library(
         "$BUILD_DIR/mongo/util/allocator_thread",
         "$BUILD_DIR/mongo/util/cmdline_utils/cmdline_utils",
         "$BUILD_DIR/mongo/util/concurrency/thread_pool",
-        "$BUILD_DIR/mongo/util/latch_analyzer"
-        if get_option("use-diagnostic-latches") == "on"
-        else [],
         "$BUILD_DIR/mongo/util/net/http_client_impl",
         "$BUILD_DIR/mongo/util/net/ssl_manager",
         "$BUILD_DIR/mongo/util/periodic_runner_factory",
@@ -1686,6 +1691,7 @@ env.Library(
         "change_streams_cluster_parameter",
         "commands/mongod",
         "commands/mongod_fsync",
+        "commands/profile_common",
         "commands/test_commands",
         "concurrency/flow_control_ticketholder",
         "fle_crud_mongod",
@@ -1870,6 +1876,7 @@ if wiredtiger:
             "record_id_test.cpp",
             "server_options_test.cpp",
             "shard_id_test.cpp",
+            "startup_warnings_mongod_thp_test.cpp",
         ],
         LIBDEPS=[
             "$BUILD_DIR/mongo/util/fail_point",
@@ -1882,6 +1889,7 @@ if wiredtiger:
             "server_options_base",
             "server_options_servers",
             "service_context_test_fixture",
+            "startup_warnings_mongod",
         ],
     )
 
@@ -2155,6 +2163,7 @@ if wiredtiger:
             "$BUILD_DIR/mongo/util/clock_source_mock",
             "keys_collection_client_direct",
             "keys_collection_document",
+            "op_observer/op_observer",
             "op_observer/op_observer_impl",
             "op_observer/operation_logger_impl",
             "read_write_concern_defaults_mock",

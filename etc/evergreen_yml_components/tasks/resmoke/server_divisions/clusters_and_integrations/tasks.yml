@@ -1753,6 +1753,8 @@ tasks:
         "incompatible_mac",
         "sharding",
         "jscore",
+        "cluster_scalability_only",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1893,6 +1895,8 @@ tasks:
         "incompatible_mac",
         "sharding",
         "common",
+        "cluster_scalability_only",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2005,6 +2009,8 @@ tasks:
         "sharding",
         "jscore",
         "common",
+        "cluster_scalability_only",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2017,6 +2023,8 @@ tasks:
         "default",
         "replica_set_endpoint",
         "requires_all_feature_flags",
+        "cluster_scalability_only",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2164,11 +2172,6 @@ tasks:
     tags: ["assigned_to_jira_team_server_catalog_and_routing", "default"]
     commands:
       - func: "generate resmoke tasks"
-        # The hardcoded timeout is to overrule history-based timeout after test number increases,
-        # which could be removed after gaining enough history for the new tests.
-        vars:
-          exec_timeout_secs: 7200 # 120min
-          timeout_secs: 7200 # 120min
 
   - <<: *gen_task_template
     name: change_streams_change_collection_replica_sets_stepdown_primary_jscore_passthrough_gen
@@ -2181,11 +2184,6 @@ tasks:
     tags: ["assigned_to_jira_team_server_catalog_and_routing", "default"]
     commands:
       - func: "generate resmoke tasks"
-        # The hardcoded timeout is to overrule history-based timeout after test number increases,
-        # which could be removed after gaining enough history for the new tests.
-        vars:
-          exec_timeout_secs: 7200 # 120min
-          timeout_secs: 7200 # 120min
 
   - <<: *gen_task_template
     name: change_streams_pre_images_replica_sets_stepdown_primary_jscore_passthrough_gen
@@ -2232,24 +2230,6 @@ tasks:
           resmoke_jobs_max: 1
 
   - <<: *gen_task_template
-    name: concurrency_sharded_with_stepdowns_and_balancer_and_config_transitions_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_catalog_and_routing",
-        "default",
-        "concurrency",
-        "large",
-        "non_live_record",
-        "sharded",
-        "no_debug_mode",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-          resmoke_jobs_max: 1
-
-  - <<: *gen_task_template
     name: concurrency_sharded_multi_stmt_txn_with_balancer_and_config_transitions_gen
     tags:
       [
@@ -2269,7 +2249,7 @@ tasks:
           resmoke_jobs_max: 1
 
   - <<: *gen_task_template
-    name: concurrency_sharded_kill_primary_with_balancer_and_config_transitions_gen
+    name: concurrency_sharded_stepdown_terminate_kill_primary_with_balancer_and_config_transitions_gen
     tags:
       [
         "assigned_to_jira_team_server_catalog_and_routing",
@@ -2380,24 +2360,6 @@ tasks:
           resmoke_jobs_max: 1
 
   - <<: *gen_task_template
-    name: concurrency_sharded_multi_stmt_txn_with_stepdowns_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_catalog_and_routing",
-        "default",
-        "incompatible_debug_mode",
-        "concurrency",
-        "stepdowns",
-        "large",
-        "sharded",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-          resmoke_jobs_max: 1
-
-  - <<: *gen_task_template
     name: concurrency_sharded_with_auto_bootstrap_gen
     tags:
       [
@@ -2412,6 +2374,8 @@ tasks:
         "read_concern_maj",
         "large",
         "sharded",
+        "cluster_scalability_only",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -2447,24 +2411,8 @@ tasks:
         "read_concern_maj",
         "large",
         "sharded",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          use_large_distro: "true"
-          resmoke_jobs_max: 1
-
-  - <<: *gen_task_template
-    name: concurrency_sharded_with_stepdowns_and_balancer_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_catalog_and_routing",
-        "default",
-        "incompatible_debug_mode",
-        "concurrency",
-        "stepdowns",
-        "large",
-        "sharded",
+        "cluster_scalability_only",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"

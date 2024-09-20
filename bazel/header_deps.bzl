@@ -25,16 +25,27 @@ def create_link_dep_impl(ctx):
             for input in dep[CcInfo].linking_context.linker_inputs.to_list():
                 for library in input.libraries:
                     if library.dynamic_library:
-                        deps.append(depset([library.resolved_symlink_dynamic_library]))
+                        dep = library.resolved_symlink_dynamic_library.path
+                        if dep not in deps:
+                            deps.append(library.resolved_symlink_dynamic_library.path)
                     if library.static_library:
-                        deps.append(depset([library.static_library]))
-    return DefaultInfo(files = depset(transitive = deps))
+                        dep = library.static_library.path
+                        if dep not in deps:
+                            deps.append(library.static_library.path)
+
+    link_list = ctx.actions.declare_file(ctx.attr.target_name + "_links.list")
+    ctx.actions.write(
+        output = link_list,
+        content = "\n".join(deps),
+    )
+
+    return DefaultInfo(files = depset([link_list]))
 
 create_link_deps = rule(
     create_link_dep_impl,
     attrs = {
+        "target_name": attr.string(),
         "link_deps": attr.label_list(providers = [CcInfo]),
     },
     doc = "create a psuedo target to query link deps for",
-    fragments = ["cpp"],
 )
