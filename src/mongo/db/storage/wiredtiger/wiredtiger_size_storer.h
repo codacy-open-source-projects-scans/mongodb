@@ -35,9 +35,7 @@
 #include <wiredtiger.h>
 
 #include "mongo/base/string_data.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/util/assert_util_core.h"
 #include "mongo/util/string_map.h"
 
@@ -110,12 +108,11 @@ private:
     const uint64_t _tableId;  // Not persisted
 
     // Serializes flushes to disk.
-    Mutex _flushMutex = MONGO_MAKE_LATCH("WiredTigerSessionStorer::_flushMutex");
+    stdx::mutex _flushMutex;
 
     using Buffer = StringMap<std::shared_ptr<SizeInfo>>;
 
-    mutable Mutex _bufferMutex =
-        MONGO_MAKE_LATCH("WiredTigerSessionStorer::_bufferMutex");  // Guards _buffer
+    mutable stdx::mutex _bufferMutex;  // Guards _buffer
     Buffer _buffer;
 };
 }  // namespace mongo

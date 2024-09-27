@@ -74,15 +74,15 @@
 namespace mongo {
 
 // Protects access to globalFsyncLockThread and other global fsync state.
-Mutex fsyncStateMutex = MONGO_MAKE_LATCH("fsyncStateMutex");
+stdx::mutex fsyncStateMutex;
 
 // Globally accessible FsyncLockThread to allow shutdown to coordinate with any active fsync cmds.
 // Must acquire the 'fsyncStateMutex' before accessing.
 std::unique_ptr<FSyncLockThread> globalFsyncLockThread = nullptr;
 
 // Exposed publically via extern in fsync.h.
-SimpleMutex oplogWriterLockedFsync;
-SimpleMutex oplogApplierLockedFsync;
+stdx::mutex oplogWriterLockedFsync;
+stdx::mutex oplogApplierLockedFsync;
 
 namespace {
 
@@ -283,7 +283,7 @@ private:
     // number is decremented to 0. May only be accessed while 'fsyncStateMutex' is held.
     int64_t _lockCount = 0;
 
-    Mutex _fsyncLockedMutex = MONGO_MAKE_LATCH("FSyncCommand::_fsyncLockedMutex");
+    stdx::mutex _fsyncLockedMutex;
     bool _fsyncLocked = false;
 };
 FSyncCore fsyncCore;
@@ -444,9 +444,9 @@ void FSyncLockThread::run() {
     // We first lock to stop oplogWriter then wait oplogApplier to apply everything in its buffer.
     // This can make sure we have applied all oplogs that have been written when we fsync lock the
     // server.
-    stdx::lock_guard<SimpleMutex> writerLk(oplogWriterLockedFsync);
+    stdx::lock_guard<stdx::mutex> writerLk(oplogWriterLockedFsync);
     _waitUntilLastAppliedCatchupLastWritten();
-    stdx::lock_guard<SimpleMutex> applierLk(oplogApplierLockedFsync);
+    stdx::lock_guard<stdx::mutex> applierLk(oplogApplierLockedFsync);
     stdx::unique_lock<Latch> stateLock(fsyncStateMutex);
 
     invariant(fsyncCore.getLockCount_inLock() == 1);

@@ -43,11 +43,11 @@
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/duration.h"
@@ -94,9 +94,7 @@ private:
     void _runTask(PeriodicTask* task);
 
     // _mutex protects the _shutdownRequested flag and the _tasks vector.
-    Mutex _mutex = MONGO_MAKE_LATCH(
-        // This mutex is held around task execution HierarchicalAcquisitionLevel(0),
-        "PeriodicTaskRunner::_mutex");
+    stdx::mutex _mutex;
 
     // The condition variable is used to sleep for the interval between task
     // executions, and is notified when the _shutdownRequested flag is toggled.
@@ -112,15 +110,15 @@ private:
     std::vector<PeriodicTask*> _tasks;
 };
 
-SimpleMutex* runnerMutex() {
-    static SimpleMutex mutex;
+stdx::mutex* runnerMutex() {
+    static stdx::mutex mutex;
     return &mutex;
 }
 
 // A scoped lock like object that only locks/unlocks the mutex if it exists.
 class ConditionalScopedLock {
 public:
-    ConditionalScopedLock(SimpleMutex* mutex) : _mutex(mutex) {
+    ConditionalScopedLock(stdx::mutex* mutex) : _mutex(mutex) {
         if (_mutex)
             _mutex->lock();
     }
@@ -130,7 +128,7 @@ public:
     }
 
 private:
-    SimpleMutex* const _mutex;
+    stdx::mutex* const _mutex;
 };
 
 // The unique PeriodicTaskRunner, also zero-initialized.
@@ -145,7 +143,7 @@ bool runnerDestroyed = false;
 struct BackgroundJob::JobStatus {
     JobStatus() : state(NotStarted) {}
 
-    Mutex mutex = MONGO_MAKE_LATCH("JobStatus::mutex");
+    stdx::mutex mutex;
     stdx::condition_variable done;
     State state;
 };

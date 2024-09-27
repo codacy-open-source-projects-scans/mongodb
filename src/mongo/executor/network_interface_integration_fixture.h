@@ -101,20 +101,14 @@ public:
 
     PseudoRandom* getRandomNumberGenerator();
 
-    void startCommand(const TaskExecutor::CallbackHandle& cbHandle,
-                      RemoteCommandRequest& request,
-                      StartCommandCB onFinish);
-
     Future<RemoteCommandResponse> runCommand(const TaskExecutor::CallbackHandle& cbHandle,
-                                             RemoteCommandRequestOnAny rcroa);
-
-    Future<RemoteCommandOnAnyResponse> runCommandOnAny(const TaskExecutor::CallbackHandle& cbHandle,
-                                                       RemoteCommandRequestOnAny request);
+                                             RemoteCommandRequest rcroa,
+                                             const std::shared_ptr<Baton>& baton = nullptr);
 
     /**
      * Runs a command on the fixture NetworkInterface and asserts it suceeded.
      */
-    void runSetupCommandSync(const DatabaseName& db, BSONObj cmdObj);
+    BSONObj runSetupCommandSync(const DatabaseName& db, BSONObj cmdObj);
 
     Future<void> startExhaustCommand(
         const TaskExecutor::CallbackHandle& cbHandle,
@@ -148,6 +142,51 @@ public:
         return _workInProgress;
     }
 
+    class FailPointGuard {
+    public:
+        FailPointGuard(StringData fpName,
+                       NetworkInterfaceIntegrationFixture* fixture,
+                       int initalTimesEntered)
+            : _fpName(fpName), _fixture(fixture), _initialTimesEntered(initalTimesEntered) {}
+
+        FailPointGuard(const FailPointGuard&) = delete;
+        FailPointGuard& operator=(const FailPointGuard&) = delete;
+
+        ~FailPointGuard() {
+            disable();
+        }
+
+        void waitForAdditionalTimesEntered(int count) {
+            auto cmdObj =
+                BSON("waitForFailPoint" << _fpName << "timesEntered" << _initialTimesEntered + count
+                                        << "maxTimeMS" << 30000);
+            _fixture->runSetupCommandSync(DatabaseName::kAdmin, cmdObj);
+        }
+
+        void disable() {
+            if (std::exchange(_disabled, true)) {
+                return;
+            }
+
+            auto cmdObj = BSON("configureFailPoint" << _fpName << "mode"
+                                                    << "off");
+            _fixture->runSetupCommandSync(DatabaseName::kAdmin, cmdObj);
+        }
+
+    private:
+        std::string _fpName;
+        NetworkInterfaceIntegrationFixture* _fixture;
+        int _initialTimesEntered;
+        bool _disabled{false};
+    };
+
+
+    FailPointGuard configureFailPoint(StringData fp, BSONObj data);
+
+    FailPointGuard configureFailCommand(StringData failCommand,
+                                        boost::optional<ErrorCodes::Error> errorCode = boost::none,
+                                        boost::optional<Milliseconds> blockTime = boost::none);
+
 private:
     void _onSchedulingCommand();
     void _onCompletingCommand();
@@ -162,7 +201,7 @@ private:
 
     size_t _workInProgress = 0;
     stdx::condition_variable _fixtureIsIdle;
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("NetworkInterfaceIntegrationFixture::_mutex");
+    mutable stdx::mutex _mutex;
 };
 
 }  // namespace executor

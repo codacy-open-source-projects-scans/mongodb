@@ -42,7 +42,6 @@
 #include "mongo/client/mongo_uri.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/mutex.h"
-#include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
 
@@ -90,7 +89,7 @@ public:
 
 private:
     std::map<std::string, std::set<std::string>> _connectionUris;
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("ConnectionRegistry::_mutex");
+    mutable stdx::mutex _mutex;
 };
 
 extern ConnectionRegistry connectionRegistry;

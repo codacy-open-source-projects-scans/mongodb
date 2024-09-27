@@ -72,12 +72,9 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
-#include "mongo/db/clientcursor.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands/query_cmd/aggregation_execution_state.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/cursor_id.h"
-#include "mongo/db/cursor_manager.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
@@ -100,10 +97,13 @@
 #include "mongo/db/pipeline/visitors/document_source_visitor_docs_needed_bounds.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/client_cursor/clientcursor.h"
+#include "mongo/db/query/client_cursor/cursor_id.h"
+#include "mongo/db/query/client_cursor/cursor_manager.h"
+#include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collection_query_info.h"
-#include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_common.h"
@@ -178,6 +178,43 @@ using std::unique_ptr;
 using NamespaceStringSet = stdx::unordered_set<NamespaceString>;
 
 Counter64& allowDiskUseFalseCounter = *MetricBuilder<Counter64>{"query.allowDiskUseFalse"};
+
+namespace {
+std::unique_ptr<Pipeline, PipelineDeleter> handleViewHelper(
+    const AggExState& aggExState,
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+    boost::optional<UUID> uuid) {
+    if (aggExState.getResolvedView()->timeseries()) {
+        // For timeseries, there may have been rewrites done on the raw BSON pipeline
+        // during view resolution. We must parse the request's full resolved pipeline
+        // which will account for those rewrites.
+        // TODO SERVER-82101 Re-organize timeseries rewrites so timeseries can follow the
+        // same pattern here as other views
+        return Pipeline::parse(aggExState.getRequest().getPipeline(), expCtx);
+    }
+    // Search queries on views behave differently than non-search aggregations on views.
+    // When a user pipeline contains a $search/$vectorSearch stage, idLookup will apply the
+    // view transforms as part of its subpipeline. In this way, the view stages will always
+    // be applied directly after $_internalSearchMongotRemote and before the remaining
+    // stages of the user pipeline. This is to ensure the stages following
+    // $search/$vectorSearch in the user pipeline will receive the modified documents: when
+    // storedSource is disabled, idLookup will retrieve full/unmodified documents during
+    // (from the _id values returned by mongot), apply the view's data transforms, and pass
+    // said transformed documents through the rest of the user pipeline.
+    else if (search_helpers::isMongotPipeline(pipeline.get())) {
+        search_helpers::setResolvedNamespaceForSearch(
+            aggExState.getOriginalNss(), aggExState.getResolvedView().value(), expCtx, uuid);
+        return pipeline;
+    }
+    // Parse the view pipeline, then stitch the user pipeline and view pipeline together
+    // to build the total aggregation pipeline.
+    auto userPipeline = std::move(pipeline);
+    pipeline = Pipeline::parse(aggExState.getResolvedView()->getPipeline(), expCtx);
+    pipeline->appendPipeline(std::move(userPipeline));
+    return pipeline;
+}
+}  // namespace
 
 namespace {
 // Ticks for server-side Javascript deprecation log messages.
@@ -854,22 +891,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> parsePipelineAndRegisterQueryStats(
 
     if (aggExState.getResolvedView().has_value()) {
         expCtx->startExpressionCounters();
-
-        if (aggExState.getResolvedView()->timeseries()) {
-            // For timeseries, there may have been rewrites done on the raw BSON pipeline
-            // during view resolution. We must parse the request's full resolved pipeline
-            // which will account for those rewrites.
-            // TODO SERVER-82101 Re-organize timeseries rewrites so timeseries can follow the
-            // same pattern here as other views
-            pipeline = Pipeline::parse(aggExState.getRequest().getPipeline(), expCtx);
-        } else {
-            // Parse the view pipeline, then stitch the user pipeline and view pipeline together
-            // to build the total aggregation pipeline.
-            auto userPipeline = std::move(pipeline);
-            pipeline = Pipeline::parse(aggExState.getResolvedView()->getPipeline(), expCtx);
-            pipeline->appendPipeline(std::move(userPipeline));
-        }
-
+        pipeline = handleViewHelper(aggExState, expCtx, std::move(pipeline), uuid);
         expCtx->stopExpressionCounters();
     }
 
@@ -1167,11 +1189,11 @@ Status _runAggregate(AggExState& aggExState, rpc::ReplyBuilderInterface* result)
                 "https://www.mongodb.com/docs/manual/reference/operator/aggregation/function/");
         }
 
-        // Only allow the use of runtime constants when from Mongos is true.
+        // Only allow the use of runtime constants when 'fromRouter' is true.
         uassert(463840,
                 "Manually setting 'runtimeConstants' is not supported. Use 'let' for user-defined "
                 "constants.",
-                expCtx->fromMongos || !aggExState.getRequest().getLegacyRuntimeConstants());
+                expCtx->fromRouter || !aggExState.getRequest().getLegacyRuntimeConstants());
 
         // This prevents opening a new change stream in the critical section of a serverless shard
         // split or merge operation to prevent resuming on the recipient with a resume token higher

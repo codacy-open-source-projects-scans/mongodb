@@ -190,7 +190,7 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContext(OperationContext* 
 
     return make_intrusive<ExpressionContext>(opCtx,
                                              boost::none, /* explain */
-                                             false,       /* fromMongos */
+                                             false,       /* fromRouter */
                                              false,       /* needsMerge */
                                              true,        /* allowDiskUse */
                                              true,        /* bypassDocumentValidation */
@@ -1014,7 +1014,7 @@ void ShardMergeRecipientService::Instance::_killBackupCursor() {
             BSON("killCursors" << donorBackupCursorInfo.nss.coll().toString() << "cursors"
                                << BSON_ARRAY(cursorId)),
             nullptr);
-        killCursorsRequest.options.fireAndForget = true;
+        killCursorsRequest.fireAndForget = true;
     }
 
     _backupCursorExecutor
@@ -1225,7 +1225,7 @@ void ShardMergeRecipientService::Instance::_keepBackupCursorAlive(const Cancella
         nss.dbName(),
         BSON("getMore" << cursorId << "collection" << nss.coll().toString()),
         nullptr);
-    getMoreRequest.options.fireAndForget = true;
+    getMoreRequest.fireAndForget = true;
 
     _backupCursorKeepAliveFuture =
         AsyncTry([this,

@@ -53,10 +53,10 @@
 #include "mongo/db/pipeline/document_source_merge.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
+#include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/cursor_response.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions.h"
@@ -409,7 +409,7 @@ MongosProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
     boost::optional<std::set<FieldPath>> fieldPaths,
     boost::optional<ChunkVersion> targetCollectionPlacementVersion,
     const NamespaceString& outputNs) const {
-    invariant(expCtx->inMongos);
+    invariant(expCtx->inRouter);
     uassert(51179,
             "Received unexpected 'targetCollectionPlacementVersion' on mongos",
             !targetCollectionPlacementVersion);

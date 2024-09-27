@@ -95,15 +95,11 @@ public:
 
     OID getCacheGeneration() override;
 
-    Status hasValidAuthSchemaVersionDocumentForInitialSync(OperationContext* opCtx) override;
-
     bool hasAnyPrivilegeDocuments(OperationContext* opCtx) override;
 
     Status getUserDescription(OperationContext* opCtx,
                               const UserName& userName,
                               BSONObj* result) override;
-
-    bool hasUser(OperationContext* opCtx, const boost::optional<TenantId>& tenantId) override;
 
     Status rolesExist(OperationContext* opCtx, const std::vector<RoleName>& roleNames) override;
 
@@ -121,13 +117,6 @@ public:
                                   const std::vector<RoleName>& roleName,
                                   AuthenticationRestrictionsFormat,
                                   BSONObj* result) override;
-
-    Status getRoleDescriptionsForDB(OperationContext* opCtx,
-                                    const DatabaseName& dbname,
-                                    PrivilegeFormat privilegeFormat,
-                                    AuthenticationRestrictionsFormat,
-                                    bool showBuiltinRoles,
-                                    std::vector<BSONObj>* result) override;
 
     StatusWith<UserHandle> acquireUser(OperationContext* opCtx,
                                        std::unique_ptr<UserRequest> userRequest) override;
@@ -155,13 +144,13 @@ public:
      */
     void invalidateUserCache() override;
 
-    void logOp(OperationContext* opCtx,
-               StringData opstr,
-               const NamespaceString& nss,
-               const BSONObj& obj,
-               const BSONObj* patt) override;
-
     std::vector<CachedUserInfo> getUserCacheInfo() const override;
+
+    void logOp(OperationContext* opCtx,
+               StringData op,
+               const NamespaceString& ns,
+               const BSONObj& o,
+               const BSONObj* o2) override;
 
 private:
     void _updateCacheGeneration();
@@ -181,8 +170,7 @@ private:
 
     // Serves as a source for the return value of getCacheGeneration(). Refer to this method for
     // more details.
-    Mutex _cacheGenerationMutex =
-        MONGO_MAKE_LATCH("AuthorizationManagerImpl::_cacheGenerationMutex");
+    stdx::mutex _cacheGenerationMutex;
     OID _cacheGeneration{OID::gen()};
 
     /**
@@ -203,8 +191,7 @@ private:
                              int unusedKey,
                              const ValueHandle& unusedCachedValue);
 
-        Mutex _mutex =
-            MONGO_MAKE_LATCH("AuthorizationManagerImpl::AuthSchemaVersionDistCache::_mutex");
+        stdx::mutex _mutex;
 
         AuthzManagerExternalState* const _externalState;
     } _authSchemaVersionCache;
@@ -230,7 +217,7 @@ private:
                              const UserRequest& userReq,
                              const SharedUserAcquisitionStats& userAcquisitionStats);
 
-        Mutex _mutex = MONGO_MAKE_LATCH("AuthorizationManagerImpl::UserDistCacheImpl::_mutex");
+        stdx::mutex _mutex;
 
         AuthSchemaVersionCache* const _authSchemaVersionCache;
 

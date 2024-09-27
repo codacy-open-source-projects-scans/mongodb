@@ -421,16 +421,16 @@ GCC_OPT_DEFINES = select({
 
 LINUX_OPT_COPTS = select({
     # This is opt=debug, not to be confused with (opt=on && dbg=on)
-    "//bazel/config:linux_opt_debug": [
+    "//bazel/config:gcc_or_clang_opt_debug": [
         "-Og",
     ],
-    "//bazel/config:linux_opt_off": [
+    "//bazel/config:gcc_or_clang_opt_off": [
         "-O0",
     ],
-    "//bazel/config:linux_opt_on": [
+    "//bazel/config:gcc_or_clang_opt_on": [
         "-O2",
     ],
-    "//bazel/config:linux_opt_size": [
+    "//bazel/config:gcc_or_clang_opt_size": [
         "-Os",
     ],
     "//conditions:default": [],
@@ -554,6 +554,12 @@ GCC_WARNINGS_COPTS = select({
         # Disable warning about variables that may not be initialized
         # Failures are triggered in the case of boost::optional
         "-Wno-maybe-uninitialized",
+
+        # Prevents warning about unused but set variables found in boost version
+        # 1.49 in boost/date_time/format_date_parser.hpp which does not work for
+        # compilers GCC >= 4.6. Error explained in
+        # https://svn.boost.org/trac/boost/ticket/6136 .
+        "-Wno-unused-but-set-variable",
     ],
     "//conditions:default": [],
 })
@@ -1043,6 +1049,8 @@ GDWARF_FEATURES = select({
     # -gdwarf64 was supported. If this creates incompatibility issues, we may
     # need to fallback to -gdwarf32 in certain cases.
     "//bazel/config:linux_gcc": ["dwarf64"],
+    # SUSE15 builds system libraries with dwarf32, use dwarf32 to be keep consistent
+    "//bazel/config:suse15_gcc": ["dwarf32"],
     "//conditions:default": [],
 })
 
@@ -1176,6 +1184,12 @@ SYMBOL_ORDER_FILES = [
     "//:symbols.orderfile",
 ]
 
+# Passed to both the compiler and linker
+COVERAGE_FLAGS = select({
+    "//bazel/config:gcov_enabled": ["--coverage", "-fprofile-update=single"],
+    "//conditions:default": [],
+})
+
 MONGO_GLOBAL_INCLUDE_DIRECTORIES = [
     "-Isrc",
     "-I$(GENDIR)/src",
@@ -1245,7 +1259,8 @@ MONGO_GLOBAL_COPTS = (
     THIN_LTO_FLAGS +
     SYMBOL_ORDER_COPTS +
     GCC_WARNINGS_COPTS +
-    SASL_WINDOWS_COPTS
+    SASL_WINDOWS_COPTS +
+    COVERAGE_FLAGS
 )
 
 MONGO_GLOBAL_LINKFLAGS = (
@@ -1271,7 +1286,8 @@ MONGO_GLOBAL_LINKFLAGS = (
     DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS +
     THIN_LTO_FLAGS +
     SYMBOL_ORDER_LINKFLAGS +
-    SASL_WINDOWS_LINKFLAGS
+    SASL_WINDOWS_LINKFLAGS +
+    COVERAGE_FLAGS
 )
 
 MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS = SYMBOL_ORDER_FILES + SASL_WINDOWS_LIB_FILES
@@ -1990,8 +2006,9 @@ def mongo_proto_library(
     )
 
     dummy_file(
-        name = name + "_dummy_debug_symbol",
-        output = "lib" + name + ".so.debug",
+        name = name + "_exclude_link",
+        output = "lib" + name + ".so.exclude_lib",
+        tags = ["scons_link_lists"],
     )
 
 def mongo_cc_proto_library(
@@ -2002,11 +2019,6 @@ def mongo_cc_proto_library(
         name = name,
         deps = deps,
         **kwargs
-    )
-
-    dummy_file(
-        name = name + "_dummy_debug_symbol",
-        output = "lib" + name + ".so.debug",
     )
 
 def mongo_cc_grpc_library(

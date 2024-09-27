@@ -91,8 +91,7 @@ void generatePlannerInfo(PlanExecutor* exec,
                          const MultipleCollectionAccessor& collections,
                          BSONObj extraInfo,
                          const SerializationContext& serializationContext,
-                         BSONObjBuilder* out,
-                         ExplainOptions::Verbosity verbosity) {
+                         BSONObjBuilder* out) {
     BSONObjBuilder plannerBob(out->subobjStart("queryPlanner"));
 
     plannerBob.append("namespace",
@@ -106,9 +105,7 @@ void generatePlannerInfo(PlanExecutor* exec,
             feature_flags::gFeatureFlagSbeFull.isEnabled(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             const auto planCacheKeyInfo =
-                plan_cache_key_factory::make(*exec->getCanonicalQuery(),
-                                             collections,
-                                             canonical_query_encoder::Optimizer::kSbeStageBuilders);
+                plan_cache_key_factory::make(*exec->getCanonicalQuery(), collections);
             planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
             planCacheShapeHash = planCacheKeyInfo.planCacheShapeHash();
         } else {
@@ -187,7 +184,6 @@ void generatePlannerInfo(PlanExecutor* exec,
         bab.append(rejectedStats);
     }
     bab.doneFast();
-
     plannerBob.doneFast();
 }
 
@@ -389,8 +385,7 @@ void Explain::explainStages(PlanExecutor* exec,
     out->appendElements(explainVersionToBson(explainer.getVersion()));
 
     if (verbosity >= ExplainOptions::Verbosity::kQueryPlanner) {
-        generatePlannerInfo(
-            exec, command, collections, extraInfo, serializationContext, out, verbosity);
+        generatePlannerInfo(exec, command, collections, extraInfo, serializationContext, out);
     }
 
     if (verbosity >= ExplainOptions::Verbosity::kExecStats) {

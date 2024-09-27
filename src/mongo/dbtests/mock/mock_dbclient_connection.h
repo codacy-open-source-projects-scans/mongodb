@@ -51,7 +51,7 @@
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
 #include "mongo/platform/mutex.h"
@@ -215,7 +215,7 @@ private:
     uint64_t _sockCreationTime;
     boost::optional<OpMsgRequest> _lastCursorMessage;
 
-    Mutex _netMutex = MONGO_MAKE_LATCH("MockDBClientConnection");
+    stdx::mutex _netMutex;
 
     stdx::condition_variable _mockCallResponsesCV;
     Responses _mockCallResponses;

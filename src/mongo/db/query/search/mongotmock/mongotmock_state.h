@@ -34,7 +34,7 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
-#include "mongo/db/cursor_id.h"
+#include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/mutex.h"
 
@@ -215,7 +215,7 @@ private:
     BSONObj _mockManageSearchIndexResponse;
 
     // Protects access to all members. Should be acquired using a MongotMockStateGuard.
-    Mutex _lock = MONGO_MAKE_LATCH("MongotMockState::_lock");
+    stdx::mutex _lock;
 
     friend class MongotMockStateGuard;
     bool _doOrderChecks = true;

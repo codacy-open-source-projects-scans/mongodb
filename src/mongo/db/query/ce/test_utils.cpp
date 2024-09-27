@@ -27,30 +27,16 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/ce/test_utils.h"
-
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <cstdint>
-#include <iostream>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/exec/docval_to_sbeval.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/pipeline/abt/utils.h"
-#include "mongo/db/query/optimizer/explain.h"
-#include "mongo/db/query/optimizer/rewrites/const_eval.h"
-#include "mongo/db/query/optimizer/utils/const_fold_interface.h"
-#include "mongo/db/query/optimizer/utils/strong_alias.h"
-#include "mongo/db/query/stats/value_utils.h"
-#include "mongo/db/storage/key_string.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/util/assert_util_core.h"
+#include <absl/random/zipf_distribution.h>
+#include <sstream>
 
-namespace mongo::optimizer::ce {
+#include "mongo/db/query/ce/array_histogram_helpers.h"
+#include "mongo/db/query/ce/scalar_histogram_helpers.h"
+#include "mongo/db/query/ce/test_utils.h"
+#include "mongo/db/query/stats/rand_utils_new.h"
+
+namespace mongo::optimizer::cbp::ce {
 namespace value = sbe::value;
 
 stats::ScalarHistogram createHistogram(const std::vector<BucketData>& data) {
@@ -83,12 +69,12 @@ stats::ScalarHistogram createHistogram(const std::vector<BucketData>& data) {
     return stats::ScalarHistogram::make(std::move(bounds), std::move(buckets));
 }
 
-double estimateIntValCard(const stats::ScalarHistogram& hist,
-                          const int v,
-                          const EstimationType type) {
+double estimateCardinalityScalarHistogramInteger(const stats::ScalarHistogram& hist,
+                                                 const int v,
+                                                 const EstimationType type) {
     const auto [tag, val] =
         std::make_pair(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(v));
-    return estimate(hist, tag, val, type).card;
+    return estimateCardinality(hist, tag, val, type).card;
 };
 
-}  // namespace mongo::optimizer::ce
+}  // namespace mongo::optimizer::cbp::ce

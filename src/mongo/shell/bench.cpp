@@ -54,7 +54,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -1550,7 +1550,7 @@ BSONObj BenchRunner::finish(BenchRunner* runner) {
     return zoo;
 }
 
-Mutex BenchRunner::_staticMutex = MONGO_MAKE_LATCH("BenchRunner");
+stdx::mutex BenchRunner::_staticMutex;
 std::map<OID, BenchRunner*> BenchRunner::_activeRuns;
 
 /**

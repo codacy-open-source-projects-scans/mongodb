@@ -74,6 +74,7 @@ public:
     void appendLocalLambda(int codePosition);
     void appendPop();
     void appendSwap();
+    void appendMakeOwn(Instruction::Parameter arg);
     void appendAdd(Instruction::Parameter lhs, Instruction::Parameter rhs);
     void appendSub(Instruction::Parameter lhs, Instruction::Parameter rhs);
     void appendMul(Instruction::Parameter lhs, Instruction::Parameter rhs);
@@ -130,10 +131,6 @@ public:
     void appendTraverseF();
     void appendTraverseF(int codePosition, Instruction::Constants k);
     void appendMagicTraverseF();
-    void appendTraverseCellValues();
-    void appendTraverseCellValues(int codePosition);
-    void appendTraverseCellTypes();
-    void appendTraverseCellTypes(int codePosition);
     void appendSetField();
     void appendGetArraySize(Instruction::Parameter input);
     void appendDateTrunc(TimeUnit unit, int64_t binSize, TimeZone timezone, DayOfWeek startOfWeek);

@@ -91,12 +91,12 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/admission_context.h"
-#include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -406,7 +406,7 @@ private:
     void _run();
 
     // Protects _cond, _shutdownSignaled, and _latestOpTime.
-    Mutex _mutex = MONGO_MAKE_LATCH("OplogApplierImpl::_mutex");
+    stdx::mutex _mutex;
     // Used to alert our thread of a new OpTime.
     stdx::condition_variable _cond;
     // The next OpTime to set as the ReplicationCoordinator's lastOpTime after flushing.
@@ -576,7 +576,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
         }
 
         // Don't allow the fsync+lock thread to see intermediate states of batch application.
-        stdx::lock_guard<SimpleMutex> fsynclk(oplogApplierLockedFsync);
+        stdx::lock_guard<stdx::mutex> fsynclk(oplogApplierLockedFsync);
 
         // Apply the operations in this batch. '_applyOplogBatch' returns the optime of the
         // last op that was applied, which should be the last optime in the batch.

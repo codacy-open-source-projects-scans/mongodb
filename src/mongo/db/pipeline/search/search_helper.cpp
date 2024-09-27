@@ -42,6 +42,7 @@
 #include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
+#include "mongo/db/pipeline/search/document_source_list_search_indexes.h"
 #include "mongo/db/pipeline/search/document_source_search.h"
 #include "mongo/db/pipeline/search/document_source_search_meta.h"
 #include "mongo/db/pipeline/search/document_source_vector_search.h"
@@ -49,6 +50,7 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/search/mongot_cursor.h"
 #include "mongo/db/query/search/search_task_executors.h"
+#include "mongo/db/views/resolved_view.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/util/assert_util.h"
 
@@ -64,6 +66,19 @@ void desugarSearchPipeline(Pipeline* pipeline) {
         auto desugaredPipeline = dynamic_cast<DocumentSourceSearch*>(searchStage.get())->desugar();
         sources.insert(sources.begin(), desugaredPipeline.begin(), desugaredPipeline.end());
         Pipeline::stitch(&sources);
+    }
+    // TODO: SERVER-85426 Take the below code out of the if statement--i.e., it should always
+    // happen.
+    // TODO: BACKPORT-22945 (8.0) Ensure that using this feature inside a view definition is not
+    // permitted.
+    if (enableUnionWithVectorSearch.load()) {
+        auto vectorSearchStage = pipeline->popFrontWithName(DocumentSourceVectorSearch::kStageName);
+        if (vectorSearchStage) {
+            auto desugaredPipeline =
+                dynamic_cast<DocumentSourceVectorSearch*>(vectorSearchStage.get())->desugar();
+            sources.insert(sources.begin(), desugaredPipeline.begin(), desugaredPipeline.end());
+            Pipeline::stitch(&sources);
+        }
     }
 }
 
@@ -266,6 +281,17 @@ bool isSearchMetaPipeline(const Pipeline* pipeline) {
     return isSearchMetaStage(pipeline->peekFront());
 }
 
+void setResolvedNamespaceForSearch(const NamespaceString& origNss,
+                                   const ResolvedView& resolvedView,
+                                   boost::intrusive_ptr<ExpressionContext> expCtx,
+                                   boost::optional<UUID> uuid) {
+    auto resolvedNamespaces = StringMap<ExpressionContext::ResolvedNamespace>{
+        {origNss.coll().toString(),
+         {resolvedView.getNamespace(), resolvedView.getPipeline(), uuid}}};
+    expCtx->setResolvedNamespaces(resolvedNamespaces);
+    expCtx->viewNS = origNss;
+}
+
 bool isMongotPipeline(const Pipeline* pipeline) {
     if (!pipeline || pipeline->getSources().empty()) {
         return false;
@@ -293,7 +319,8 @@ bool isMongotStage(DocumentSource* stage) {
     return stage &&
         (dynamic_cast<mongo::DocumentSourceSearch*>(stage) ||
          dynamic_cast<mongo::DocumentSourceInternalSearchMongotRemote*>(stage) ||
-         dynamic_cast<mongo::DocumentSourceVectorSearch*>(stage));
+         dynamic_cast<mongo::DocumentSourceVectorSearch*>(stage) ||
+         dynamic_cast<mongo::DocumentSourceListSearchIndexes*>(stage));
 }
 
 void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
@@ -302,10 +329,10 @@ void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
         return;
     }
 
-    // If we already validated this pipeline on mongos, no need to do it again on a shard. Check
+    // If we already validated this pipeline on router, no need to do it again on a shard. Check
     // for $mergeCursors because we could be on a shard doing the merge and only want to validate if
     // we have the whole pipeline.
-    bool alreadyValidated = !expCtx->inMongos && expCtx->needsMerge;
+    bool alreadyValidated = !expCtx->inRouter && expCtx->needsMerge;
     if (!alreadyValidated ||
         pipeline.front()->getSourceName() != DocumentSourceMergeCursors::kStageName) {
         assertSearchMetaAccessValidHelper({&pipeline});
@@ -345,11 +372,11 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
     tassert(6253727, "Expected search stage", origSearchStage);
     origSearchStage->setDocsNeededBounds(bounds);
 
-    // We expect to receive unmerged metadata documents from mongot if we are not in mongos and have
+    // We expect to receive unmerged metadata documents from mongot if we are not in router and have
     // a metadata merge protocol version. However, we can ignore the meta cursor if the pipeline
     // doesn't have a downstream reference to $$SEARCH_META.
     auto expectsMetaCursorFromMongot =
-        !expCtx->inMongos && origSearchStage->getIntermediateResultsProtocolVersion();
+        !expCtx->inRouter && origSearchStage->getIntermediateResultsProtocolVersion();
     auto shouldBuildMetadataPipeline =
         expectsMetaCursorFromMongot && origSearchStage->queryReferencesSearchMeta();
 
@@ -467,7 +494,7 @@ void establishSearchCursorsSBE(boost::intrusive_ptr<ExpressionContext> expCtx,
         // metadata.
         tassert(7856002,
                 "Didn't expect metadata cursor from mongot",
-                !expCtx->inMongos && searchStage->getIntermediateResultsProtocolVersion());
+                !expCtx->inRouter && searchStage->getIntermediateResultsProtocolVersion());
         searchStage->setMetadataCursor(std::move(metaCursor));
     }
 }

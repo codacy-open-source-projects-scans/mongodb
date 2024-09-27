@@ -227,6 +227,7 @@ public:
                     break;
                 }
                 // Instructions with 1 argument.
+                case Instruction::makeOwn:
                 case Instruction::negate:
                 case Instruction::logicNot:
                 case Instruction::getArraySize:
@@ -284,13 +285,6 @@ public:
                     pcPointer += sizeof(offset);
                     os << "k: " << Instruction::toStringConstants(k)
                        << ", target: " << _formatter.pcPointer(pcPointer + offset);
-                    break;
-                }
-                case Instruction::traverseCsiCellValues:
-                case Instruction::traverseCsiCellTypes: {
-                    auto offset = readFromMemory<int>(pcPointer);
-                    pcPointer += sizeof(offset);
-                    os << "target: " << _formatter.pcPointer(pcPointer + offset);
                     break;
                 }
                 case Instruction::fillEmptyImm: {

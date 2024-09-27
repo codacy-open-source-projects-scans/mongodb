@@ -36,7 +36,6 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
 
 namespace mongo {
@@ -109,7 +108,7 @@ private:
         _reclaimCv.notify_all();
     }
 
-    Mutex _reclaimMutex = MONGO_MAKE_LATCH("WiredTigerOplogTruncateMarkers::_reclaimMutex");
+    stdx::mutex _reclaimMutex;
     stdx::condition_variable _reclaimCv;
 
     // True if '_rs' has been destroyed, e.g. due to repairDatabase being called on the collection's

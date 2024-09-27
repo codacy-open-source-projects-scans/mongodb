@@ -1843,7 +1843,7 @@ env.Append(
 try:
     env["ICECC_DEBUG"] = to_boolean(env["ICECC_DEBUG"])
 except ValueError as e:
-    env.FatalError("Error setting ICECC_DEBUG variable: {e}")
+    env.FatalError(f"Error setting ICECC_DEBUG variable: {e}")
 
 if has_option("variables-help"):
     print(env_vars.GenerateHelpText(env))
@@ -5389,6 +5389,17 @@ def doConfigure(myenv):
                     "required for LDAP authorizaton in the enterprise build"
                 )
 
+    if "sasl" in myenv.get("MONGO_ENTERPRISE_FEATURES", []):
+        if conf.env.TargetOSIs("windows"):
+            conf.env["MONGO_GSSAPI_IMPL"] = "sspi"
+            conf.env["MONGO_GSSAPI_LIB"] = ["secur32"]
+        else:
+            if conf.CheckLib(library="gssapi_krb5", autoadd=False):
+                conf.env["MONGO_GSSAPI_IMPL"] = "gssapi"
+                if conf.env.TargetOSIs("freebsd"):
+                    conf.env.AppendUnique(MONGO_GSSAPI_LIB=["gssapi"])
+                conf.env.AppendUnique(MONGO_GSSAPI_LIB=["gssapi_krb5"])
+
     myenv = conf.Finish()
 
     return myenv
@@ -5759,7 +5770,7 @@ gdb_index_enabled = env.get("GDB_INDEX")
 if gdb_index_enabled == "auto" and link_model == "dynamic":
     gdb_index_enabled = True
 
-if gdb_index_enabled == True:
+if gdb_index_enabled is True:
     gdb_index = Tool("gdb_index")
     if gdb_index.exists(env):
         gdb_index.generate(env)

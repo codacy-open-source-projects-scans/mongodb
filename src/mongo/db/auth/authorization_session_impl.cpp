@@ -28,6 +28,7 @@
  */
 
 
+#include "mongo/db/auth/authorization_manager.h"
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <algorithm>
@@ -659,7 +660,7 @@ void AuthorizationSessionImpl::_refreshUserInfoAsNeeded(OperationContext* opCtx)
         _updateInternalAuthorizationState();
     };
 
-    auto swUser = getAuthorizationManager().reacquireUser(opCtx, currentUser);
+    auto swUser = AuthorizationManager::get(opCtx->getService())->reacquireUser(opCtx, currentUser);
     if (!swUser.isOK()) {
         auto& status = swUser.getStatus();
         switch (status.code()) {
@@ -1076,7 +1077,7 @@ void AuthorizationSessionImpl::verifyContract(const AuthorizationContract* contr
                                         ActionType::issueDirectShardOperations));
 
     uassert(5452401,
-            "Authorization Session contains more authorization checks then permitted by contract.",
+            "Authorization Session contains more authorization checks than permitted by contract.",
             tempContract.contains(_contract));
 }
 

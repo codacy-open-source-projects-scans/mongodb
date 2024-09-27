@@ -46,9 +46,9 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/client/remote_command_retry_scheduler.h"
-#include "mongo/db/clientcursor.h"
-#include "mongo/db/cursor_id.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/client_cursor/clientcursor.h"
+#include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/mutex.h"
@@ -276,7 +276,7 @@ private:
     CallbackFn _work;
 
     // Protects member data of this Fetcher.
-    mutable Mutex _mutex = MONGO_MAKE_LATCH("Fetcher::_mutex");
+    mutable stdx::mutex _mutex;
 
     mutable stdx::condition_variable _condition;
 

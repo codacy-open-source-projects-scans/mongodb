@@ -239,7 +239,7 @@ protected:
         size_t target = 0;
     };
 
-    Mutex _mutex = MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(0), "LimitController::_mutex");
+    stdx::mutex _mutex;
     stdx::unordered_map<PoolId, PoolData> _poolData;
 };
 
@@ -888,9 +888,11 @@ Future<ConnectionPool::ConnectionHandle> ConnectionPool::SpecificPool::getConnec
         // ever be necessary in this context. Further, implementing cancellation would require
         // invasive changes to the timer system that is used to implement the failpoint logic.
         request->source.token().onCancel().unsafeToInlineFuture().getAsync([](Status s) {
-            invariant(!s.isOK(),
-                      "getConnection() cancellation with forceExecutorConnectionPoolTimeout "
-                      "failpoint enabled is not supported");
+            if (!s.isOK()) {
+                return;
+            }
+            LOGV2(9257003,
+                  "Ignoring cancellation due to forceExecutorConnectionPoolTimeout failpoint");
         });
         return std::move(pf.future);
     }

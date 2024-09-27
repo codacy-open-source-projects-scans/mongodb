@@ -29,106 +29,30 @@
 
 #pragma once
 
-#include <string>
-
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/optimizer/defs.h"
-#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/query/ce/histogram_common.h"
 #include "mongo/db/query/stats/array_histogram.h"
-#include "mongo/db/query/stats/scalar_histogram.h"
-#include "mongo/stdx/unordered_map.h"
 
-namespace mongo::optimizer::ce {
+namespace mongo::optimizer::cbp::ce {
 
-enum class EstimationType { kEqual, kLess, kLessOrEqual, kGreater, kGreaterOrEqual };
-enum class EstimationAlgo { HistogramV1, HistogramV2, HistogramV3 };
+class HistogramCardinalityEstimator {
+public:
+    /**
+     * Estimates the cardinality of an interval based on the provided histogram.
+     * 'collectionSize' represents the number of documents in the collection.
+     * 'inputScalar' indicates whether or not the provided interval should include non-array values.
+     * e.g., $elemMatch should exclude the non-array values when 'includeScalar' is set to false.
+     */
+    static Cardinality estimateCardinality(const stats::ArrayHistogram& hist,
+                                           Cardinality collectionSize,
+                                           const Interval& interval,
+                                           bool includeScalar);
 
-const stdx::unordered_map<EstimationType, std::string> estimationTypeName = {
-    {EstimationType::kEqual, "eq"},
-    {EstimationType::kLess, "lt"},
-    {EstimationType::kLessOrEqual, "lte"},
-    {EstimationType::kGreater, "gt"},
-    {EstimationType::kGreaterOrEqual, "gte"}};
-
-struct EstimationResult {
-    double card;
-    double ndv;
-
-    EstimationResult operator-(const EstimationResult& other) const {
-        return {card - other.card, ndv - other.ndv};
-    }
+    /**
+     * Checks if given interval can be estimated.
+     */
+    static bool canEstimateInterval(const stats::ArrayHistogram& hist,
+                                    const Interval& interval,
+                                    bool includeScalar);
 };
 
-/**
- * Converts an input cardinality to a selectivity based on the histogram's sample size.
- */
-SelectivityType getSelectivity(const stats::ArrayHistogram& ah, CEType cardinality);
-
-/**
- * Returns the selectivity of arrays according to this histogram.
- */
-SelectivityType getArraySelectivity(const stats::ArrayHistogram& ah);
-
-/**
- * Returns cumulative total statistics for a histogram.
- */
-EstimationResult getTotals(const stats::ScalarHistogram& h);
-
-/**
- * Compute an estimate for a given value and estimation type. Use linear interpolation for values
- * that fall inside of histogram buckets.
- */
-EstimationResult estimate(const stats::ScalarHistogram& h,
-                          sbe::value::TypeTags tag,
-                          sbe::value::Value val,
-                          EstimationType type);
-
-/**
- * Estimates the cardinality of an equality predicate given an ArrayHistogram and an SBE value and
- * type tag pair.
- */
-CEType estimateCardEq(const stats::ArrayHistogram& ah,
-                      sbe::value::TypeTags tag,
-                      sbe::value::Value val,
-                      bool includeScalar);
-
-/**
- * Estimates the cardinality of a range predicate given an ArrayHistogram and a range predicate.
- * Set 'includeScalar' to true to indicate whether or not the provided range should include no-array
- * values. The other fields define the range of the estimation.
- */
-CEType estimateCardRange(const stats::ArrayHistogram& ah,
-                         bool lowInclusive,
-                         sbe::value::TypeTags tagLow,
-                         sbe::value::Value valLow,
-                         bool highInclusive,
-                         sbe::value::TypeTags tagHigh,
-                         sbe::value::Value valHigh,
-                         bool includeScalar,
-                         EstimationAlgo estAlgo = EstimationAlgo::HistogramV2);
-
-/**
- * Estimates the selectivity of an equality predicate given an ArrayHistogram and an SBE value and
- * type tag pair.
- */
-SelectivityType estimateSelEq(const stats::ArrayHistogram& ah,
-                              sbe::value::TypeTags tag,
-                              sbe::value::Value val,
-                              bool includeScalar);
-
-/**
- * Estimates the selectivity of a range predicate given an ArrayHistogram and a range predicate.
- * Set 'includeScalar' to true to indicate whether or not the provided range should include no-array
- * values. The other fields define the range of the estimation.
- */
-SelectivityType estimateSelRange(const stats::ArrayHistogram& ah,
-                                 bool lowInclusive,
-                                 sbe::value::TypeTags tagLow,
-                                 sbe::value::Value valLow,
-                                 bool highInclusive,
-                                 sbe::value::TypeTags tagHigh,
-                                 sbe::value::Value valHigh,
-                                 bool includeScalar,
-                                 EstimationAlgo estAlgo = EstimationAlgo::HistogramV2);
-
-}  // namespace mongo::optimizer::ce
+}  // namespace mongo::optimizer::cbp::ce

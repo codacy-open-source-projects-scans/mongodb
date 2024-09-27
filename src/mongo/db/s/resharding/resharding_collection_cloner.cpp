@@ -169,7 +169,7 @@ ReshardingCollectionCloner::makeRawPipeline(
 
     auto expCtx = make_intrusive<ExpressionContext>(opCtx,
                                                     boost::none, /* explain */
-                                                    false,       /* fromMongos */
+                                                    false,       /* fromRouter */
                                                     false,       /* needsMerge */
                                                     false,       /* allowDiskUse */
                                                     false,       /* bypassDocumentValidation */
@@ -226,7 +226,7 @@ ReshardingCollectionCloner::makeRawNaturalOrderPipeline(
 
     auto expCtx = make_intrusive<ExpressionContext>(opCtx,
                                                     boost::none, /* explain */
-                                                    false,       /* fromMongos */
+                                                    false,       /* fromRouter */
                                                     false,       /* needsMerge */
                                                     false,       /* allowDiskUse */
                                                     false,       /* bypassDocumentValidation */
@@ -551,7 +551,7 @@ private:
     };
     std::vector<boost::optional<MultiProducerSingleConsumerQueue<QueueData>>> _queues;
 
-    Mutex _mutex = MONGO_MAKE_LATCH("ReshardingCloneFetcher::_mutex");
+    stdx::mutex _mutex;
     int _activeCursors;                  // (M)
     int _openConsumers;                  // (M)
     Status _finalResult = Status::OK();  // (M)

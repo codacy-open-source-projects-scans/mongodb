@@ -168,25 +168,69 @@ idl_generator(
 )
 
 mongo_cc_library(
-    name = "hedge_options_util",
+    name = "network_interface_tl",
     srcs = [
-        "hedge_options_util.cpp",
-        "//src/mongo/util:sort.h",  # Only usage. Might want to move it here.
+        "connection_pool_tl.cpp",
+        "exhaust_response_reader_tl.cpp",
+        "network_interface_tl.cpp",
+        ":network_interface_tl_gen",
+        "//src/mongo/util:strong_weak_finish_line.h",
     ],
     hdrs = [
-        "hedge_options_util.h",
+        "connection_pool_tl.h",
+        "exhaust_response_reader_tl.h",
+        "network_interface_tl.h",
     ],
     deps = [
-        "//src/mongo:base",
-        "//src/mongo/client:read_preference",
-        "//src/mongo/s:mongos_server_parameters",
-        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
+        ":connection_pool_executor",
+        ":network_interface",
+        "//src/mongo/client:async_client",
+        "//src/mongo/db:server_feature_flags",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/auth",
+        "//src/mongo/db/commands:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/transport:transport_layer",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/transport:transport_layer_manager",
+    ],
+)
+
+mongo_cc_library(
+    name = "network_interface_factory",
+    srcs = [
+        "network_interface_factory.cpp",
+    ],
+    hdrs = [
+        "network_interface_factory.h",
+    ],
+    deps = [
+        ":connection_pool_executor",  # TODO(SERVER-93876): Remove.
+        ":egress_connection_closer_manager",  # TODO(SERVER-93876): Remove.
+        ":network_interface",  # TODO(SERVER-93876): Remove.
+        ":network_interface_tl",
     ],
 )
 
 idl_generator(
     name = "task_executor_pool_parameters_gen",
     src = "task_executor_pool_parameters.idl",
+)
+
+mongo_cc_library(
+    name = "task_executor_cursor",
+    srcs = [
+        "task_executor_cursor.cpp",
+        "task_executor_cursor_options.cpp",
+        ":task_executor_cursor_parameters_gen",
+    ],
+    hdrs = [
+        "task_executor_cursor.h",
+        "task_executor_cursor_options.h",
+    ],
+    deps = [
+        ":pinned_connection_task_executor_factory",
+        ":task_executor_interface",
+        "//src/mongo/db/query:command_request_response",
+        "//src/mongo/db/query:plan_yield_policy",  # TODO(SERVER-93876): Remove.
+    ],
 )
 
 mongo_cc_library(
@@ -262,34 +306,9 @@ mongo_cc_library(
         "//src/mongo/s:shard_version.h",
     ],
     header_deps = [
-        "//src/mongo/bson/util:bson_column",
+        "//src/mongo/bson/column",
         "//src/mongo/db/concurrency:flow_control_ticketholder",
         "//src/mongo/db/exec/sbe:query_sbe_plan_stats",
-    ],
-    deps = [
-        "//src/mongo:base",
-    ],
-)
-
-mongo_cc_library(
-    name = "hedging_metrics",
-    srcs = [
-        "hedging_metrics.cpp",
-    ],
-    hdrs = [
-        "hedging_metrics.h",
-        "//src/mongo/db:read_write_concern_provenance_base_gen",
-        "//src/mongo/db:resumable_index_builds_gen",
-        "//src/mongo/db/commands/query_cmd:explain_gen",
-        "//src/mongo/db/commands/query_cmd:query_settings_cmds_gen",
-        "//src/mongo/db/ftdc:ftdc_mongod_gen",
-        "//src/mongo/db/repl:oplog_entry_gen",
-        "//src/mongo/db/repl:repl_set_config_gen",
-    ],
-    header_deps = [
-        "//src/mongo/db/concurrency:flow_control_ticketholder",
-        "//src/mongo/db/exec/sbe:query_sbe_plan_stats",
-        "//src/mongo/db/fts:fts_query_noop",
     ],
     deps = [
         "//src/mongo:base",
@@ -317,7 +336,6 @@ mongo_cc_library(
         "//src/mongo/db/repl:repl_set_config_gen",
         "//src/mongo/db/sorter:sorter_gen",
         "//src/mongo/executor:connection_metrics.h",
-        "//src/mongo/executor:hedge_options_util.h",
         "//src/mongo/executor:network_connection_hook.h",
         "//src/mongo/executor:network_interface.h",
         "//src/mongo/executor:network_interface_thread_pool.h",

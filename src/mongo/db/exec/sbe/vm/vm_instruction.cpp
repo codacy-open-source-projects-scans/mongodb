@@ -87,6 +87,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     1,   // pushLocalLambda
     -1,  // pop
     0,   // swap
+    0,   // makeOwn
 
     -1,  // add
     -1,  // sub
@@ -127,8 +128,6 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     -2,  // traverseF
     0,   // traverseFImm
     -4,  // magicTraverseF
-    0,   // traverseCsiCellValues
-    0,   // traverseCsiCellTypes
     -2,  // setField
     0,   // getArraySize
 
@@ -336,6 +335,25 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
             }
             case Instruction::swap: {
                 swapStack();
+                break;
+            }
+            case Instruction::makeOwn: {
+                auto [popParam, moveFromParam, offsetParam] =
+                    Instruction::Parameter::decodeParam(pcPointer);
+                auto [owned, tag, val] = moveFromStack(offsetParam);
+                if (!owned) {
+                    // Value is not owned, make a copy.
+                    std::tie(tag, val) = value::copyValue(tag, val);
+                }
+                // Pop the stack entry if required, otherwise invalidate it to avoid the error
+                // "swapping stack entries containing the same value".
+                if (popParam) {
+                    popStack();
+                } else {
+                    setTagToNothing(offsetParam);
+                }
+                pushStack(true, tag, val);
+
                 break;
             }
             case Instruction::add: {
@@ -978,22 +996,6 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 magicTraverseF(code);
                 break;
             }
-            case Instruction::traverseCsiCellValues: {
-                auto offset = readFromMemory<int>(pcPointer);
-                pcPointer += sizeof(offset);
-                auto codePosition = pcPointer - code->instrs().data() + offset;
-
-                traverseCsiCellValues(code, codePosition);
-                break;
-            }
-            case Instruction::traverseCsiCellTypes: {
-                auto offset = readFromMemory<int>(pcPointer);
-                pcPointer += sizeof(offset);
-                auto codePosition = pcPointer - code->instrs().data() + offset;
-
-                traverseCsiCellTypes(code, codePosition);
-                break;
-            }
             case Instruction::setField: {
                 auto [owned, tag, val] = setField();
                 popAndReleaseStack();
@@ -1476,6 +1478,8 @@ const char* Instruction::toString() const {
             return "pop";
         case swap:
             return "swap";
+        case makeOwn:
+            return "makeOwn";
         case add:
             return "add";
         case sub:
@@ -1544,10 +1548,6 @@ const char* Instruction::toString() const {
             return "traverseF";
         case traverseFImm:
             return "traverseFImm";
-        case traverseCsiCellValues:
-            return "traverseCsiCellValues";
-        case traverseCsiCellTypes:
-            return "traverseCsiCellTypes";
         case setField:
             return "setField";
         case getArraySize:

@@ -40,7 +40,7 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/network_test_env.h"
@@ -178,7 +178,7 @@ TEST_F(ResultsMergerTestFixture, ShouldBeAbleToBlockUntilNextResultIsReadyWithDe
     future.default_timed_get();
 
     // Used for synchronizing the background thread with this thread.
-    auto mutex = MONGO_MAKE_LATCH();
+    stdx::mutex mutex;
     stdx::unique_lock<Latch> lk(mutex);
 
     // Issue a blocking wait for the next result asynchronously on a different thread.

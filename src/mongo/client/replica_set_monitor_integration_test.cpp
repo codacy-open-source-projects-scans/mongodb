@@ -134,12 +134,7 @@ public:
      * Runs the given remote command request, and returns the response.
      */
     RemoteCommandResponse runCommand(RemoteCommandRequest request) {
-        RemoteCommandRequestOnAny rcroa{request};
-        auto deferred = net->startCommand(makeCallbackHandle(), rcroa)
-                            .then([](TaskExecutor::ResponseOnAnyStatus roa) {
-                                return RemoteCommandResponse(roa);
-                            });
-        return deferred.get();
+        return net->startCommand(makeCallbackHandle(), request).get();
     }
 
 
@@ -205,7 +200,7 @@ TEST_F(ReplicaSetMonitorFixture, ReplicaSetMonitorCleanup) {
     auto sets = ReplicaSetMonitorManager::get()->getAllSetNames();
     ASSERT_TRUE(std::find(sets.begin(), sets.end(), setName) == sets.end());
 
-    auto mutex = MONGO_MAKE_LATCH("ReplicaSetMonitorCleanup");
+    stdx::mutex mutex;
     stdx::condition_variable cv;
     bool cleanupInvoked = false;
     auto rsm = ReplicaSetMonitorManager::get()->getOrCreateMonitor(replSetUri,
@@ -237,7 +232,7 @@ TEST_F(ReplicaSetMonitorFixture, LockOrderingAndGC) {
         ReplicaSetMonitorManager::get()->getGarbageCollectedMonitorsCount();
 
     {
-        auto lvl2mutex = MONGO_MAKE_LATCH(HierarchicalAcquisitionLevel(2), "lvl2mutex");
+        stdx::mutex lvl2mutex;
         stdx::unique_lock lk(lvl2mutex);
         // This invokes delayed GC that locks only lvl 1 mutex.
         monitor.reset();

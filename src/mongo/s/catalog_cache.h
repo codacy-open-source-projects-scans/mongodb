@@ -300,14 +300,14 @@ public:
                                 const boost::optional<DatabaseVersion>& wantedVersion);
 
     /**
-     * Invalidates a single shard for the current collection if the epochs given in the chunk
-     * versions match. Otherwise, invalidates the entire collection, causing any future targetting
-     * requests to block on an upcoming catalog cache refresh.
+     * Advances the version in the cache for the given namespace.
+     *
+     * To be called with the wantedVersion. In the case the passed version is boost::none, uses a
+     * which will artificially be greater than any previously created version to force the catalog
+     * cache refresh on next causal consistence access.
      */
-    void invalidateShardOrEntireCollectionEntryForShardedCollection(
-        const NamespaceString& nss,
-        const boost::optional<ShardVersion>& wantedVersion,
-        const ShardId& shardId);
+    void onStaleCollectionVersion(const NamespaceString& nss,
+                                  const boost::optional<ShardVersion>& wantedVersion);
 
     /**
      * Notifies the cache that there is a (possibly) newer collection version on the backing store.
@@ -374,7 +374,7 @@ private:
                                      const ComparableDatabaseVersion& previousDbVersion);
 
         CatalogCacheLoader& _catalogCacheLoader;
-        Mutex _mutex = MONGO_MAKE_LATCH("DatabaseCache::_mutex");
+        stdx::mutex _mutex;
     };
 
     class CollectionCache : public RoutingTableHistoryCache {
@@ -392,7 +392,7 @@ private:
                                        const ComparableChunkVersion& previousChunkVersion);
 
         CatalogCacheLoader& _catalogCacheLoader;
-        Mutex _mutex = MONGO_MAKE_LATCH("CollectionCache::_mutex");
+        stdx::mutex _mutex;
 
         struct Stats {
             // Tracks how many incremental refreshes are waiting to complete currently
@@ -431,7 +431,7 @@ private:
                                     const NamespaceString& nss,
                                     const ValueHandle& indexes,
                                     const ComparableIndexVersion& previousIndexVersion);
-        Mutex _mutex = MONGO_MAKE_LATCH("IndexCache::_mutex");
+        stdx::mutex _mutex;
     };
 
     // Callers of this internal function that are passing allowLocks must handle allowLocks failures

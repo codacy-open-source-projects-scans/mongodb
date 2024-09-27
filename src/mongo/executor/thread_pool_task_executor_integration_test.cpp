@@ -139,7 +139,7 @@ private:
     // counter of how many successful and failed responses were received.
     responseOutcomeCount _responseOutcomeCount;
 
-    Mutex _mutex = MONGO_MAKE_LATCH("ExhaustRequestHandlerUtil::_mutex");
+    stdx::mutex _mutex;
     stdx::condition_variable _cv;
 
     // called when a server sends a new isMaster exhaust response. Updates _responseOutcomeCount
@@ -308,9 +308,10 @@ TEST_F(TaskExecutorFixture, RunExhaustShouldStopOnFailure) {
 
         auto counters = exhaustRequestHandler.getCountersWhenReady();
 
-        // The response should be marked as failed
-        ASSERT_EQ(counters._success, 0);
-        ASSERT_EQ(counters._failed, 1);
+        // The response should be marked as succeeded, since in terms of networking it was
+        // successful.
+        ASSERT_EQ(counters._success, 1);
+        ASSERT_EQ(counters._failed, 0);
 
         // The tasks should be removed after 'isMaster' fails
         ASSERT_TRUE(waitUntilNoTasksOrDeadline(Date_t::now() + Seconds(5)));

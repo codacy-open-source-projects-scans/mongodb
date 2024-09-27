@@ -21,6 +21,34 @@
 #
 last-continuous:
   all:
+    - test_file: jstests/core/query/query_settings/query_settings_and_index_filters.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_cmds.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_cmds_validation.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_debug_query_shape.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_index_application_aggregate.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_index_application_distinct.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_index_application_find.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_lost_update.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_plan_cache.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_query_framework.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_reject_application.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_reject_application_bypass.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_size_limits.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_strictness.js
+      ticket: SERVER-91954
     - test_file: jstests/change_streams/ddl_create_event.js
       ticket: SERVER-88142
     - test_file: jstests/change_streams/ddl_view_events.js
@@ -289,9 +317,39 @@ last-continuous:
       ticket: SERVER-93154
     - test_file: jstests/sharding/timeseries_query_extended_range.js
       ticket: SERVER-73641
+    - test_file: jstests/sharding/direct_shard_connection_write_after_restart.js
+      ticket: SERVER-95244
   suites: null
 last-lts:
   all:
+    - test_file: jstests/core/query/query_settings/query_settings_and_index_filters.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_cmds.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_cmds_validation.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_debug_query_shape.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_index_application_aggregate.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_index_application_distinct.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_index_application_find.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_lost_update.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_plan_cache.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_query_framework.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_reject_application.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_reject_application_bypass.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_size_limits.js
+      ticket: SERVER-91954
+    - test_file: jstests/core/query/query_settings/query_settings_strictness.js
+      ticket: SERVER-91954
     - test_file: jstests/change_streams/ddl_create_event.js
       ticket: SERVER-88142
     - test_file: jstests/change_streams/ddl_view_events.js
@@ -592,4 +650,6 @@ last-lts:
       ticket: SERVER-93154
     - test_file: jstests/sharding/timeseries_query_extended_range.js
       ticket: SERVER-73641
+    - test_file: jstests/sharding/direct_shard_connection_write_after_restart.js
+      ticket: SERVER-95244
   suites: null

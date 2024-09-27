@@ -45,7 +45,6 @@
 #include "mongo/db/stats/operation_latency_histogram.h"
 #include "mongo/platform/mutex.h"
 #include "mongo/rpc/message.h"
-#include "mongo/util/concurrency/mutex.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
@@ -180,7 +179,7 @@ private:
     AtomicOperationLatencyHistogram _workingTimeHistogramStats;
 
     // _lockUsage should always be acquired before using _usage.
-    Mutex _lockUsage = MONGO_MAKE_LATCH("Top::_lockUsage");
+    stdx::mutex _lockUsage;
     UsageMap _usage;
 };
 

@@ -180,7 +180,7 @@ private:
 
     // InitializationGuard guards and serializes the initialization and shutdown of members
     struct InitializationGuard {
-        Mutex mutex = MONGO_MAKE_LATCH("MirrorMaestroImpl::InitializationGuard::mutex");
+        stdx::mutex mutex;
         Liveness liveness;
     };
     InitializationGuard _initGuard;
@@ -256,7 +256,7 @@ public:
         }
 
     private:
-        mutable Mutex _mutex = MONGO_MAKE_LATCH("ResolvedBreakdownByHost"_sd);
+        mutable stdx::mutex _mutex;
 
         stdx::unordered_map<std::string, CounterT> _resolved;
     };
@@ -499,9 +499,9 @@ void MirrorMaestroImpl::_mirror(const std::vector<HostAndPort>& hosts,
         auto newRequest = executor::RemoteCommandRequest(
             host, invocation.getDBForReadMirroring(), payload, nullptr /* opCtx */);
 
-        newRequest.options.fireAndForget = true;
+        newRequest.fireAndForget = true;
         if (MONGO_unlikely(mirrorMaestroExpectsResponse.shouldFail()))
-            newRequest.options.fireAndForget = false;
+            newRequest.fireAndForget = false;
 
         LOGV2_DEBUG(31455, 4, "About to mirror", "host"_attr = host, "request"_attr = newRequest);
 
