@@ -6,7 +6,6 @@ import glob
 from concurrent import futures
 from pathlib import Path
 import time
-from typing import List, Tuple
 
 # Get relative imports to work when the package is not installed on the PYTHONPATH.
 if __name__ == "__main__" and __package__ is None:
@@ -57,9 +56,14 @@ subprocess.run(
         "--out",
         OUTPUT_FULL_DIR,
         "--numSourceFiles",
-        str(min(num_changed_files, 250)),
+        str(min(num_changed_files, 100)),
         "--numGeneratedFiles",
         "250",
+        # This parameter is used to limit the output file size to avoid timeouts when running them.
+        # For this task, we just want to sanity check that we *can* generate the files so loosen
+        # the restriction.
+        "--maxFileSizeMB",
+        "10",
     ],
     check=True,
     cwd="jstestfuzz",

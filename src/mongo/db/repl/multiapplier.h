@@ -46,8 +46,8 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/functional.h"
 
 namespace mongo {
@@ -130,7 +130,7 @@ public:
     State getState_forTest() const;
 
 private:
-    bool _isActive_inlock() const;
+    bool _isActive(WithLock lk) const;
 
     /**
      * DB worker callback function - applies all operations.

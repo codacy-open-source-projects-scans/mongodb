@@ -43,7 +43,7 @@
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/mutex.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -133,7 +133,7 @@ public:
         // (starting at 0) into the corresponding indexed field that represent what prefixes of the
         // indexed field cause the index to be multikey.
         // multikeyMutex must be held when accessing multikey or multikeyPaths
-        mutable Mutex multikeyMutex;
+        mutable stdx::mutex multikeyMutex;
         mutable bool multikey = false;
         mutable MultikeyPaths multikeyPaths;
         mutable AtomicWord<int32_t> concurrentWriters;
@@ -170,6 +170,11 @@ public:
         CollectionOptions options;
         // May include empty instances which represent indexes already dropped.
         std::vector<IndexMetaData> indexes;
+
+        // Note that collection cloning (initial sync, mongodump+mongorestore, resharding, etc.)
+        // use listCollections and listIndexes to obtain the collection metadata. Therefore, any
+        // additional field not contained inside options or indexes does not get cloned into the
+        // target collection, which is almost surely problematic; see SERVER-91195 for more details.
 
         // Time-series collections created in versions 5.1 and earlier are allowed to contain
         // measurements with arbitrarily mixed schema in the buckets. When upgrading from these

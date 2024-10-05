@@ -29,12 +29,16 @@
 
 #pragma once
 
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/ce/histogram_common.h"
-#include "mongo/db/query/stats/array_histogram.h"
-#include "mongo/db/query/stats/value_utils.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/exec/docval_to_sbeval.h"
+#include "mongo/db/query/ce/histogram_estimator.h"
+#include "mongo/db/query/stats/max_diff.h"
+#include "mongo/db/query/stats/maxdiff_test_utils.h"
+#include "mongo/db/query/stats/rand_utils_new.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/assert.h"
 
-namespace mongo::optimizer::cbp::ce {
+namespace mongo::ce {
 
 // Enable this flag to log all estimates, and let all tests pass.
 constexpr bool kCETestLogOnly = false;
@@ -119,4 +123,4 @@ double estimateCardinalityScalarHistogramInteger(const stats::ScalarHistogram& h
                                                  int v,
                                                  EstimationType type);
 
-}  // namespace mongo::optimizer::cbp::ce
+}  // namespace mongo::ce

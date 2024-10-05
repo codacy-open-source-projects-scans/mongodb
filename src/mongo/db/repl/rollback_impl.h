@@ -52,7 +52,7 @@
 #include "mongo/db/repl/roll_back_local_operations.h"
 #include "mongo/db/repl/rollback.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/platform/mutex.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
@@ -477,9 +477,9 @@ private:
     void _summarizeRollback(OperationContext* opCtx) const;
 
     /**
-     * Aligns the drop pending reaper's state with the catalog.
+     * Confirm that every database has an _id index.
      */
-    void _resetDropPendingState(OperationContext* opCtx);
+    void _checkForAllIdIndexes(OperationContext* opCtx);
 
     // Guards access to member variables.
     mutable stdx::mutex _mutex;  // (S)

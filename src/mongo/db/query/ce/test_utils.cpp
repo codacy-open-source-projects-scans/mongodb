@@ -27,16 +27,11 @@
  *    it in the license file.
  */
 
-#include "mongo/db/exec/docval_to_sbeval.h"
-#include <absl/random/zipf_distribution.h>
-#include <sstream>
-
-#include "mongo/db/query/ce/array_histogram_helpers.h"
-#include "mongo/db/query/ce/scalar_histogram_helpers.h"
 #include "mongo/db/query/ce/test_utils.h"
-#include "mongo/db/query/stats/rand_utils_new.h"
 
-namespace mongo::optimizer::cbp::ce {
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
+namespace mongo::ce {
 namespace value = sbe::value;
 
 stats::ScalarHistogram createHistogram(const std::vector<BucketData>& data) {
@@ -76,5 +71,4 @@ double estimateCardinalityScalarHistogramInteger(const stats::ScalarHistogram& h
         std::make_pair(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(v));
     return estimateCardinality(hist, tag, val, type).card;
 };
-
-}  // namespace mongo::optimizer::cbp::ce
+}  // namespace mongo::ce

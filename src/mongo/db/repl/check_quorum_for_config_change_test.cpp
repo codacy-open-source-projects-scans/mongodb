@@ -54,8 +54,8 @@
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor_test_fixture.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/unittest/assert.h"
@@ -131,13 +131,13 @@ Status CheckQuorumTest::waitForQuorumCheck() {
 }
 
 bool CheckQuorumTest::isQuorumCheckDone() {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _isQuorumCheckDone;
 }
 
 void CheckQuorumTest::_runQuorumCheck(const ReplSetConfig& config, int myIndex) {
     _quorumCheckStatus = _runQuorumCheckImpl(config, myIndex);
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     _isQuorumCheckDone = true;
 }
 
@@ -207,9 +207,10 @@ TEST_F(CheckQuorumForInitiate, QuorumCheckFailedDueToSeveralDownNodes) {
     const Date_t startDate = getNet()->now();
     const int numCommandsExpected = config.getNumMembers() - 1;
     for (int i = 0; i < numCommandsExpected; ++i) {
-        getNet()->scheduleResponse(getNet()->getNextReadyRequest(),
-                                   startDate + Milliseconds(10),
-                                   {ErrorCodes::HostUnreachable, "No reply"});
+        getNet()->scheduleResponse(
+            getNet()->getNextReadyRequest(),
+            startDate + Milliseconds(10),
+            RemoteCommandResponse::make_forTest(Status(ErrorCodes::HostUnreachable, "No reply")));
     }
     getNet()->runUntil(startDate + Milliseconds(10));
     getNet()->exitNetwork();
@@ -258,7 +259,7 @@ executor::RemoteCommandResponse makeHeartbeatResponse(const ReplSetConfig& rsCon
     hbResp.setDurableOpTimeAndWallTime({opTime, wallTime});
     auto bob = BSONObjBuilder(hbResp.toBSON());
     bob.appendElements(extraFields);
-    return RemoteCommandResponse(bob.obj(), duration_cast<Milliseconds>(millis));
+    return RemoteCommandResponse::make_forTest(bob.obj(), duration_cast<Milliseconds>(millis));
 }
 
 TEST_F(CheckQuorumForInitiate, QuorumCheckSuccessForFiveNodes) {
@@ -341,8 +342,10 @@ TEST_F(CheckQuorumForInitiate, QuorumCheckFailedDueToOneDownNode) {
         ASSERT(seenHosts.insert(request.target).second)
             << "Already saw " << request.target.toString();
         if (request.target == HostAndPort("h2", 1)) {
-            getNet()->scheduleResponse(
-                noi, startDate + Milliseconds(10), {ErrorCodes::HostUnreachable, "No response"});
+            getNet()->scheduleResponse(noi,
+                                       startDate + Milliseconds(10),
+                                       RemoteCommandResponse::make_forTest(
+                                           Status(ErrorCodes::HostUnreachable, "No response")));
         } else {
             getNet()->scheduleResponse(noi,
                                        startDate + Milliseconds(10),
@@ -401,14 +404,15 @@ TEST_F(CheckQuorumForInitiate, QuorumCheckFailedDueToSetNameMismatch) {
             getNet()->scheduleResponse(
                 noi,
                 startDate + Milliseconds(10),
-                (RemoteCommandResponse(
+                (RemoteCommandResponse::make_forTest(
                     BSON("ok" << 0 << "code" << ErrorCodes::InconsistentReplicaSetNames << "errmsg"
                               << "replica set name doesn't match."),
                     Milliseconds(8))));
         } else {
-            getNet()->scheduleResponse(noi,
-                                       startDate + Milliseconds(10),
-                                       RemoteCommandResponse(BSON("ok" << 1), Milliseconds(8)));
+            getNet()->scheduleResponse(
+                noi,
+                startDate + Milliseconds(10),
+                RemoteCommandResponse::make_forTest(BSON("ok" << 1), Milliseconds(8)));
         }
     }
     getNet()->runUntil(startDate + Milliseconds(10));
@@ -586,13 +590,15 @@ TEST_F(CheckQuorumForReconfig, QuorumCheckVetoedDueToIncompatibleSetName) {
             getNet()->scheduleResponse(
                 noi,
                 startDate + Milliseconds(10),
-                (RemoteCommandResponse(
+                (RemoteCommandResponse::make_forTest(
                     BSON("ok" << 0 << "code" << ErrorCodes::InconsistentReplicaSetNames << "errmsg"
                               << "replica set name doesn't match."),
                     Milliseconds(8))));
         } else {
-            getNet()->scheduleResponse(
-                noi, startDate + Milliseconds(10), {ErrorCodes::HostUnreachable, "No response"});
+            getNet()->scheduleResponse(noi,
+                                       startDate + Milliseconds(10),
+                                       RemoteCommandResponse::make_forTest(
+                                           Status(ErrorCodes::HostUnreachable, "No response")));
         }
     }
     getNet()->runUntil(startDate + Milliseconds(10));
@@ -647,8 +653,10 @@ TEST_F(CheckQuorumForReconfig, QuorumCheckFailsDueToInsufficientVoters) {
                                        startDate + Milliseconds(10),
                                        makeHeartbeatResponse(rsConfig, Milliseconds(8)));
         } else {
-            getNet()->scheduleResponse(
-                noi, startDate + Milliseconds(10), {ErrorCodes::HostUnreachable, "No response"});
+            getNet()->scheduleResponse(noi,
+                                       startDate + Milliseconds(10),
+                                       RemoteCommandResponse::make_forTest(
+                                           Status(ErrorCodes::HostUnreachable, "No response")));
         }
     }
     getNet()->runUntil(startDate + Milliseconds(10));
@@ -703,8 +711,10 @@ TEST_F(CheckQuorumForReconfig, QuorumCheckFailsDueToNoElectableNodeResponding) {
                                        startDate + Milliseconds(10),
                                        makeHeartbeatResponse(rsConfig, Milliseconds(8)));
         } else {
-            getNet()->scheduleResponse(
-                noi, startDate + Milliseconds(10), {ErrorCodes::HostUnreachable, "No response"});
+            getNet()->scheduleResponse(noi,
+                                       startDate + Milliseconds(10),
+                                       RemoteCommandResponse::make_forTest(
+                                           Status(ErrorCodes::HostUnreachable, "No response")));
         }
     }
     getNet()->runUntil(startDate + Milliseconds(10));
@@ -800,11 +810,13 @@ TEST_F(CheckQuorumForReconfig, QuorumCheckProcessesCallbackCanceledResponse) {
             getNet()->scheduleResponse(
                 noi,
                 startDate + Milliseconds(10),
-                (RemoteCommandResponse(ErrorCodes::CallbackCanceled, "Testing canceled callback")));
+                (RemoteCommandResponse::make_forTest(
+                    Status(ErrorCodes::CallbackCanceled, "Testing canceled callback"))));
         } else {
-            getNet()->scheduleResponse(noi,
-                                       startDate + Milliseconds(10),
-                                       RemoteCommandResponse(BSON("ok" << 0), Milliseconds(8)));
+            getNet()->scheduleResponse(
+                noi,
+                startDate + Milliseconds(10),
+                RemoteCommandResponse::make_forTest(BSON("ok" << 0), Milliseconds(8)));
         }
     }
     getNet()->runUntil(startDate + Milliseconds(10));

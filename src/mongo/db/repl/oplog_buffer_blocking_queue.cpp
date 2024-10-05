@@ -90,10 +90,10 @@ void OplogBufferBlockingQueue::startup(OperationContext*) {
 
 void OplogBufferBlockingQueue::shutdown(OperationContext* opCtx) {
     {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _isShutdown = true;
         if (_options.clearOnShutdown) {
-            _clear_inlock(lk);
+            _clear(lk);
         } else {
             _notFullCV.notify_one();
             _notEmptyCV.notify_one();
@@ -146,11 +146,11 @@ void OplogBufferBlockingQueue::_push(Batch::const_iterator begin,
                                      const Cost& cost) {
     invariant(begin != end);
     {
-        stdx::unique_lock<Latch> lk(_mutex);
+        stdx::unique_lock<stdx::mutex> lk(_mutex);
 
         // Block until enough space is available.
         invariant(!_drainMode);
-        _waitForSpace_inlock(lk, cost);
+        _waitForSpace(lk, cost);
 
         // Do not push anything if already shutdown.
         if (_isShutdown) {
@@ -173,29 +173,29 @@ void OplogBufferBlockingQueue::_push(Batch::const_iterator begin,
 }
 
 void OplogBufferBlockingQueue::waitForSpace(OperationContext*, const Cost& cost) {
-    stdx::unique_lock<Latch> lk(_mutex);
-    _waitForSpace_inlock(lk, cost);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    _waitForSpace(lk, cost);
 }
 
 bool OplogBufferBlockingQueue::isEmpty() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _queue.empty();
 }
 
 std::size_t OplogBufferBlockingQueue::getSize() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _curSize;
 }
 
 std::size_t OplogBufferBlockingQueue::getCount() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _curCount;
 }
 
 void OplogBufferBlockingQueue::clear(OperationContext*) {
     {
-        stdx::lock_guard<Latch> lk(_mutex);
-        _clear_inlock(lk);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        _clear(lk);
     }
 
     if (_counters) {
@@ -206,7 +206,7 @@ void OplogBufferBlockingQueue::clear(OperationContext*) {
 bool OplogBufferBlockingQueue::tryPop(OperationContext*, Value* value) {
     Cost cost;
     {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
 
         if (_queue.empty()) {
             return false;
@@ -237,7 +237,7 @@ bool OplogBufferBlockingQueue::tryPop(OperationContext*, Value* value) {
 
 bool OplogBufferBlockingQueue::waitForDataFor(Milliseconds waitDuration,
                                               Interruptible* interruptible) {
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     interruptible->waitForConditionOrInterruptFor(_notEmptyCV, lk, waitDuration, [this] {
         return !_queue.empty() || _drainMode || _isShutdown;
@@ -247,7 +247,7 @@ bool OplogBufferBlockingQueue::waitForDataFor(Milliseconds waitDuration,
 }
 
 bool OplogBufferBlockingQueue::waitForDataUntil(Date_t deadline, Interruptible* interruptible) {
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     interruptible->waitForConditionOrInterruptUntil(
         _notEmptyCV, lk, deadline, [this] { return !_queue.empty() || _drainMode || _isShutdown; });
@@ -256,7 +256,7 @@ bool OplogBufferBlockingQueue::waitForDataUntil(Date_t deadline, Interruptible* 
 }
 
 bool OplogBufferBlockingQueue::peek(OperationContext*, Value* value) {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     if (_queue.empty()) {
         return false;
@@ -268,7 +268,7 @@ bool OplogBufferBlockingQueue::peek(OperationContext*, Value* value) {
 
 boost::optional<OplogBuffer::Value> OplogBufferBlockingQueue::lastObjectPushed(
     OperationContext*) const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     if (_queue.empty()) {
         return {};
     }
@@ -277,18 +277,17 @@ boost::optional<OplogBuffer::Value> OplogBufferBlockingQueue::lastObjectPushed(
 }
 
 void OplogBufferBlockingQueue::enterDrainMode() {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     _drainMode = true;
     _notEmptyCV.notify_one();
 }
 
 void OplogBufferBlockingQueue::exitDrainMode() {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     _drainMode = false;
 }
 
-void OplogBufferBlockingQueue::_waitForSpace_inlock(stdx::unique_lock<Latch>& lk,
-                                                    const Cost& cost) {
+void OplogBufferBlockingQueue::_waitForSpace(stdx::unique_lock<stdx::mutex>& lk, const Cost& cost) {
     invariant(cost.size > 0 && cost.count > 0);
     invariant(!_waitSize && !_waitCount);
 
@@ -304,7 +303,7 @@ void OplogBufferBlockingQueue::_waitForSpace_inlock(stdx::unique_lock<Latch>& lk
     }
 }
 
-void OplogBufferBlockingQueue::_clear_inlock(WithLock lk) {
+void OplogBufferBlockingQueue::_clear(WithLock lk) {
     _queue = {};
     _curSize = 0;
     _curCount = 0;

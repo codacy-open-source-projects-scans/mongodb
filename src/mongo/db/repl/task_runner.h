@@ -35,8 +35,8 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/service_context.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/functional.h"
 
@@ -138,7 +138,7 @@ private:
      * Loop exits when any of the tasks returns a non-kContinue next action.
      */
     void _runTasks();
-    void _finishRunTasks_inlock();
+    void _finishRunTasks(WithLock lk);
 
     /**
      * Waits for next scheduled task to be added to queue.

@@ -185,13 +185,11 @@ protected:
                     opCtx, CollectionPtr(), nss, {}, BSONObj(), OplogSlot(), false);
                 opObserver.onCollMod(opCtx, nss, uuid, BSONObj(), {}, boost::none);
                 opObserver.onDropDatabase(opCtx, nss.dbName(), false /*fromMigrate*/);
-                opObserver.onDropCollection(
-                    opCtx,
-                    nss,
-                    uuid,
-                    0,
-                    UserWriteBlockModeOpObserver::CollectionDropType::kOnePhase,
-                    /*markFromMigrate=*/false);
+                opObserver.onDropCollection(opCtx,
+                                            nss,
+                                            uuid,
+                                            0,
+                                            /*markFromMigrate=*/false);
                 opObserver.onDropIndex(opCtx, nss, uuid, "", BSONObj());
                 // For renames, make sure we check both from and to for the given namespace
                 opObserver.preRenameCollection(opCtx,
@@ -244,13 +242,11 @@ protected:
                           AssertionException);
             ASSERT_THROWS(opObserver.onDropDatabase(opCtx, nss.dbName(), false /*fromMigrate*/),
                           AssertionException);
-            ASSERT_THROWS(opObserver.onDropCollection(
-                              opCtx,
-                              nss,
-                              uuid,
-                              0,
-                              UserWriteBlockModeOpObserver::CollectionDropType::kOnePhase,
-                              /*markFromMigrate=*/false),
+            ASSERT_THROWS(opObserver.onDropCollection(opCtx,
+                                                      nss,
+                                                      uuid,
+                                                      0,
+                                                      /*markFromMigrate=*/false),
                           AssertionException);
             ASSERT_THROWS(opObserver.onDropIndex(opCtx, nss, uuid, "", BSONObj()),
                           AssertionException);
@@ -328,7 +324,7 @@ TEST_F(UserWriteBlockModeOpObserverTest, WriteBlockingDisabledWithBypass) {
     // Disable blocking and enable bypass
     GlobalUserWriteBlockState::get(opCtx.get())->disableUserWriteBlocking(opCtx.get());
     auto authSession = AuthorizationSession::get(opCtx->getClient());
-    authSession->grantInternalAuthorization(opCtx.get());
+    authSession->grantInternalAuthorization();
     ASSERT(authSession->mayBypassWriteBlockingMode());
 
     WriteBlockBypass::get(opCtx.get()).setFromMetadata(opCtx.get(), {});
@@ -376,7 +372,7 @@ TEST_F(UserWriteBlockModeOpObserverTest, WriteBlockingEnabledWithBypass) {
     // Enable blocking and enable bypass
     GlobalUserWriteBlockState::get(opCtx.get())->enableUserWriteBlocking(opCtx.get());
     auto authSession = AuthorizationSession::get(opCtx->getClient());
-    authSession->grantInternalAuthorization(opCtx.get());
+    authSession->grantInternalAuthorization();
     ASSERT(authSession->mayBypassWriteBlockingMode());
 
     WriteBlockBypass::get(opCtx.get()).setFromMetadata(opCtx.get(), {});

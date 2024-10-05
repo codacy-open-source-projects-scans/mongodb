@@ -27,15 +27,18 @@
  *    it in the license file.
  */
 
-#include <utility>
+#pragma once
 
 #include <boost/optional/optional.hpp>
+#include <utility>
 
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/optimizer/index_bounds.h"
+#include "mongo/db/pipeline/abt/utils.h"  // TODO: remove this somehow!!!
 #include "mongo/db/query/optimizer/syntax/syntax.h"
 
-namespace mongo::optimizer::ce {
+namespace mongo::ce {
+
+using namespace mongo::optimizer;
 
 /**
  * Helper function to extract a tag & value from an ABT node if it turns out to be a Constant node
@@ -49,26 +52,4 @@ boost::optional<std::pair<sbe::value::TypeTags, sbe::value::Value>> getConstType
  */
 boost::optional<sbe::value::TypeTags> getConstTypeTag(const ABT& abt);
 
-/**
- * Helper function to extract an sbe tag & value from the given 'boundReq' if possible, or
- * boost::none if not.
- */
-boost::optional<std::pair<sbe::value::TypeTags, sbe::value::Value>> getBound(
-    const BoundRequirement& boundReq);
-
-/**
- * Helper function to extract the TypeTag from the given 'boundReq' or boost::none if not.
- */
-boost::optional<sbe::value::TypeTags> getBoundReqTypeTag(const BoundRequirement& boundReq);
-
-/**
- * Helper function to return the interval corresponding to a given 'type'.
- */
-IntervalRequirement getMinMaxIntervalForType(sbe::value::TypeTags type);
-
-/**
- * Helper function to determine if the given 'interval' is a subset of the given 'type'.
- */
-bool isIntervalSubsetOfType(const IntervalRequirement& interval, sbe::value::TypeTags type);
-
-}  // namespace mongo::optimizer::ce
+}  // namespace mongo::ce

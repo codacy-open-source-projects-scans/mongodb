@@ -148,6 +148,7 @@ buildvariants:
       - name: .default .requires_large_host !.requires_compile_variant !.incompatible_development_variant !.requires_all_feature_flags
         distros:
           - amazon2-arm64-atlas-latest-large
+      - name: .fuzzer_deterministic
 
   - name: &commit-queue commit-queue
     display_name: "~ Commit Queue"
@@ -250,3 +251,4 @@ buildvariants:
       - name: concurrency_gen
       - name: concurrency_replication_gen
       - name: concurrency_sharded_replication_gen
+      - name: .fuzzer_deterministic

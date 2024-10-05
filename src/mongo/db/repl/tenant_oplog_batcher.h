@@ -42,7 +42,7 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/future.h"
 #include "mongo/util/uuid.h"
@@ -113,13 +113,13 @@ private:
 
     void _pushEntry(OperationContext* opCtx, TenantOplogBatch* batch, OplogEntry&& op);
 
-    void _doStartup_inlock() final;
+    void _doStartup(WithLock) final;
 
-    void _doShutdown_inlock() noexcept final;
+    void _doShutdown(WithLock) noexcept final;
 
     void _preJoin() noexcept final {}
 
-    Mutex* _getMutex() noexcept final {
+    stdx::mutex* _getMutex() noexcept final {
         return &_mutex;
     }
 

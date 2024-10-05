@@ -54,25 +54,25 @@ std::string AbstractAsyncComponent::_getComponentName() const {
 }
 
 bool AbstractAsyncComponent::isActive() noexcept {
-    stdx::lock_guard<Latch> lock(*_getMutex());
-    return _isActive_inlock();
+    stdx::lock_guard<stdx::mutex> lock(*_getMutex());
+    return _isActive(lock);
 }
 
-bool AbstractAsyncComponent::_isActive_inlock() noexcept {
+bool AbstractAsyncComponent::_isActive(WithLock lk) noexcept {
     return State::kRunning == _state || State::kShuttingDown == _state;
 }
 
 bool AbstractAsyncComponent::_isShuttingDown() noexcept {
-    stdx::lock_guard<Latch> lock(*_getMutex());
-    return _isShuttingDown_inlock();
+    stdx::lock_guard<stdx::mutex> lock(*_getMutex());
+    return _isShuttingDown(lock);
 }
 
-bool AbstractAsyncComponent::_isShuttingDown_inlock() noexcept {
+bool AbstractAsyncComponent::_isShuttingDown(WithLock lk) noexcept {
     return State::kShuttingDown == _state;
 }
 
 Status AbstractAsyncComponent::startup() noexcept {
-    stdx::lock_guard<Latch> lock(*_getMutex());
+    stdx::lock_guard<stdx::mutex> lock(*_getMutex());
     switch (_state) {
         case State::kPreStart:
             _state = State::kRunning;
@@ -89,7 +89,7 @@ Status AbstractAsyncComponent::startup() noexcept {
     }
 
     try {
-        _doStartup_inlock();
+        _doStartup(lock);
     } catch (const DBException& ex) {
         _state = State::kComplete;
         return ex.toStatus();
@@ -99,7 +99,7 @@ Status AbstractAsyncComponent::startup() noexcept {
 }
 
 void AbstractAsyncComponent::shutdown() noexcept {
-    stdx::lock_guard<Latch> lock(*_getMutex());
+    stdx::lock_guard<stdx::mutex> lock(*_getMutex());
     switch (_state) {
         case State::kPreStart:
             // Transition directly from PreStart to Complete if not started yet.
@@ -114,26 +114,26 @@ void AbstractAsyncComponent::shutdown() noexcept {
             return;
     }
 
-    _doShutdown_inlock();
+    _doShutdown(lock);
 }
 
 void AbstractAsyncComponent::join() noexcept {
     _preJoin();
-    stdx::unique_lock<Latch> lk(*_getMutex());
-    _stateCondition.wait(lk, [this]() { return !_isActive_inlock(); });
+    stdx::unique_lock<stdx::mutex> lk(*_getMutex());
+    _stateCondition.wait(lk, [&]() { return !_isActive(lk); });
 }
 
 AbstractAsyncComponent::State AbstractAsyncComponent::getState_forTest() noexcept {
-    stdx::lock_guard<Latch> lock(*_getMutex());
+    stdx::lock_guard<stdx::mutex> lock(*_getMutex());
     return _state;
 }
 
 void AbstractAsyncComponent::_transitionToComplete() noexcept {
-    stdx::lock_guard<Latch> lock(*_getMutex());
-    _transitionToComplete_inlock();
+    stdx::lock_guard<stdx::mutex> lock(*_getMutex());
+    _transitionToComplete(lock);
 }
 
-void AbstractAsyncComponent::_transitionToComplete_inlock() noexcept {
+void AbstractAsyncComponent::_transitionToComplete(WithLock lk) noexcept {
     invariant(State::kComplete != _state);
     _state = State::kComplete;
     _stateCondition.notify_all();
@@ -141,25 +141,28 @@ void AbstractAsyncComponent::_transitionToComplete_inlock() noexcept {
 
 Status AbstractAsyncComponent::_checkForShutdownAndConvertStatus(
     const executor::TaskExecutor::CallbackArgs& callbackArgs, const std::string& message) {
-    stdx::unique_lock<Latch> lk(*_getMutex());
-    return _checkForShutdownAndConvertStatus_inlock(callbackArgs, message);
+    stdx::unique_lock<stdx::mutex> lk(*_getMutex());
+    return _checkForShutdownAndConvertStatus(lk, callbackArgs, message);
 }
 
 Status AbstractAsyncComponent::_checkForShutdownAndConvertStatus(const Status& status,
                                                                  const std::string& message) {
-    stdx::unique_lock<Latch> lk(*_getMutex());
-    return _checkForShutdownAndConvertStatus_inlock(status, message);
+    stdx::unique_lock<stdx::mutex> lk(*_getMutex());
+    return _checkForShutdownAndConvertStatus(lk, status, message);
 }
 
-Status AbstractAsyncComponent::_checkForShutdownAndConvertStatus_inlock(
-    const executor::TaskExecutor::CallbackArgs& callbackArgs, const std::string& message) {
-    return _checkForShutdownAndConvertStatus_inlock(callbackArgs.status, message);
+Status AbstractAsyncComponent::_checkForShutdownAndConvertStatus(
+    WithLock lk,
+    const executor::TaskExecutor::CallbackArgs& callbackArgs,
+    const std::string& message) {
+    return _checkForShutdownAndConvertStatus(lk, callbackArgs.status, message);
 }
 
-Status AbstractAsyncComponent::_checkForShutdownAndConvertStatus_inlock(
-    const Status& status, const std::string& message) {
+Status AbstractAsyncComponent::_checkForShutdownAndConvertStatus(WithLock lk,
+                                                                 const Status& status,
+                                                                 const std::string& message) {
 
-    if (_isShuttingDown_inlock()) {
+    if (_isShuttingDown(lk)) {
         return Status(ErrorCodes::CallbackCanceled,
                       str::stream() << message << ": " << _componentName << " is shutting down");
     }
@@ -167,12 +170,13 @@ Status AbstractAsyncComponent::_checkForShutdownAndConvertStatus_inlock(
     return status.withContext(message);
 }
 
-Status AbstractAsyncComponent::_scheduleWorkAndSaveHandle_inlock(
+Status AbstractAsyncComponent::_scheduleWorkAndSaveHandle(
+    WithLock lk,
     executor::TaskExecutor::CallbackFn work,
     executor::TaskExecutor::CallbackHandle* handle,
     const std::string& name) {
     invariant(handle);
-    if (_isShuttingDown_inlock()) {
+    if (_isShuttingDown(lk)) {
         return Status(ErrorCodes::CallbackCanceled,
                       str::stream() << "failed to schedule work " << name << ": " << _componentName
                                     << " is shutting down");
@@ -185,13 +189,14 @@ Status AbstractAsyncComponent::_scheduleWorkAndSaveHandle_inlock(
     return Status::OK();
 }
 
-Status AbstractAsyncComponent::_scheduleWorkAtAndSaveHandle_inlock(
+Status AbstractAsyncComponent::_scheduleWorkAtAndSaveHandle(
+    WithLock lk,
     Date_t when,
     executor::TaskExecutor::CallbackFn work,
     executor::TaskExecutor::CallbackHandle* handle,
     const std::string& name) {
     invariant(handle);
-    if (_isShuttingDown_inlock()) {
+    if (_isShuttingDown(lk)) {
         return Status(ErrorCodes::CallbackCanceled,
                       str::stream()
                           << "failed to schedule work " << name << " at " << when.toString() << ": "
@@ -206,7 +211,8 @@ Status AbstractAsyncComponent::_scheduleWorkAtAndSaveHandle_inlock(
     return Status::OK();
 }
 
-void AbstractAsyncComponent::_cancelHandle_inlock(executor::TaskExecutor::CallbackHandle handle) {
+void AbstractAsyncComponent::_cancelHandle(WithLock lk,
+                                           executor::TaskExecutor::CallbackHandle handle) {
     if (!handle) {
         return;
     }

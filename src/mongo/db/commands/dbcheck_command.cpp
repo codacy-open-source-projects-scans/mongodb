@@ -120,7 +120,7 @@ MONGO_FAIL_POINT_DEFINE(hangBeforeAddingDBCheckBatchToOplog);
 
 namespace {
 // Makes sure that only one dbcheck operation is running at a time.
-Mutex _dbCheckMutex;
+stdx::mutex _dbCheckMutex;
 
 // Queue for dbcheck commands that are waiting to be run. There can be at most
 // `gDbCheckMaxRunsOnQueue` (default 5) dbchecks in the queue, including 1 currently running. An
@@ -177,8 +177,8 @@ void _initializeCurOp(OperationContext* opCtx, boost::optional<DbCheckCollection
 
     stdx::unique_lock<Client> lk(*opCtx->getClient());
     auto curOp = CurOp::get(opCtx);
-    curOp->setNS_inlock(info->nss);
-    curOp->setOpDescription_inlock(info->toBSON());
+    curOp->setNS(lk, info->nss);
+    curOp->setOpDescription(lk, info->toBSON());
     curOp->ensureStarted();
 }
 
@@ -553,7 +553,7 @@ void DbCheckJob::run() {
     // TODO SERVER-78399: Clean up this check once feature flag is removed.
     // Only one dbcheck operation can be in progress.
     if (info && info.value().secondaryIndexCheckParameters) {
-        stdx::unique_lock<Latch> lock(_dbCheckMutex);
+        stdx::unique_lock<stdx::mutex> lock(_dbCheckMutex);
 
         size_t queueCapacity = gDbCheckMaxRunsOnQueue.load();
         if (_dbChecksInProgress.size() >= queueCapacity) {
@@ -616,7 +616,7 @@ void DbCheckJob::run() {
             // The thread holds onto the _dbcheckMutex and waits for its dbcheck job to be at the
             // front of the queue. The `waitForConditionOrInterrupt` releases the lock so we
             // shouldn't run into a deadlock here.
-            stdx::lock_guard<Latch> lock(_dbCheckMutex);
+            stdx::lock_guard<stdx::mutex> lock(_dbCheckMutex);
             _dbChecksInProgress.pop_front();
             _dbCheckNotifier.notify_all();
         }
@@ -1799,8 +1799,9 @@ void DbChecker::_dataConsistencyCheck(OperationContext* opCtx) {
         stdx::unique_lock<Client> lk(*opCtx->getClient());
         progress.set(
             lk,
-            CurOp::get(opCtx)->setProgress_inlock(
-                StringData(curOpMessage), collAcquisition.getCollectionPtr()->numRecords(opCtx)),
+            CurOp::get(opCtx)->setProgress(lk,
+                                           StringData(curOpMessage),
+                                           collAcquisition.getCollectionPtr()->numRecords(opCtx)),
             opCtx);
         retryProgressInitialization = false;
     }

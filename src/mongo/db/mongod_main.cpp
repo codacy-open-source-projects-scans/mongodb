@@ -146,7 +146,6 @@
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongod.h"
 #include "mongo/db/repl/base_cloner.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/initial_syncer_factory.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/primary_only_service.h"
@@ -196,6 +195,7 @@
 #include "mongo/db/s/sharding_initialization_mongod.h"
 #include "mongo/db/s/sharding_ready.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
+#include "mongo/db/server_lifecycle_monitor.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/serverless/shard_split_donor_op_observer.h"
 #include "mongo/db/serverless/shard_split_donor_service.h"
@@ -230,7 +230,7 @@
 #include "mongo/db/timeseries/timeseries_op_observer.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/ttl.h"
+#include "mongo/db/ttl/ttl.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/network_connection_hook.h"
@@ -248,7 +248,6 @@
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/platform/random.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
@@ -268,6 +267,7 @@
 #include "mongo/s/sharding_state.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
 #include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
@@ -1222,6 +1222,8 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
         return getMagicRestoreMain()(serviceContext);
     }
 
+    globalServerLifecycleMonitor().onFinishingStartup();
+
     logStartupStats.dismiss();
     logMongodStartupTimeElapsedStatistics(serviceContext,
                                           beginInitAndListen,
@@ -1438,10 +1440,6 @@ void setUpReplication(ServiceContext* serviceContext) {
             storageInterface, std::move(consistencyMarkers), std::move(recovery)));
     auto replicationProcess = repl::ReplicationProcess::get(serviceContext);
 
-    repl::DropPendingCollectionReaper::set(
-        serviceContext, std::make_unique<repl::DropPendingCollectionReaper>(storageInterface));
-    auto dropPendingCollectionReaper = repl::DropPendingCollectionReaper::get(serviceContext);
-
     repl::TopologyCoordinator::Options topoCoordOptions;
     topoCoordOptions.maxSyncSourceLagSecs = Seconds(repl::maxSyncSourceLagSecs);
     topoCoordOptions.clusterRole = serverGlobalParams.clusterRole;
@@ -1450,7 +1448,7 @@ void setUpReplication(ServiceContext* serviceContext) {
         serviceContext,
         getGlobalReplSettings(),
         std::make_unique<repl::ReplicationCoordinatorExternalStateImpl>(
-            serviceContext, dropPendingCollectionReaper, storageInterface, replicationProcess),
+            serviceContext, storageInterface, replicationProcess),
         makeReplicationExecutor(serviceContext),
         std::make_unique<repl::TopologyCoordinator>(topoCoordOptions),
         replicationProcess,
@@ -1633,7 +1631,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     // Before doing anything else, ensure fsync is inactive or make it release its GlobalRead lock.
     {
-        stdx::unique_lock<Latch> stateLock(fsyncStateMutex);
+        stdx::unique_lock<stdx::mutex> stateLock(fsyncStateMutex);
         if (globalFsyncLockThread) {
             globalFsyncLockThread->shutdown(stateLock);
         }

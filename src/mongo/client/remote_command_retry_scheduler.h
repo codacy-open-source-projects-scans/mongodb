@@ -41,8 +41,8 @@
 #include "mongo/base/status.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/hierarchical_acquisition.h"
 #include "mongo/util/time_support.h"
@@ -100,7 +100,7 @@ public:
      * Returns true if we have scheduled a remote command and are waiting for the response.
      */
     bool isActive() const;
-    bool _isActive_inlock() const;
+    bool _isActive(WithLock lk) const;
 
     /**
      * Schedules remote command request.

@@ -51,8 +51,8 @@
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
@@ -229,7 +229,7 @@ public:
     }
 
 private:
-    bool _isActive_inlock() const;
+    bool _isActive(WithLock lk) const;
 
     /**
      * Schedules getMore command to be run by the executor

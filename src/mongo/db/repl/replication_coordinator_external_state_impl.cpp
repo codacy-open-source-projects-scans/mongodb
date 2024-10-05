@@ -74,7 +74,6 @@
 #include "mongo/db/read_write_concern_defaults_gen.h"
 #include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/bgsync.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/isself.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/noop_writer.h"
@@ -199,7 +198,7 @@ auto makeThreadPool(const std::string& poolName, const std::string& threadName) 
             cc().setSystemOperationUnkillableByStepdown(lk);
         }
 
-        AuthorizationSession::get(cc())->grantInternalAuthorization(&cc());
+        AuthorizationSession::get(cc())->grantInternalAuthorization();
     };
     return std::make_unique<ThreadPool>(threadPoolOptions);
 }
@@ -239,11 +238,9 @@ void scheduleWork(executor::TaskExecutor* executor, executor::TaskExecutor::Call
 
 ReplicationCoordinatorExternalStateImpl::ReplicationCoordinatorExternalStateImpl(
     ServiceContext* service,
-    DropPendingCollectionReaper* dropPendingCollectionReaper,
     StorageInterface* storageInterface,
     ReplicationProcess* replicationProcess)
     : _service(service),
-      _dropPendingCollectionReaper(dropPendingCollectionReaper),
       _storageInterface(storageInterface),
       _replicationProcess(replicationProcess) {
     uassert(ErrorCodes::BadValue, "A StorageInterface is required.", _storageInterface);
@@ -259,7 +256,7 @@ bool ReplicationCoordinatorExternalStateImpl::isInitialSyncFlagSet(OperationCont
 void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     OperationContext* opCtx, ReplicationCoordinator* replCoord) {
 
-    stdx::unique_lock<Latch> lk(_threadMutex);
+    stdx::unique_lock<stdx::mutex> lk(_threadMutex);
 
     // We've shut down the external state, don't start again.
     if (_inShutdown)
@@ -343,9 +340,9 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
 
     LOGV2(21301, "Starting replication reporter thread");
     invariant(!_syncSourceFeedbackThread);
-    // Get the pointer while holding the lock so that _stopDataReplication_inlock() won't
+    // Get the pointer while holding the lock so that _stopDataReplication() won't
     // leave the unique pointer empty if the _syncSourceFeedbackThread's function starts
-    // after _stopDataReplication_inlock's move.
+    // after _stopDataReplication's move.
     auto bgSyncPtr = _bgSync.get();
     _syncSourceFeedbackThread = std::make_unique<stdx::thread>([this, bgSyncPtr, replCoord] {
         _syncSourceFeedback.run(_taskExecutor.get(), bgSyncPtr, replCoord);
@@ -359,8 +356,8 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     storageEngine->notifyReplStartupRecoveryComplete(opCtx);
 }
 
-void ReplicationCoordinatorExternalStateImpl::_stopDataReplication_inlock(
-    OperationContext* opCtx, stdx::unique_lock<Latch>& lock) {
+void ReplicationCoordinatorExternalStateImpl::_stopDataReplication(
+    OperationContext* opCtx, stdx::unique_lock<stdx::mutex>& lock) {
     // Make sue no other _stopDataReplication calls are in progress.
     _dataReplicationStopped.wait(lock, [this]() { return !_stoppingDataReplication; });
     _stoppingDataReplication = true;
@@ -463,7 +460,7 @@ JournalListener* ReplicationCoordinatorExternalStateImpl::getReplicationJournalL
 }
 
 void ReplicationCoordinatorExternalStateImpl::startThreads() {
-    stdx::lock_guard<Latch> lk(_threadMutex);
+    stdx::lock_guard<stdx::mutex> lk(_threadMutex);
     if (_startedThreads) {
         return;
     }
@@ -492,13 +489,13 @@ void ReplicationCoordinatorExternalStateImpl::startThreads() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* opCtx) {
-    stdx::unique_lock<Latch> lk(_threadMutex);
+    stdx::unique_lock<stdx::mutex> lk(_threadMutex);
     _inShutdown = true;
     if (!_startedThreads) {
         return;
     }
 
-    _stopDataReplication_inlock(opCtx, lk);
+    _stopDataReplication(opCtx, lk);
 
     LOGV2(21307, "Stopping replication storage threads");
     _taskExecutor->shutdown();
@@ -1242,14 +1239,14 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 }
 
 void ReplicationCoordinatorExternalStateImpl::signalApplierToChooseNewSyncSource() {
-    stdx::lock_guard<Latch> lk(_threadMutex);
+    stdx::lock_guard<stdx::mutex> lk(_threadMutex);
     if (_bgSync) {
         _bgSync->clearSyncTarget();
     }
 }
 
 void ReplicationCoordinatorExternalStateImpl::stopProducer() {
-    stdx::lock_guard<Latch> lk(_threadMutex);
+    stdx::lock_guard<stdx::mutex> lk(_threadMutex);
     if (_bgSync) {
         _bgSync->stop(false);
     }
@@ -1265,7 +1262,7 @@ void ReplicationCoordinatorExternalStateImpl::stopProducer() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
-    stdx::lock_guard<Latch> lk(_threadMutex);
+    stdx::lock_guard<stdx::mutex> lk(_threadMutex);
     // When _oplogWriteBuffer is not null, featureFlagReduceMajorityWriteLatency is enabled.
     // We call exitDrainMode() on both buffers, but it is possible that the apply buffer is
     // not even in drain mode when exitDrainMode() is called, which can happen if the node
@@ -1283,14 +1280,14 @@ void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::notifyOtherMemberDataChanged() {
-    stdx::lock_guard<Latch> lk(_threadMutex);
+    stdx::lock_guard<stdx::mutex> lk(_threadMutex);
     if (_bgSync) {
         _bgSync->notifySyncSourceSelectionDataChanged();
     }
 }
 
 bool ReplicationCoordinatorExternalStateImpl::tooStale() {
-    stdx::lock_guard<Latch> lk(_threadMutex);
+    stdx::lock_guard<stdx::mutex> lk(_threadMutex);
     if (_bgSync) {
         return _bgSync->tooStale();
     }
@@ -1349,32 +1346,6 @@ bool ReplicationCoordinatorExternalStateImpl::snapshotsEnabled() const {
 void ReplicationCoordinatorExternalStateImpl::notifyOplogMetadataWaiters(
     const OpTime& committedOpTime) {
     signalOplogWaiters();
-
-    // Notify the DropPendingCollectionReaper if there are any drop-pending collections with
-    // drop optimes before or at the committed optime.
-    if (auto earliestDropOpTime = _dropPendingCollectionReaper->getEarliestDropOpTime()) {
-        if (committedOpTime >= *earliestDropOpTime) {
-            auto reaper = _dropPendingCollectionReaper;
-            scheduleWork(
-                _taskExecutor.get(),
-                [committedOpTime, reaper](const executor::TaskExecutor::CallbackArgs& args) {
-                    if (MONGO_unlikely(dropPendingCollectionReaperHang.shouldFail())) {
-                        LOGV2(21310,
-                              "fail point dropPendingCollectionReaperHang enabled. "
-                              "Blocking until fail point is disabled",
-                              "committedOpTime"_attr = committedOpTime);
-                        dropPendingCollectionReaperHang.pauseWhileSet();
-                    }
-                    auto opCtx = cc().makeOperationContext();
-                    reaper->dropCollectionsOlderThan(opCtx.get(), committedOpTime);
-                });
-        }
-    }
-}
-
-boost::optional<OpTime> ReplicationCoordinatorExternalStateImpl::getEarliestDropPendingOpTime()
-    const {
-    return _dropPendingCollectionReaper->getEarliestDropOpTime();
 }
 
 double ReplicationCoordinatorExternalStateImpl::getElectionTimeoutOffsetLimitFraction() const {

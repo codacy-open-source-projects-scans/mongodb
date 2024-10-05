@@ -1009,6 +1009,7 @@ void StorageEngineImpl::endBackup(OperationContext* opCtx) {
 }
 
 Status StorageEngineImpl::disableIncrementalBackup(OperationContext* opCtx) {
+    LOGV2(9538600, "Disabling incremental backup");
     return _engine->disableIncrementalBackup(opCtx);
 }
 
@@ -1283,7 +1284,7 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
             }
 
             {
-                stdx::lock_guard<Latch> lock(_monitorMutex);
+                stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
                 if (_listeners.empty()) {
                     return;
                 }
@@ -1318,7 +1319,7 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
                 }
 
                 {
-                    stdx::lock_guard<Latch> lock(_monitorMutex);
+                    stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
                     for (const auto& listener : _listeners) {
                         if (listener->getType() == TimestampType::kCheckpoint) {
                             listener->notify(opCtx, checkpoint);
@@ -1368,7 +1369,7 @@ void StorageEngineImpl::TimestampMonitor::_startup() {
 }
 
 void StorageEngineImpl::TimestampMonitor::addListener(TimestampListener* listener) {
-    stdx::lock_guard<Latch> lock(_monitorMutex);
+    stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
     if (std::find(_listeners.begin(), _listeners.end(), listener) != _listeners.end()) {
         bool listenerAlreadyRegistered = true;
         invariant(!listenerAlreadyRegistered);
@@ -1377,7 +1378,7 @@ void StorageEngineImpl::TimestampMonitor::addListener(TimestampListener* listene
 }
 
 void StorageEngineImpl::TimestampMonitor::removeListener(TimestampListener* listener) {
-    stdx::lock_guard<Latch> lock(_monitorMutex);
+    stdx::lock_guard<stdx::mutex> lock(_monitorMutex);
     if (auto it = std::find(_listeners.begin(), _listeners.end(), listener);
         it != _listeners.end()) {
         _listeners.erase(it);

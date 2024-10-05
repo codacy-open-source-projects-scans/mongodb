@@ -121,7 +121,7 @@ void OplogBufferCollection::startup(OperationContext* opCtx) {
     // If the collection doesn't already exist, create it.
     _createCollection(opCtx);
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     // If we are starting from an existing collection, we must populate the in memory state of the
     // buffer.
     _size = uassertStatusOK(_storageInterface->getCollectionSize(opCtx, _nss));
@@ -139,9 +139,9 @@ void OplogBufferCollection::startup(OperationContext* opCtx) {
     _updateLastPushedTimestampFromCollection(lk, opCtx);
 }
 
-void OplogBufferCollection::_updateLastPushedTimestampFromCollection(WithLock,
+void OplogBufferCollection::_updateLastPushedTimestampFromCollection(WithLock lk,
                                                                      OperationContext* opCtx) {
-    auto lastPushedObj = _lastDocumentPushed_inlock(opCtx);
+    auto lastPushedObj = _lastDocumentPushed(lk, opCtx);
     if (lastPushedObj) {
         auto lastPushedId = lastPushedObj->getObjectField(kIdFieldName);
         fassert(
@@ -154,7 +154,7 @@ void OplogBufferCollection::_updateLastPushedTimestampFromCollection(WithLock,
 
 void OplogBufferCollection::shutdown(OperationContext* opCtx) {
     if (_options.dropCollectionAtShutdown) {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _dropCollection(opCtx);
         _size = 0;
         _count = 0;
@@ -171,7 +171,7 @@ void OplogBufferCollection::push(OperationContext* opCtx,
     if (begin == end) {
         return;
     }
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     // Make sure timestamp order is correct.
     auto ts = _lastPushedTimestamp;
     std::for_each(begin, end, [&ts](const Value& value) {
@@ -199,7 +199,7 @@ void OplogBufferCollection::preload(OperationContext* opCtx,
         _lastPushedTimestamp = kInvalidLastPushedTimestamp;
     });
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     invariant(_lastPoppedKey.isEmpty());
     _push(lk, opCtx, begin, end);
     _updateLastPushedTimestampFromCollection(lk, opCtx);
@@ -253,23 +253,23 @@ void OplogBufferCollection::_push(WithLock,
 void OplogBufferCollection::waitForSpace(OperationContext* opCtx, const Cost& cost) {}
 
 bool OplogBufferCollection::isEmpty() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _count == 0;
 }
 
 std::size_t OplogBufferCollection::getSize() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     uassert(4940100, "getSize() called on OplogBufferCollection after seek", _sizeIsValid);
     return _size;
 }
 
 std::size_t OplogBufferCollection::getCount() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _count;
 }
 
 void OplogBufferCollection::clear(OperationContext* opCtx) {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     // We acquire the appropriate locks for the temporary oplog buffer collection here,
     // so that we perform the drop and create under the same locks.
     AutoGetCollection autoColl(opCtx, NamespaceString::kDefaultOplogCollectionNamespace, MODE_X);
@@ -284,16 +284,16 @@ void OplogBufferCollection::clear(OperationContext* opCtx) {
 }
 
 bool OplogBufferCollection::tryPop(OperationContext* opCtx, Value* value) {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     if (_count == 0) {
         return false;
     }
-    return _pop_inlock(opCtx, value);
+    return _pop(lk, opCtx, value);
 }
 
 bool OplogBufferCollection::waitForDataFor(Milliseconds waitDuration,
                                            Interruptible* interruptible) {
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
     if (!interruptible->waitForConditionOrInterruptFor(
             _cvNoLongerEmpty, lk, waitDuration, [&]() { return _count != 0; })) {
         return false;
@@ -302,7 +302,7 @@ bool OplogBufferCollection::waitForDataFor(Milliseconds waitDuration,
 }
 
 bool OplogBufferCollection::waitForDataUntil(Date_t deadline, Interruptible* interruptible) {
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
     if (!interruptible->waitForConditionOrInterruptUntil(
             _cvNoLongerEmpty, lk, deadline, [&]() { return _count != 0; })) {
         return false;
@@ -311,18 +311,18 @@ bool OplogBufferCollection::waitForDataUntil(Date_t deadline, Interruptible* int
 }
 
 bool OplogBufferCollection::peek(OperationContext* opCtx, Value* value) {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     if (_count == 0) {
         return false;
     }
-    *value = _peek_inlock(opCtx, PeekMode::kExtractEmbeddedDocument);
+    *value = _peek(lk, opCtx, PeekMode::kExtractEmbeddedDocument);
     return true;
 }
 
 boost::optional<OplogBuffer::Value> OplogBufferCollection::lastObjectPushed(
     OperationContext* opCtx) const {
-    stdx::lock_guard<Latch> lk(_mutex);
-    auto lastDocumentPushed = _lastDocumentPushed_inlock(opCtx);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    auto lastDocumentPushed = _lastDocumentPushed(lk, opCtx);
     if (lastDocumentPushed) {
         BSONObj entryObj = extractEmbeddedOplogDocument(*lastDocumentPushed);
         entryObj.shareOwnershipWith(*lastDocumentPushed);
@@ -353,7 +353,7 @@ StatusWith<OplogBuffer::Value> OplogBufferCollection::findByTimestamp(OperationC
 Status OplogBufferCollection::seekToTimestamp(OperationContext* opCtx,
                                               const Timestamp& ts,
                                               SeekStrategy exact) {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     BSONObj docWithTimestamp;
     auto docWithStatus = _getDocumentWithTimestamp(opCtx, ts);
     if (docWithStatus.isOK()) {
@@ -370,7 +370,7 @@ Status OplogBufferCollection::seekToTimestamp(OperationContext* opCtx,
         _lastPoppedKey = key;
     } else {
         // The document with the requested timestamp was found.  _lastPoppedKey will be set to that
-        // document's timestamp once the document is popped from the peek cache in _pop_inlock().
+        // document's timestamp once the document is popped from the peek cache in _pop().
         _lastPoppedKey = {};
         _peekCache.push(docWithTimestamp);
     }
@@ -385,8 +385,8 @@ Status OplogBufferCollection::seekToTimestamp(OperationContext* opCtx,
     return Status::OK();
 }
 
-boost::optional<OplogBuffer::Value> OplogBufferCollection::_lastDocumentPushed_inlock(
-    OperationContext* opCtx) const {
+boost::optional<OplogBuffer::Value> OplogBufferCollection::_lastDocumentPushed(
+    WithLock lk, OperationContext* opCtx) const {
     if (_count == 0) {
         return boost::none;
     }
@@ -402,9 +402,8 @@ boost::optional<OplogBuffer::Value> OplogBufferCollection::_lastDocumentPushed_i
     return docs.front();
 }
 
-bool OplogBufferCollection::_pop_inlock(OperationContext* opCtx, Value* value) {
-    BSONObj docFromCollection =
-        _peek_inlock(opCtx, PeekMode::kReturnUnmodifiedDocumentFromCollection);
+bool OplogBufferCollection::_pop(WithLock lk, OperationContext* opCtx, Value* value) {
+    BSONObj docFromCollection = _peek(lk, opCtx, PeekMode::kReturnUnmodifiedDocumentFromCollection);
     _lastPoppedKey = docFromCollection[kIdFieldName].wrap("");
     *value = extractEmbeddedOplogDocument(docFromCollection).getOwned();
 
@@ -421,7 +420,7 @@ bool OplogBufferCollection::_pop_inlock(OperationContext* opCtx, Value* value) {
     return true;
 }
 
-BSONObj OplogBufferCollection::_peek_inlock(OperationContext* opCtx, PeekMode peekMode) {
+BSONObj OplogBufferCollection::_peek(WithLock lk, OperationContext* opCtx, PeekMode peekMode) {
     invariant(_count > 0);
 
     BSONObj startKey;
@@ -485,7 +484,7 @@ void OplogBufferCollection::_dropCollection(OperationContext* opCtx) {
 }
 
 Timestamp OplogBufferCollection::getLastPushedTimestamp() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     uassert(8359601,
             "preload() might have failed. So clear() should be called before reading "
             "'lastPushedTimestamp'",
@@ -494,13 +493,13 @@ Timestamp OplogBufferCollection::getLastPushedTimestamp() const {
 }
 
 Timestamp OplogBufferCollection::getLastPoppedTimestamp_forTest() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _lastPoppedKey.isEmpty() ? Timestamp()
                                     : _lastPoppedKey[""].Obj()[kTimestampFieldName].timestamp();
 }
 
 std::queue<BSONObj> OplogBufferCollection::getPeekCache_forTest() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _peekCache;
 }
 

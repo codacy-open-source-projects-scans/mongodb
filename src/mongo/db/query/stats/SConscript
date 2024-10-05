@@ -21,7 +21,6 @@ env.CppUnitTest(
         "$BUILD_DIR/mongo/db/query/datetime/date_time_support",
         "$BUILD_DIR/mongo/db/query/query_test_service_context",
         "$BUILD_DIR/mongo/db/query_expressions",
-        "$BUILD_DIR/mongo/db/repl/drop_pending_collection_reaper",
         "$BUILD_DIR/mongo/db/repl/oplog",
         "$BUILD_DIR/mongo/db/repl/optime",
         "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
@@ -108,9 +107,19 @@ env.CppUnitTest(
 )
 
 env.CppUnitTest(
-    target="array_histogram_test",
+    target="ce_histogram_test",
     source=[
-        "array_histogram_test.cpp",
+        "ce_histogram_test.cpp",
+    ],
+    LIBDEPS=[
+        "stats_test_utils",
+    ],
+)
+
+env.CppUnitTest(
+    target="value_utils_test",
+    source=[
+        "value_utils_test.cpp",
     ],
     LIBDEPS=[
         "stats_test_utils",

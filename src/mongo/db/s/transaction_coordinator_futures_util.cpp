@@ -117,14 +117,14 @@ AsyncWorkScheduler::AsyncWorkScheduler(ServiceContext* serviceContext,
 
 AsyncWorkScheduler::~AsyncWorkScheduler() {
     {
-        stdx::lock_guard<Latch> lg(_mutex);
+        stdx::lock_guard<stdx::mutex> lg(_mutex);
         invariant(_quiesced(lg));
     }
 
     if (!_parent)
         return;
 
-    stdx::lock_guard<Latch> lg(_parent->_mutex);
+    stdx::lock_guard<stdx::mutex> lg(_parent->_mutex);
     _parent->_childSchedulers.erase(_itToRemove);
     _parent->_notifyAllTasksComplete(lg);
 }
@@ -152,9 +152,10 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
             }
             return false;
         }))) {
-        return ResponseStatus{BSON("code" << failPointErrorCode << "ok" << false << "errmsg"
-                                          << "fail point"),
-                              Milliseconds(1)};
+        return ResponseStatus::make_forTest(BSON("code" << failPointErrorCode << "ok" << false
+                                                        << "errmsg"
+                                                        << "fail point"),
+                                            Milliseconds(1));
     }
 
     if (isSelfShard) {
@@ -168,8 +169,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
 
             // Note: This internal authorization is tied to the lifetime of the client, which will
             // be destroyed by 'scheduleWork' immediately after this lambda ends
-            AuthorizationSession::get(opCtx->getClient())
-                ->grantInternalAuthorization(opCtx->getClient());
+            AuthorizationSession::get(opCtx->getClient())->grantInternalAuthorization();
 
             if (MONGO_unlikely(hangWhileTargetingLocalHost.shouldFail(
                     [&](BSONObj data) { return shouldActivateFailpoint(commandObj, data); }))) {
@@ -196,7 +196,9 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
             // 'ResponseStatus' is the response format of a remote request sent over the network
             // so we simulate that format manually here, since we sent the request over the
             // loopback.
-            return ResponseStatus{replyOpMsg.body.getOwned(), _executor->now() - start};
+            return ResponseStatus{HostAndPort("localhost", serverGlobalParams.port),
+                                  replyOpMsg.body.getOwned(),
+                                  _executor->now() - start};
         });
     }
 
@@ -211,7 +213,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
 
             auto pf = makePromiseFuture<ResponseStatus>();
 
-            stdx::unique_lock<Latch> ul(_mutex);
+            stdx::unique_lock<stdx::mutex> ul(_mutex);
             uassertStatusOK(_shutdownStatus);
 
             auto scheduledCommandHandle = uassertStatusOK(_executor->scheduleRemoteCommand(
@@ -239,7 +241,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
                     } else {
                         promise->setError([&] {
                             if (status == ErrorCodes::CallbackCanceled) {
-                                stdx::unique_lock<Latch> ul(_mutex);
+                                stdx::unique_lock<stdx::mutex> ul(_mutex);
                                 return _shutdownStatus.isOK() ? status : _shutdownStatus;
                             }
                             return status;
@@ -254,7 +256,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
 
             return std::move(pf.future).tapAll(
                 [this, it = std::move(it)](StatusWith<ResponseStatus> s) {
-                    stdx::lock_guard<Latch> lg(_mutex);
+                    stdx::lock_guard<stdx::mutex> lg(_mutex);
                     _activeHandles.erase(it);
                     _notifyAllTasksComplete(lg);
                 });
@@ -263,7 +265,7 @@ Future<executor::TaskExecutor::ResponseStatus> AsyncWorkScheduler::scheduleRemot
 
 std::unique_ptr<AsyncWorkScheduler> AsyncWorkScheduler::makeChildScheduler() {
 
-    stdx::lock_guard<Latch> lg(_mutex);
+    stdx::lock_guard<stdx::mutex> lg(_mutex);
     // This is to enable access to the private AsyncWorkScheduler ctor.
     std::unique_ptr<AsyncWorkScheduler> child(new AsyncWorkScheduler(_serviceContext, this, lg));
 
@@ -276,7 +278,7 @@ std::unique_ptr<AsyncWorkScheduler> AsyncWorkScheduler::makeChildScheduler() {
 void AsyncWorkScheduler::shutdown(Status status) {
     invariant(!status.isOK());
 
-    stdx::lock_guard<Latch> lg(_mutex);
+    stdx::lock_guard<stdx::mutex> lg(_mutex);
     if (!_shutdownStatus.isOK())
         return;
 
@@ -297,7 +299,7 @@ void AsyncWorkScheduler::shutdown(Status status) {
 }
 
 void AsyncWorkScheduler::join() {
-    stdx::unique_lock<Latch> ul(_mutex);
+    stdx::unique_lock<stdx::mutex> ul(_mutex);
     _allListsEmptyCV.wait(ul, [&] {
         return _activeOpContexts.empty() && _activeHandles.empty() && _childSchedulers.empty();
     });

@@ -53,8 +53,8 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/vector_clock_metadata_hook.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
@@ -331,17 +331,17 @@ private:
     /**
      * Schedules the _runQuery function to run in a separate thread.
      */
-    void _doStartup_inlock() override;
+    void _doStartup(WithLock) override;
 
     /**
      * Shuts down the DBClientCursor and DBClientConnection. Uses the connection's
      * shutdownAndDisallowReconnect function to interrupt it.
      */
-    void _doShutdown_inlock() noexcept override;
+    void _doShutdown(WithLock) noexcept override;
 
     void _preJoin() noexcept override {}
 
-    Mutex* _getMutex() noexcept override;
+    stdx::mutex* _getMutex() noexcept override;
 
     // ============= End AbstractAsyncComponent overrides ==============
 

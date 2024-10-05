@@ -44,9 +44,9 @@
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
@@ -101,9 +101,16 @@ public:
 
     PseudoRandom* getRandomNumberGenerator();
 
-    Future<RemoteCommandResponse> runCommand(const TaskExecutor::CallbackHandle& cbHandle,
-                                             RemoteCommandRequest rcroa,
-                                             const std::shared_ptr<Baton>& baton = nullptr);
+    /**
+     * Runs a command, returning a future representing its response. When waiting on this future,
+     * use the interruptible returned by interruptible() and only do so from one thread.
+     */
+    Future<RemoteCommandResponse> runCommand(
+        const TaskExecutor::CallbackHandle& cbHandle,
+        RemoteCommandRequest request,
+        const CancellationToken& token = CancellationToken::uncancelable());
+
+    void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle);
 
     /**
      * Runs a command on the fixture NetworkInterface and asserts it suceeded.
@@ -116,8 +123,16 @@ public:
         std::function<void(const RemoteCommandResponse&)> exhaustUtilCB,
         const BatonHandle& baton = nullptr);
 
+    /**
+     * Runs a command synchronously, returning its response. While this executes, no other thread
+     * may use interruptible().
+     */
     RemoteCommandResponse runCommandSync(RemoteCommandRequest& request);
 
+    /**
+     * Asserts that a command succeeds or fails in some disposition. While these execute, no other
+     * thread may use interruptible().
+     */
     void assertCommandOK(const DatabaseName& db,
                          const BSONObj& cmd,
                          Milliseconds timeoutMillis = Minutes(5),
@@ -186,6 +201,19 @@ public:
     FailPointGuard configureFailCommand(StringData failCommand,
                                         boost::optional<ErrorCodes::Error> errorCode = boost::none,
                                         boost::optional<Milliseconds> blockTime = boost::none);
+
+    /**
+     * Returns a Baton that can be used to run commands on, or nullptr for reactor-only operation.
+     * Implicitly used by runCommand, cancelCommand, runCommandSync, and assertCommand* variants.
+     */
+    virtual BatonHandle baton() {
+        return nullptr;
+    }
+
+    /** Returns an Interruptible appropriate for the Baton returned from baton(). */
+    virtual Interruptible* interruptible() {
+        return Interruptible::notInterruptible();
+    }
 
 private:
     void _onSchedulingCommand();

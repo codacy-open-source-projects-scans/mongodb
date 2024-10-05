@@ -2159,6 +2159,14 @@ export class ReplSetTest {
         var primary = this.getPrimary();
         assert(primary, 'calling getPrimary() failed');
 
+        // Ensure that the current primary isn't in the secondaries list from a stale
+        // determineLiveSecondaries call. Otherwise we will mistakenly freeze the current primary.
+        const primIndex = secondaries.indexOf(primary);
+        if (primIndex > -1) {
+            secondaries.splice(primIndex, 1);
+        }
+        checkerFunctionArgs.push(secondaries);
+
         // Prevent an election, which could start, then hang due to the fsyncLock.
         jsTestLog(`Freezing nodes: [${secondaries.map((n) => n.host)}]`);
         secondaries.forEach(secondary => this.freeze(secondary));
@@ -2220,7 +2228,7 @@ export class ReplSetTest {
         var collectionPrinted = new Set();
 
         function checkDBHashesForReplSet(
-            rst, dbDenylist = [], secondaries, msgPrefix, ignoreUUIDs) {
+            rst, dbDenylist = [], msgPrefix, ignoreUUIDs, secondaries) {
             // We don't expect the local database to match because some of its
             // collections are not replicated.
             dbDenylist.push('local');
@@ -2336,30 +2344,23 @@ export class ReplSetTest {
         }
 
         const liveSecondaries = _determineLiveSecondaries(this);
-        this.checkReplicaSet(checkDBHashesForReplSet,
-                             liveSecondaries,
-                             this,
-                             excludedDBs,
-                             liveSecondaries,
-                             msgPrefix,
-                             ignoreUUIDs);
+        this.checkReplicaSet(
+            checkDBHashesForReplSet, liveSecondaries, this, excludedDBs, msgPrefix, ignoreUUIDs);
     }
 
     checkOplogs(msgPrefix) {
         var liveSecondaries = _determineLiveSecondaries(this);
-        this.checkReplicaSet(checkOplogs, liveSecondaries, this, liveSecondaries, msgPrefix);
+        this.checkReplicaSet(checkOplogs, liveSecondaries, this, msgPrefix);
     }
 
     checkPreImageCollection(msgPrefix) {
         var liveSecondaries = _determineLiveSecondaries(this);
-        this.checkReplicaSet(
-            checkPreImageCollection, liveSecondaries, this, liveSecondaries, msgPrefix);
+        this.checkReplicaSet(checkPreImageCollection, liveSecondaries, this, msgPrefix);
     }
 
     checkChangeCollection(msgPrefix) {
         var liveSecondaries = _determineLiveSecondaries(this);
-        this.checkReplicaSet(
-            checkChangeCollection, liveSecondaries, this, liveSecondaries, msgPrefix);
+        this.checkReplicaSet(checkChangeCollection, liveSecondaries, this, msgPrefix);
     }
 
     /**
@@ -3188,11 +3189,15 @@ function _constructStartNewInstances(rst, opts) {
     }
 }
 
+function _newMongo(host) {
+    return new Mongo(host, undefined, {gRPC: false});
+}
+
 /**
  * Constructor, which instantiates the ReplSetTest object from an existing set.
  */
 function _constructFromExistingSeedNode(rst, seedNode) {
-    const conn = new Mongo(seedNode);
+    const conn = _newMongo(seedNode);
     if (jsTest.options().keyFile) {
         rst.keyFile = jsTest.options().keyFile;
     }
@@ -3204,7 +3209,7 @@ function _constructFromExistingSeedNode(rst, seedNode) {
     rst.nodes = existingNodes.map(node => {
         // Note: the seed node is required to be operational in order for the Mongo
         // shell to connect to it. In this code there is no fallback to other nodes.
-        let conn = new Mongo(node);
+        let conn = _newMongo(node);
         conn.name = conn.host;
         return conn;
     });
@@ -3235,7 +3240,7 @@ function _constructFromExistingNodes(rst, {
 
     let i = 0;
     rst.nodes = nodeHosts.map((node) => {
-        const conn = Mongo(node);
+        const conn = _newMongo(node);
         conn.name = conn.host;
         conn.port = node.split(':')[1];
         if (pidValue !== undefined && pidValue[i] !== undefined) {
@@ -3575,8 +3580,11 @@ const ReverseReader = function(mongo, coll, query) {
  * Check oplogs on all nodes, by reading from the last time. Since the oplog is a capped
  * collection, each node may not contain the same number of entries and stop if the cursor
  * is exhausted on any node being checked.
+ *
+ * `secondaries` must be the last argument since in checkReplicaSet we explicitly append the live
+ * secondaries to the end of the parameter list after ensuring that the current primary is excluded.
  */
-function checkOplogs(rst, secondaries, msgPrefix = 'checkOplogs') {
+function checkOplogs(rst, msgPrefix = 'checkOplogs', secondaries) {
     secondaries = secondaries || rst._secondaries;
 
     function assertOplogEntriesEq(oplogEntry0, oplogEntry1, reader0, reader1, prevOplogEntry) {
@@ -3735,8 +3743,11 @@ function dumpPreImagesCollection(msgPrefix, node, nsUUID, timestamp, limit) {
  * Check preimages on all nodes, by reading reading from the last time. Since the preimage may
  * or may not be maintained independently, each node may not contain the same number of entries
  * and stop if the cursor is exhausted on any node being checked.
+ *
+ * `secondaries` must be the last argument since in checkReplicaSet we explicitly append the live
+ * secondaries to the end of the parameter list after ensuring that the current primary is excluded.
  */
-function checkPreImageCollection(rst, secondaries, msgPrefix = 'checkPreImageCollection') {
+function checkPreImageCollection(rst, msgPrefix = 'checkPreImageCollection', secondaries) {
     secondaries = secondaries || rst._secondaries;
 
     const originalPreferences = [];
@@ -3940,8 +3951,11 @@ function checkTenantChangeCollection(
  * Check change_collection for all tenants on all nodes, by doing a reverse scan. This check
  * accounts for the fact that each node might independently truncate the change collection, and
  * not contain the same number of entries.
+ *
+ * `secondaries` must be the last argument since in checkReplicaSet we explicitly append the live
+ * secondaries to the end of the parameter list after ensuring that the current primary is excluded.
  */
-function checkChangeCollection(rst, secondaries, msgPrefix = 'checkChangeCollection') {
+function checkChangeCollection(rst, msgPrefix = 'checkChangeCollection', secondaries) {
     secondaries = secondaries || rst._secondaries;
     secondaries = secondaries.filter((node) => !isNodeArbiter(node));
 

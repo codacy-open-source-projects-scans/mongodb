@@ -94,17 +94,17 @@ SyncSourceResolver::~SyncSourceResolver() {
 }
 
 bool SyncSourceResolver::isActive() const {
-    stdx::lock_guard<Latch> lock(_mutex);
-    return _isActive_inlock();
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return _isActive(lock);
 }
 
-bool SyncSourceResolver::_isActive_inlock() const {
+bool SyncSourceResolver::_isActive(WithLock lk) const {
     return State::kRunning == _state || State::kShuttingDown == _state;
 }
 
 Status SyncSourceResolver::startup() {
     {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         switch (_state) {
             case State::kPreStart:
                 _state = State::kRunning;
@@ -122,7 +122,7 @@ Status SyncSourceResolver::startup() {
 }
 
 void SyncSourceResolver::shutdown() {
-    stdx::lock_guard<Latch> lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     // Transition directly from PreStart to Complete if not started yet.
     if (State::kPreStart == _state) {
         _state = State::kComplete;
@@ -143,12 +143,12 @@ void SyncSourceResolver::shutdown() {
 }
 
 void SyncSourceResolver::join() {
-    stdx::unique_lock<Latch> lk(_mutex);
-    _condition.wait(lk, [this]() { return !_isActive_inlock(); });
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    _condition.wait(lk, [&]() { return !_isActive(lk); });
 }
 
 bool SyncSourceResolver::_isShuttingDown() const {
-    stdx::lock_guard<Latch> lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     return State::kShuttingDown == _state;
 }
 
@@ -194,7 +194,7 @@ std::unique_ptr<Fetcher> SyncSourceResolver::_makeFirstOplogEntryFetcher(
 }
 
 Status SyncSourceResolver::_scheduleFetcher(std::unique_ptr<Fetcher> fetcher) {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     // TODO SERVER-27499 need to check if _state is kShuttingDown inside the mutex.
     // Must schedule fetcher inside lock in case fetcher's callback gets invoked immediately by task
     // executor.
@@ -394,7 +394,7 @@ Status SyncSourceResolver::_finishCallback(const SyncSourceResolverResponse& res
                       "error"_attr = exceptionToStatus());
     }
 
-    stdx::lock_guard<Latch> lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     invariant(_state != State::kComplete);
     _state = State::kComplete;
     _condition.notify_all();

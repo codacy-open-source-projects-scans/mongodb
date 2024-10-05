@@ -62,8 +62,8 @@
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/duration.h"
@@ -153,19 +153,17 @@ public:
                 stdx::lock_guard lg{_m};
                 _requests.emplace_back(cmdBSON, dbName, targets[0], std::move(p));
                 _hasRequestsCV.notify_one();
-                return std::move(f).onCompletion([targetUsed =
-                                                      targets[0]](StatusWith<BSONObj> resp) {
-                    if (!resp.isOK()) {
-                        uassertStatusOK(Status{AsyncRPCErrorInfo(resp.getStatus(), targetUsed),
-                                               "Remote command execution failed"});
-                    }
-                    Status maybeError(
-                        detail::makeErrorIfNeeded(executor::RemoteCommandResponse(
-                                                      targetUsed, resp.getValue(), Microseconds(1)),
-                                                  targetUsed));
-                    uassertStatusOK(maybeError);
-                    return detail::AsyncRPCInternalResponse{resp.getValue(), targetUsed};
-                });
+                return std::move(f).onCompletion(
+                    [targetUsed = targets[0]](StatusWith<BSONObj> resp) {
+                        if (!resp.isOK()) {
+                            uassertStatusOK(Status{AsyncRPCErrorInfo(resp.getStatus(), targetUsed),
+                                                   "Remote command execution failed"});
+                        }
+                        Status maybeError(detail::makeErrorIfNeeded(executor::RemoteCommandResponse(
+                            targetUsed, resp.getValue(), Microseconds(1))));
+                        uassertStatusOK(maybeError);
+                        return detail::AsyncRPCInternalResponse{resp.getValue(), targetUsed};
+                    });
             });
     }
 
@@ -203,7 +201,7 @@ private:
     // All requests that have been scheduled on the mock.
     std::deque<RequestInfo> _requests;
     // Protects the above _requests queue.
-    Mutex _m;
+    stdx::mutex _m;
     stdx::condition_variable _hasRequestsCV;
 };
 
@@ -281,8 +279,7 @@ public:
                                            "Remote command execution failed"});
                 }
                 Status maybeError(detail::makeErrorIfNeeded(
-                    executor::RemoteCommandResponse(targets[0], ans.getValue(), Microseconds(1)),
-                    targets[0]));
+                    executor::RemoteCommandResponse(targets[0], ans.getValue(), Microseconds(1))));
                 uassertStatusOK(maybeError);
                 return detail::AsyncRPCInternalResponse{ans.getValue(), targets[0]};
             });
@@ -380,7 +377,7 @@ private:
     std::vector<Expectation> _expectations;
     std::vector<Request> _unexpectedRequests;
     // Protects the above _expectations queue.
-    Mutex _m;
+    stdx::mutex _m;
 };
 
 std::ostream& operator<<(std::ostream& s, const AsyncMockAsyncRPCRunner::Request& o) {

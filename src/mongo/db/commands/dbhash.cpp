@@ -276,10 +276,6 @@ public:
                 desiredCollections.count(collNss.coll().toString()) == 0)
                 return true;
 
-            // Don't include 'drop pending' collections.
-            if (collNss.isDropPendingNamespace())
-                return true;
-
             if (collection->isCapped()) {
                 cappedCollectionSet.insert(collNss.coll().toString());
             }
@@ -391,8 +387,6 @@ private:
         // the one before upgrade.
         bool includeRids = collection->areRecordIdsReplicated() && !excludeRecordIds;
 
-        // TODO SERVER-86692: This logic can be simplified once all capped, clustered, and
-        // replicated recordId collections always use a collection scan.
         if (desc && !includeRids) {
             exec = InternalPlanner::indexScan(opCtx,
                                               &collection,
@@ -403,7 +397,7 @@ private:
                                               PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                               InternalPlanner::FORWARD,
                                               InternalPlanner::IXSCAN_FETCH);
-        } else if (collection->isCapped() || collection->isClustered() || includeRids) {
+        } else if (collection->isClustered() || includeRids) {
             exec = InternalPlanner::collectionScan(
                 opCtx, &collection, PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
         } else {

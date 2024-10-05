@@ -42,8 +42,8 @@
 #include "mongo/db/repl/oplog_fetcher.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
@@ -92,13 +92,13 @@ public:
 private:
     // =============== AbstractAsyncComponent overrides ================
 
-    void _doStartup_inlock() override;
+    void _doStartup(WithLock) override;
 
-    void _doShutdown_inlock() noexcept override;
+    void _doShutdown(WithLock) noexcept override;
 
     void _preJoin() noexcept override {}
 
-    Mutex* _getMutex() noexcept override;
+    stdx::mutex* _getMutex() noexcept override;
 
     // ============= End AbstractAsyncComponent overrides ==============
     class TestCodeBlock {

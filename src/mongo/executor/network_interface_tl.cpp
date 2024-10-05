@@ -279,13 +279,19 @@ std::string NetworkInterfaceTL::getHostName() {
 }
 
 void NetworkInterfaceTL::startup() {
+    stdx::lock_guard lk(_mutex);
+    if (_state != kDefault) {
+        LOGV2_INFO(9446800,
+                   "Skipping NetworkInterface startup: interface is in an invalid startup state",
+                   "state"_attr = toString(_state));
+        return;
+    }
+
     _ioThread = stdx::thread([this] {
         setThreadName(_instanceName);
         _run();
     });
 
-    stdx::lock_guard lk(_mutex);
-    invariant(_state == kDefault, "Network interface has already started");
     _state = kStarted;
 }
 
@@ -419,7 +425,7 @@ void NetworkInterfaceTL::_registerCommand(const TaskExecutor::CallbackHandle& cb
     }
 
     // Okay to inline this callback since all it does is log.
-    cmdState->_cancelSource.token().onCancel().unsafeToInlineFuture().getAsync(
+    cmdState->cancelSource.token().onCancel().unsafeToInlineFuture().getAsync(
         [id = cmdState->request.id](Status s) {
             if (!s.isOK()) {
                 return;
@@ -432,12 +438,14 @@ NetworkInterfaceTL::CommandStateBase::CommandStateBase(
     NetworkInterfaceTL* interface_,
     RemoteCommandRequest request_,
     const TaskExecutor::CallbackHandle& cbHandle_,
-    const BatonHandle& baton_)
+    const BatonHandle& baton_,
+    const CancellationToken& token)
     : interface(interface_),
       request(std::move(request_)),
       cbHandle(cbHandle_),
       baton(baton_),
-      timer(interface->_reactor->makeTimer()) {}
+      timer(interface->_reactor->makeTimer()),
+      cancelSource(token) {}
 
 NetworkInterfaceTL::CommandStateBase::~CommandStateBase() {
     invariant(!conn);
@@ -447,7 +455,7 @@ NetworkInterfaceTL::CommandStateBase::~CommandStateBase() {
 void NetworkInterfaceTL::CommandStateBase::cancel(Status status) {
     invariant(!status.isOK());
     {
-        stdx::lock_guard<Mutex> lk(cancelMutex);
+        stdx::lock_guard<stdx::mutex> lk(cancelMutex);
         if (!cancelStatus.isOK()) {
             LOGV2_DEBUG(9257001,
                         2,
@@ -467,7 +475,7 @@ void NetworkInterfaceTL::CommandStateBase::cancel(Status status) {
                     "request"_attr = redact(request.toString()),
                     "reason"_attr = status);
     }
-    _cancelSource.cancel();
+    cancelSource.cancel();
 }
 
 AsyncDBClient* NetworkInterfaceTL::CommandStateBase::getClient(
@@ -560,7 +568,8 @@ void NetworkInterfaceTL::_unregisterCommand(const TaskExecutor::CallbackHandle& 
 SemiFuture<RemoteCommandResponse> NetworkInterfaceTL::startCommand(
     const TaskExecutor::CallbackHandle& cbHandle,
     RemoteCommandRequest& request,
-    const BatonHandle& baton) {
+    const BatonHandle& baton,
+    const CancellationToken& token) {
     if (inShutdown()) {
         uassertStatusOK(kNetworkInterfaceShutdownInProgress);
     }
@@ -570,7 +579,7 @@ SemiFuture<RemoteCommandResponse> NetworkInterfaceTL::startCommand(
 
     appendMetadata(&request, _metadataHook);
 
-    auto cmdState = std::make_shared<CommandState>(this, request, cbHandle, baton);
+    auto cmdState = std::make_shared<CommandState>(this, request, cbHandle, baton, token);
     _registerCommand(cmdState->cbHandle, cmdState);
 
     return _runCommand(cmdState).semi();
@@ -595,7 +604,7 @@ Future<RemoteCommandResponse> NetworkInterfaceTL::CommandState::sendRequestImpl(
                    checked_cast<connection_pool_tl::TLConnection*>(conn.get())
                        ->getConnAcquiredTimer();
                return getClient(conn)->runCommandRequest(
-                   std::move(req), baton, std::move(connAcquiredTimer), _cancelSource.token());
+                   std::move(req), baton, std::move(connAcquiredTimer), cancelSource.token());
            })
         .then([this](RemoteCommandResponse response) {
             response.target = request.target;
@@ -617,7 +626,7 @@ Future<RemoteCommandResponse> NetworkInterfaceTL::ExhaustCommandState::sendReque
     finalResponsePromise = std::move(promise);
 
     getClient(conn)
-        ->beginExhaustCommandRequest(req, baton, _cancelSource.token())
+        ->beginExhaustCommandRequest(req, baton, cancelSource.token())
         .thenRunOn(interface->_reactor)
         .getAsync([this](StatusWith<RemoteCommandResponse> swResponse) mutable {
             continueExhaustRequest(swResponse);
@@ -631,7 +640,7 @@ void NetworkInterfaceTL::ExhaustCommandState::continueExhaustRequest(
     StatusWith<RemoteCommandResponse> swResponse) {
     RemoteCommandResponse response;
     if (!swResponse.isOK()) {
-        response = RemoteCommandResponse(std::move(swResponse.getStatus()));
+        response = RemoteCommandResponse(request.target, std::move(swResponse.getStatus()));
     } else {
         response = std::move(swResponse.getValue());
     }
@@ -662,7 +671,7 @@ void NetworkInterfaceTL::ExhaustCommandState::continueExhaustRequest(
 
     // Reset the stopwatch to measure the correct duration for the following reply
     {
-        stdx::lock_guard<Latch> lk(stopwatchMutex);
+        stdx::lock_guard<stdx::mutex> lk(stopwatchMutex);
         stopwatch.restart();
     }
     if (deadline != kNoExpirationDate) {
@@ -672,7 +681,7 @@ void NetworkInterfaceTL::ExhaustCommandState::continueExhaustRequest(
     setTimer();
 
     getClient(conn)
-        ->awaitExhaustCommand(baton, _cancelSource.token())
+        ->awaitExhaustCommand(baton, cancelSource.token())
         .thenRunOn(interface->_reactor)
         .getAsync([this](StatusWith<RemoteCommandResponse> swResponse) mutable {
             continueExhaustRequest(swResponse);
@@ -709,7 +718,7 @@ void NetworkInterfaceTL::cancelCommand(const TaskExecutor::CallbackHandle& cbHan
                                        const BatonHandle&) {
     std::shared_ptr<NetworkInterfaceTL::CommandStateBase> cmdStateToCancel;
     {
-        stdx::unique_lock<Mutex> lk(_mutex);
+        stdx::unique_lock<stdx::mutex> lk(_mutex);
         auto it = _inProgress.find(cbHandle);
         if (it == _inProgress.end()) {
             return;
@@ -786,7 +795,7 @@ SemiFuture<void> NetworkInterfaceTL::setAlarm(Date_t when, const CancellationTok
     auto alarmState = std::make_shared<AlarmState>(this, id, _reactor->makeTimer(), token);
 
     {
-        stdx::lock_guard<Mutex> lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
 
         if (_inShutdown_inlock(lk)) {
             // Check that we've won any possible race with _shutdownAllAlarms();
@@ -803,18 +812,23 @@ SemiFuture<void> NetworkInterfaceTL::setAlarm(Date_t when, const CancellationTok
     auto future =
         alarmState->timer->waitUntil(when, nullptr).tapAll([alarmState](Status status) {});
 
-    alarmState->source.token().onCancel().thenRunOn(_reactor).getAsync(
+    alarmState->source.token().onCancel().unsafeToInlineFuture().getAsync(
         [this, weakAlarmState = std::weak_ptr(alarmState)](Status status) {
             if (!status.isOK()) {
                 return;
             }
 
-            auto alarmState = weakAlarmState.lock();
-            if (!alarmState) {
-                return;
-            }
+            _reactor->schedule([this, weakAlarmState = std::move(weakAlarmState)](Status s) {
+                if (!s.isOK()) {
+                    return;
+                }
+                auto alarmState = weakAlarmState.lock();
+                if (!alarmState) {
+                    return;
+                }
 
-            alarmState->timer->cancel();
+                alarmState->timer->cancel();
+            });
         });
 
     return std::move(future).semi();
@@ -822,7 +836,7 @@ SemiFuture<void> NetworkInterfaceTL::setAlarm(Date_t when, const CancellationTok
 
 void NetworkInterfaceTL::_shutdownAllAlarms() {
     auto alarms = [&] {
-        stdx::unique_lock<Mutex> lk(_mutex);
+        stdx::unique_lock<stdx::mutex> lk(_mutex);
         invariant(_state == kStopping);
         return _inProgressAlarms;
     }();
@@ -836,13 +850,13 @@ void NetworkInterfaceTL::_shutdownAllAlarms() {
     }
 
     {
-        stdx::unique_lock<Mutex> lk(_mutex);
+        stdx::unique_lock<stdx::mutex> lk(_mutex);
         _stoppedCV.wait(lk, [&] { return _inProgressAlarms.empty(); });
     }
 }
 
 void NetworkInterfaceTL::_removeAlarm(std::uint64_t id) {
-    stdx::lock_guard<Mutex> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     auto it = _inProgressAlarms.find(id);
     invariant(it != _inProgressAlarms.end());
     _inProgressAlarms.erase(it);
@@ -906,7 +920,7 @@ SemiFuture<ConnectionPool::ConnectionHandle> NetworkInterfaceTL::CommandStateBas
     if (!failPointStatus.isOK()) {
         return failPointStatus;
     }
-    return pool->get(request.target, request.sslMode, request.timeout, _cancelSource.token());
+    return pool->get(request.target, request.sslMode, request.timeout, cancelSource.token());
 }
 
 ExecutorFuture<RemoteCommandResponse> NetworkInterfaceTL::CommandStateBase::sendRequest(
@@ -1001,7 +1015,7 @@ ExecutorFuture<RemoteCommandResponse> NetworkInterfaceTL::_runCommand(
         .onCompletion([cmdState, this](StatusWith<RemoteCommandResponse> swResponse) noexcept {
             // If the command was cancelled for a reason, return a status that reflects that.
             if (swResponse == ErrorCodes::CallbackCanceled) {
-                stdx::lock_guard<Mutex> lk(cmdState->cancelMutex);
+                stdx::lock_guard<stdx::mutex> lk(cmdState->cancelMutex);
                 if (!cmdState->cancelStatus.isOK()) {
                     swResponse = cmdState->cancelStatus;
                 }
@@ -1011,7 +1025,8 @@ ExecutorFuture<RemoteCommandResponse> NetworkInterfaceTL::_runCommand(
                 if (swResponse.isOK()) {
                     return swResponse.getValue();
                 } else {
-                    return RemoteCommandResponse(std::move(swResponse.getStatus()),
+                    return RemoteCommandResponse(cmdState->request.target,
+                                                 std::move(swResponse.getStatus()),
                                                  cmdState->stopwatch.elapsed());
                 }
             }();

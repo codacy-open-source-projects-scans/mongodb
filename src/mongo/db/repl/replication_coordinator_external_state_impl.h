@@ -58,8 +58,8 @@
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
@@ -69,7 +69,6 @@
 namespace mongo {
 namespace repl {
 
-class DropPendingCollectionReaper;
 class ReplicationProcess;
 class StorageInterface;
 
@@ -83,11 +82,9 @@ class ReplicationCoordinatorExternalStateImpl final : public ReplicationCoordina
         const ReplicationCoordinatorExternalStateImpl&) = delete;
 
 public:
-    ReplicationCoordinatorExternalStateImpl(
-        ServiceContext* service,
-        DropPendingCollectionReaper* dropPendingCollectionReaper,
-        StorageInterface* storageInterface,
-        ReplicationProcess* replicationProcess);
+    ReplicationCoordinatorExternalStateImpl(ServiceContext* service,
+                                            StorageInterface* storageInterface,
+                                            ReplicationProcess* replicationProcess);
     ~ReplicationCoordinatorExternalStateImpl() override;
     void startThreads() override;
     void startSteadyStateReplication(OperationContext* opCtx,
@@ -134,7 +131,6 @@ public:
     void updateLastAppliedSnapshot(const OpTime& optime) final;
     bool snapshotsEnabled() const override;
     void notifyOplogMetadataWaiters(const OpTime& committedOpTime) override;
-    boost::optional<OpTime> getEarliestDropPendingOpTime() const final;
     double getElectionTimeoutOffsetLimitFraction() const override;
     bool isReadConcernSnapshotSupportedByStorageEngine(OperationContext* opCtx) const override;
     std::size_t getOplogFetcherSteadyStateMaxFetcherRestarts() const override;
@@ -158,7 +154,7 @@ private:
     /**
      * Stops data replication and returns with 'lock' locked.
      */
-    void _stopDataReplication_inlock(OperationContext* opCtx, stdx::unique_lock<Latch>& lock);
+    void _stopDataReplication(OperationContext* opCtx, stdx::unique_lock<stdx::mutex>& lock);
 
     /**
      * Called when the instance transitions to primary in order to notify a potentially sharded host
@@ -205,10 +201,6 @@ private:
     // Flag for guarding against concurrent data replication stopping.
     bool _stoppingDataReplication = false;
     stdx::condition_variable _dataReplicationStopped;
-
-    // Used to clean up drop-pending collections with drop optimes before the current replica set
-    // committed OpTime.
-    DropPendingCollectionReaper* _dropPendingCollectionReaper;
 
     StorageInterface* _storageInterface;
 

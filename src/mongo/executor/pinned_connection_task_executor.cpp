@@ -85,12 +85,12 @@ public:
     }
 
     // Run callback with a CallbackCanceled error.
-    static void runCallbackCanceled(stdx::unique_lock<Latch>& lk,
+    static void runCallbackCanceled(stdx::unique_lock<stdx::mutex>& lk,
                                     RequestAndCallback rcb,
                                     TaskExecutor* exec) {
         CallbackHandle cbHandle;
         setCallbackForHandle(&cbHandle, rcb.second);
-        auto errorResponse = RemoteCommandResponse(boost::none, kCallbackCanceledErrorStatus);
+        auto errorResponse = RemoteCommandResponse(rcb.first.target, kCallbackCanceledErrorStatus);
         TaskExecutor::RemoteCommandCallbackFn callback;
         using std::swap;
         swap(rcb.second->callback, callback);
@@ -99,15 +99,14 @@ public:
     }
 
     // Run callback with the provided result.
-    static void runCallbackFinished(stdx::unique_lock<Latch>& lk,
+    static void runCallbackFinished(stdx::unique_lock<stdx::mutex>& lk,
                                     RequestAndCallback rcb,
                                     TaskExecutor* exec,
-                                    const StatusWith<RemoteCommandResponse>& result,
-                                    boost::optional<HostAndPort> targetUsed) {
+                                    const StatusWith<RemoteCommandResponse>& result) {
         // Convert the result into a RemoteCommandResponse unconditionally.
-        RemoteCommandResponse asRcr =
-            result.isOK() ? result.getValue() : RemoteCommandResponse(result.getStatus());
-        asRcr.target = targetUsed;
+        RemoteCommandResponse asRcr = result.isOK()
+            ? result.getValue()
+            : RemoteCommandResponse(rcb.first.target, result.getStatus());
         CallbackHandle cbHandle;
         setCallbackForHandle(&cbHandle, rcb.second);
         TaskExecutor::RemoteCommandCallbackFn callback;
@@ -179,7 +178,7 @@ StatusWith<TaskExecutor::CallbackHandle> PinnedConnectionTaskExecutor::scheduleR
     const RemoteCommandCallbackFn& cb,
     const BatonHandle& baton) {
 
-    stdx::unique_lock<Latch> lk{_mutex};
+    stdx::unique_lock<stdx::mutex> lk{_mutex};
     if (_state != State::running) {
         return {ErrorCodes::ShutdownInProgress, "Shutdown in progress"};
     }
@@ -279,7 +278,7 @@ Future<executor::RemoteCommandResponse> PinnedConnectionTaskExecutor::_runSingle
 }
 
 boost::optional<PinnedConnectionTaskExecutor::RequestAndCallback>
-PinnedConnectionTaskExecutor::_getFirstUncanceledRequest(stdx::unique_lock<Latch>& lk) {
+PinnedConnectionTaskExecutor::_getFirstUncanceledRequest(stdx::unique_lock<stdx::mutex>& lk) {
     while (!_requestQueue.empty()) {
         auto req = std::move(_requestQueue.front());
         _requestQueue.pop_front();
@@ -292,7 +291,7 @@ PinnedConnectionTaskExecutor::_getFirstUncanceledRequest(stdx::unique_lock<Latch
     return boost::none;
 }
 
-void PinnedConnectionTaskExecutor::_doNetworking(stdx::unique_lock<Latch>&& lk) {
+void PinnedConnectionTaskExecutor::_doNetworking(stdx::unique_lock<stdx::mutex>&& lk) {
     _isDoingNetworking = true;
     // Find the first non-canceled request.
     boost::optional<RequestAndCallback> maybeReqToRun = _getFirstUncanceledRequest(lk);
@@ -316,7 +315,7 @@ void PinnedConnectionTaskExecutor::_doNetworking(stdx::unique_lock<Latch>&& lk) 
         .then([req, this]() { return _runSingleCommand(req.first, req.second); })
         .thenRunOn(makeGuaranteedExecutor(req.second->baton, _cancellationExecutor))
         .getAsync([req, this](StatusWith<RemoteCommandResponse> result) {
-            stdx::unique_lock<Latch> lk{_mutex};
+            stdx::unique_lock<stdx::mutex> lk{_mutex};
             _inProgressRequest.reset();
             // If we used the _stream, update it accordingly.
             if (req.second->startedNetworking) {
@@ -344,12 +343,7 @@ void PinnedConnectionTaskExecutor::_doNetworking(stdx::unique_lock<Latch>&& lk) 
                 // stream. In any case, we first complete the current request
                 // by invoking it's callback:
                 state = CallbackState::State::kDone;
-                // Get the target if we successfully acquired a stream.
-                boost::optional<HostAndPort> target = boost::none;
-                if (_stream) {
-                    target = _stream->getClient()->remote();
-                }
-                CallbackState::runCallbackFinished(lk, req, this, result, target);
+                CallbackState::runCallbackFinished(lk, req, this, result);
             }
             // If we weren't able to acquire a stream, shut-down.
             if (!_stream) {

@@ -68,10 +68,10 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_severity.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/reply_interface.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -198,7 +198,7 @@ executor::RemoteCommandResponse initWireVersion(
 
     if (auto status = DBClientSession::appendClientMetadata(applicationName, &bob);
         !status.isOK()) {
-        return status;
+        return {conn->getServerHostAndPort(), status};
     }
 
     conn->getCompressorManager().clientBegin(&bob);
@@ -229,10 +229,11 @@ executor::RemoteCommandResponse initWireVersion(
 
     conn->getCompressorManager().clientFinish(helloObj);
 
-    return executor::RemoteCommandResponse{std::move(helloObj), finish - start};
+    return executor::RemoteCommandResponse{
+        conn->getServerHostAndPort(), std::move(helloObj), finish - start};
 
 } catch (...) {
-    return exceptionToStatus();
+    return {conn->getServerHostAndPort(), exceptionToStatus()};
 }
 
 boost::optional<Milliseconds> clampTimeout(double timeoutInSec) {
@@ -366,7 +367,7 @@ void DBClientSession::connectNoHello(
     }
 
     {
-        stdx::lock_guard<Latch> lk(_sessionMutex);
+        stdx::lock_guard<stdx::mutex> lk(_sessionMutex);
         if (_stayFailed.load()) {
             // This object is still in a failed state. The session we just created will be destroyed
             // immediately since we aren't holding on to it.
@@ -391,7 +392,7 @@ void DBClientSession::_markFailed(FailAction action) {
         } else if (action == kReleaseSession) {
             std::shared_ptr<transport::Session> destroyedOutsideMutex;
 
-            stdx::lock_guard<Latch> lk(_sessionMutex);
+            stdx::lock_guard<stdx::mutex> lk(_sessionMutex);
             _session.swap(destroyedOutsideMutex);
         }
     }
@@ -434,12 +435,12 @@ bool DBClientSession::isStillConnected() {
 }
 
 void DBClientSession::shutdown() {
-    stdx::lock_guard<Latch> lk(_sessionMutex);
+    stdx::lock_guard<stdx::mutex> lk(_sessionMutex);
     _markFailed(kKillSession);
 }
 
 void DBClientSession::shutdownAndDisallowReconnect() {
-    stdx::lock_guard<Latch> lk(_sessionMutex);
+    stdx::lock_guard<stdx::mutex> lk(_sessionMutex);
     _stayFailed.store(true);
     _markFailed(kKillSession);
 }

@@ -102,9 +102,9 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
@@ -156,9 +156,9 @@ using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
 using executor::RemoteCommandResponse;
 
-using LockGuard = stdx::lock_guard<Latch>;
+using LockGuard = stdx::lock_guard<stdx::mutex>;
 using NetworkGuard = executor::NetworkInterfaceMock::InNetworkGuard;
-using UniqueLock = stdx::unique_lock<Latch>;
+using UniqueLock = stdx::unique_lock<stdx::mutex>;
 
 const BSONObj kListDatabasesFailPointData = BSON("cloner"
                                                  << "AllDatabaseCloner"
@@ -243,7 +243,7 @@ public:
                                  const BSONObj& obj) {
         NetworkInterfaceMock* net = getNet();
         Milliseconds millis(0);
-        RemoteCommandResponse response(obj, millis);
+        RemoteCommandResponse response = RemoteCommandResponse::make_forTest(obj, millis);
         LOGV2(24159,
               "Sending response for network request",
               "dbname"_attr = noi->getRequest().dbname,
@@ -261,7 +261,9 @@ public:
                   "errorStatus"_attr = errorStatus);
         }
         verifyNextRequestCommandName(cmdName);
-        net->scheduleResponse(net->getNextReadyRequest(), net->now(), errorStatus);
+        net->scheduleResponse(net->getNextReadyRequest(),
+                              net->now(),
+                              RemoteCommandResponse::make_forTest(errorStatus));
     }
 
     void processNetworkResponse(std::string cmdName, const BSONObj& obj) {
@@ -655,7 +657,7 @@ RemoteCommandResponse makeCursorResponse(CursorId cursorId,
     }
     ASSERT_OK(oqMetadata.writeToMetadata(&bob));
     bob.append("ok", 1);
-    return {bob.obj(), Milliseconds()};
+    return RemoteCommandResponse::make_forTest(bob.obj(), Milliseconds());
 }
 
 /**
@@ -1833,8 +1835,8 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughFCVFetcherCallbackError_Mock
     _mock
         ->expect(BSON("find"
                       << "system.version"),
-                 RemoteCommandResponse(ErrorCodes::OperationFailed,
-                                       "find command failed at sync source"))
+                 RemoteCommandResponse::make_forTest(
+                     Status(ErrorCodes::OperationFailed, "find command failed at sync source")))
         .times(1);
 
     // Start the real work.
@@ -1926,10 +1928,10 @@ TEST_F(InitialSyncerTest, InitialSyncerResendsFindCommandIfFCVFetcherReturnsRetr
 
     // Respond to the first FCV attempt with a retriable error.
     _mock
-        ->expect(
-            BSON("find"
-                 << "system.version"),
-            RemoteCommandResponse(ErrorCodes::HostUnreachable, "host unreachable network error"))
+        ->expect(BSON("find"
+                      << "system.version"),
+                 RemoteCommandResponse::make_forTest(
+                     Status(ErrorCodes::HostUnreachable, "host unreachable network error")))
         .times(1);
     ASSERT_OK(initialSyncer->startup(opCtx.get(), maxAttempts));
 
@@ -2502,9 +2504,9 @@ TEST_F(InitialSyncerTest,
         _mock
             ->expect(BSON("find"
                           << "oplog.rs"),
-                     RemoteCommandResponse(
-                         ErrorCodes::OperationFailed,
-                         "Oplog entry fetcher associated with the stopTimestamp failed"))
+                     RemoteCommandResponse::make_forTest(
+                         Status(ErrorCodes::OperationFailed,
+                                "Oplog entry fetcher associated with the stopTimestamp failed")))
             .times(1);
     }
 
@@ -3749,7 +3751,7 @@ TEST_F(InitialSyncerTest, InitialSyncerCancelsGetNextApplierBatchOnShutdown) {
         // Oplog entry associated with the stopTimestamp.
         processSuccessfulLastOplogEntryFetcherResponse({makeOplogEntryObj(2)});
 
-        // Since we black holed OplogFetcher's find request, _getNextApplierBatch_inlock() will
+        // Since we black holed OplogFetcher's find request, _getNextApplierBatch() will
         // not return any operations for us to apply, leading to _getNextApplierBatchCallback()
         // rescheduling itself at new->now() + _options.getApplierBatchCallbackRetryWait.
     }
@@ -3775,7 +3777,7 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughGetNextApplierBatchInLockErr
 
     ASSERT_TRUE(_replicationProcess->getConsistencyMarkers()->getInitialSyncFlag(opCtx.get()));
 
-    // _getNextApplierBatch_inlock() returns BadValue when it gets an oplog entry with an unexpected
+    // _getNextApplierBatch() returns BadValue when it gets an oplog entry with an unexpected
     // version (not OplogEntry::kOplogVersion).
     auto oplogEntry = makeOplogEntryObj(1);
     auto oplogEntryWithInconsistentVersion =
@@ -3810,7 +3812,7 @@ TEST_F(InitialSyncerTest, InitialSyncerPassesThroughGetNextApplierBatchInLockErr
             processSuccessfulFCVFetcherResponseLastLTS();
 
             // Simulate an OplogFetcher batch with bad oplog entries that will be added to the oplog
-            // buffer and processed by _getNextApplierBatch_inlock().
+            // buffer and processed by _getNextApplierBatch().
             getOplogFetcher()->receiveBatch(1LL, {oplogEntry, oplogEntryWithInconsistentVersion});
         }
 
@@ -3844,13 +3846,13 @@ TEST_F(
 
     ASSERT_TRUE(_replicationProcess->getConsistencyMarkers()->getInitialSyncFlag(opCtx.get()));
 
-    // _getNextApplierBatch_inlock() returns BadValue when it gets an oplog entry with an unexpected
+    // _getNextApplierBatch() returns BadValue when it gets an oplog entry with an unexpected
     // version (not OplogEntry::kOplogVersion).
     auto oplogEntry = makeOplogEntryObj(1);
     auto oplogEntryWithInconsistentVersion =
         makeOplogEntryObj(2, OpTypeEnum::kInsert, OplogEntry::kOplogVersion + 100);
 
-    // Enable 'rsSyncApplyStop' so that _getNextApplierBatch_inlock() returns an empty batch of
+    // Enable 'rsSyncApplyStop' so that _getNextApplierBatch() returns an empty batch of
     // operations instead of a batch containing an oplog entry with a bad version.
     auto failPoint = globalFailPointRegistry().find("rsSyncApplyStop");
     failPoint->setMode(FailPoint::alwaysOn);
@@ -3884,7 +3886,7 @@ TEST_F(
             processSuccessfulFCVFetcherResponseLastLTS();
 
             // Simulate an OplogFetcher batch with bad oplog entries that will be added to the oplog
-            // buffer and processed by _getNextApplierBatch_inlock().
+            // buffer and processed by _getNextApplierBatch().
             getOplogFetcher()->receiveBatch(1LL, {oplogEntry, oplogEntryWithInconsistentVersion});
         }
 
@@ -3892,7 +3894,7 @@ TEST_F(
         processSuccessfulLastOplogEntryFetcherResponse({makeOplogEntryObj(2)});
 
         // Since the 'rsSyncApplyStop' fail point is enabled, InitialSyncer will get an empty
-        // batch of operations from _getNextApplierBatch_inlock() even though the oplog buffer
+        // batch of operations from _getNextApplierBatch() even though the oplog buffer
         // is not empty.
     }
 

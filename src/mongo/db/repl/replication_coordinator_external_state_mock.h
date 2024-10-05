@@ -48,8 +48,8 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -117,7 +117,6 @@ public:
     void updateLastAppliedSnapshot(const OpTime& optime) override;
     bool snapshotsEnabled() const override;
     void notifyOplogMetadataWaiters(const OpTime& committedOpTime) override;
-    boost::optional<OpTime> getEarliestDropPendingOpTime() const final;
     double getElectionTimeoutOffsetLimitFraction() const override;
     bool isReadConcernSnapshotSupportedByStorageEngine(OperationContext* opCtx) const override;
     std::size_t getOplogFetcherSteadyStateMaxFetcherRestarts() const override;

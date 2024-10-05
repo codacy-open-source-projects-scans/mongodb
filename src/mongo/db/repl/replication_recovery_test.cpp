@@ -63,7 +63,6 @@
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
@@ -94,7 +93,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_severity.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/mutex.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
@@ -120,52 +119,52 @@ const NamespaceString testNs = NamespaceString::createNamespaceString_forTest("a
 class StorageInterfaceRecovery : public StorageInterfaceImpl {
 public:
     boost::optional<Timestamp> getRecoveryTimestamp(ServiceContext* serviceCtx) const override {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return _recoveryTimestamp;
     }
 
     void setRecoveryTimestamp(Timestamp recoveryTimestamp) {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         _recoveryTimestamp = recoveryTimestamp;
     }
 
     bool supportsRecoverToStableTimestamp(ServiceContext* serviceCtx) const override {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return _supportsRecoverToStableTimestamp;
     }
 
     void setSupportsRecoverToStableTimestamp(bool supports) {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         _supportsRecoverToStableTimestamp = supports;
     }
 
     bool supportsRecoveryTimestamp(ServiceContext* serviceCtx) const override {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return _supportsRecoveryTimestamp;
     }
 
     void setSupportsRecoveryTimestamp(bool supports) {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         _supportsRecoveryTimestamp = supports;
     }
 
     void setPointInTimeReadTimestamp(Timestamp pointInTimeReadTimestamp) {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         _pointInTimeReadTimestamp = pointInTimeReadTimestamp;
     }
 
     Timestamp getPointInTimeReadTimestamp(OperationContext* opCtx) const override {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return _pointInTimeReadTimestamp;
     }
 
     void setInitialDataTimestamp(ServiceContext* serviceCtx, Timestamp snapshotName) override {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         _initialDataTimestamp = snapshotName;
     }
 
     Timestamp getInitialDataTimestamp(ServiceContext* serviceCtx) const override {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return _initialDataTimestamp;
     };
 
@@ -185,7 +184,6 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  const CollectionDropType dropType,
                                   bool markFromMigrate) override {
         // If the oplog is not disabled for this namespace, then we need to reserve an op time for
         // the drop.
@@ -275,9 +273,6 @@ private:
 
         auto observerRegistry = checked_cast<OpObserverRegistry*>(service->getOpObserver());
         observerRegistry->addObserver(std::make_unique<ReplicationRecoveryTestObObserver>());
-
-        repl::DropPendingCollectionReaper::set(
-            service, std::make_unique<repl::DropPendingCollectionReaper>(_storageInterface));
     }
 
     void tearDown() override {

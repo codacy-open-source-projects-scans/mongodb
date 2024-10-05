@@ -44,7 +44,7 @@
 #include "mongo/db/s/metrics/sharding_data_transform_metrics_observer_interface.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/mutex.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/functional.h"
@@ -99,7 +99,6 @@ public:
     static ShardingDataTransformCumulativeMetrics* getForBalancerMoveCollection(
         ServiceContext* context);
     static ShardingDataTransformCumulativeMetrics* getForUnshardCollection(ServiceContext* context);
-    static ShardingDataTransformCumulativeMetrics* getForGlobalIndexes(ServiceContext* context);
     static ShardingDataTransformCumulativeMetrics* getForMovePrimary(ServiceContext* context);
 
     ShardingDataTransformCumulativeMetrics(const std::string& rootSectionName,
@@ -149,7 +148,7 @@ private:
     MetricsSet::iterator insertMetrics(const InstanceObserver* metrics, MetricsSet& set);
     void deregisterMetrics(const Role& role, const MetricsSet::iterator& metrics);
 
-    mutable Mutex _mutex;
+    mutable stdx::mutex _mutex;
     std::unique_ptr<NameProvider> _fieldNames;
     std::vector<MetricsSet> _instanceMetricsForAllRoles;
 

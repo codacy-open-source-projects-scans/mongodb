@@ -55,11 +55,11 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_killer.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/query/exec/cluster_client_cursor.h"
 #include "mongo/s/query/exec/cluster_client_cursor_guard.h"
 #include "mongo/s/query/exec/cluster_client_cursor_params.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util_core.h"
@@ -556,7 +556,7 @@ private:
     /**
      * Will detach a cursor, release the lock and then call kill() on it.
      */
-    void detachAndKillCursor(stdx::unique_lock<Latch> lk,
+    void detachAndKillCursor(stdx::unique_lock<stdx::mutex> lk,
                              OperationContext* opCtx,
                              CursorId cursorId);
 
@@ -609,20 +609,5 @@ private:
 
     size_t _cursorsTimedOut = 0;
 };
-
-/**
- * Record metrics for the current operation on opDebug and aggregates those metrics for queryStats
- * use. If a cursor is provided (via ClusterClientCursorGuard or
- * ClusterCursorManager::PinnedCursor), metrics are aggregated on the cursor; otherwise, metrics are
- * written directly to the queryStats store.
- * NOTE: Metrics are taken from opDebug.additiveMetrics, so CurOp::setEndOfOpMetrics must be called
- * *prior* to calling these.
- *
- * Currently, queryStats is only collected for find and aggregate requests (and their subsequent
- * getMore requests), so these should only be called from those request paths.
- */
-void collectQueryStatsMongos(OperationContext* opCtx, std::unique_ptr<query_stats::Key> key);
-void collectQueryStatsMongos(OperationContext* opCtx, ClusterClientCursorGuard& cursor);
-void collectQueryStatsMongos(OperationContext* opCtx, ClusterCursorManager::PinnedCursor& cursor);
 
 }  // namespace mongo

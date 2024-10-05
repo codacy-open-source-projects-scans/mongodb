@@ -79,16 +79,16 @@ RemoteCommandRetryScheduler::~RemoteCommandRetryScheduler() {
 }
 
 bool RemoteCommandRetryScheduler::isActive() const {
-    stdx::lock_guard<Latch> lock(_mutex);
-    return _isActive_inlock();
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return _isActive(lock);
 }
 
-bool RemoteCommandRetryScheduler::_isActive_inlock() const {
+bool RemoteCommandRetryScheduler::_isActive(WithLock lk) const {
     return State::kRunning == _state || State::kShuttingDown == _state;
 }
 
 Status RemoteCommandRetryScheduler::startup() {
-    stdx::lock_guard<Latch> lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
 
     switch (_state) {
         case State::kPreStart:
@@ -114,7 +114,7 @@ Status RemoteCommandRetryScheduler::startup() {
 void RemoteCommandRetryScheduler::shutdown() {
     executor::TaskExecutor::CallbackHandle remoteCommandCallbackHandle;
     {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         switch (_state) {
             case State::kPreStart:
                 // Transition directly from PreStart to Complete if not started yet.
@@ -137,16 +137,16 @@ void RemoteCommandRetryScheduler::shutdown() {
 }
 
 void RemoteCommandRetryScheduler::join() {
-    stdx::unique_lock<Latch> lock(_mutex);
-    _condition.wait(lock, [this]() { return !_isActive_inlock(); });
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
+    _condition.wait(lock, [&]() { return !_isActive(lock); });
 }
 
 std::string RemoteCommandRetryScheduler::toString() const {
-    stdx::lock_guard<Latch> lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     str::stream output;
     output << "RemoteCommandRetryScheduler";
     output << " request: " << _request.toString();
-    output << " active: " << _isActive_inlock();
+    output << " active: " << _isActive(lock);
     if (_remoteCommandCallbackHandle.isValid()) {
         output << " callbackHandle.valid: " << _remoteCommandCallbackHandle.isValid();
         output << " callbackHandle.cancelled: " << _remoteCommandCallbackHandle.isCanceled();
@@ -175,7 +175,7 @@ void RemoteCommandRetryScheduler::_remoteCommandCallback(
 
     // Use a lambda to avoid unnecessary lock acquisition when checking conditions for termination.
     auto getCurrentAttempt = [this]() {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return _currentAttempt;
     };
 
@@ -189,7 +189,7 @@ void RemoteCommandRetryScheduler::_remoteCommandCallback(
     // TODO(benety): Check cumulative elapsed time of failed responses received against retry
     // policy. Requires SERVER-24067.
     auto scheduleStatus = [this]() {
-        stdx::lock_guard<Latch> lock(_mutex);
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         if (State::kShuttingDown == _state) {
             return Status(ErrorCodes::CallbackCanceled,
                           "scheduler was shut down before retrying command");
@@ -198,7 +198,10 @@ void RemoteCommandRetryScheduler::_remoteCommandCallback(
     }();
 
     if (!scheduleStatus.isOK()) {
-        _onComplete({rcba.executor, rcba.myHandle, rcba.request, scheduleStatus});
+        _onComplete({rcba.executor,
+                     rcba.myHandle,
+                     rcba.request,
+                     executor::RemoteCommandResponse(rcba.request.target, scheduleStatus)});
         return;
     }
 }
@@ -214,8 +217,8 @@ void RemoteCommandRetryScheduler::_onComplete(
     // RemoteCommandRetryScheduler, we release this function object outside the lock.
     _callback = {};
 
-    stdx::lock_guard<Latch> lock(_mutex);
-    invariant(_isActive_inlock());
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    invariant(_isActive(lock));
     _state = State::kComplete;
     _condition.notify_all();
 }

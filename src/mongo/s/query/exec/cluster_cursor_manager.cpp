@@ -45,8 +45,6 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/query/client_cursor/allocate_cursor_id.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/query_stats/query_stats.h"
-#include "mongo/db/query/query_stats/vector_search_stats_entry.h"
 #include "mongo/db/session/kill_sessions_common.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/logv2/log.h"
@@ -78,22 +76,6 @@ Status cursorNotFoundStatus(CursorId cursorId) {
 Status cursorInUseStatus(CursorId cursorId) {
     return {ErrorCodes::CursorInUse,
             str::stream() << "Cursor already in use (id: " << cursorId << ")."};
-}
-
-void maybeAddVectorSearchMetrics(
-    const OpDebug& opDebug,
-    std::vector<std::unique_ptr<query_stats::SupplementalStatsEntry>>& supplementalMetrics) {
-    if (const auto& metrics = opDebug.vectorSearchMetrics) {
-        supplementalMetrics.emplace_back(std::make_unique<query_stats::VectorSearchStatsEntry>(
-            metrics->limit, metrics->numCandidatesLimitRatio));
-    }
-}
-
-std::vector<std::unique_ptr<query_stats::SupplementalStatsEntry>> computeSupplementalQueryMetrics(
-    const OpDebug& opDebug) {
-    std::vector<std::unique_ptr<query_stats::SupplementalStatsEntry>> supplementalMetrics;
-    maybeAddVectorSearchMetrics(opDebug, supplementalMetrics);
-    return supplementalMetrics;
 }
 
 }  // namespace
@@ -181,7 +163,7 @@ ClusterCursorManager::~ClusterCursorManager() {
 
 void ClusterCursorManager::shutdown(OperationContext* opCtx) {
     {
-        stdx::lock_guard<Latch> lk(_mutex);
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
         _inShutdown = true;
     }
     killAllCursors(opCtx);
@@ -197,7 +179,7 @@ StatusWith<CursorId> ClusterCursorManager::registerCursor(
     // Read the clock out of the lock.
     const auto now = _clockSource->now();
 
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     if (_inShutdown) {
         lk.unlock();
@@ -234,7 +216,7 @@ StatusWith<ClusterCursorManager::PinnedCursor> ClusterCursorManager::checkOutCur
     AuthzCheckFn authChecker,
     AuthCheck checkSessionAuth) {
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     if (_inShutdown) {
         return Status(ErrorCodes::ShutdownInProgress,
@@ -297,7 +279,7 @@ void ClusterCursorManager::checkInCursor(std::unique_ptr<ClusterClientCursor> cu
     cursor->detachFromOperationContext();
     cursor->setLastUseDate(now);
 
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     CursorEntry* entry = _getEntry(lk, cursorId);
     invariant(entry);
@@ -321,7 +303,7 @@ void ClusterCursorManager::checkInCursor(std::unique_ptr<ClusterClientCursor> cu
 Status ClusterCursorManager::checkAuthForKillCursors(OperationContext* opCtx,
                                                      CursorId cursorId,
                                                      AuthzCheckFn authChecker) {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     auto entry = _getEntry(lk, cursorId);
 
     if (!entry) {
@@ -352,7 +334,7 @@ void ClusterCursorManager::killOperationUsingCursor(WithLock, CursorEntry* entry
 Status ClusterCursorManager::killCursor(OperationContext* opCtx, CursorId cursorId) {
     invariant(opCtx);
 
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
 
     CursorEntry* entry = _getEntry(lk, cursorId);
     if (!entry) {
@@ -375,7 +357,7 @@ Status ClusterCursorManager::killCursor(OperationContext* opCtx, CursorId cursor
     return Status::OK();
 }
 
-void ClusterCursorManager::detachAndKillCursor(stdx::unique_lock<Latch> lk,
+void ClusterCursorManager::detachAndKillCursor(stdx::unique_lock<stdx::mutex> lk,
                                                OperationContext* opCtx,
                                                CursorId cursorId) {
     LOGV2_DEBUG(8928411, 2, "Detaching and killing cursor", "cursorId"_attr = cursorId);
@@ -409,7 +391,7 @@ std::size_t ClusterCursorManager::killMortalCursorsInactiveSince(OperationContex
             return res;
         });
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     _cursorsTimedOut += cursorsKilled;
 
     return cursorsKilled;
@@ -422,7 +404,7 @@ void ClusterCursorManager::killAllCursors(OperationContext* opCtx) {
 std::size_t ClusterCursorManager::killCursorsSatisfying(
     OperationContext* opCtx, const std::function<bool(CursorId, const CursorEntry&)>& pred) {
     invariant(opCtx);
-    stdx::unique_lock<Latch> lk(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
     std::size_t nKilled = 0;
 
     std::vector<ClusterClientCursorGuard> cursorsToDestroy;
@@ -466,7 +448,7 @@ std::size_t ClusterCursorManager::killCursorsSatisfying(
 }
 
 size_t ClusterCursorManager::cursorsTimedOut() const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _cursorsTimedOut;
 }
 
@@ -494,7 +476,7 @@ auto ClusterCursorManager::getOpenCursorStats() const -> OpenCursorStats {
 }
 
 void ClusterCursorManager::appendActiveSessions(LogicalSessionIdSet* lsids) const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     for (auto&& [cursorId, entry] : _cursorEntryMap) {
         if (entry.isKillPending()) {
@@ -531,14 +513,14 @@ std::vector<GenericCursor> ClusterCursorManager::getIdleCursors(
     const OperationContext* opCtx, MongoProcessInterface::CurrentOpUserMode userMode) const {
     std::vector<GenericCursor> cursors;
 
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     AuthorizationSession* ctxAuth = AuthorizationSession::get(opCtx->getClient());
 
     for (auto&& [cursorId, entry] : _cursorEntryMap) {
         // If auth is enabled, and userMode is allUsers, check if the current user has
         // permission to see this cursor.
-        if (ctxAuth->getAuthorizationManager().isAuthEnabled() &&
+        if (AuthorizationManager::get(opCtx->getService())->isAuthEnabled() &&
             userMode == MongoProcessInterface::CurrentOpUserMode::kExcludeOthers &&
             !ctxAuth->isCoauthorizedWith(entry.getAuthenticatedUser())) {
             continue;
@@ -570,7 +552,7 @@ std::pair<Status, int> ClusterCursorManager::killCursorsWithMatchingSessions(
 
 stdx::unordered_set<CursorId> ClusterCursorManager::getCursorsForSession(
     LogicalSessionId lsid) const {
-    stdx::lock_guard<Latch> lk(_mutex);
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     stdx::unordered_set<CursorId> cursorIds;
 
@@ -618,71 +600,6 @@ StatusWith<ClusterClientCursorGuard> ClusterCursorManager::_detachCursor(WithLoc
     invariant(1 == eraseResult);
 
     return std::move(cursor);
-}
-
-void collectQueryStatsMongos(OperationContext* opCtx, std::unique_ptr<query_stats::Key> key) {
-    // If we haven't registered a cursor to prepare for getMore requests, we record
-    // queryStats directly.
-    auto& opDebug = CurOp::get(opCtx)->debug();
-
-    auto snapshot = query_stats::captureMetrics(
-        opCtx,
-        query_stats::microsecondsToUint64(opDebug.additiveMetrics.executionTime),
-        opDebug.additiveMetrics);
-
-    query_stats::writeQueryStats(opCtx,
-                                 opDebug.queryStatsInfo.keyHash,
-                                 std::move(key),
-                                 snapshot,
-                                 computeSupplementalQueryMetrics(opDebug));
-}
-
-void collectQueryStatsMongos(OperationContext* opCtx, ClusterClientCursorGuard& cursor) {
-    auto& opDebug = CurOp::get(opCtx)->debug();
-    opDebug.additiveMetrics.aggregateDataBearingNodeMetrics(cursor->takeRemoteMetrics());
-    cursor->incrementCursorMetrics(CurOp::get(opCtx)->debug().additiveMetrics);
-
-    // For a change stream query that never ends, we want to collect query stats on the initial
-    // query and each getMore. Here we record the initial query.
-    if (cursor->getQueryStatsWillNeverExhaust()) {
-        auto& opDebug = CurOp::get(opCtx)->debug();
-
-        auto snapshot = query_stats::captureMetrics(
-            opCtx,
-            query_stats::microsecondsToUint64(opDebug.additiveMetrics.executionTime),
-            opDebug.additiveMetrics);
-
-        query_stats::writeQueryStats(opCtx,
-                                     opDebug.queryStatsInfo.keyHash,
-                                     cursor->takeKey(),
-                                     snapshot,
-                                     {} /* supplementalMetrics */,
-                                     cursor->getQueryStatsWillNeverExhaust());
-    }
-}
-
-void collectQueryStatsMongos(OperationContext* opCtx, ClusterCursorManager::PinnedCursor& cursor) {
-    auto& opDebug = CurOp::get(opCtx)->debug();
-    opDebug.additiveMetrics.aggregateDataBearingNodeMetrics(cursor->takeRemoteMetrics());
-    cursor->incrementCursorMetrics(CurOp::get(opCtx)->debug().additiveMetrics);
-
-    // For a change stream query that never ends, we want to update query stats for every getMore on
-    // the cursor.
-    if (cursor->getQueryStatsWillNeverExhaust()) {
-        auto& opDebug = CurOp::get(opCtx)->debug();
-
-        auto snapshot = query_stats::captureMetrics(
-            opCtx,
-            query_stats::microsecondsToUint64(opDebug.additiveMetrics.executionTime),
-            opDebug.additiveMetrics);
-
-        query_stats::writeQueryStats(opCtx,
-                                     opDebug.queryStatsInfo.keyHash,
-                                     nullptr,
-                                     snapshot,
-                                     {} /* supplementalMetrics */,
-                                     cursor->getQueryStatsWillNeverExhaust());
-    }
 }
 
 }  // namespace mongo

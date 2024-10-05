@@ -142,7 +142,6 @@
 #include "mongo/logv2/log_severity.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/message.h"
@@ -165,6 +164,7 @@
 #include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
@@ -607,7 +607,8 @@ private:
             stdx::lock_guard<Client> lk(*client);
             // We construct a legacy $cmd namespace so we can fill in curOp using
             // the existing logic that existed for OP_QUERY commands
-            CurOp::get(opCtx)->setGenericOpRequestDetails_inlock(
+            CurOp::get(opCtx)->setGenericOpRequestDetails(
+                lk,
                 NamespaceString::makeCommandNamespace(_invocation->db()),
                 command,
                 request.body,

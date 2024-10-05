@@ -39,8 +39,8 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/mutex.h"
 #include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
@@ -156,12 +156,12 @@ private:
     /**
      * Returns true if reporter is active.
      */
-    bool _isActive_inlock() const;
+    bool _isActive(WithLock lk) const;
 
     /**
      * Returns true if reporter's backup channel is also active.
      */
-    bool _isBackupActive_inlock() const;
+    bool _isBackupActive(WithLock lk) const;
 
     /**
      * Prepares remote command to be run by the executor.
@@ -171,9 +171,10 @@ private:
     /**
      * Schedules remote command to be run by the executor with the given network timeout.
      */
-    void _sendCommand_inlock(BSONObj commandRequest,
-                             Milliseconds netTimeout,
-                             bool useBackupChannel);
+    void _sendCommand(WithLock lk,
+                      BSONObj commandRequest,
+                      Milliseconds netTimeout,
+                      bool useBackupChannel);
 
     /**
      * Callback for processing response from remote command.
@@ -191,7 +192,7 @@ private:
     /**
      * Signals end of Reporter work and notifies waiters.
      */
-    void _onShutdown_inlock(bool useBackupChannel);
+    void _onShutdown(WithLock lk, bool useBackupChannel);
 
     // Not owned by us.
     executor::TaskExecutor* const _executor;

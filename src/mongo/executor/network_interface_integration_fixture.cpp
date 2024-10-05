@@ -126,12 +126,11 @@ void NetworkInterfaceIntegrationFixture::resetIsInternalClient(bool isInternalCl
 Future<RemoteCommandResponse> NetworkInterfaceIntegrationFixture::runCommand(
     const TaskExecutor::CallbackHandle& cbHandle,
     RemoteCommandRequest request,
-    const std::shared_ptr<Baton>& baton) {
-
+    const CancellationToken& token) {
     _onSchedulingCommand();
 
     return net()
-        .startCommand(cbHandle, request, baton)
+        .startCommand(cbHandle, request, baton(), token)
         .unsafeToInlineFuture()
         .then([request](TaskExecutor::ResponseStatus resStatus) {
             if (resStatus.isOK()) {
@@ -151,6 +150,11 @@ Future<RemoteCommandResponse> NetworkInterfaceIntegrationFixture::runCommand(
             _onCompletingCommand();
             return status;
         });
+}
+
+void NetworkInterfaceIntegrationFixture::cancelCommand(
+    const TaskExecutor::CallbackHandle& cbHandle) {
+    net().cancelCommand(cbHandle, baton());
 }
 
 Future<void> NetworkInterfaceIntegrationFixture::startExhaustCommand(
@@ -226,9 +230,7 @@ NetworkInterfaceIntegrationFixture::configureFailCommand(
 
 RemoteCommandResponse NetworkInterfaceIntegrationFixture::runCommandSync(
     RemoteCommandRequest& request) {
-    auto deferred = runCommand(makeCallbackHandle(), request);
-    auto& res = deferred.get();
-    return res;
+    return runCommand(makeCallbackHandle(), request).get(interruptible());
 }
 
 void NetworkInterfaceIntegrationFixture::assertCommandOK(const DatabaseName& db,

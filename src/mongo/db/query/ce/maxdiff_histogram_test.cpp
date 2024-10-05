@@ -27,34 +27,14 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/stats/rand_utils_new.h"
-#include <cstddef>
-#include <iostream>
-#include <memory>
-#include <string>
-#include <vector>
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/ce/array_histogram_helpers.h"
-#include "mongo/db/query/ce/scalar_histogram_helpers.h"
 #include "mongo/db/query/ce/test_utils.h"
-#include "mongo/db/query/optimizer/defs.h"
-#include "mongo/db/query/stats/array_histogram.h"
-#include "mongo/db/query/stats/max_diff.h"
 #include "mongo/db/query/stats/maxdiff_test_utils.h"
 #include "mongo/db/query/stats/rand_utils.h"
-#include "mongo/db/query/stats/scalar_histogram.h"
-#include "mongo/db/query/stats/value_utils.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/storage/key_string.h"
-#include "mongo/logv2/log.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
-namespace mongo::optimizer::cbp::ce {
+namespace mongo::ce {
 namespace {
 namespace value = sbe::value;
 
@@ -342,8 +322,8 @@ TEST_F(HistogramTest, MaxDiffIntArrays) {
     auto rawData = genFixedValueArray(nElems, 1.0, 0.0);
     auto arrayData = nestArrays(rawData, 0 /* No empty arrays */);
 
-    auto estimator = createArrayEstimator(arrayData, nBuckets, stats::SortArg::kArea);
-    auto estimatorAreaDiff = createArrayEstimator(arrayData, nBuckets);
+    auto estimator = createCEHistogram(arrayData, nBuckets, stats::SortArg::kArea);
+    auto estimatorAreaDiff = createCEHistogram(arrayData, nBuckets);
 
     auto opCtx = makeOperationContext();
 
@@ -437,10 +417,10 @@ TEST_F(HistogramTest, MaxDiffEmptyArrays) {
           "nElems"_attr = nElems,
           "arrayData"_attr = printValueArray(arrayData));
 
-    const auto arrayHist = createArrayEstimator(arrayData, nBuckets, stats::SortArg::kAreaDiff);
-    const auto arrayHistAreaDiff = createArrayEstimator(arrayData, nBuckets);
+    const auto ceHist = createCEHistogram(arrayData, nBuckets, stats::SortArg::kAreaDiff);
+    const auto ceHistAreaDiff = createCEHistogram(arrayData, nBuckets);
 
-    const auto histograms = {arrayHist, arrayHistAreaDiff};
+    const auto histograms = {ceHist, ceHistAreaDiff};
 
     std::for_each(histograms.begin(), histograms.end(), [emptyArrayCount](auto&& histogram) {
         ASSERT_EQ(histogram->getEmptyArrayCount(), emptyArrayCount);
@@ -485,4 +465,4 @@ TEST(HistogramTest, HistogramTopBucketsFreqDiffUniformInt) {
 }
 
 }  // namespace
-}  // namespace mongo::optimizer::cbp::ce
+}  // namespace mongo::ce

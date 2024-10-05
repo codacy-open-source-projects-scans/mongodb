@@ -514,44 +514,6 @@ tasks:
           run_no_feature_flag_tests: "true"
 
   - <<: *gen_task_template
-    name: concurrency_sharded_replication_no_txns_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_repl",
-        "default",
-        "concurrency",
-        "no_txns",
-        "large",
-        "sharded",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          suite: concurrency_sharded_replication
-          resmoke_args: "--excludeWithAnyTags=uses_transactions"
-          use_large_distro: "true"
-          resmoke_jobs_max: 1
-
-  - <<: *gen_task_template
-    name: concurrency_sharded_replication_no_txns_with_balancer_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_repl",
-        "default",
-        "concurrency",
-        "no_txns",
-        "large",
-        "sharded",
-      ]
-    commands:
-      - func: "generate resmoke tasks"
-        vars:
-          suite: concurrency_sharded_replication_with_balancer
-          resmoke_args: "--excludeWithAnyTags=uses_transactions"
-          use_large_distro: "true"
-          resmoke_jobs_max: 1
-
-  - <<: *gen_task_template
     name: concurrency_sharded_replication_with_balancer_gen
     tags:
       [
@@ -988,7 +950,18 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           suite: no_passthrough
-          resmoke_args: src/mongo/db/modules/*/jstests/hot_backups/*.js
+          resmoke_args: src/mongo/db/modules/*/jstests/hot_backups/**/*.js
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: queryableWT_gen
+    tags: ["assigned_to_jira_team_server_rss_sydney", "release_critical"]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          suite: queryable_wt
+          resmoke_args: src/mongo/db/modules/*/jstests/queryable_wt/*.js
+          resmoke_jobs_max: 1
           use_large_distro: "true"
 
   - <<: *gen_task_template
@@ -1769,6 +1742,7 @@ tasks:
         "incompatible_aubsan",
         "incompatible_debug_mode",
         "incompatible_inmemory",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1796,6 +1770,7 @@ tasks:
         "jstestfuzz",
         "non_deterministic",
         "require_npm",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1825,6 +1800,7 @@ tasks:
         "incompatible_aubsan",
         "incompatible_debug_mode",
         "incompatible_inmemory",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1871,6 +1847,7 @@ tasks:
         "config_fuzzer",
         "incompatible_inmemory",
         "incompatible_tsan",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "do setup"
@@ -1894,6 +1871,7 @@ tasks:
         "incompatible_aubsan",
         "incompatible_debug_mode",
         "incompatible_inmemory",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1942,6 +1920,7 @@ tasks:
         "incompatible_aubsan",
         "incompatible_debug_mode",
         "incompatible_inmemory",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1966,6 +1945,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
@@ -1989,6 +1969,7 @@ tasks:
         "incompatible_tsan",
         "incompatible_aubsan",
         "incompatible_debug_mode",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"
