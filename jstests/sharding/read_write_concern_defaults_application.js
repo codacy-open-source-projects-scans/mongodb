@@ -166,8 +166,6 @@ let testCases = {
     _shardsvrCoordinateMultiUpdate: {skip: "internal command"},
     _shardsvrCreateCollection: {skip: "internal command"},
     _shardsvrCreateCollectionParticipant: {skip: "internal command"},
-    _shardsvrCreateGlobalIndex: {skip: "internal command"},
-    _shardsvrDropGlobalIndex: {skip: "internal command"},
     _shardsvrDropCollection: {skip: "internal command"},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: "internal command"},
     _shardsvrDropCollectionParticipant: {skip: "internal command"},
@@ -178,10 +176,7 @@ let testCases = {
     _shardsvrDropDatabaseParticipant: {skip: "internal command"},
     _shardsvrEndMigrationBlockingOperation: {skip: "internal command"},
     _shardsvrGetStatsForBalancing: {skip: "internal command"},
-    _shardsvrInsertGlobalIndexKey: {skip: "internal command"},
     _shardsvrJoinDDLCoordinators: {skip: "internal command"},
-    _shardsvrDeleteGlobalIndexKey: {skip: "internal command"},
-    _shardsvrWriteGlobalIndexKeys: {skip: "internal command"},
     _shardsvrJoinMigrations: {skip: "internal command"},
     _shardsvrMergeAllChunksOnShard: {skip: "internal command"},
     _shardsvrMovePrimary: {skip: "internal command"},
@@ -441,9 +436,9 @@ let testCases = {
     donorForgetMigration: {skip: "does not accept read or write concern"},
     donorStartMigration: {skip: "does not accept read or write concern"},
     donorWaitForMigrationToCommit: {skip: "does not accept read or write concern"},
-    abortShardSplit: {skip: "internal command"},
-    commitShardSplit: {skip: "internal command"},
-    forgetShardSplit: {skip: "internal command"},
+    abortShardSplit: {skip: "deprecated command"},
+    commitShardSplit: {skip: "deprecated command"},
+    forgetShardSplit: {skip: "deprecated command"},
     drop: {
         setUp: function(conn) {
             assert.commandWorked(conn.getDB(db).runCommand({create: coll, writeConcern: {w: 1}}));

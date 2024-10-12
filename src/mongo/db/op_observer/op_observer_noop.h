@@ -50,15 +50,6 @@ public:
                                                 const UUID& uuid,
                                                 BSONObj indexDoc) override {}
 
-    void onCreateGlobalIndex(OperationContext* opCtx,
-                             const NamespaceString& globalIndexNss,
-                             const UUID& globalIndexUUID) override {}
-
-    void onDropGlobalIndex(OperationContext* opCtx,
-                           const NamespaceString& globalIndexNss,
-                           const UUID& globalIndexUUID,
-                           long long numKeys) override {}
-
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
                        const UUID& uuid,
@@ -101,18 +92,6 @@ public:
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) override {}
-
-    void onInsertGlobalIndexKey(OperationContext* opCtx,
-                                const NamespaceString& globalIndexNss,
-                                const UUID& globalIndexUuid,
-                                const BSONObj& key,
-                                const BSONObj& docKey) override {}
-
-    void onDeleteGlobalIndexKey(OperationContext* opCtx,
-                                const NamespaceString& globalIndexNss,
-                                const UUID& globalIndexUuid,
-                                const BSONObj& key,
-                                const BSONObj& docKey) override {}
 
     void onUpdate(OperationContext* opCtx,
                   const OplogUpdateEntryArgs& args,
@@ -159,6 +138,7 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
+                                  const CollectionDropType dropType,
                                   bool markFromMigrate) override {
         return {};
     }

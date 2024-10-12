@@ -530,8 +530,8 @@ protected:
         if (_executorThreadShutdownComplete) {
             return;
         }
-        getExecutor().shutdown();
-        getExecutor().join();
+        shutdownExecutorThread();
+        joinExecutorThread();
         _clonerExecutor->shutdown();
         _clonerExecutor->join();
         _executorThreadShutdownComplete = true;
@@ -825,6 +825,7 @@ TEST_F(InitialSyncerTest, StartupReturnsShutdownInProgressIfInitialSyncerIsShutt
     // SyncSourceSelector returns an invalid sync source so InitialSyncer is stuck waiting for
     // another sync source in 'Options::syncSourceRetryWait' ms.
     ASSERT_OK(initialSyncer->shutdown());
+    executor::NetworkInterfaceMock::InNetworkGuard(getNet())->runReadyNetworkOperations();
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, initialSyncer->startup(opCtx.get(), maxAttempts));
 }
 
@@ -1042,6 +1043,7 @@ TEST_F(InitialSyncerTest,
     // This will cancel the _chooseSyncSourceCallback() task scheduled at getNet()->now() +
     // '_options.syncSourceRetryWait'.
     ASSERT_OK(initialSyncer->shutdown());
+    executor::NetworkInterfaceMock::InNetworkGuard(getNet())->runReadyNetworkOperations();
 
     initialSyncer->join();
 
@@ -4292,23 +4294,6 @@ TEST_F(InitialSyncerTest,
     ASSERT_OK(_lastApplied.getStatus());
     ASSERT_EQUALS(lastOp.getOpTime(), _lastApplied.getValue().opTime);
     ASSERT_EQUALS(lastOp.getWallClockTime(), _lastApplied.getValue().wallTime);
-}
-
-TEST_F(InitialSyncerTest,
-       InitialSyncerReturnsInvalidSyncSourceWhenFailInitialSyncWithBadHostFailpointIsEnabled) {
-    auto initialSyncer = &getInitialSyncer();
-    auto opCtx = makeOpCtx();
-
-    // This fail point makes chooseSyncSourceCallback fail with an InvalidSyncSource error.
-    auto failPoint = globalFailPointRegistry().find("failInitialSyncWithBadHost");
-    failPoint->setMode(FailPoint::alwaysOn);
-    ON_BLOCK_EXIT([failPoint]() { failPoint->setMode(FailPoint::off); });
-
-    _syncSourceSelector->setChooseNewSyncSourceResult_forTest(HostAndPort("localhost", 12345));
-    ASSERT_OK(initialSyncer->startup(opCtx.get(), maxAttempts));
-
-    initialSyncer->join();
-    ASSERT_EQUALS(ErrorCodes::InvalidSyncSource, _lastApplied);
 }
 
 TEST_F(InitialSyncerTest, OplogOutOfOrderOnOplogFetchFinish) {

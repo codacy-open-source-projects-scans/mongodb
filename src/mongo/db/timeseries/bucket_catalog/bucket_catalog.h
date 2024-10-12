@@ -172,7 +172,7 @@ struct Stripe {
     // many buckets it exist in 'archivedBuckets' for this UUID.
     // TODO SERVER-70605: Remove this mapping, only needed when usingAlwaysCompressedBuckets is
     // disabled.
-    tracked_unordered_map<UUID, std::pair<tracked_string, int64_t>> collectionTimeFields;
+    tracked_unordered_map<UUID, std::tuple<tracked_string, int64_t>> collectionTimeFields;
 
     // All series currently with outstanding reopening operations. Used to coordinate disk access
     // between reopenings and regular writes to prevent stale reads and corrupted updates.

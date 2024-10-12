@@ -80,15 +80,6 @@ public:
                                                 const UUID& uuid,
                                                 BSONObj indexDoc) final;
 
-    void onCreateGlobalIndex(OperationContext* opCtx,
-                             const NamespaceString& globalIndexNss,
-                             const UUID& globalIndexUUID) final;
-
-    void onDropGlobalIndex(OperationContext* opCtx,
-                           const NamespaceString& globalIndexNss,
-                           const UUID& globalIndexUUID,
-                           long long numKeys) final;
-
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
                        const UUID& uuid,
@@ -127,18 +118,6 @@ public:
                    std::vector<bool> fromMigrate,
                    bool defaultFromMigrate,
                    OpStateAccumulator* opAccumulator = nullptr) final;
-
-    void onInsertGlobalIndexKey(OperationContext* opCtx,
-                                const NamespaceString& globalIndexNss,
-                                const UUID& globalIndexUuid,
-                                const BSONObj& key,
-                                const BSONObj& docKey) final;
-
-    void onDeleteGlobalIndexKey(OperationContext* opCtx,
-                                const NamespaceString& globalIndexNss,
-                                const UUID& globalIndexUuid,
-                                const BSONObj& key,
-                                const BSONObj& docKey) final;
 
     void onUpdate(OperationContext* opCtx,
                   const OplogUpdateEntryArgs& args,
@@ -179,6 +158,7 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
+                                  CollectionDropType dropType,
                                   bool markFromMigrate) final;
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,

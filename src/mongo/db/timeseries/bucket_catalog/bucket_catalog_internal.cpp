@@ -564,7 +564,8 @@ StatusWith<std::reference_wrapper<Bucket>> reopenBucket(BucketCatalog& catalog,
         // Decrement refCount and cleanup collectionTimeFields if needed
         if (auto timeFieldIt = stripe.collectionTimeFields.find(key.collectionUUID);
             timeFieldIt != stripe.collectionTimeFields.end()) {
-            if (--timeFieldIt->second.second == 0) {
+            int64_t& refCount = std::get<int64_t>(timeFieldIt->second);
+            if (--refCount == 0) {
                 stripe.collectionTimeFields.erase(timeFieldIt);
             }
         }
@@ -914,7 +915,8 @@ boost::optional<OID> findArchivedCandidate(
             // Decrement refCount and cleanup collectionTimeFields if needed
             if (auto timeFieldIt = stripe.collectionTimeFields.find(uuid);
                 timeFieldIt != stripe.collectionTimeFields.end()) {
-                if (--timeFieldIt->second.second == 0) {
+                int64_t& refCount = std::get<int64_t>(timeFieldIt->second);
+                if (--refCount == 0) {
                     stripe.collectionTimeFields.erase(timeFieldIt);
                 }
             }
@@ -1121,13 +1123,15 @@ void expireIdleBuckets(BucketCatalog& catalog,
         StringData timeField;
         auto timeFieldIt = stripe.collectionTimeFields.find(uuid);
         if (timeFieldIt != stripe.collectionTimeFields.end()) {
-            timeField = {timeFieldIt->second.first.data(), timeFieldIt->second.first.size()};
+            const tracked_string& tf = std::get<tracked_string>(timeFieldIt->second);
+            timeField = {tf.data(), tf.size()};
         }
 
         closeArchivedBucket(catalog, bucketId, timeField, closedBuckets);
 
         if (timeFieldIt != stripe.collectionTimeFields.end()) {
-            if (--timeFieldIt->second.second == 0) {
+            int64_t& refCount = std::get<int64_t>(timeFieldIt->second);
+            if (--refCount == 0) {
                 stripe.collectionTimeFields.erase(timeFieldIt);
             }
         }

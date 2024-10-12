@@ -94,9 +94,6 @@ void onTransitionToAbortingIndexBuilds(OperationContext* opCtx,
         const auto tenantId = TenantId::parseFromString(*donorStateDoc.getTenantId());
         TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext()).add(tenantId, mtab);
     } else {
-        tassert(6448702,
-                "Bad protocol",
-                donorStateDoc.getProtocol() == MigrationProtocolEnum::kShardMerge);
         invariant(donorStateDoc.getTenantIds());
 
         auto& registry = TenantMigrationAccessBlockerRegistry::get(opCtx->getServiceContext());
@@ -366,6 +363,7 @@ repl::OpTime TenantMigrationDonorOpObserver::onDropCollection(OperationContext* 
                                                               const NamespaceString& collectionName,
                                                               const UUID& uuid,
                                                               std::uint64_t numRecords,
+                                                              const CollectionDropType dropType,
                                                               bool markFromMigrate) {
     if (collectionName == NamespaceString::kTenantMigrationDonorsNamespace) {
         shard_role_details::getRecoveryUnit(opCtx)->onCommit(

@@ -35,11 +35,6 @@ feature_flags:
         cpp_varname: gFeatureFlagSecurityToken
         default: false
         shouldBeFCVGated: true
-    featureFlagGlobalIndexes:
-        description: "Enable support for global indexes"
-        cpp_varname: gFeatureFlagGlobalIndexes
-        default: false
-        shouldBeFCVGated: true
     featureFlagAllowAdditionalParticipants:
         description: "Enable adding additional participants to active transaction"
         cpp_varname: gFeatureFlagAllowAdditionalParticipants
@@ -83,12 +78,6 @@ feature_flags:
         description: "Feature flag to enable and autobootstrap sharding for all mongods"
         cpp_varname: gFeatureFlagAllMongodsAreSharded
         default: false
-        shouldBeFCVGated: true
-    featureFlagShardKeyIndexOptionalHashedSharding:
-        description: "Feature flag to make a supporting shard key index for hashed sharding optional"
-        cpp_varname: gFeatureFlagShardKeyIndexOptionalHashedSharding
-        default: true
-        version: 7.0
         shouldBeFCVGated: true
     featureFlagBanEncryptionOptionsInCollectionCreation:
         description: "Feature flag that bans encryption options from being used in createCollection

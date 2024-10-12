@@ -2,15 +2,15 @@
 
 import os
 import os.path
-import time
 import shutil
-from typing import Optional
+import time
 import uuid
-
-import yaml
+from typing import Optional
 
 import pymongo
 import pymongo.errors
+import yaml
+
 from buildscripts.resmokelib import logging
 from buildscripts.resmokelib.testing.fixtures import interface
 from buildscripts.resmokelib.testing.fixtures.fixturelib import FixtureLib
@@ -494,6 +494,9 @@ class MongodLauncher(object):
             suite_set_parameters.setdefault(
                 "reshardingCriticalSectionTimeoutMillis", 24 * 60 * 60 * 1000
             )  # 24 hours
+            suite_set_parameters.setdefault(
+                "reshardingDelayBeforeRemainingOperationTimeQueryMillis", 0
+            )
 
         # Command line options override the YAML configuration.
         for opt_name in shortcut_opts:

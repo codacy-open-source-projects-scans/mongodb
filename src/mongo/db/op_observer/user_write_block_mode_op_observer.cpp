@@ -43,14 +43,6 @@
 #include "mongo/util/assert_util_core.h"
 
 namespace mongo {
-namespace {
-
-bool isStandaloneOrPrimary(OperationContext* opCtx, const NamespaceString& nss) {
-    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-    return replCoord->canAcceptWritesFor(opCtx, nss);
-}
-
-}  // namespace
 
 void UserWriteBlockModeOpObserver::onInserts(OperationContext* opCtx,
                                              const CollectionPtr& coll,
@@ -212,6 +204,7 @@ repl::OpTime UserWriteBlockModeOpObserver::onDropCollection(OperationContext* op
                                                             const NamespaceString& collectionName,
                                                             const UUID& uuid,
                                                             std::uint64_t numRecords,
+                                                            CollectionDropType dropType,
                                                             bool markFromMigrate) {
     _checkWriteAllowed(opCtx, collectionName);
     return repl::OpTime();

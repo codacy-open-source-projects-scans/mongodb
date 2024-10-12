@@ -116,10 +116,6 @@ public:
     // Prefix for time-series buckets collection.
     static constexpr StringData kTimeseriesBucketsCollectionPrefix = "system.buckets."_sd;
 
-    // Prefix for global index container collections. These collections belong to the system
-    // database.
-    static constexpr StringData kGlobalIndexCollectionPrefix = "globalIndex."_sd;
-
     // Collection name that is used for { aggregate: 1, ... } style aggregations.
     static constexpr auto kCollectionlessAggregateCollection = "$cmd.aggregate"_sd;
 
@@ -236,11 +232,6 @@ public:
      * namespace is "<dbName>.$cmd.listCollections".
      */
     static NamespaceString makeListCollectionsNSS(const DatabaseName& dbName);
-
-    /**
-     * Constructs a NamespaceString for the specified global index.
-     */
-    static NamespaceString makeGlobalIndexNSS(const UUID& uuid);
 
     /**
      * Constructs the cluster parameters NamespaceString for the specified tenant. The format for
@@ -451,9 +442,6 @@ public:
     bool isNormalCollection() const {
         return !isSystem() && !(isLocalDB() && coll().startsWith("replset."));
     }
-    bool isGlobalIndex() const {
-        return coll().startsWith(kGlobalIndexCollectionPrefix);
-    }
     bool isAdminDB() const {
         return db_deprecated() == DatabaseName::kAdmin.db(omitTenant);
     }
@@ -647,9 +635,28 @@ public:
     bool isLegalClientSystemNS() const;
 
     /**
+     * Returns true if this namespace refers to a drop-pending collection.
+     */
+    bool isDropPendingNamespace() const;
+
+    /**
      * Returns true if operations on this namespace must be applied in their own oplog batch.
      */
     bool mustBeAppliedInOwnOplogBatch() const;
+
+    /**
+     * Returns the drop-pending namespace name for this namespace, provided the given optime.
+     *
+     * Example:
+     *     test.foo -> test.system.drop.<timestamp seconds>i<timestamp increment>t<term>.foo
+     */
+    NamespaceString makeDropPendingNamespace(const repl::OpTime& opTime) const;
+
+    /**
+     * Returns the optime used to generate the drop-pending namespace.
+     * Returns an error if this namespace is not drop-pending.
+     */
+    StatusWith<repl::OpTime> getDropPendingNamespaceOpTime() const;
 
     /**
      * Returns true if the namespace is valid. Special namespaces for internal use are considered as
