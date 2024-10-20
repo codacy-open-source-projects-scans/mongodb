@@ -77,7 +77,6 @@ const allCommands = {
     _flushReshardingStateChange: {skip: isAnInternalCommand},
     _flushRoutingTableCacheUpdates: {skip: isAnInternalCommand},
     _flushRoutingTableCacheUpdatesWithWriteConcern: {skip: isAnInternalCommand},
-    _getAuditConfigGeneration: {skip: isAnInternalCommand},
     _getNextSessionMods: {skip: isAnInternalCommand},
     _getUserCacheGeneration: {skip: isAnInternalCommand},
     _hashBSONElement: {skip: isAnInternalCommand},
@@ -487,7 +486,7 @@ const allCommands = {
         },
     },
     dbCheck: {command: {dbCheck: 1}, shouldFail: true},
-    dbHash: {command: {dbHash: 1}, shouldFail: true},
+    dbHash: {command: {dbHash: 1}, shouldFail: false},
     dbStats: {
         command: {dbStats: 1},
         shouldFail: true,

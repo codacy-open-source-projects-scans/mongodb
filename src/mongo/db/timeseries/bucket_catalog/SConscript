@@ -16,22 +16,12 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/catalog/catalog_test_fixture",
-        "$BUILD_DIR/mongo/db/catalog/collection_crud",
+        "$BUILD_DIR/mongo/db/collection_crud/collection_crud",
         "$BUILD_DIR/mongo/db/dbdirectclient",
         "$BUILD_DIR/mongo/db/shard_role",
         "$BUILD_DIR/mongo/db/timeseries/bucket_compression",
         "$BUILD_DIR/mongo/db/timeseries/timeseries_metadata",
         "$BUILD_DIR/mongo/db/timeseries/timeseries_options",
-        "bucket_catalog",
-    ],
-)
-
-env.CppUnitTest(
-    target="timeseries_sizing_test",
-    source=[
-        "timeseries_sizing_test.cpp",
-    ],
-    LIBDEPS=[
         "bucket_catalog",
     ],
 )

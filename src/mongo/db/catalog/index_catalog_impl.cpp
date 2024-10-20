@@ -249,8 +249,8 @@ void IndexCatalogImpl::init(OperationContext* opCtx,
         if (IndexNames::findPluginName(keyPattern) == IndexNames::COLUMN) {
             LOGV2_OPTIONS(7281100,
                           {logv2::LogTag::kStartupWarnings},
-                          "Found a columnstore index in the catalog. Columnstore indexes are "
-                          "a preview feature and not recommended for production use",
+                          "Found a columnstore index in the catalog. Columnstore indexes are no "
+                          "longer supported and are not recommended for production use.",
                           "ns"_attr = collection->ns(),
                           "uuid"_attr = collection->uuid(),
                           "index"_attr = indexName,
@@ -646,7 +646,8 @@ IndexCatalogEntry* IndexCatalogImpl::createIndexEntry(OperationContext* opCtx,
     bool isUpdateMetadata = CreateIndexEntryFlags::kUpdateMetadata & flags;
     if (isUpdateMetadata) {
         bool isForceUpdateMetadata = CreateIndexEntryFlags::kForceUpdateMetadata & flags;
-        engine->getEngine()->alterIdentMetadata(opCtx, ident, desc, isForceUpdateMetadata);
+        engine->getEngine()->alterIdentMetadata(
+            *shard_role_details::getRecoveryUnit(opCtx), ident, desc, isForceUpdateMetadata);
     }
 
     if (!frozen) {

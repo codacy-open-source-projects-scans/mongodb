@@ -64,8 +64,6 @@
 #include "mongo/db/audit_interface.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_factory.h"
-#include "mongo/db/auth/authz_manager_external_state.h"
-#include "mongo/db/auth/authz_manager_external_state_s.h"
 #include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/client.h"
@@ -531,24 +529,11 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         }
 
         if (Grid::get(serviceContext)->isShardingInitialized()) {
-            // The CatalogCache must be shuted down before shutting down the CatalogCacheLoader as
-            // the CatalogCache may try to schedule work on CatalogCacheLoader and fail.
-            {
-                TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
-                                                          "Shut down the catalog cache",
-                                                          &shutdownTimeElapsedBuilder);
-                LOGV2_OPTIONS(7698301, {LogComponent::kSharding}, "Shutting down the CatalogCache");
-                Grid::get(serviceContext)->catalogCache()->shutDownAndJoin();
-            }
-
-            {
-                TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
-                                                          "Shut down the catalog cache loader",
-                                                          &shutdownTimeElapsedBuilder);
-                LOGV2_OPTIONS(
-                    7698302, {LogComponent::kSharding}, "Shutting down the CatalogCacheLoader");
-                CatalogCacheLoader::get(serviceContext).shutDown();
-            }
+            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
+                                                      "Shut down the catalog cache",
+                                                      &shutdownTimeElapsedBuilder);
+            LOGV2_OPTIONS(7698301, {LogComponent::kSharding}, "Shutting down the CatalogCache");
+            Grid::get(serviceContext)->catalogCache()->shutDownAndJoin();
         }
 
         // Finish shutting down the TransportLayers
@@ -611,11 +596,8 @@ Status initializeSharding(
     auto shardFactory =
         std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
 
-    CatalogCacheLoader::set(opCtx->getServiceContext(),
-                            std::make_unique<ConfigServerCatalogCacheLoader>());
-
-    auto catalogCache =
-        std::make_unique<CatalogCache>(opCtx->getServiceContext(), CatalogCacheLoader::get(opCtx));
+    auto catalogCache = std::make_unique<CatalogCache>(
+        opCtx->getServiceContext(), std::make_shared<ConfigServerCatalogCacheLoader>());
 
     // List of hooks which will be called by the ShardRegistry when it discovers a shard has been
     // removed.
@@ -1021,10 +1003,6 @@ void startupConfigActions(const std::vector<std::string>& argv) {
     ntservice::configureService(
         initService, moe::startupOptionsParsed, defaultServiceStrings, disallowedOptions, argv);
 #endif
-}
-
-std::unique_ptr<AuthzManagerExternalState> createAuthzManagerExternalStateMongos() {
-    return std::make_unique<AuthzManagerExternalStateMongos>();
 }
 
 ExitCode main(ServiceContext* serviceContext) {

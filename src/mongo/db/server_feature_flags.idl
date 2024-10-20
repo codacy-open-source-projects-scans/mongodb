@@ -51,12 +51,6 @@ feature_flags:
         cpp_varname: gFeatureFlagRecordIdsReplicated
         default: false
         shouldBeFCVGated: true
-    featureFlagAuditConfigClusterParameter:
-        description: "Enable use of new auditConfig cluster server parameter"
-        cpp_varname: feature_flags::gFeatureFlagAuditConfigClusterParameter
-        default: true
-        version: 7.1
-        shouldBeFCVGated: true
     featureFlagStreams:
         description: "Enable support for streams"
         cpp_varname: gFeatureFlagStreams
@@ -89,7 +83,7 @@ feature_flags:
     featureFlagRearchitectUserAcquisition:
         description: "Enable new flow for authentication and authorization"
         cpp_varname: gFeatureFlagRearchitectUserAcquisition
-        default: false
+        default: true
         shouldBeFCVGated: false
     featureFlagOIDCInternalAuthorization:
         description: "Feature flag gating OIDC authentication with internal authorization"
