@@ -33,7 +33,17 @@ namespace mongo::ce {
 
 using stats::TypeCounts;
 using TypeTags = sbe::value::TypeTags;
-using TypeProbability = std::pair<sbe::value::TypeTags, size_t>;
+
+struct TypeProbability {
+    sbe::value::TypeTags typeTag;
+
+    // Type probability [0,100]
+    size_t typeProbability;
+
+    // Probability of NaN Value [0,1]
+    double nanProb = 0.0;
+};
+
 using TypeCombination = std::vector<TypeProbability>;
 using TypeCombinations = std::vector<TypeCombination>;
 
@@ -61,18 +71,31 @@ struct ErrorCalculationSummary {
     double qError90thPercentile;
     double qError95thPercentile;
     double qError99thPercentile;
+
+    // total executed queries.
+    size_t executedQueries = 0;
 };
 
-static size_t calculateFrequencyFromDataVectorEq(const std::vector<stats::SBEValue>& data,
-                                                 sbe::value::TypeTags type,
-                                                 stats::SBEValue valueToCalculate);
+stats::ScalarHistogram createHistogram(const std::vector<BucketData>& data);
+
+/**
+ * Calculate the frequency of a specific SBEValue as found in a vector of SBEValues.
+ */
+size_t calculateFrequencyFromDataVectorEq(const std::vector<stats::SBEValue>& data,
+                                          stats::SBEValue valueToCalculate,
+                                          bool includeScalar);
+
+/**
+ * Calculate the frequency of a specific TypeTag as found in a vector of SBEValues.
+ */
+size_t calculateTypeFrequencyFromDataVectorEq(const std::vector<stats::SBEValue>& data,
+                                              sbe::value::TypeTags type);
 
 /**
  * Calculate the frequency of a range in a given vector of values.
  * The range is always inclusive of the bounds.
  */
 static size_t calculateFrequencyFromDataVectorRange(const std::vector<stats::SBEValue>& data,
-                                                    sbe::value::TypeTags type,
                                                     stats::SBEValue valueToCalculateLow,
                                                     stats::SBEValue valueToCalculateHigh);
 
@@ -82,13 +105,14 @@ static std::pair<boost::optional<double>, boost::optional<double>> computeErrors
 void printHeader();
 
 void printResult(DataDistributionEnum dataDistribution,
-                 const std::vector<std::pair<sbe::value::TypeTags, size_t>>& typeCombination,
+                 const TypeCombination& typeCombination,
                  int size,
                  int numberOfBuckets,
-                 const std::pair<sbe::value::TypeTags, size_t>& typeCombinationQuery,
+                 const TypeProbability& typeCombinationQuery,
                  int numberOfQueries,
                  QueryType queryType,
                  const std::pair<size_t, size_t>& dataInterval,
+                 bool includeScalar,
                  ErrorCalculationSummary error);
 
 void generateDataUniform(size_t size,
@@ -96,30 +120,82 @@ void generateDataUniform(size_t size,
                          const TypeCombination& typeCombination,
                          size_t seed,
                          size_t ndv,
-                         std::vector<stats::SBEValue>& data);
+                         std::vector<stats::SBEValue>& data,
+                         int arrayLength = 0);
 
 void generateDataNormal(size_t size,
                         const std::pair<size_t, size_t>& interval,
                         const TypeCombination& typeCombination,
                         size_t seed,
                         size_t ndv,
-                        std::vector<stats::SBEValue>& data);
+                        std::vector<stats::SBEValue>& data,
+                        int arrayLength = 0);
 
 void generateDataZipfian(size_t size,
                          const std::pair<size_t, size_t>& interval,
                          const TypeCombination& typeCombination,
                          size_t seed,
                          size_t ndv,
-                         std::vector<stats::SBEValue>& data);
+                         std::vector<stats::SBEValue>& data,
+                         int arrayLength = 0);
+/**
+ * Generates query intervals randomly according to testing configuration.
+ *
+ * @param queryType The type of query intervals. It can be either kPoint or kRange.
+ * @param interval A pair representing the overall range [min, max] within which all generated
+ *                 query intervals' bounds will fall. Both the low and high bounds of each query
+ *                 interval will be within this specified range.
+ * @param numberOfQueries The number of query intervals to generate.
+ * @param queryTypeInfo The type probability information used for generating query interval bounds.
+ * @param seed A seed value for random number generation.
+ * @return A vector of pairs, where each pair consists of two SBEValue representing the low and high
+ *         bounds of an interval.
+ */
+std::vector<std::pair<stats::SBEValue, stats::SBEValue>> generateIntervals(
+    QueryType queryType,
+    const std::pair<size_t, size_t>& interval,
+    size_t numberOfQueries,
+    const TypeProbability& queryTypeInfo,
+    size_t seed);
 
+/**
+ * Executes a single query estimation based on the specified query type and parameters.
+ *
+ * @param queryType The type of query intervals. It can be either kPoint or kRange.
+ * @param sbeValLow The lower bound value for the query interval. For kPoint queries, this is the
+ *                  single value to estimate.
+ * @param sbeValHigh The upper bound value for the query interval. This is used only for kRange
+ *                   queries.
+ * @param ceHist The CEHistogram used for cardinality estimation.
+ * @param includeScalar The flag indicating whether scalar values should be included in the
+ *                      estimation.
+ * @param arrayRangeEstimationAlgo The estimation algorithms for range queries over array values.
+ * @param useE2EAPI A flag indicating whether to use the end-to-end API for estimation.
+ * @param size The data size.
+ * @return The estimated cardinality for the query interval.
+ */
+EstimationResult runSingleQuery(QueryType queryType,
+                                const stats::SBEValue& sbeValLow,
+                                const stats::SBEValue& sbeValHigh,
+                                const std::shared_ptr<const stats::CEHistogram>& ceHist,
+                                bool includeScalar,
+                                ArrayRangeEstimationAlgo arrayRangeEstimationAlgo,
+                                bool useE2EAPI,
+                                size_t size);
+
+/**
+ * Generates query intervals and executes query estimation. Calculates the overall accuracy and
+ * returns the summary in ErrorCalculationSummary.
+ */
 ErrorCalculationSummary runQueries(size_t size,
                                    size_t numberOfQueries,
                                    QueryType queryType,
                                    std::pair<size_t, size_t> interval,
-                                   std::pair<sbe::value::TypeTags, size_t> queryTypeInfo,
+                                   TypeProbability queryTypeInfo,
                                    const std::vector<stats::SBEValue>& data,
                                    std::shared_ptr<const stats::CEHistogram> ceHist,
                                    bool includeScalar,
+                                   ArrayRangeEstimationAlgo arrayRangeEstimationAlgo,
                                    bool useE2EAPI,
                                    size_t seed);
 
@@ -136,8 +212,10 @@ void runAccuracyTestConfiguration(DataDistributionEnum dataDistribution,
                                   int numberOfQueries,
                                   QueryType queryType,
                                   bool includeScalar,
+                                  ArrayRangeEstimationAlgo arrayRangeEstimationAlgo,
                                   bool useE2EAPI,
                                   size_t seed,
-                                  bool printResults);
+                                  bool printResults,
+                                  int arrayTypeLength = 1000);
 
 }  // namespace mongo::ce

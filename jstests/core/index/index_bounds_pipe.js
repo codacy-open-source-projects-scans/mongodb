@@ -6,8 +6,7 @@
  *   requires_fcv_80,
  * ]
  */
-import {exhaustFindCursorAndReturnResults} from "jstests/libs/find_cmd_util.js";
-import {getPlanStages, getWinningPlan} from "jstests/libs/query/analyze_plan.js";
+import {getPlanStages, getWinningPlanFromExplain} from "jstests/libs/query/analyze_plan.js";
 
 const collName = jsTestName();
 const coll = db.getCollection(collName);
@@ -29,13 +28,15 @@ assert.commandWorked(coll.insert({_id: '|'}));
  */
 function assertIndexBoundsAndResult(params) {
     const query = {_id: params.regex};
-    const command = {find: collName, filter: query, projection: {_id: 1}, sort: {_id: 1}};
+    const projection = {_id: 1};
+    const sort = {_id: 1};
+    const command = {find: collName, filter: query, projection: projection, sort: sort};
     const explain = db.runCommand({explain: command});
     assert.commandWorked(explain);
 
     // Check that the query uses correct index bounds. When run against a sharded cluster, there
     // may be multiple index scan stages, but each should have the same index bounds.
-    const ixscans = getPlanStages(getWinningPlan(explain.queryPlanner), 'IXSCAN');
+    const ixscans = getPlanStages(getWinningPlanFromExplain(explain), 'IXSCAN');
     assert.gt(ixscans.length, 0, 'Plan unexpectedly missing IXSCAN stage: ' + tojson(explain));
     for (let i = 0; i < ixscans.length; i++) {
         const ixscan = ixscans[i];
@@ -45,7 +46,10 @@ function assertIndexBoundsAndResult(params) {
                       tojson(ixscan.indexBounds._id)}. i=${i}, all output: ${tojson(explain)}`);
     }
 
-    const results = exhaustFindCursorAndReturnResults(db, command);
+    // Use coll.find() syntax instead of db.runCommand() so we can use the toArray() function. This
+    // is important when 'internalQueryFindCommandBatchSize' is less than the result size and the
+    // cursor.firstBatch returned from db.runCommand() doesn't contain all the results.
+    const results = coll.find(query, projection).sort(sort).toArray();
     assert.eq(
         results, params.results, 'Regex query ' + tojson(query) + ' returned incorrect results');
 

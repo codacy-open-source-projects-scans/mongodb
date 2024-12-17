@@ -33,15 +33,11 @@ struct __wt_index {
     WT_COLLATOR *collator; /* Custom collator */
     int collator_owned;    /* Collator is owned by this index */
 
-    WT_EXTRACTOR *extractor; /* Custom key extractor */
-    int extractor_owned;     /* Extractor is owned by this index */
-
     const char *key_format; /* Key format */
     const char *key_plan;   /* Key projection plan */
     const char *value_plan; /* Value projection plan */
 
     const char *idxkey_format; /* Index key format (hides primary) */
-    const char *exkey_format;  /* Key format for custom extractors */
 
 /* AUTOMATIC FLAG VALUE GENERATION START 0 */
 #define WT_INDEX_IMMUTABLE 0x1u
@@ -373,74 +369,5 @@ struct __wt_import_list {
             op;                                                                                    \
             FLD_CLR(session->lock_flags, WT_SESSION_LOCKED_HOTBACKUP_WRITE);                       \
             __wt_writeunlock(session, &__conn->hot_backup_lock);                                   \
-        }                                                                                          \
-    } while (0)
-
-/*
- * WT_WITHOUT_LOCKS --
- *	Drop the handle, table and/or schema locks, perform an operation,
- *	re-acquire the lock(s).
- */
-#define WT_WITHOUT_LOCKS(session, op)                                                              \
-    do {                                                                                           \
-        WT_CONNECTION_IMPL *__conn = S2C(session);                                                 \
-        bool __checkpoint_locked = FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_CHECKPOINT);   \
-        bool __handle_read_locked =                                                                \
-          FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_HANDLE_LIST_READ);                      \
-        bool __handle_write_locked =                                                               \
-          FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_HANDLE_LIST_WRITE);                     \
-        bool __table_read_locked = FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_TABLE_READ);   \
-        bool __table_write_locked = FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_TABLE_WRITE); \
-        bool __schema_locked = FLD_ISSET(session->lock_flags, WT_SESSION_LOCKED_SCHEMA);           \
-        if (__handle_read_locked) {                                                                \
-            FLD_CLR(session->lock_flags, WT_SESSION_LOCKED_HANDLE_LIST_READ);                      \
-            __wt_readunlock(session, &__conn->dhandle_lock);                                       \
-        }                                                                                          \
-        if (__handle_write_locked) {                                                               \
-            FLD_CLR(session->lock_flags, WT_SESSION_LOCKED_HANDLE_LIST_WRITE);                     \
-            __wt_writeunlock(session, &__conn->dhandle_lock);                                      \
-        }                                                                                          \
-        if (__table_read_locked) {                                                                 \
-            FLD_CLR(session->lock_flags, WT_SESSION_LOCKED_TABLE_READ);                            \
-            __wt_readunlock(session, &__conn->table_lock);                                         \
-        }                                                                                          \
-        if (__table_write_locked) {                                                                \
-            FLD_CLR(session->lock_flags, WT_SESSION_LOCKED_TABLE_WRITE);                           \
-            __wt_writeunlock(session, &__conn->table_lock);                                        \
-        }                                                                                          \
-        if (__schema_locked) {                                                                     \
-            FLD_CLR(session->lock_flags, WT_SESSION_LOCKED_SCHEMA);                                \
-            __wt_spin_unlock(session, &__conn->schema_lock);                                       \
-        }                                                                                          \
-        if (__checkpoint_locked) {                                                                 \
-            FLD_CLR(session->lock_flags, WT_SESSION_LOCKED_CHECKPOINT);                            \
-            __wt_spin_unlock(session, &__conn->checkpoint_lock);                                   \
-        }                                                                                          \
-        __wt_yield();                                                                              \
-        op;                                                                                        \
-        __wt_yield();                                                                              \
-        if (__checkpoint_locked) {                                                                 \
-            __wt_spin_lock(session, &__conn->checkpoint_lock);                                     \
-            FLD_SET(session->lock_flags, WT_SESSION_LOCKED_CHECKPOINT);                            \
-        }                                                                                          \
-        if (__schema_locked) {                                                                     \
-            __wt_spin_lock(session, &__conn->schema_lock);                                         \
-            FLD_SET(session->lock_flags, WT_SESSION_LOCKED_SCHEMA);                                \
-        }                                                                                          \
-        if (__table_read_locked) {                                                                 \
-            __wt_readlock(session, &__conn->table_lock);                                           \
-            FLD_SET(session->lock_flags, WT_SESSION_LOCKED_TABLE_READ);                            \
-        }                                                                                          \
-        if (__table_write_locked) {                                                                \
-            __wt_writelock(session, &__conn->table_lock);                                          \
-            FLD_SET(session->lock_flags, WT_SESSION_LOCKED_TABLE_WRITE);                           \
-        }                                                                                          \
-        if (__handle_read_locked) {                                                                \
-            __wt_readlock(session, &__conn->dhandle_lock);                                         \
-            FLD_SET(session->lock_flags, WT_SESSION_LOCKED_HANDLE_LIST_READ);                      \
-        }                                                                                          \
-        if (__handle_write_locked) {                                                               \
-            __wt_writelock(session, &__conn->dhandle_lock);                                        \
-            FLD_SET(session->lock_flags, WT_SESSION_LOCKED_HANDLE_LIST_WRITE);                     \
         }                                                                                          \
     } while (0)

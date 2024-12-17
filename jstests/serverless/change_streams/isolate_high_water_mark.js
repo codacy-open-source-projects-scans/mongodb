@@ -7,8 +7,6 @@
  *     requires_fcv_71
  * ]
  */
-// TODO SERVER-76309: re-purpose this test to show that the resume token does advance with the
-// global oplog, or remove the test in favour of existing coverage elsewhere.
 import {
     ChangeStreamMultitenantReplicaSetTest
 } from "jstests/serverless/libs/change_collection_util.js";
@@ -51,6 +49,7 @@ assert.soon(() => {
     assert.neq(undefined, hwmToken);
     return bsonWoCompare(hwmToken, monitoredEvent._id) > 0;
 });
+assert.eq(decodeResumeToken(hwmToken).tokenType, highWaterMarkResumeTokenType);
 
 // Open a change stream on tenant 2 so we can observe a write that happens and verify that write
 // advanced the global oplog timestamp.
@@ -67,6 +66,7 @@ assert.soon(() => {
 // greater than the last resume token we got.
 assert.eq(csCursor.hasNext(), false);
 const hwmToken2 = csCursor.getResumeToken();
+assert.eq(decodeResumeToken(hwmToken2).tokenType, highWaterMarkResumeTokenType);
 assert.neq(undefined, hwmToken2);
 assert.eq(bsonWoCompare(hwmToken, hwmToken2), 0);
 

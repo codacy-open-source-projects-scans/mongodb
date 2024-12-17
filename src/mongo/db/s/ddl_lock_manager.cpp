@@ -30,24 +30,30 @@
 
 #include "mongo/db/s/ddl_lock_manager.h"
 
+#include <cstdlib>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
-#include "mongo/base/error_codes.h"
+#include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/client.h"
 #include "mongo/db/concurrency/resource_catalog.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
+#include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/scopeguard.h"
@@ -67,7 +73,7 @@ MONGO_FAIL_POINT_DEFINE(overrideDDLLockTimeout);
 }  // namespace
 
 const Minutes DDLLockManager::ScopedBaseDDLLock::kDefaultLockTimeout(5);
-const Milliseconds DDLLockManager::kSingleLockAttemptTimeout(0);
+const Milliseconds DDLLockManager::kSingleLockAttemptTimeout(25);
 
 DDLLockManager* DDLLockManager::get(ServiceContext* service) {
     return &ddlLockManagerDecorator(service);
@@ -77,10 +83,8 @@ DDLLockManager* DDLLockManager::get(OperationContext* opCtx) {
     return get(opCtx->getServiceContext());
 }
 
-void DDLLockManager::setState(const State& state) {
-    stdx::unique_lock<stdx::mutex> lock(_mutex);
-    _state = state;
-    _stateCV.notify_all();
+void DDLLockManager::setRecoverable(Recoverable* recoverable) {
+    _recoverable = recoverable;
 }
 
 void DDLLockManager::_lock(OperationContext* opCtx,
@@ -91,33 +95,39 @@ void DDLLockManager::_lock(OperationContext* opCtx,
                            LockMode mode,
                            Date_t deadline,
                            bool waitForRecovery) {
-    Timer waitingTime;
+    tassert(9037198,
+            "Operation context must be interruptable on stepup/stepdown",
+            opCtx->shouldAlwaysInterruptAtStepDownOrUp());
 
-    {
-        stdx::unique_lock<stdx::mutex> lock{_mutex};
-        // Wait for primary and DDL recovered state
-        if (!opCtx->waitForConditionOrInterruptUntil(_stateCV, lock, deadline, [&] {
-                return _state == State::kPrimaryAndRecovered || !waitForRecovery;
-            })) {
+    Timer waitingTime;
+    if (waitForRecovery) {
+        tassert(9037199,
+                "Failed to wait for recovery on acquire DDL lock for namespace '{}' in mode {} with"
+                " reason '{}': No recoverable object set"_format(ns, modeName(mode), reason),
+                _recoverable);
+        try {
+            opCtx->runWithDeadline(
+                deadline, opCtx->getTimeoutError(), [_recoverable = this->_recoverable, &opCtx]() {
+                    _recoverable->waitForRecovery(opCtx);
+                });
+        } catch (const ExceptionForCat<ErrorCategory::ExceededTimeLimitError>&) {
             uasserted(
                 ErrorCodes::LockTimeout,
                 "Failed to acquire DDL lock for namespace '{}' in mode {} after {} with reason "
                 "'{}' while waiting recovery of DDLCoordinatorService"_format(
                     ns, modeName(mode), waitingTime.elapsed().toString(), reason));
         }
-
-        tassert(7742100,
-                "No hierarchy lock (Global/DB/Coll) must be held when acquiring a DDL lock outside"
-                "a transaction (transactions hold at least the global lock in IX mode)",
-                opCtx->inMultiDocumentTransaction() || !locker->isLocked());
-
-        _registerResourceName(lock, resId, ns);
     }
 
-    ScopeGuard unregisterResourceExitGuard([&] {
-        stdx::unique_lock<stdx::mutex> lock(_mutex);
-        _unregisterResourceNameIfNoLongerNeeded(lock, resId, ns);
-    });
+    tassert(7742100,
+            "No hierarchy lock (Global/DB/Coll) must be held when acquiring a DDL lock outside"
+            "a transaction (transactions hold at least the global lock in IX mode)",
+            opCtx->inMultiDocumentTransaction() || !locker->isLocked());
+
+    _registerResourceName(resId, ns);
+
+    ScopeGuard unregisterResourceExitGuard(
+        [&] { _unregisterResourceNameIfNoLongerNeeded(resId, ns); });
 
     if (locker->getDebugInfo().empty()) {
         locker->setDebugInfo(reason.toString());
@@ -125,24 +135,6 @@ void DDLLockManager::_lock(OperationContext* opCtx,
 
     try {
         locker->lock(opCtx, resId, mode, deadline);
-
-        const auto state = [this]() {
-            stdx::unique_lock<stdx::mutex> lock(_mutex);
-            return _state;
-        }();
-        if (state != State::kPrimaryAndRecovered && waitForRecovery) {
-            // We must fail if the node has become secondary while we were waiting for the lock
-            // acquisition. It is not allowed to acquire a DDL lock once `_state` has changed from
-            // `kPrimaryAndRecovered` as we may be in the middle of a DDL operation that was
-            // interrupted during a step-down, leading to undefined behavior. Note that once a DDL
-            // operation takes a DDL lock, no one else should acquire that DDL lock until the
-            // operation completes.
-            locker->unlock(resId);
-            uasserted(
-                ErrorCodes::InterruptedDueToReplStateChange,
-                "Failed to acquire DDL lock for namespace '{}' in mode {} with reason {} "
-                "because this is not the primary anymore."_format(ns, modeName(mode), reason));
-        }
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>&) {
 
         std::vector<std::string> lockHoldersArr;
@@ -160,11 +152,6 @@ void DDLLockManager::_lock(OperationContext* opCtx,
                 modeName(mode),
                 duration_cast<Milliseconds>(waitingTime.elapsed()).toString(),
                 lockHoldersArr));
-
-    } catch (DBException& e) {
-        e.addContext("Failed to acquire DDL lock for '{}' in mode {} after {}"_format(
-            ns, modeName(mode), duration_cast<Milliseconds>(waitingTime.elapsed()).toString()));
-        throw;
     }
 
     unregisterResourceExitGuard.dismiss();
@@ -181,8 +168,7 @@ void DDLLockManager::_unlock(
     dassert(locker);
     locker->unlock(resId);
 
-    stdx::unique_lock<stdx::mutex> lock(_mutex);
-    _unregisterResourceNameIfNoLongerNeeded(lock, resId, ns);
+    _unregisterResourceNameIfNoLongerNeeded(resId, ns);
 
     LOGV2(6855302,
           "Released DDL lock",
@@ -191,16 +177,16 @@ void DDLLockManager::_unlock(
           "mode"_attr = modeName(mode));
 }
 
-void DDLLockManager::_registerResourceName(WithLock lk, ResourceId resId, StringData resName) {
+void DDLLockManager::_registerResourceName(ResourceId resId, StringData resName) {
+    stdx::lock_guard<stdx::mutex> guard{_mutex};
     const auto currentNumHolders = _numHoldersPerResource[resId]++;
     if (currentNumHolders == 0) {
         ResourceCatalog::get().add(resId, DDLResourceName(resName));
     }
 }
 
-void DDLLockManager::_unregisterResourceNameIfNoLongerNeeded(WithLock lk,
-                                                             ResourceId resId,
-                                                             StringData resName) {
+void DDLLockManager::_unregisterResourceNameIfNoLongerNeeded(ResourceId resId, StringData resName) {
+    stdx::lock_guard<stdx::mutex> guard{_mutex};
     const auto currentNumHolders = --_numHoldersPerResource[resId];
     if (currentNumHolders <= 0) {
         _numHoldersPerResource.erase(resId);
@@ -209,48 +195,137 @@ void DDLLockManager::_unregisterResourceNameIfNoLongerNeeded(WithLock lk,
 }
 
 
-DDLLockManager::ScopedDatabaseDDLLock::ScopedDatabaseDDLLock(OperationContext* opCtx,
-                                                             const DatabaseName& db,
-                                                             StringData reason,
-                                                             LockMode mode)
-    : _dbLock{
-          opCtx, shard_role_details::getLocker(opCtx), db, reason, mode, true /*waitForRecovery*/} {
-    // Check under the DDL dbLock if this is the primary shard for the database
-    const auto lockMode = opCtx->inMultiDocumentTransaction() ? MODE_IX : MODE_IS;
-    Lock::DBLock dbLock(opCtx, db, lockMode);
-    const auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, db);
-    scopedDss->assertIsPrimaryShardForDb(opCtx);
+DDLLockManager::ScopedDatabaseDDLLock::ScopedDatabaseDDLLock(
+    OperationContext* opCtx,
+    const DatabaseName& db,
+    StringData reason,
+    LockMode mode,
+    boost::optional<BackoffStrategy&> backoffStrategy) {
+    if (backoffStrategy) {
+        if (_tryLock(opCtx, db, reason, mode, *backoffStrategy)) {
+            return;
+        }
+    }
+    _lock(opCtx, db, reason, mode, boost::none);
 }
 
-DDLLockManager::ScopedCollectionDDLLock::ScopedCollectionDDLLock(OperationContext* opCtx,
-                                                                 const NamespaceString& ns,
-                                                                 StringData reason,
-                                                                 LockMode mode) {
-    // Acquire implicitly the db DDL lock
-    _dbLock.emplace(opCtx,
-                    shard_role_details::getLocker(opCtx),
-                    ns.dbName(),
-                    reason,
-                    isSharedLockMode(mode) ? MODE_IS : MODE_IX,
-                    true /*waitForRecovery*/);
+bool DDLLockManager::ScopedDatabaseDDLLock::_tryLock(OperationContext* opCtx,
+                                                     const DatabaseName& db,
+                                                     StringData reason,
+                                                     LockMode mode,
+                                                     BackoffStrategy& backoffStrategy) {
+    return backoffStrategy.execute(
+        [&]() {
+            try {
+                _lock(opCtx, db, reason, mode, kSingleLockAttemptTimeout);
+            } catch (const DBException& ex) {
+                if (ex.code() != ErrorCodes::LockTimeout && ex.code() != ErrorCodes::LockBusy) {
+                    throw;
+                }
+                return false;
+            }
+            return true;
+        },
+        [&](Milliseconds millis) { opCtx->sleepFor(millis); });
+}
 
-    // Check under the DDL db lock if this is the primary shard for the database
-    {
+void DDLLockManager::ScopedDatabaseDDLLock::_lock(OperationContext* opCtx,
+                                                  const DatabaseName& db,
+                                                  StringData reason,
+                                                  LockMode mode,
+                                                  boost::optional<Milliseconds> timeout) {
+    try {
+        _dbLock.emplace(opCtx,
+                        shard_role_details::getLocker(opCtx),
+                        db,
+                        reason,
+                        mode,
+                        true /*waitForRecovery*/,
+                        timeout);
+
+        // Check under the DDL dbLock if this is the primary shard for the database
         const auto lockMode = opCtx->inMultiDocumentTransaction() ? MODE_IX : MODE_IS;
-        Lock::DBLock dbLock(opCtx, ns.dbName(), lockMode);
-        const auto scopedDss =
-            DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, ns.dbName());
+        Lock::DBLock dbLock(opCtx, db, lockMode);
+        const auto scopedDss = DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, db);
         scopedDss->assertIsPrimaryShardForDb(opCtx);
+    } catch (...) {
+        _dbLock.reset();
+        throw;
     }
+}
 
-    // Acquire the collection DDL lock.
-    // If the ns represents a timeseries buckets collection, translate to its corresponding view ns.
-    _collLock.emplace(opCtx,
-                      shard_role_details::getLocker(opCtx),
-                      ns.isTimeseriesBucketsCollection() ? ns.getTimeseriesViewNamespace() : ns,
-                      reason,
-                      mode,
-                      true /*waitForRecovery*/);
+DDLLockManager::ScopedCollectionDDLLock::ScopedCollectionDDLLock(
+    OperationContext* opCtx,
+    const NamespaceString& ns,
+    StringData reason,
+    LockMode mode,
+    boost::optional<BackoffStrategy&> backoffStrategy) {
+    if (backoffStrategy) {
+        if (_tryLock(opCtx, ns, reason, mode, *backoffStrategy)) {
+            return;
+        }
+    }
+    _lock(opCtx, ns, reason, mode, boost::none);
+}
+
+bool DDLLockManager::ScopedCollectionDDLLock::_tryLock(OperationContext* opCtx,
+                                                       const NamespaceString& ns,
+                                                       StringData reason,
+                                                       LockMode mode,
+                                                       BackoffStrategy& backoffStrategy) {
+    return backoffStrategy.execute(
+        [&]() {
+            try {
+                _lock(opCtx, ns, reason, mode, kSingleLockAttemptTimeout);
+            } catch (const DBException& ex) {
+                if (ex.code() != ErrorCodes::LockTimeout && ex.code() != ErrorCodes::LockBusy) {
+                    throw;
+                }
+                return false;
+            }
+            return true;
+        },
+        [&](Milliseconds millis) { opCtx->sleepFor(millis); });
+}
+
+void DDLLockManager::ScopedCollectionDDLLock::_lock(OperationContext* opCtx,
+                                                    const NamespaceString& ns,
+                                                    StringData reason,
+                                                    LockMode mode,
+                                                    boost::optional<Milliseconds> timeout) {
+    try {
+        _dbLock.emplace(opCtx,
+                        shard_role_details::getLocker(opCtx),
+                        ns.dbName(),
+                        reason,
+                        isSharedLockMode(mode) ? MODE_IS : MODE_IX,
+                        true /*waitForRecovery*/,
+                        timeout);
+
+        // Check under the DDL db lock if this is the primary shard for the database
+        {
+            const auto lockMode = opCtx->inMultiDocumentTransaction() ? MODE_IX : MODE_IS;
+            Lock::DBLock dbLock(opCtx, ns.dbName(), lockMode);
+            const auto scopedDss =
+                DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, ns.dbName());
+            scopedDss->assertIsPrimaryShardForDb(opCtx);
+        }
+
+        // Acquire the collection DDL lock.
+        // If the ns represents a timeseries buckets collection, translate to its corresponding
+        // view ns.
+        _collLock.emplace(opCtx,
+                          shard_role_details::getLocker(opCtx),
+                          ns.isTimeseriesBucketsCollection() ? ns.getTimeseriesViewNamespace() : ns,
+                          reason,
+                          mode,
+                          true /*waitForRecovery*/,
+                          timeout);
+    } catch (...) {
+        _dbLock.reset();
+        _collLock.reset();
+        throw;
+    }
 }
 
 DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
@@ -259,7 +334,8 @@ DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
                                                      const ResourceId& resId,
                                                      StringData reason,
                                                      LockMode mode,
-                                                     bool waitForRecovery)
+                                                     bool waitForRecovery,
+                                                     Milliseconds timeout)
     : _resourceName(resName.toString()),
       _resourceId(resId),
       _reason(reason.toString()),
@@ -267,15 +343,15 @@ DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
       _result(LockResult::LOCK_INVALID),
       _locker(locker),
       _lockManager(DDLLockManager::get(opCtx)) {
-
     invariant(_lockManager);
+
     _lockManager->_lock(opCtx,
                         _locker,
                         _resourceName,
                         _resourceId,
                         _reason,
                         _mode,
-                        Date_t::now() + _getTimeout(),
+                        Date_t::now() + timeout,
                         waitForRecovery);
     _result = LockResult::LOCK_OK;
 }
@@ -285,28 +361,32 @@ DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
                                                      const NamespaceString& nss,
                                                      StringData reason,
                                                      LockMode mode,
-                                                     bool waitForRecovery)
+                                                     bool waitForRecovery,
+                                                     boost::optional<Milliseconds> timeout)
     : ScopedBaseDDLLock(opCtx,
                         locker,
                         NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()),
                         ResourceId{RESOURCE_DDL_COLLECTION, nss},
                         reason,
                         mode,
-                        waitForRecovery) {}
+                        waitForRecovery,
+                        timeout.value_or(_getTimeout())) {}
 
 DDLLockManager::ScopedBaseDDLLock::ScopedBaseDDLLock(OperationContext* opCtx,
                                                      Locker* locker,
                                                      const DatabaseName& db,
                                                      StringData reason,
                                                      LockMode mode,
-                                                     bool waitForRecovery)
+                                                     bool waitForRecovery,
+                                                     boost::optional<Milliseconds> timeout)
     : ScopedBaseDDLLock(opCtx,
                         locker,
                         DatabaseNameUtil::serialize(db, SerializationContext::stateDefault()),
                         ResourceId{RESOURCE_DDL_DATABASE, db},
                         reason,
                         mode,
-                        waitForRecovery) {}
+                        waitForRecovery,
+                        timeout.value_or(_getTimeout())) {}
 
 DDLLockManager::ScopedBaseDDLLock::~ScopedBaseDDLLock() {
     if (_lockManager && _result == LockResult::LOCK_OK) {

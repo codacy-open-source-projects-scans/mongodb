@@ -201,30 +201,50 @@ tasks:
         vars:
           use_large_distro: "true"
 
-  # TODO(SERVER-93789): Re-enable magic_restore passthroughs in master
-  # - <<: *gen_task_template
-  #   name: magic_restore_replica_sets_jscore_passthrough_gen
-  #   tags: ["assigned_to_jira_team_server_repl", "default", "large"]
-  #   commands:
-  #     - func: "generate resmoke tasks"
-  #       vars:
-  #         use_large_distro: "true"
-  #
-  # - <<: *gen_task_template
-  #   name: magic_restore_sharding_jscore_passthrough_gen
-  #   tags: ["assigned_to_jira_team_server_repl", "default", "large"]
-  #   commands:
-  #     - func: "generate resmoke tasks"
-  #       vars:
-  #         use_large_distro: "true"
-  #
-  # - <<: *gen_task_template
-  #   name: magic_restore_sharded_collections_jscore_passthrough_gen
-  #   tags: ["assigned_to_jira_team_server_repl", "default", "large"]
-  #   commands:
-  #     - func: "generate resmoke tasks"
-  #       vars:
-  #         use_large_distro: "true"
+  - <<: *gen_task_template
+    name: magic_restore_replica_sets_jscore_passthrough_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_repl",
+        "default",
+        "large",
+        "suggested_excluding_required__for_devprod_mitigation_only",
+        "magic_restore",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: magic_restore_sharding_jscore_passthrough_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_repl",
+        "default",
+        "large",
+        "suggested_excluding_required__for_devprod_mitigation_only",
+        "magic_restore",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
+
+  - <<: *gen_task_template
+    name: magic_restore_sharded_collections_jscore_passthrough_gen
+    tags:
+      [
+        "assigned_to_jira_team_server_repl",
+        "default",
+        "large",
+        "suggested_excluding_required__for_devprod_mitigation_only",
+        "magic_restore",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          use_large_distro: "true"
 
   - <<: *task_template
     name: causally_consistent_jscore_txns_passthrough
@@ -379,7 +399,8 @@ tasks:
           concurrency_replication_last_lts_old_new_new: last_lts
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: concurrency_sharded_initial_sync_gen
@@ -511,7 +532,8 @@ tasks:
           concurrency_sharded_replication_last_lts_new_old_old_new: last_lts
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: concurrency_sharded_replication_with_balancer_gen
@@ -572,7 +594,7 @@ tasks:
         vars:
           # This task sometimes has outliers that will hit the default exec timeout set by the
           # historical data. We manually increase the timeout above the historical timeout to avoid this
-          exec_timeout_secs: 900 # 15 mins
+          exec_timeout_secs: 1800 # 30 mins
 
   ## initial sync generational fuzzer to ensure stability in patch builds ##
   - <<: *jstestfuzz_template
@@ -635,8 +657,9 @@ tasks:
           num_files: 10
           num_tasks: 5
           npm_command: initsync-fuzzer
-          resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --mongodSetParameters='{logComponentVerbosity: {command: 2}}'
+            --runNoFeatureFlagTests
 
   - <<: *task_template
     name: jsCore_txns
@@ -701,9 +724,9 @@ tasks:
           suite: jstestfuzz_replication
           resmoke_args: --numClientsPerFixture=10
 
-  ## jstestfuzz concurrent replica set with logical session ##
+  ## jstestfuzz concurrent replica set with notablescan enabled ##
   - <<: *jstestfuzz_template
-    name: jstestfuzz_concurrent_replication_session_gen
+    name: jstestfuzz_concurrent_replication_notablescan_gen
     # TODO(SERVER-69996) remove "incompatible_debug_mode" tag
     tags:
       [
@@ -711,7 +734,6 @@ tasks:
         "incompatible_debug_mode",
         "jstestfuzz",
         "non_deterministic",
-        "session",
         "require_npm",
         "random_name",
       ]
@@ -722,7 +744,7 @@ tasks:
           num_files: ${jstestfuzz_concurrent_num_files|10}
           num_tasks: 5
           jstestfuzz_vars: --jsTestsDir ../jstests
-          suite: jstestfuzz_replication_session
+          suite: jstestfuzz_replication_notablescan
           resmoke_args: --numClientsPerFixture=10
 
   # jstestfuzz concurrent conflict #
@@ -848,13 +870,14 @@ tasks:
         vars:
           <<: *jstestfuzz_config_vars
           jstestfuzz_vars: --jsTestsDir ../jstests
-          resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+          resmoke_args: >-
+            --mongodSetParameters='{logComponentVerbosity: {command: 2}}'
+            --runNoFeatureFlagTests
           npm_command: jstestfuzz
-          run_no_feature_flag_tests: "true"
 
-  ## jstestfuzz replica set with logical session ##
+  ## jstestfuzz replica set with notablescan enabled ##
   - <<: *jstestfuzz_template
-    name: jstestfuzz_replication_session_gen
+    name: jstestfuzz_replication_notablescan_gen
     # TODO(SERVER-69996) remove "incompatible_debug_mode" tag
     tags:
       [
@@ -862,7 +885,6 @@ tasks:
         "incompatible_debug_mode",
         "jstestfuzz",
         "non_deterministic",
-        "session",
         "require_npm",
         "random_name",
       ]
@@ -871,7 +893,7 @@ tasks:
         vars:
           <<: *jstestfuzz_config_vars
           jstestfuzz_vars: --jsTestsDir ../jstests
-          suite: jstestfuzz_replication_session
+          suite: jstestfuzz_replication_notablescan
           resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
   ## jstestfuzz replica set endpoint ##
@@ -1118,7 +1140,8 @@ tasks:
           replica_sets_jscore_passthrough_last_lts_old_new_new: last_lts
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: replica_sets_kill_primary_jscore_multiversion_gen
@@ -1136,7 +1159,8 @@ tasks:
           replica_sets_kill_primary_jscore_passthrough_last_lts_new_old_old: last_lts
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: replica_sets_jscore_passthrough_gen
@@ -1328,7 +1352,8 @@ tasks:
           replica_sets_last_continuous: last_continuous
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: replica_sets_reconfig_jscore_passthrough_gen
@@ -1514,8 +1539,9 @@ tasks:
           npm_command: rollback-fuzzer
           # Rollback suites create indexes with majority of nodes not available for replication. So, disabling
           # index build commit quorum.
-          resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}, enableIndexBuildCommitQuorum: false}'"
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --mongodSetParameters='{logComponentVerbosity: {command: 2}, enableIndexBuildCommitQuorum: false}'
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: secondary_reads_passthrough_gen
@@ -1696,6 +1722,39 @@ tasks:
   ################################################
   #           Storage Execution tasks            #
   ################################################
+
+  - <<: *benchmark_template
+    name: benchmarks_sorter
+    tags:
+      ["assigned_to_jira_team_server_execution", "experimental", "benchmarks"]
+    commands:
+      - func: "do benchmark setup"
+      - func: "run benchmark tests"
+        vars:
+          suite: benchmarks_sorter
+          resmoke_jobs_max: 1
+
+  - <<: *benchmark_template
+    name: benchmarks_storage
+    tags:
+      ["assigned_to_jira_team_server_execution", "experimental", "benchmarks"]
+    commands:
+      - func: "do benchmark setup"
+      - func: "run benchmark tests"
+        vars:
+          suite: benchmarks_storage
+          resmoke_jobs_max: 1
+
+  - <<: *benchmark_template
+    name: benchmarks_util
+    tags:
+      ["assigned_to_jira_team_server_execution", "experimental", "benchmarks"]
+    commands:
+      - func: "do benchmark setup"
+      - func: "run benchmark tests"
+        vars:
+          suite: benchmarks_util
+          resmoke_jobs_max: 1
 
   - <<: *gen_task_template
     name: clustered_collection_passthrough_gen
@@ -1951,6 +2010,7 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           suite: concurrency_replication
+          # TODO SERVER-97887 add SIGUSR2 stress testing once libunwind deadlocks are fixed.
           resmoke_args: >-
             --fuzzMongodConfigs=stress
             --fuzzRuntimeParams
@@ -1975,6 +2035,7 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           suite: concurrency_sharded_replication
+          # TODO SERVER-97887 add SIGUSR2 stress testing once libunwind deadlocks are fixed.
           resmoke_args: >-
             --fuzzMongodConfigs=stress
             --fuzzMongosConfigs=normal
@@ -2154,6 +2215,7 @@ tasks:
         "release_critical",
         "misc_js",
         "non_win_dbg",
+        "suggested_excluding_required__for_devprod_mitigation_only",
       ]
     commands:
       - func: "generate resmoke tasks"

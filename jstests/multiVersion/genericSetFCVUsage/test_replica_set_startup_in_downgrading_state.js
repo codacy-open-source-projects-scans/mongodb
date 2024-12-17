@@ -14,7 +14,7 @@ function runReplicaSet() {
     const rst = new ReplSetTest({nodes: 2, nodeOptions: {binVersion: "latest"}});
 
     rst.startSet();
-    rst.initiate();
+    rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
     const primaryAdminDB = rst.getPrimary().getDB("admin");
     const primary = rst.getPrimary();
@@ -50,7 +50,7 @@ function runReplicaSet() {
 
     jsTestLog("Restarting the primary.");
     rst.restart(primaryId, {}, true /* wait */);
-    rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+    rst.awaitSecondaryNodes(null, [primary]);
 
     fcvDoc = primaryAdminDB.system.version.findOne({_id: 'featureCompatibilityVersion'});
     jsTestLog(`Old primary's version after restarting: ${tojson(fcvDoc)}`);

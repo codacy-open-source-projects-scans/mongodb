@@ -77,6 +77,8 @@
 #include "mongo/db/process_health/fault_manager.h"
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -108,13 +110,13 @@
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog_cache.h"
-#include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
 #include "mongo/s/client/sharding_connection_hook.h"
 #include "mongo/s/client_transport_observer_mongos.h"
 #include "mongo/s/config_server_catalog_cache_loader.h"
+#include "mongo/s/config_server_catalog_cache_loader_impl.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/load_balancer_support.h"
 #include "mongo/s/mongos_options.h"
@@ -305,14 +307,12 @@ void implicitlyAbortAllTransactions(OperationContext* opCtx) {
                             session.kill(ErrorCodes::InterruptedAtShutdown));
     });
 
+    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
     auto newClient = opCtx->getServiceContext()
                          ->getService(ClusterRole::RouterServer)
-                         ->makeClient("ImplicitlyAbortTxnAtShutdown");
-    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<mongo::Client> lk(*newClient.get());
-        newClient.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
+                         ->makeClient("ImplicitlyAbortTxnAtShutdown",
+                                      Client::noSession(),
+                                      ClientOperationKillableByStepdown{false});
     AlternativeClientRegion acr(newClient);
 
     Status shutDownStatus(ErrorCodes::InterruptedAtShutdown,
@@ -376,15 +376,13 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
         // This client initiation pattern is only to be used here, with plans to eliminate this
         // pattern down the line.
         if (!haveClient()) {
-            Client::initThread(getThreadName(),
-                               serviceContext->getService(ClusterRole::RouterServer));
-
             // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-            {
-                stdx::lock_guard<Client> lk(cc());
-                cc().setSystemOperationUnkillableByStepdown(lk);
-            }
+            Client::initThread(getThreadName(),
+                               serviceContext->getService(ClusterRole::RouterServer),
+                               Client::noSession(),
+                               ClientOperationKillableByStepdown{false});
         }
+
         Client& client = cc();
 
         ServiceContext::UniqueOperationContext uniqueTxn;
@@ -490,7 +488,8 @@ void cleanupTask(const ShutdownTaskArgs& shutdownArgs) {
             }
             FailPoint* hangBeforeInterruptfailPoint =
                 globalFailPointRegistry().find("hangBeforeCheckingMongosShutdownInterrupt");
-            if (hangBeforeInterruptfailPoint) {
+            if (MONGO_unlikely(hangBeforeInterruptfailPoint &&
+                               hangBeforeInterruptfailPoint->shouldFail())) {
                 hangBeforeInterruptfailPoint->setMode(FailPoint::Mode::off);
                 sleepsecs(3);
             }
@@ -597,7 +596,7 @@ Status initializeSharding(
         std::make_unique<ShardFactory>(std::move(buildersMap), std::move(targeterFactory));
 
     auto catalogCache = std::make_unique<CatalogCache>(
-        opCtx->getServiceContext(), std::make_shared<ConfigServerCatalogCacheLoader>());
+        opCtx->getServiceContext(), std::make_shared<ConfigServerCatalogCacheLoaderImpl>());
 
     // List of hooks which will be called by the ShardRegistry when it discovers a shard has been
     // removed.
@@ -749,13 +748,10 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
                                                   &startupInfoBuilder);
         });
 
-    ThreadClient tc("mongosMain", serviceContext->getService(ClusterRole::RouterServer));
-
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*tc.get());
-        tc.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
+    ThreadClient tc("mongosMain",
+                    serviceContext->getService(ClusterRole::RouterServer),
+                    ClientOperationKillableByStepdown{false});
 
     logMongosVersionInfo(nullptr);
 
@@ -799,15 +795,18 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         auto tl = transport::TransportLayerManagerImpl::createWithConfig(
             &serverGlobalParams,
             serviceContext,
+            false /* useEgressGRPC */,
             loadBalancerPort,
             boost::none,
             std::make_unique<ClientTransportObserverMongos>());
         if (auto res = tl->setup(); !res.isOK()) {
-            LOGV2_ERROR(22856, "Error setting up listener", "error"_attr = res);
+            LOGV2_ERROR(22856, "Error setting up transport layer", "error"_attr = res);
             return ExitCode::netError;
         }
         serviceContext->setTransportLayerManager(std::move(tl));
     }
+
+    executor::startupSearchExecutorsIfNeeded(serviceContext);
 
     // Add sharding hooks to both connection pools - ShardingConnectionHook includes auth hooks
     globalConnPool.addHook(new ShardingConnectionHook(makeShardingEgressHooksList(serviceContext)));
@@ -820,15 +819,19 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         quickExit(ExitCode::badOptions);
     }
 
-    ReadWriteConcernDefaults::create(serviceContext, readWriteConcernDefaultsCacheLookupMongoS);
+    ReadWriteConcernDefaults::create(serviceContext->getService(ClusterRole::RouterServer),
+                                     readWriteConcernDefaultsCacheLookupMongoS);
     ChangeStreamOptionsManager::create(serviceContext);
-    query_settings::QuerySettingsManager::create(serviceContext, [](OperationContext* opCtx) {
-        // QuerySettingsManager modifies a cluster-wide parameter and thus a refresh of the
-        // parameter after that modification should observe results of preceeding writes.
-        const bool kEnsureReadYourWritesConsistency = true;
-        uassertStatusOK(ClusterServerParameterRefresher::get(opCtx)->refreshParameters(
-            opCtx, kEnsureReadYourWritesConsistency));
-    });
+    query_settings::QuerySettingsManager::create(
+        serviceContext,
+        [](OperationContext* opCtx) {
+            // QuerySettingsManager modifies a cluster-wide parameter and thus a refresh of the
+            // parameter after that modification should observe results of preceeding writes.
+            const bool kEnsureReadYourWritesConsistency = true;
+            uassertStatusOK(ClusterServerParameterRefresher::get(opCtx)->refreshParameters(
+                opCtx, kEnsureReadYourWritesConsistency));
+        },
+        query_settings::utils::sanitizeQuerySettingsHints);
 
     auto opCtxHolder = tc->makeOperationContext();
     auto const opCtx = opCtxHolder.get();
@@ -868,7 +871,7 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                                   "Update read write concern defaults",
                                                   &startupTimeElapsedBuilder);
-        ReadWriteConcernDefaults::get(serviceContext).refreshIfNecessary(opCtx);
+        ReadWriteConcernDefaults::get(opCtx).refreshIfNecessary(opCtx);
     } catch (const DBException& ex) {
         LOGV2_WARNING(22855,
                       "Error loading read and write concern defaults at startup",
@@ -1080,7 +1083,8 @@ ExitCode mongos_main(int argc, char* argv[]) {
     startSignalProcessingThread();
 
     try {
-        setGlobalServiceContext(ServiceContext::make());
+        setGlobalServiceContext(
+            ServiceContext::make(FastClockSourceFactory::create(Milliseconds{10})));
     } catch (...) {
         auto cause = exceptionToStatus();
         LOGV2_FATAL_OPTIONS(
@@ -1092,9 +1096,6 @@ ExitCode mongos_main(int argc, char* argv[]) {
     }
 
     const auto service = getGlobalServiceContext();
-    // This FastClockSourceFactory creates a background thread ClockSource. It must be set
-    // on ServiceContext before any other threads can get and use it.
-    service->setFastClockSource(FastClockSourceFactory::create(Milliseconds{10}));
 
     // Attempt to rotate the audit log pre-emptively on startup to avoid any potential conflicts
     // with existing log state. If this rotation fails, then exit nicely with failure

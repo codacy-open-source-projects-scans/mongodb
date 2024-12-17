@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <memory>
@@ -42,7 +41,6 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/basic_types.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
@@ -51,7 +49,6 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_access_method.h"
@@ -71,7 +68,6 @@
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
-#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
@@ -196,11 +192,12 @@ void _appendRecordStore(OperationContext* opCtx,
                         bool numericOnly,
                         BSONObjBuilder* result) {
     const RecordStore* recordStore = collection->getRecordStore();
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
     auto storageSize =
-        static_cast<long long>(recordStore->storageSize(opCtx, result, verbose ? 1 : 0));
+        static_cast<long long>(recordStore->storageSize(ru, result, verbose ? 1 : 0));
     result->appendNumber("storageSize", storageSize / scale);
     result->appendNumber("freeStorageSize",
-                         static_cast<long long>(recordStore->freeStorageSize(opCtx)) / scale);
+                         static_cast<long long>(recordStore->freeStorageSize(ru)) / scale);
 
     const bool isCapped = collection->isCapped();
     result->appendBool("capped", isCapped);
@@ -214,9 +211,9 @@ void _appendRecordStore(OperationContext* opCtx,
     if (redactForQE) {
         BSONObjBuilder filteredQEBuilder;
         if (numericOnly) {
-            recordStore->appendNumericCustomStats(opCtx, &filteredQEBuilder, scale);
+            recordStore->appendNumericCustomStats(ru, &filteredQEBuilder, scale);
         } else {
-            recordStore->appendAllCustomStats(opCtx, &filteredQEBuilder, scale);
+            recordStore->appendAllCustomStats(ru, &filteredQEBuilder, scale);
         }
 
         result->appendElements(filterQECustomStats(filteredQEBuilder.obj()));
@@ -225,9 +222,9 @@ void _appendRecordStore(OperationContext* opCtx,
     }
 
     if (numericOnly) {
-        recordStore->appendNumericCustomStats(opCtx, result, scale);
+        recordStore->appendNumericCustomStats(ru, result, scale);
     } else {
-        recordStore->appendAllCustomStats(opCtx, result, scale);
+        recordStore->appendAllCustomStats(ru, result, scale);
     }
 }
 
@@ -303,8 +300,9 @@ void _appendTotalSize(OperationContext* opCtx,
                       int scale,
                       BSONObjBuilder* result) {
     const RecordStore* recordStore = collection->getRecordStore();
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
     auto storageSize =
-        static_cast<long long>(recordStore->storageSize(opCtx, result, verbose ? 1 : 0));
+        static_cast<long long>(recordStore->storageSize(ru, result, verbose ? 1 : 0));
     BSONObjBuilder indexSizes;
     long long indexSize = collection->getIndexSize(opCtx, &indexSizes, scale);
 

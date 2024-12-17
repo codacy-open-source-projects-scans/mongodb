@@ -348,42 +348,6 @@ tasks:
           resmoke_args: >-
             --runAllFeatureFlagTests
 
-  - name: build_metrics_tasks_gen
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "do scons setup"
-      - func: "f_expansions_write"
-      - command: subprocess.exec
-        params:
-          binary: bash
-          add_expansions_to_env: true
-          args:
-            - "src/evergreen/run_python_script.sh"
-            - "buildscripts/evergreen_gen_build_metrics_tasks.py"
-      - command: archive.targz_pack
-        params:
-          target: build_metrics_task_gen.tgz
-          source_dir: "src"
-          include:
-            - "build_metrics_task_gen.json"
-      - command: s3.put
-        params:
-          aws_key: ${aws_key}
-          aws_secret: ${aws_secret}
-          local_file: build_metrics_task_gen.tgz
-          remote_file: ${project}/${build_variant}/${revision}/build-metrics/${task_name}-${build_id}.tgz
-          bucket: mciuploads
-          permissions: public-read
-          content_type: application/gzip
-          display_name: Build Metrics Task Gen JSON
-      - command: generate.tasks
-        params:
-          files:
-            - src/build_metrics_task_gen.json
-
   - name: check_feature_flag_tags
     tags:
       [
@@ -473,7 +437,7 @@ tasks:
             - "./src/evergreen/generate_buildid_debug_symbols_mapping.sh"
 
   - name: idl_tests
-    tags: ["assigned_to_jira_team_server_servicearch", "default"]
+    tags: ["assigned_to_jira_team_server_programmability", "default"]
     depends_on:
       - name: archive_dist_test
     commands:
@@ -501,36 +465,6 @@ tasks:
           args:
             - "src/evergreen/run_python_script.sh"
             - "buildscripts/iwyu/test/run_tests.py"
-
-  # Smoke test to ensure the Server still works with Jepsen
-  - <<: *run_jepsen_template
-    name: jepsen-config_fuzzer_smoke
-    tags: ["assigned_to_jira_team_server_repl", "experimental"]
-    commands:
-      - func: "do setup"
-      - func: "do jepsen setup"
-      - func: "setup jepsen config fuzzer"
-      - func: "run jepsen test"
-        vars:
-          <<: *jepsen_config_vars
-          mongod_conf: --mongod-conf mongod.conf
-          jepsen_storage_engine: --storage-engine wiredTiger
-          jepsen_test_name: read-concern-majority
-          jepsen_time_limit: --time-limit 120
-
-  # Smoke test to ensure the Server still works with Jepsen
-  - <<: *run_jepsen_template
-    name: jepsen-smoke
-    tags: ["assigned_to_jira_team_server_repl", "experimental"]
-    commands:
-      - func: "do setup"
-      - func: "do jepsen setup"
-      - func: "run jepsen test"
-        vars:
-          <<: *jepsen_config_vars
-          jepsen_storage_engine: --storage-engine wiredTiger
-          jepsen_test_name: read-concern-majority
-          jepsen_time_limit: --time-limit 120
 
   - <<: *run_jepsen_template
     name: jepsen_config_fuzzer_list-append
@@ -687,7 +621,7 @@ tasks:
           jepsen_storage_engine: --storage-engine wiredTiger
           jepsen_test_name: set
 
-  # TODO: rename if display_name appears on the evergreen UI
+  # TODO(SERVER-97804): rename if display_name appears on the evergreen UI
   - name: bazel_run_//:format
     tags:
       [
@@ -720,7 +654,7 @@ tasks:
           target: >-
             //:format -- --check
 
-  # TODO: rename if display_name appears on the evergreen UI
+  # TODO(SERVER-97804): rename if display_name appears on the evergreen UI
   - name: bazel_run_//:codeowners
     tags:
       [
@@ -753,6 +687,39 @@ tasks:
           target: >-
             //:codeowners -- --check
 
+  # TODO(SERVER-97804): rename if display_name appears on the evergreen UI
+  - name: bazel_run_//buildscripts:resmoke
+    tags:
+      [
+        "assigned_to_jira_team_devprod_build",
+        "development_critical_single_variant",
+        "lint",
+        "bazel_check",
+      ]
+    depends_on:
+      - name: version_expansions_gen
+        variant: generate-tasks-for-version
+    commands:
+      - command: timeout.update
+        params:
+          # 10 minutes
+          exec_timeout_secs: 600
+      - func: "f_expansions_write"
+      - command: manifest.load
+      - func: "git get project and add git tag"
+      - func: "f_expansions_write"
+      - func: "kill processes"
+      - func: "cleanup environment"
+      - func: "set up venv"
+      - func: "upload pip requirements"
+      - func: "get engflow creds"
+      # TODO SERVER-81038: Remove "fetch bazel" once bazelisk is self-hosted.
+      - func: "fetch bazel"
+      - func: "bazel run"
+        vars:
+          target: >-
+            //buildscripts:resmoke -- --help
+
   - name: lint_clang_format
     tags:
       [
@@ -773,10 +740,15 @@ tasks:
       - func: "cleanup environment"
       - func: "set up venv"
       - func: "upload pip requirements"
-      - func: "get engflow creds"
-      - func: "scons lint"
-        vars:
-          targets: lint-clang-format
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "lint-clang-format"
+            - "buildscripts/clang_format.py"
+            - "lint-all"
 
   - name: lint_cpplint
     tags:
@@ -798,10 +770,15 @@ tasks:
       - func: "cleanup environment"
       - func: "set up venv"
       - func: "upload pip requirements"
-      - func: "get engflow creds"
-      - func: "scons lint"
-        vars:
-          targets: lint-lint.py
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "lint_cpplint"
+            - "buildscripts/quickmongolint.py"
+            - "lint"
 
   - name: lint_errorcodes
     tags:
@@ -818,10 +795,15 @@ tasks:
       - func: "cleanup environment"
       - func: "set up venv"
       - func: "upload pip requirements"
-      - func: "get engflow creds"
-      - func: "scons lint"
-        vars:
-          targets: lint-errorcodes
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "lint-errorcodes"
+            - "buildscripts/errorcodes.py"
+            - "--quiet"
 
   - name: lint_eslint
     tags:
@@ -843,10 +825,18 @@ tasks:
       - func: "cleanup environment"
       - func: "set up venv"
       - func: "upload pip requirements"
-      - func: "get engflow creds"
-      - func: "scons lint"
-        vars:
-          targets: lint-eslint
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "lint-eslint"
+            - "buildscripts/eslint.py"
+            - "--dirmode"
+            - "lint"
+            - "jstests/"
+            - "src/mongo"
 
   # Check that the mutational fuzzer can parse all JS filess.
   - name: lint_fuzzer_sanity_all
@@ -900,7 +890,8 @@ tasks:
         params:
           binary: bash
           args:
-            - "./src/evergreen/run_python_script.sh"
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "lint-large-files-check"
             - "buildscripts/large_file_check.py"
             - "--exclude"
             - "src/third_party/*"
@@ -926,7 +917,8 @@ tasks:
         params:
           binary: bash
           args:
-            - "src/evergreen/run_python_script.sh"
+            - "src/evergreen/run_python_script_with_report.sh"
+            - "lint-poetry-lock"
             - "evergreen/functions/poetry_lock_check.py"
 
   - name: lint_bazel
@@ -961,7 +953,8 @@ tasks:
           binary: bash
           add_expansions_to_env: true
           args:
-            - "src/evergreen/run_python_script.sh"
+            - "src/evergreen/run_python_script_with_report.sh"
+            - "lint-bazel"
             - "buildscripts/buildifier.py"
             - "--generate-report"
             - "--binary-dir=./"
@@ -991,7 +984,8 @@ tasks:
         params:
           binary: bash
           args:
-            - "src/evergreen/run_python_script.sh"
+            - "src/evergreen/run_python_script_with_report.sh"
+            - "lint-sbom"
             - "buildscripts/sbom_linter.py"
 
   - name: lint_pylinters
@@ -1014,10 +1008,45 @@ tasks:
       - func: "cleanup environment"
       - func: "set up venv"
       - func: "upload pip requirements"
-      - func: "get engflow creds"
-      - func: "scons lint"
-        vars:
-          targets: lint-pylinters
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "lint-pylinters"
+            - "buildscripts/pylinters.py"
+            - "lint"
+
+  - name: lint_pyright
+    tags:
+      [
+        "assigned_to_jira_team_devprod_build",
+        "development_critical_single_variant",
+        "lint",
+      ]
+    commands:
+      - command: timeout.update
+        params:
+          # 2 hours
+          exec_timeout_secs: 7200
+      - func: "f_expansions_write"
+      - command: manifest.load
+      - func: "git get project and add git tag"
+      - func: "f_expansions_write"
+      - func: "kill processes"
+      - func: "cleanup environment"
+      - func: "set up venv"
+      - func: "upload pip requirements"
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "lint-pyright"
+            - "buildscripts/pyrightlint.py"
+            - "lint-all"
 
   - name: lint_shellscripts
     tags:
@@ -1064,6 +1093,17 @@ tasks:
           binary: bash
           args:
             - "src/evergreen/lint_yaml.sh"
+      - func: "configure evergreen api credentials"
+      - command: subprocess.exec
+        type: test
+        params:
+          binary: bash
+          args:
+            - "src/evergreen/run_python_script_with_report.sh"
+            - "validate-evergreen-project-config-yaml"
+            - "buildscripts/validate_evg_project_config.py"
+            - "--evg-project-name=${project}"
+            - "--evg-auth-config=.evergreen.yml"
 
   - name: bazel_coverage
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1094,11 +1134,12 @@ tasks:
           #   targets=$(bazel query 'kind(".*_test", //src/...)')
           #   bazel test $targets
           target: >-
-            //src/...
+            //src/mongo/...
           args: >-
             --test_output=all
             --config=local
             --combined_report=lcov
+            --build_tag_filters=mongo_unittest
 
   - name: monitor_build_status
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
@@ -1156,23 +1197,6 @@ tasks:
         vars:
           <<: *powercycle_remote_credentials
         timeout_secs: 1800 # 30 minute timeout for no output
-
-  - name: powercycle_gen
-    tags:
-      [
-        "assigned_to_jira_team_server_storage_engines",
-        "experimental",
-        "incompatible_windows",
-      ]
-    commands:
-      - func: "generate powercycle tasks"
-        vars:
-          task_names: >-
-            powercycle
-            powercycle_kill_mongod
-            powercycle_replication_smalloplog
-            powercycle_syncdelay
-          num_tasks: 1
 
   - name: powercycle_kill_mongod
     tags:
@@ -1366,6 +1390,17 @@ tasks:
           <<: *powercycle_remote_credentials
         timeout_secs: 1800 # 30 minute timeout for no output
 
+  - name: run_smoke_tests_gen
+    tags:
+      [
+        "assigned_to_jira_team_devprod_correctness",
+        "development_critical_single_variant",
+        "requires_large_host",
+        "incompatible_windows",
+      ]
+    commands:
+      - func: "generate smoke test tasks"
+
   - name: selinux_rhel8_enterprise
     tags: ["assigned_to_jira_team_server_security", "experimental"]
     depends_on:
@@ -1531,7 +1566,8 @@ tasks:
         params:
           binary: bash
           args:
-            - "./src/evergreen/run_python_script.sh"
+            - "./src/evergreen/run_python_script_with_report.sh"
+            - "validate_commit_message"
             - "buildscripts/validate_commit_message.py"
           env:
             JIRA_AUTH_ACCESS_TOKEN: ${jira_auth_access_token}

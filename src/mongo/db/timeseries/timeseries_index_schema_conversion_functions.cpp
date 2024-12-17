@@ -44,22 +44,18 @@
 #include <boost/optional/optional.hpp>
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/logv2/redaction.h"
@@ -179,7 +175,7 @@ StatusWith<BSONObj> createBucketsSpecFromTimeseriesSpec(const TimeseriesOptions&
 
         // 2dsphere indexes on measurements are allowed, but need to be re-written to
         // point to the data field and use the special 2dsphere_bucket index type.
-        if (elem.valueStringData() == IndexNames::GEO_2DSPHERE) {
+        if (elem.valueStringDataSafe() == IndexNames::GEO_2DSPHERE) {
             builder.append(str::stream() << timeseries::kBucketDataFieldName << "."
                                          << elem.fieldNameStringData(),
                            IndexNames::GEO_2DSPHERE_BUCKET);
@@ -285,7 +281,7 @@ boost::optional<BSONObj> createTimeseriesIndexSpecFromBucketsIndexSpec(
         }
 
         if (elem.fieldNameStringData().startsWith(timeseries::kBucketDataFieldName + ".") &&
-            elem.valueStringData() == IndexNames::GEO_2DSPHERE_BUCKET) {
+            elem.valueStringDataSafe() == IndexNames::GEO_2DSPHERE_BUCKET) {
             builder.append(
                 elem.fieldNameStringData().substr(timeseries::kBucketDataFieldName.size() + 1),
                 IndexNames::GEO_2DSPHERE);
@@ -600,7 +596,7 @@ bool doesBucketsIndexIncludeMeasurement(OperationContext* opCtx,
                 str::stream() << "Partial filter expression is not an object: " << filterElem,
                 filterElem.type() == BSONType::Object);
 
-        auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr /* collator */, bucketNs);
+        auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).ns(bucketNs).build();
 
         MatchExpressionParser::AllowedFeatureSet allowedFeatures =
             MatchExpressionParser::kDefaultSpecialFeatures;

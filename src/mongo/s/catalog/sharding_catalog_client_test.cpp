@@ -414,16 +414,14 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
     ChunkType chunkA;
     chunkA.setName(OID::gen());
     chunkA.setCollectionUUID(collUuid);
-    chunkA.setMin(BSON("a" << 1));
-    chunkA.setMax(BSON("a" << 100));
+    chunkA.setRange({BSON("a" << 1), BSON("a" << 100)});
     chunkA.setVersion(ChunkVersion({collEpoch, collTimestamp}, {1, 2}));
     chunkA.setShard(ShardId("shard0000"));
 
     ChunkType chunkB;
     chunkB.setName(OID::gen());
     chunkB.setCollectionUUID(collUuid);
-    chunkB.setMin(BSON("a" << 100));
-    chunkB.setMax(BSON("a" << 200));
+    chunkB.setRange({BSON("a" << 100), BSON("a" << 200)});
     chunkB.setVersion(ChunkVersion({collEpoch, collTimestamp}, {3, 4}));
     chunkB.setShard(ShardId("shard0001"));
 
@@ -454,34 +452,34 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSWithSortAndLimit) {
         return chunks;
     });
 
-    onFindWithMetadataCommand(
-        [this, &chunksQuery, chunkA, chunkB, newOpTime](const RemoteCommandRequest& request) {
-            auto opMsg = static_cast<OpMsgRequest>(request);
-            auto query = query_request_helper::makeFromFindCommandForTests(opMsg.body);
+    onFindWithMetadataCommand([this, &chunksQuery, chunkA, chunkB, newOpTime](
+                                  const RemoteCommandRequest& request) {
+        auto opMsg = static_cast<OpMsgRequest>(request);
+        auto query = query_request_helper::makeFromFindCommandForTests(opMsg.body);
 
-            ASSERT_EQ(query->getNamespaceOrUUID().nss(), ChunkType::ConfigNS);
-            ASSERT_BSONOBJ_EQ(query->getFilter(), chunksQuery);
-            ASSERT_BSONOBJ_EQ(query->getSort(), BSON(ChunkType::lastmod() << -1));
-            ASSERT_EQ(query->getLimit().value(), 1);
+        ASSERT_EQ(query->getNamespaceOrUUID().nss(), NamespaceString::kConfigsvrChunksNamespace);
+        ASSERT_BSONOBJ_EQ(query->getFilter(), chunksQuery);
+        ASSERT_BSONOBJ_EQ(query->getSort(), BSON(ChunkType::lastmod() << -1));
+        ASSERT_EQ(query->getLimit().value(), 1);
 
-            checkReadConcern(request.cmdObj,
-                             VectorClock::kInitialComponentTime.asTimestamp(),
-                             repl::OpTime::kUninitializedTerm);
+        checkReadConcern(request.cmdObj,
+                         VectorClock::kInitialComponentTime.asTimestamp(),
+                         repl::OpTime::kUninitializedTerm);
 
-            ReplSetMetadata metadata(10,
-                                     {newOpTime, Date_t() + Seconds(newOpTime.getSecs())},
-                                     newOpTime,
-                                     100,
-                                     0,
-                                     OID(),
-                                     -1,
-                                     true);
-            BSONObjBuilder builder;
-            metadata.writeToMetadata(&builder).transitional_ignore();
+        ReplSetMetadata metadata(10,
+                                 {newOpTime, Date_t() + Seconds(newOpTime.getSecs())},
+                                 newOpTime,
+                                 100,
+                                 0,
+                                 OID(),
+                                 -1,
+                                 true);
+        BSONObjBuilder builder;
+        metadata.writeToMetadata(&builder).transitional_ignore();
 
-            return std::make_tuple(vector<BSONObj>{chunkA.toConfigBSON(), chunkB.toConfigBSON()},
-                                   builder.obj());
-        });
+        return std::make_tuple(vector<BSONObj>{chunkA.toConfigBSON(), chunkB.toConfigBSON()},
+                               builder.obj());
+    });
 
     const auto& chunks = future.default_timed_get();
     ASSERT_BSONOBJ_EQ(chunkA.toConfigBSON(), chunks[0].toConfigBSON());
@@ -521,7 +519,7 @@ TEST_F(ShardingCatalogClientTest, GetChunksForUUIDNoSortNoLimit) {
         auto opMsg = static_cast<OpMsgRequest>(request);
         auto query = query_request_helper::makeFromFindCommandForTests(opMsg.body);
 
-        ASSERT_EQ(query->getNamespaceOrUUID().nss(), ChunkType::ConfigNS);
+        ASSERT_EQ(query->getNamespaceOrUUID().nss(), NamespaceString::kConfigsvrChunksNamespace);
         ASSERT_BSONOBJ_EQ(query->getFilter(), chunksQuery);
         ASSERT_BSONOBJ_EQ(query->getSort(), BSONObj());
         ASSERT_FALSE(query->getLimit().has_value());
@@ -564,15 +562,13 @@ TEST_F(ShardingCatalogClientTest, GetChunksForNSInvalidChunk) {
     onFindCommand([&chunksQuery, collUuid](const RemoteCommandRequest& request) {
         ChunkType chunkA;
         chunkA.setCollectionUUID(collUuid);
-        chunkA.setMin(BSON("a" << 1));
-        chunkA.setMax(BSON("a" << 100));
+        chunkA.setRange({BSON("a" << 1), BSON("a" << 100)});
         chunkA.setVersion(ChunkVersion({OID::gen(), Timestamp(1, 1)}, {1, 2}));
         chunkA.setShard(ShardId("shard0000"));
 
         ChunkType chunkB;
         chunkB.setCollectionUUID(collUuid);
-        chunkB.setMin(BSON("a" << 100));
-        chunkB.setMax(BSON("a" << 200));
+        chunkB.setRange({BSON("a" << 100), BSON("a" << 200)});
         chunkB.setVersion(ChunkVersion({OID::gen(), Timestamp(1, 1)}, {3, 4}));
         // Missing shard id
 
@@ -1036,14 +1032,12 @@ TEST_F(ShardingCatalogClientTest, GetTagsForCollection) {
     TagsType tagA;
     tagA.setNS(NamespaceString::createNamespaceString_forTest("TestDB.TestColl"));
     tagA.setTag("TagA");
-    tagA.setMinKey(BSON("a" << 100));
-    tagA.setMaxKey(BSON("a" << 200));
+    tagA.setRange({BSON("a" << 100), BSON("a" << 200)});
 
     TagsType tagB;
     tagB.setNS(NamespaceString::createNamespaceString_forTest("TestDB.TestColl"));
     tagB.setTag("TagB");
-    tagB.setMinKey(BSON("a" << 200));
-    tagB.setMaxKey(BSON("a" << 300));
+    tagB.setRange({BSON("a" << 200), BSON("a" << 300)});
 
     auto future = launchAsync([this] {
         const auto& tags = assertGet(catalogClient()->getTagsForCollection(
@@ -1098,23 +1092,29 @@ TEST_F(ShardingCatalogClientTest, GetTagsForCollectionInvalidTag) {
         const auto swTags = catalogClient()->getTagsForCollection(
             operationContext(), NamespaceString::createNamespaceString_forTest("TestDB.TestColl"));
 
-        ASSERT_EQUALS(ErrorCodes::NoSuchKey, swTags.getStatus());
+        ASSERT_EQUALS(ErrorCodes::IDLFailedToParse, swTags.getStatus());
     });
 
     onFindCommand([](const RemoteCommandRequest& request) {
-        TagsType tagA;
-        tagA.setNS(NamespaceString::createNamespaceString_forTest("TestDB.TestColl"));
-        tagA.setTag("TagA");
-        tagA.setMinKey(BSON("a" << 100));
-        tagA.setMaxKey(BSON("a" << 200));
+        auto tagA = [&] {
+            TagsType tag;
+            tag.setNS(NamespaceString::createNamespaceString_forTest("TestDB.TestColl"));
+            tag.setTag("TagA");
+            tag.setRange({BSON("a" << 100), BSON("a" << 200)});
+            return tag.toBSON();
+        }();
 
-        TagsType tagB;
-        tagB.setNS(NamespaceString::createNamespaceString_forTest("TestDB.TestColl"));
-        tagB.setTag("TagB");
-        tagB.setMinKey(BSON("a" << 200));
-        // Missing maxKey
+        auto tagB = [&] {
+            TagsType tag;
+            tag.setNS(NamespaceString::createNamespaceString_forTest("TestDB.TestColl"));
+            tag.setTag("TagB");
+            tag.setRange({BSON("a" << 200), BSON("a" << 300)});
+            auto serializedTag = tag.toBSON();
+            // Remove maxKey
+            return serializedTag.removeField(TagsType::max.name());
+        }();
 
-        return vector<BSONObj>{tagA.toBSON(), tagB.toBSON()};
+        return vector<BSONObj>{tagA, tagB};
     });
 
     future.default_timed_get();

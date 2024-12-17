@@ -177,6 +177,8 @@ std::string builtinToString(Builtin b) {
             return "concatArrays";
         case Builtin::aggConcatArraysCapped:
             return "aggConcatArraysCapped";
+        case Builtin::concatArraysCapped:
+            return "concatArraysCapped";
         case Builtin::aggSetUnion:
             return "aggSetUnion";
         case Builtin::aggCollSetUnion:
@@ -445,6 +447,14 @@ std::string builtinToString(Builtin b) {
             return "aggRemovablePushRemove";
         case Builtin::aggRemovablePushFinalize:
             return "aggRemovablePushFinalize";
+        case Builtin::aggRemovableConcatArraysInit:
+            return "aggRemovableConcatArraysInit";
+        case Builtin::aggRemovableConcatArraysAdd:
+            return "aggRemovableConcatArraysAdd";
+        case Builtin::aggRemovableConcatArraysRemove:
+            return "aggRemovableConcatArraysRemove";
+        case Builtin::aggRemovableConcatArraysFinalize:
+            return "aggRemovableConcatArraysFinalize";
         case Builtin::aggRemovableStdDevAdd:
             return "aggRemovableStdDevAdd";
         case Builtin::aggRemovableStdDevRemove:
@@ -788,6 +798,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinConcatArrays(arity);
         case Builtin::aggConcatArraysCapped:
             return builtinAggConcatArraysCapped(arity);
+        case Builtin::concatArraysCapped:
+            return builtinConcatArraysCapped(arity);
         case Builtin::aggSetUnion:
             return builtinAggSetUnion(arity);
         case Builtin::aggCollSetUnion:
@@ -1030,6 +1042,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinAggRemovablePushRemove(arity);
         case Builtin::aggRemovablePushFinalize:
             return builtinAggRemovablePushFinalize(arity);
+        case Builtin::aggRemovableConcatArraysInit:
+            return builtinAggRemovableConcatArraysInit(arity);
+        case Builtin::aggRemovableConcatArraysAdd:
+            return builtinAggRemovableConcatArraysAdd(arity);
+        case Builtin::aggRemovableConcatArraysRemove:
+            return builtinAggRemovableConcatArraysRemove(arity);
+        case Builtin::aggRemovableConcatArraysFinalize:
+            return builtinAggRemovableConcatArraysFinalize(arity);
         case Builtin::aggRemovableStdDevAdd:
             return builtinAggRemovableStdDevAdd(arity);
         case Builtin::aggRemovableStdDevRemove:

@@ -1,8 +1,9 @@
 /*
  * Utilities for performing writes without shard key under various test configurations.
  */
-
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {
+    withAbortAndRetryOnTransientTxnError
+} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 
 export var WriteWithoutShardKeyTestUtil = (function() {
     const Configurations = {
@@ -168,16 +169,18 @@ export var WriteWithoutShardKeyTestUtil = (function() {
             let allMatchedDocs;
             let dbConn;
             if (config == Configurations.transaction) {
-                conn.startTransaction();
-                dbConn = conn.getDatabase(testCase.dbName);
-                allMatchedDocs = insertDocsAndRunCommand(dbConn,
-                                                         testCase.collName,
-                                                         testCase.docsToInsert,
-                                                         newCmdObj,
-                                                         operationType,
-                                                         testCase.expectedResponse,
-                                                         testCase.expectedRetryResponse);
-                conn.commitTransaction_forTesting();
+                withAbortAndRetryOnTransientTxnError(conn, () => {
+                    conn.startTransaction();
+                    dbConn = conn.getDatabase(testCase.dbName);
+                    allMatchedDocs = insertDocsAndRunCommand(dbConn,
+                                                             testCase.collName,
+                                                             testCase.docsToInsert,
+                                                             newCmdObj,
+                                                             operationType,
+                                                             testCase.expectedResponse,
+                                                             testCase.expectedRetryResponse);
+                    conn.commitTransaction_forTesting();
+                });
             } else {
                 switch (config) {
                     case Configurations.sessionNotRetryableWrite:
@@ -273,22 +276,12 @@ export var WriteWithoutShardKeyTestUtil = (function() {
         }
     }
 
-    /*
-     * Checks if the write without shard key feature is enabled.
-     */
-    function isWriteWithoutShardKeyFeatureEnabled(conn) {
-        // The feature flag spans 6.2 and current master, while the actual logic only exists
-        // on 6.3 and later.
-        return FeatureFlagUtil.isPresentAndEnabled(conn, "UpdateOneWithoutShardKey");
-    }
-
     return {
         setupShardedCollection,
         getClusterConnection,
         runTestWithConfig,
         insertDocsAndRunCommand,
         Configurations,
-        OperationType,
-        isWriteWithoutShardKeyFeatureEnabled
+        OperationType
     };
 })();

@@ -504,13 +504,45 @@ def _impl(ctx):
         ],
     )
 
-    enable_debug_info_feature = feature(
-        name = "enable_debug_info",
+    dbg_level_0_feature = feature(
+        name = "g0",
+        enabled = False,
+        flag_sets = [
+            flag_set(
+                actions = all_non_assembly_compile_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-g0",
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    dbg_level_1_feature = feature(
+        name = "g1",
+        enabled = False,
+        flag_sets = [
+            flag_set(
+                actions = all_non_assembly_compile_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-g1",
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    dbg_level_2_feature = feature(
+        name = "g2",
         enabled = True,
         flag_sets = [
             flag_set(
-                # This needs to only be set in the cpp compile actions to avoid generating debug info when
-                # building assembly files since the assembler doesn't support gdwarf64.
                 actions = all_non_assembly_compile_actions,
                 flag_groups = [
                     flag_group(
@@ -521,7 +553,24 @@ def _impl(ctx):
                 ],
                 with_features = [
                     with_feature_set(
-                        not_features = ["disable_debug_symbols"],
+                        not_features = ["g0", "g1", "g3", "disable_debug_symbols"],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    dbg_level_3_feature = feature(
+        name = "g3",
+        enabled = False,
+        flag_sets = [
+            flag_set(
+                actions = all_non_assembly_compile_actions,
+                flag_groups = [
+                    flag_group(
+                        flags = [
+                            "-g3",
+                        ],
                     ),
                 ],
             ),
@@ -607,9 +656,10 @@ def _impl(ctx):
         ],
     )
 
-    no_warn_non_virtual_detour_feature = feature(
-        name = "no_warn_non_virtual_detour",
-        enabled = False,
+    # This warning overzealously warns on uses of non-virtual destructors which are benign.
+    no_warn_non_virtual_destructor_feature = feature(
+        name = "no_warn_non_virtual_destructor",
+        enabled = True,
         flag_sets = [
             flag_set(
                 actions = all_cpp_compile_actions,
@@ -687,6 +737,30 @@ def _impl(ctx):
         ],
     )
 
+    # -Wno-invalid-offsetof is only valid for C++ but not for C
+    no_invalid_offsetof_warning_feature = feature(
+        name = "no_invalid_offsetof_warning",
+        enabled = False,
+        flag_sets = [
+            flag_set(
+                actions = all_cpp_compile_actions,
+                flag_groups = [flag_group(flags = ["-Wno-invalid-offsetof"])],
+            ),
+        ],
+    )
+
+    # -Wno-class-memaccess is only valid for C++ but not for C
+    no_class_memaccess_warning_feature = feature(
+        name = "no_class_memaccess_warning",
+        enabled = False,
+        flag_sets = [
+            flag_set(
+                actions = all_cpp_compile_actions,
+                flag_groups = [flag_group(flags = ["-Wno-class-memaccess"])],
+            ),
+        ],
+    )
+
     features = [
         bin_dirs_feature,
         default_compile_flags_feature,
@@ -712,19 +786,26 @@ def _impl(ctx):
         includes_feature,
         dependency_file_feature,
         verbose_feature,
-        enable_debug_info_feature,
         dwarf4_feature,
         dwarf5_feature,
         dwarf32_feature,
         dwarf64_feature,
+        # Debug level should be passed after dwarf
+        # as many dwarf flags will just set g2
+        dbg_level_0_feature,
+        dbg_level_1_feature,
+        dbg_level_2_feature,
+        dbg_level_3_feature,
         disable_debug_symbols_feature,
-        no_warn_non_virtual_detour_feature,
+        no_warn_non_virtual_destructor_feature,
         no_deprecated_enum_enum_conversion_feature,
         no_volatile_feature,
         fsized_deallocation_feature,
         overloaded_virtual_warning_feature,
         no_overloaded_virtual_warning_feature,
         pessimizing_move_warning_feature,
+        no_invalid_offsetof_warning_feature,
+        no_class_memaccess_warning_feature,
     ]
 
     return [

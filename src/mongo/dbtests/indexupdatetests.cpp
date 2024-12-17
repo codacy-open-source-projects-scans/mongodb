@@ -32,13 +32,10 @@
 #include <boost/optional/optional.hpp>
 #include <cstdint>
 #include <fmt/format.h>
-#include <memory>
 #include <string>
-#include <vector>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -48,9 +45,7 @@
 #include "mongo/client/index_spec.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
@@ -61,6 +56,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"

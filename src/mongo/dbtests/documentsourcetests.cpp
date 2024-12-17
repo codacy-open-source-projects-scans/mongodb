@@ -116,7 +116,7 @@ public:
         : client(_opCtx.get()),
           _ctx(new ExpressionContextForTest(
               _opCtx.get(), AggregateCommandRequest(nss, std::vector<mongo::BSONObj>()))) {
-        _ctx->tempDir = storageGlobalParams.dbpath + "/_tmp";
+        _ctx->setTempDir(storageGlobalParams.dbpath + "/_tmp");
     }
 
     ~DocumentSourceCursorTest() override {
@@ -135,9 +135,9 @@ protected:
         if (hint) {
             findCommand->setHint(*hint);
         }
-        auto cq = std::make_unique<CanonicalQuery>(
-            CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
-                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
         auto exec = uassertStatusOK(getExecutorFind(opCtx(),
                                                     MultipleCollectionAccessor{_coll},
@@ -275,7 +275,7 @@ TEST_F(DocumentSourceCursorTest, SerializationNoExplainLevel) {
 
 TEST_F(DocumentSourceCursorTest, SerializationQueryPlannerExplainLevel) {
     auto verb = ExplainOptions::Verbosity::kQueryPlanner;
-    ctx()->explain = verb;
+    ctx()->setExplain(verb);
     createSource();
 
     auto explainResult =
@@ -288,7 +288,7 @@ TEST_F(DocumentSourceCursorTest, SerializationQueryPlannerExplainLevel) {
 
 TEST_F(DocumentSourceCursorTest, SerializationExecStatsExplainLevel) {
     auto verb = ExplainOptions::Verbosity::kExecStats;
-    ctx()->explain = verb;
+    ctx()->setExplain(verb);
     createSource();
 
     // Execute the plan so that the source populates its internal execution stats.
@@ -305,7 +305,7 @@ TEST_F(DocumentSourceCursorTest, SerializationExecStatsExplainLevel) {
 
 TEST_F(DocumentSourceCursorTest, SerializationExecAllPlansExplainLevel) {
     auto verb = ExplainOptions::Verbosity::kExecAllPlans;
-    ctx()->explain = verb;
+    ctx()->setExplain(verb);
     createSource();
 
     // Execute the plan so that the source populates its internal executionStats.
@@ -325,7 +325,7 @@ TEST_F(DocumentSourceCursorTest, SerializationExecAllPlansExplainLevel) {
 TEST_F(DocumentSourceCursorTest, ExpressionContextAndSerializeVerbosityMismatch) {
     const auto verb1 = ExplainOptions::Verbosity::kExecAllPlans;
     const auto verb2 = ExplainOptions::Verbosity::kQueryPlanner;
-    ctx()->explain = verb1;
+    ctx()->setExplain(verb1);
     createSource();
 
     // Execute the plan so that the source populates its internal executionStats.
@@ -365,9 +365,9 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterTimeout)
     findCommand->setFilter(filter);
     query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
                                           findCommand.get());
-    auto canonicalQuery = std::make_unique<CanonicalQuery>(
-        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
-                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+        .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
+        .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor =
         uassertStatusOK(plan_executor_factory::make(std::move(canonicalQuery),
                                                     std::move(workingSet),
@@ -377,7 +377,7 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterTimeout)
                                                     QueryPlannerParams::DEFAULT));
 
     // Make a DocumentSourceCursor.
-    ctx()->tailableMode = TailableModeEnum::kTailableAndAwaitData;
+    ctx()->setTailableMode(TailableModeEnum::kTailableAndAwaitData);
     // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
     planExecutor->saveState();
     auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),
@@ -408,9 +408,9 @@ TEST_F(DocumentSourceCursorTest, NonAwaitDataCursorShouldErrorAfterTimeout) {
                                                            matchExpression.get());
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(filter);
-    auto canonicalQuery = std::make_unique<CanonicalQuery>(
-        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
-                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+        .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
+        .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor =
         uassertStatusOK(plan_executor_factory::make(std::move(canonicalQuery),
                                                     std::move(workingSet),
@@ -422,7 +422,7 @@ TEST_F(DocumentSourceCursorTest, NonAwaitDataCursorShouldErrorAfterTimeout) {
                                                     ));
 
     // Make a DocumentSourceCursor.
-    ctx()->tailableMode = TailableModeEnum::kNormal;
+    ctx()->setTailableMode(TailableModeEnum::kNormal);
     // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
     planExecutor->saveState();
     auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),
@@ -464,7 +464,10 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterBeingKil
     query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
                                           findCommand.get());
     auto canonicalQuery = std::make_unique<CanonicalQuery>(
-        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
+        CanonicalQueryParams{.expCtx = ExpressionContextBuilder{}
+                                           .fromRequest(opCtx(), *findCommand)
+                                           .mayDbProfile(true)
+                                           .build(),
                              .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor = uassertStatusOK(
         plan_executor_factory::make(std::move(canonicalQuery),
@@ -475,7 +478,7 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterBeingKil
                                     QueryPlannerParams::DEFAULT));
 
     // Make a DocumentSourceCursor.
-    ctx()->tailableMode = TailableModeEnum::kTailableAndAwaitData;
+    ctx()->setTailableMode(TailableModeEnum::kTailableAndAwaitData);
     // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
     planExecutor->saveState();
     auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),
@@ -505,9 +508,9 @@ TEST_F(DocumentSourceCursorTest, NormalCursorShouldErrorAfterBeingKilled) {
                                                            matchExpression.get());
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(filter);
-    auto canonicalQuery = std::make_unique<CanonicalQuery>(
-        CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx(), *findCommand),
-                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+    auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+        .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
+        .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     auto planExecutor = uassertStatusOK(
         plan_executor_factory::make(std::move(canonicalQuery),
                                     std::move(workingSet),
@@ -517,7 +520,7 @@ TEST_F(DocumentSourceCursorTest, NormalCursorShouldErrorAfterBeingKilled) {
                                     QueryPlannerParams::DEFAULT));
 
     // Make a DocumentSourceCursor.
-    ctx()->tailableMode = TailableModeEnum::kNormal;
+    ctx()->setTailableMode(TailableModeEnum::kNormal);
     // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
     planExecutor->saveState();
     auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),

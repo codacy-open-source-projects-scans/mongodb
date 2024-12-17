@@ -163,12 +163,28 @@ inline auto makeAdditionalChildren(
     std::vector<Stage<T>> children;
     std::vector<T> offTheEndContents;
 
-    if (auto lookupSource = dynamic_cast<const DocumentSourceLookUp*>(&source);
-        lookupSource && lookupSource->hasPipeline()) {
-        auto [child, offTheEndReshaper] = makeTreeWithOffTheEndStage(
-            initialStageContents, lookupSource->getResolvedIntrospectionPipeline(), propagator);
-        offTheEndContents.push_back(offTheEndReshaper(child.get().contents));
-        children.push_back(std::move(*child));
+    if (auto lookupSource = dynamic_cast<const DocumentSourceLookUp*>(&source)) {
+        // When we have a local field/foreign field join, we must provide the foreign
+        // collection's initial schema in the children. If we did not have a sub-pipeline, the
+        // foreign namespace schema becomes the rhs of the join. If we had a sub-pipeline, the
+        // sub-pipeline's schema is the rhs of join, but, we still need to provide the
+        // initial base schema of the foreign namespace. This is so that we can check the
+        // encryption metadata of the foreign field during schema propagation.
+        if (lookupSource->hasLocalFieldForeignFieldJoin()) {
+            // We create an empty stage with no principal child or additional children to return the
+            // entire foreign namespace schema.
+            auto contents = findStageContents(lookupSource->getFromNs(), initialStageContents);
+            children.emplace_back(Stage<T>(
+                std::move(contents), std::unique_ptr<Stage<T>>(), std::vector<Stage<T>>()));
+            offTheEndContents.push_back(children.back().contents);
+        }
+
+        if (lookupSource->hasPipeline()) {
+            auto [child, offTheEndReshaper] = makeTreeWithOffTheEndStage(
+                initialStageContents, lookupSource->getResolvedIntrospectionPipeline(), propagator);
+            offTheEndContents.push_back(std::move(offTheEndReshaper(child.get().contents)));
+            children.push_back(std::move(*child));
+        }
     }
     if (auto facetSource = dynamic_cast<const DocumentSourceFacet*>(&source))
         std::transform(facetSource->getFacetPipelines().begin(),
@@ -205,8 +221,9 @@ inline auto makeStage(
     const std::function<T(const T&)>& reshapeContents,
     const DocumentSource& source,
     const std::function<T(const T&, const std::vector<T>&, const DocumentSource&)>& propagator) {
-    auto contents = (previous) ? reshapeContents(previous.get().contents)
-                               : findStageContents(source.getContext()->ns, initialStageContents);
+    auto contents = (previous)
+        ? reshapeContents(previous.get().contents)
+        : findStageContents(source.getContext()->getNamespaceString(), initialStageContents);
 
     auto [additionalChildren, offTheEndContents] =
         makeAdditionalChildren(initialStageContents, source, propagator, contents);
@@ -248,7 +265,9 @@ inline void walk(Stage<T>* stage,
     if (auto lookupSource = dynamic_cast<DocumentSourceLookUp*>(&***sourceIter);
         lookupSource && lookupSource->hasPipeline()) {
         auto iter = lookupSource->getResolvedIntrospectionPipeline().getSources().begin();
-        walk(&stage->additionalChildren.front(), &iter, zipper);
+        // The pipeline's schema child is always contained at the last element of the vector for
+        // lookup.
+        walk(&stage->additionalChildren.back(), &iter, zipper);
     }
 
     if (auto facetSource = dynamic_cast<const DocumentSourceFacet*>(&***sourceIter)) {
@@ -298,8 +317,9 @@ inline std::pair<boost::optional<Stage<T>>, T> makeTree(
     // For empty pipelines, there's no Stage<T> to return and the output schema is the same as the
     // input schema.
     if (pipeline.getSources().empty()) {
-        return std::pair(boost::none,
-                         findStageContents(pipeline.getContext()->ns, initialStageContents));
+        return std::pair(
+            boost::none,
+            findStageContents(pipeline.getContext()->getNamespaceString(), initialStageContents));
     }
 
     auto&& [finalStage, reshaper] =

@@ -56,6 +56,7 @@
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/index/2d_common.h"
+#include "mongo/db/index/2d_key_generator.h"
 #include "mongo/db/index/btree_key_generator.h"
 #include "mongo/db/index/expression_keys_private.h"
 #include "mongo/db/index/expression_params.h"
@@ -63,6 +64,7 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/s2_common.h"
+#include "mongo/db/index/s2_key_generator.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/namespace_string.h"
@@ -118,7 +120,7 @@ public:
         // Set the collator interface if the index descriptor has a collation.
         if (auto collation = indexDescriptor->collation(); !collation.isEmpty()) {
             auto collatorFactory =
-                CollatorFactoryInterface::get(expCtx->opCtx->getServiceContext());
+                CollatorFactoryInterface::get(expCtx->getOperationContext()->getServiceContext());
             auto collatorFactoryResult = collatorFactory->makeFromBSON(collation);
 
             uassert(6868502,
@@ -226,18 +228,18 @@ private:
      */
     void _generate2DIndexKeys(KeyStringSet* keyStrings) const {
         TwoDIndexingParams twoDIndexingParams;
-        ExpressionParams::parseTwoDParams(_indexDescriptor->infoObj(), &twoDIndexingParams);
+        index2d::parse2dParams(_indexDescriptor->infoObj(), &twoDIndexingParams);
 
         const boost::optional<RecordId> recordId = boost::none;
         SharedBufferFragmentBuilder pooledBufferBuilder(BufBuilder::kDefaultInitSizeBytes);
 
-        ExpressionKeysPrivate::get2DKeys(pooledBufferBuilder,
-                                         _docObj,
-                                         twoDIndexingParams,
-                                         keyStrings,
-                                         _keyStringVersion,
-                                         _ordering,
-                                         recordId);
+        index2d::get2DKeys(pooledBufferBuilder,
+                           _docObj,
+                           twoDIndexingParams,
+                           keyStrings,
+                           _keyStringVersion,
+                           _ordering,
+                           recordId);
     }
 
     /*
@@ -246,23 +248,23 @@ private:
      */
     void _generate2DSphereIndexKeys(KeyStringSet* keyStrings) const {
         S2IndexingParams s2IndexingParams;
-        ExpressionParams::initialize2dsphereParams(
+        index2dsphere::initialize2dsphereParams(
             _indexDescriptor->infoObj(), _collatorInterface.get(), &s2IndexingParams);
 
         MultikeyPaths multikeyPaths;
         const boost::optional<RecordId> recordId = boost::none;
         SharedBufferFragmentBuilder pooledBufferBuilder(BufBuilder::kDefaultInitSizeBytes);
 
-        ExpressionKeysPrivate::getS2Keys(pooledBufferBuilder,
-                                         _docObj,
-                                         _indexDescriptor->keyPattern(),
-                                         s2IndexingParams,
-                                         keyStrings,
-                                         &multikeyPaths,
-                                         _keyStringVersion,
-                                         SortedDataIndexAccessMethod::GetKeysContext::kAddingKeys,
-                                         _ordering,
-                                         recordId);
+        index2dsphere::getS2Keys(pooledBufferBuilder,
+                                 _docObj,
+                                 _indexDescriptor->keyPattern(),
+                                 s2IndexingParams,
+                                 keyStrings,
+                                 &multikeyPaths,
+                                 _keyStringVersion,
+                                 SortedDataIndexAccessMethod::GetKeysContext::kAddingKeys,
+                                 _ordering,
+                                 recordId);
     }
 
     /**
@@ -400,21 +402,42 @@ Value ExpressionInternalOwningShard::evaluate(const Document& root, Variables* v
             "$_internalOwningShard is currently not supported on mongos",
             !serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
 
+    auto expCtx = getExpressionContext();
+
     Value input = _children[0]->evaluate(root, variables);
     if (input.nullish()) {
         return Value(BSONNULL);
     }
 
+    uassert(9567000,
+            str::stream() << opName << " supports an object as its argument",
+            input.getType() == BSONType::Object);
+
     // Retrieve the values from the incoming document.
-    auto expCtx = getExpressionContext();
-    NamespaceString ns(NamespaceStringUtil::deserialize(
-        expCtx->ns.tenantId(), input["ns"_sd].getStringData(), expCtx->serializationCtxt));
-    const auto shardVersionObj = input["shardVersion"_sd].getDocument().toBson();
+    Value nsUnchecked = input["ns"_sd];
+    Value shardVersionUnchecked = input["shardVersion"_sd];
+    Value shardKeyValUnchecked = input["shardKeyVal"_sd];
+
+    uassert(9567001,
+            str::stream() << opName << " requires 'ns' argument to be an string",
+            nsUnchecked.getType() == BSONType::String);
+    NamespaceString ns(NamespaceStringUtil::deserialize(expCtx->getNamespaceString().tenantId(),
+                                                        nsUnchecked.getStringData(),
+                                                        expCtx->getSerializationContext()));
+
+    uassert(9567002,
+            str::stream() << opName << " requires 'shardVersion' argument to be an object",
+            shardVersionUnchecked.getType() == BSONType::Object);
+    const auto shardVersionObj = shardVersionUnchecked.getDocument().toBson();
     const auto shardVersion = ShardVersion::parse(BSON("" << shardVersionObj).firstElement());
-    const auto shardKeyVal = input["shardKeyVal"_sd].getDocument().toBson();
+
+    uassert(9567003,
+            str::stream() << opName << " requires 'shardKeyVal' argument to be an object",
+            shardKeyValUnchecked.getType() == BSONType::Object);
+    const auto shardKeyVal = shardKeyValUnchecked.getDocument().toBson();
 
     // Get the 'chunkManager' from the catalog cache.
-    auto opCtx = expCtx->opCtx;
+    auto opCtx = expCtx->getOperationContext();
     const auto catalogCache = Grid::get(opCtx)->catalogCache();
     uassert(6868602,
             "$_internalOwningShard expression only makes sense in sharded environment",
@@ -486,7 +509,7 @@ ExpressionInternalIndexKey::ExpressionInternalIndexKey(ExpressionContext* expCtx
     : Expression(expCtx, {std::move(doc), std::move(spec)}),
       _doc(_children[0]),
       _spec(_children[1]) {
-    expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+    expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
 }
 
 boost::intrusive_ptr<Expression> ExpressionInternalIndexKey::optimize() {
@@ -520,8 +543,8 @@ Value ExpressionInternalIndexKey::evaluate(const Document& root, Variables* vari
     auto specObj = _spec->evaluate(root, variables).getDocument().toBson();
 
     // Parse and validate the index spec and then create the index descriptor object from it.
-    auto indexSpec =
-        index_key_validate::parseAndValidateIndexSpecs(getExpressionContext()->opCtx, specObj);
+    auto indexSpec = index_key_validate::parseAndValidateIndexSpecs(
+        getExpressionContext()->getOperationContext(), specObj);
     BSONObj keyPattern = indexSpec.getObjectField(kIndexSpecKeyField);
     auto indexDescriptor =
         std::make_unique<IndexDescriptor>(IndexNames::findPluginName(keyPattern), indexSpec);

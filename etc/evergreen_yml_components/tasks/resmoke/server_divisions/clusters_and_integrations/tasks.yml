@@ -131,7 +131,6 @@ variables:
       - func: "save mongo coredumps"
       - func: "generate hang analyzer tasks"
       - func: "save failed unittests"
-      - func: "save UndoDB recordings"
       - func: "save unstripped dbtest"
       - func: "save hang analyzer debugger files"
       - func: "save disk statistics"
@@ -199,7 +198,11 @@ tasks:
   - <<: *benchmark_template
     name: benchmarks_namespace
     tags:
-      ["assigned_to_jira_team_server_servicearch", "experimental", "benchmarks"]
+      [
+        "assigned_to_jira_team_server_programmability",
+        "experimental",
+        "benchmarks",
+      ]
     commands:
       - func: "do benchmark setup"
       - func: "run benchmark tests"
@@ -210,19 +213,28 @@ tasks:
   - <<: *benchmark_template
     name: benchmarks_orphaned_first_half
     tags:
-      ["assigned_to_jira_team_server_servicearch", "experimental", "benchmarks"]
+      [
+        "assigned_to_jira_team_server_programmability",
+        "experimental",
+        "benchmarks",
+      ]
     commands:
       - func: "do benchmark setup"
       - func: "run benchmark tests"
         vars:
           suite: benchmarks_first_half
           exec_timeout_secs: 28800 # 8 hour timeout.
+          timeout_secs: 14400 # 4 hours
           resmoke_jobs_max: 1
 
   - <<: *benchmark_template
     name: benchmarks_orphaned_second_half
     tags:
-      ["assigned_to_jira_team_server_servicearch", "experimental", "benchmarks"]
+      [
+        "assigned_to_jira_team_server_programmability",
+        "experimental",
+        "benchmarks",
+      ]
     commands:
       - func: "do benchmark setup"
       - func: "run benchmark tests"
@@ -235,7 +247,7 @@ tasks:
     name: benchmarks_sep
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "experimental",
         "benchmarks_sep",
       ]
@@ -252,7 +264,7 @@ tasks:
     # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_security",
         "experimental",
         "incompatible_debug_mode",
         "serverless",
@@ -573,7 +585,7 @@ tasks:
     name: failpoints
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "release_critical",
         "misc_js",
       ]
@@ -585,7 +597,7 @@ tasks:
     name: failpoints_auth
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "release_critical",
         "incompatible_mac",
         "incompatible_windows",
@@ -598,7 +610,11 @@ tasks:
   - <<: *task_template
     name: integration_tests_replset
     tags:
-      ["assigned_to_jira_team_server_servicearch", "auxiliary", "integration"]
+      [
+        "assigned_to_jira_team_server_programmability",
+        "auxiliary",
+        "integration",
+      ]
     depends_on:
       - name: compile_integration_test
     commands:
@@ -610,7 +626,11 @@ tasks:
   - <<: *task_template
     name: integration_tests_replset_ssl_auth
     tags:
-      ["assigned_to_jira_team_server_servicearch", "auxiliary", "integration"]
+      [
+        "assigned_to_jira_team_server_programmability",
+        "auxiliary",
+        "integration",
+      ]
     depends_on:
       - name: compile_integration_test
     commands:
@@ -623,7 +643,7 @@ tasks:
     name: integration_tests_sharded
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "auxiliary",
         "integration",
         "sharded",
@@ -640,7 +660,7 @@ tasks:
     name: integration_tests_standalone
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "auxiliary",
         "integration",
         "standalone",
@@ -657,7 +677,7 @@ tasks:
     name: integration_tests_standalone_audit
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "auxiliary",
         "integration",
         "audit",
@@ -674,7 +694,7 @@ tasks:
     name: libunwind_tests
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "release_critical",
         "incompatible_mac",
         "incompatible_windows",
@@ -693,7 +713,7 @@ tasks:
     # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_security",
         "experimental",
         "incompatible_debug_mode",
         "serverless",
@@ -708,7 +728,7 @@ tasks:
     # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_security",
         "experimental",
         "incompatible_debug_mode",
         "serverless",
@@ -723,7 +743,7 @@ tasks:
     # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_security",
         "experimental",
         "incompatible_debug_mode",
         "serverless",
@@ -737,7 +757,7 @@ tasks:
     name: search_no_pinned_connections_auth
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_networking_and_observability",
         "release_critical",
         "incompatible_community",
         "incompatible_mac",
@@ -752,7 +772,7 @@ tasks:
           resmoke_jobs_max: 1
 
   - <<: *task_template
-    name: no_passthrough_architecture
+    name: no_passthrough_network
     tags:
       [
         "assigned_to_jira_team_server_networking_and_observability",
@@ -770,13 +790,14 @@ tasks:
   - name: server_discovery_and_monitoring_json_test
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_networking_and_observability",
         "default",
         "requires_compile_variant",
       ]
     depends_on:
       - name: version_expansions_gen
         variant: generate-tasks-for-version
+      - name: compile_libraries_for_unittests
     commands:
       - func: "do scons setup"
       - func: "scons compile"
@@ -784,6 +805,7 @@ tasks:
           targets: install-sdam-json-test
           compiling_for_test: true
           install_dir: build/install/bin
+          bazel_build_tags: --bazel-build-tag=mongo_binary
       - func: "run tests"
         vars:
           suite: sdam_json_test
@@ -791,7 +813,7 @@ tasks:
   - name: server_selection_json_test
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_networking_and_observability",
         "default",
         "requires_compile_variant",
         "requires_large_host_debug_mode",
@@ -799,6 +821,7 @@ tasks:
     depends_on:
       - name: version_expansions_gen
         variant: generate-tasks-for-version
+      - name: compile_libraries_for_unittests
     commands:
       - func: "do scons setup"
       - func: "scons compile"
@@ -806,6 +829,7 @@ tasks:
           targets: install-server-selection-json-test
           compiling_for_test: true
           install_dir: build/install/bin
+          bazel_build_tags: --bazel-build-tag=mongo_binary
       - func: "run tests"
 
   - <<: *task_template
@@ -813,7 +837,7 @@ tasks:
     # TODO(SERVER-70015) remove "incompatible_debug_mode" tag
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "experimental",
         "incompatible_debug_mode",
         "requires_large_host_debug_mode",
@@ -826,7 +850,7 @@ tasks:
 
   - <<: *task_template
     name: session_jscore_passthrough
-    tags: ["assigned_to_jira_team_server_servicearch", "default"]
+    tags: ["assigned_to_jira_team_server_repl", "default"]
     commands:
       - func: "do setup"
       - func: "run tests"
@@ -835,7 +859,11 @@ tasks:
   - <<: *task_template
     name: watchdog_inmemory
     tags:
-      ["assigned_to_jira_team_server_servicearch", "experimental", "watchdog"]
+      [
+        "assigned_to_jira_team_server_networking_and_observability",
+        "experimental",
+        "watchdog",
+      ]
     commands:
       - func: "do setup"
       - func: "do watchdog setup"
@@ -848,7 +876,11 @@ tasks:
   - <<: *task_template
     name: watchdog_wiredtiger
     tags:
-      ["assigned_to_jira_team_server_servicearch", "experimental", "watchdog"]
+      [
+        "assigned_to_jira_team_server_networking_and_observability",
+        "experimental",
+        "watchdog",
+      ]
     commands:
       - func: "do setup"
       - func: "do watchdog setup"
@@ -873,8 +905,6 @@ tasks:
         "aggregation",
         "encrypt",
       ]
-    depends_on:
-      - name: aggregation
     commands:
       - func: "do setup"
       - func: "run tests"
@@ -892,8 +922,6 @@ tasks:
         "encrypt",
         "gcm",
       ]
-    depends_on:
-      - name: aggregation
     commands:
       - func: "do setup"
       - func: "run tests"
@@ -1193,7 +1221,7 @@ tasks:
     name: jsCore_heap_profiling
     tags:
       [
-        "assigned_to_jira_team_server_servicearch",
+        "assigned_to_jira_team_server_programmability",
         "default",
         "jscore",
         "incompatible_system_allocator",
@@ -1551,7 +1579,8 @@ tasks:
           retryable_writes_downgrade_last_continuous: last_continuous
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: retryable_writes_jscore_passthrough_gen
@@ -1724,7 +1753,8 @@ tasks:
           sharded_collections_jscore_passthrough_last_lts_new_old_old_new: last_lts
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: sharded_collections_jscore_passthrough_gen
@@ -1879,7 +1909,8 @@ tasks:
           sharded_retryable_writes_downgrade_last_lts_new_old_old_new: last_lts
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: sharding_auto_bootstrap_gen
@@ -1964,7 +1995,8 @@ tasks:
           sharding_jscore_passthrough_last_continuous_new_old_old_new: last_continuous
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *gen_task_template
     name: sharding_jscore_passthrough_gen
@@ -2061,7 +2093,8 @@ tasks:
       - func: "generate resmoke tasks"
         vars:
           use_large_distro: "true"
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *jstestfuzz_template
     name: unshard_collection_fuzzer_gen
@@ -2111,7 +2144,7 @@ tasks:
   ################################################
 
   - <<: *gen_task_template
-    name: aggregation_unsplittable_collections_on_random_shard_passthrough
+    name: aggregation_unsplittable_collections_on_random_shard_passthrough_gen
     # TODO SERVER-83445 Enable on non-all-feature-flag variants.
     tags:
       [
@@ -2119,14 +2152,11 @@ tasks:
         "default",
         "unsplittable_collections",
       ]
-    depends_on:
-      - name: aggregation
     commands:
-      - func: "do setup"
-      - func: "run tests"
+      - func: "generate resmoke tasks"
 
   - <<: *gen_task_template
-    name: aggregation_unsplittable_collections_on_random_shard_passthrough_with_config_transitions
+    name: aggregation_unsplittable_collections_on_random_shard_passthrough_with_config_transitions_gen
     # TODO SERVER-83445 Enable on non-all-feature-flag variants.
     tags:
       [
@@ -2134,11 +2164,8 @@ tasks:
         "default",
         "unsplittable_collections",
       ]
-    depends_on:
-      - name: aggregation
     commands:
-      - func: "do setup"
-      - func: "run tests"
+      - func: "generate resmoke tasks"
 
   - <<: *gen_task_template
     name: causally_consistent_jscore_passthrough_auth_gen
@@ -2628,9 +2655,9 @@ tasks:
           suite: jstestfuzz_sharded
           resmoke_args: --numClientsPerFixture=10
 
-  ## jstestfuzz concurrent sharded cluster with logical session ##
+  ## jstestfuzz concurrent sharded cluster with notablescan parameter enabled ##
   - <<: *jstestfuzz_template
-    name: jstestfuzz_concurrent_sharded_session_gen
+    name: jstestfuzz_concurrent_sharded_notablescan_gen
     # TODO(SERVER-69996) remove "incompatible_debug_mode" tag
     tags:
       [
@@ -2638,7 +2665,6 @@ tasks:
         "incompatible_debug_mode",
         "jstestfuzz",
         "non_deterministic",
-        "session",
         "require_npm",
         "random_name",
       ]
@@ -2649,7 +2675,7 @@ tasks:
           num_files: ${jstestfuzz_concurrent_num_files|10}
           num_tasks: 5
           jstestfuzz_vars: --jsTestsDir ../jstests
-          suite: jstestfuzz_sharded_session
+          suite: jstestfuzz_sharded_notablescan
           resmoke_args: --numClientsPerFixture=10
 
   ## jstestfuzz sharded cluster causal consistency ##
@@ -2744,13 +2770,14 @@ tasks:
         vars:
           <<: *jstestfuzz_config_vars
           jstestfuzz_vars: --jsTestsDir ../jstests
-          resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
+          resmoke_args: >-
+            --mongodSetParameters='{logComponentVerbosity: {command: 2}}'
+            --runNoFeatureFlagTests
           npm_command: jstestfuzz
-          run_no_feature_flag_tests: "true"
 
-  ## jstestfuzz sharded cluster with logical session ##
+  ## jstestfuzz sharded cluster with notablescan param enabled ##
   - <<: *jstestfuzz_template
-    name: jstestfuzz_sharded_session_gen
+    name: jstestfuzz_sharded_notablescan_gen
     # TODO(SERVER-69996) remove "incompatible_debug_mode" tag
     tags:
       [
@@ -2758,7 +2785,6 @@ tasks:
         "incompatible_debug_mode",
         "jstestfuzz",
         "non_deterministic",
-        "session",
         "require_npm",
         "random_name",
       ]
@@ -2767,7 +2793,7 @@ tasks:
         vars:
           <<: *jstestfuzz_config_vars
           jstestfuzz_vars: --jsTestsDir ../jstests
-          suite: jstestfuzz_sharded_session
+          suite: jstestfuzz_sharded_notablescan
           resmoke_args: "--mongodSetParameters='{logComponentVerbosity: {command: 2}}'"
 
   ## jstestfuzz sharded cluster with replica set endpoint ##

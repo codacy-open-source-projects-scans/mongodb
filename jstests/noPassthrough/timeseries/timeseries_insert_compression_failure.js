@@ -3,7 +3,6 @@
  * retried and will not try writing to the same corrupt bucket.
  *
  * @tags: [
- *   featureFlagTimeseriesAlwaysUseCompressedBuckets,
  *   requires_fcv_80,
  * ]
  */
@@ -77,7 +76,6 @@ const runTest = function(ordered) {
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToTimeForward"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToMemoryThreshold"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numCommits"));
-    assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numMeasurementsGroupCommitted"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numWaits"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numMeasurementsCommitted"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToReopening"));
@@ -126,7 +124,6 @@ const runTest = function(ordered) {
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToTimeForward"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToMemoryThreshold"));
     assert.eq(3, TimeseriesTest.getStat(stats.timeseries, "numCommits"));
-    assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numMeasurementsGroupCommitted"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numWaits"));
     assert.eq(6, TimeseriesTest.getStat(stats.timeseries, "numMeasurementsCommitted"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToReopening"));
@@ -159,7 +156,6 @@ const runTest = function(ordered) {
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToTimeForward"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToMemoryThreshold"));
     assert.eq(6, TimeseriesTest.getStat(stats.timeseries, "numCommits"));
-    assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numMeasurementsGroupCommitted"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numWaits"));
     assert.eq(11, TimeseriesTest.getStat(stats.timeseries, "numMeasurementsCommitted"));
     assert.eq(0, TimeseriesTest.getStat(stats.timeseries, "numBucketsClosedDueToReopening"));

@@ -54,7 +54,6 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -111,6 +110,7 @@ public:
 
     Status dropIdent(RecoveryUnit* ru,
                      StringData ident,
+                     bool identHasSizeInfo,
                      const StorageEngine::DropIdentCallback& onDrop) override {
         return Status::OK();
     }

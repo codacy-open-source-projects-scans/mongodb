@@ -74,13 +74,6 @@ feature_flags:
     default: true
     version: 7.1
     shouldBeFCVGated: true
-  # TODO (SERVER-79304): Remove once 8.0 becomes last LTS.
-  featureFlagAuthoritativeShardCollection:
-    description: "Feature flag for enabling the authoritative version of the shardCollection DDL operation."
-    cpp_varname: feature_flags::gAuthoritativeShardCollection
-    default: true
-    version: 8.0
-    shouldBeFCVGated: true
   # TODO (SERVER-76436): Remove once 8.0 becomes last LTS.
   featureFlagBalanceUnshardedCollections:
     description: "Feature flag for enabling the balancing of user unsharded collections"
@@ -100,13 +93,6 @@ feature_flags:
     cpp_varname: feature_flags::gUpdateOneWithIdWithoutShardKey
     default: true
     version: 8.0
-    shouldBeFCVGated: true
-  # TODO (SERVER-83264): Remove once 8.0 becomes last LTS.
-  featureFlagBalancerSettingsSchema:
-    description: "Feature flag for updating the config settings schema to enforce balancer settings"
-    cpp_varname: feature_flags::gBalancerSettingsSchema
-    default: true
-    version: 7.3
     shouldBeFCVGated: true
   # TODO (SERVER-83704): Remove once 8.0 becomes last LTS.
   featureFlagPlacementHistoryPostFCV73 :
@@ -145,12 +131,7 @@ feature_flags:
     default: true
     version: 8.0
     shouldBeFCVGated: true
-  featureFlagReplicaSetEndpoint:
-    description: When enabled, allows users to connect to a single-shard cluster with no dedicated config
-                 server using a replica set connection string.
-    cpp_varname: feature_flags::gFeatureFlagReplicaSetEndpoint
-    default: false
-    shouldBeFCVGated: true
+  # TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
   featureFlag80CollectionCreationPath:
     description: "Feature flag protecting all codepaths that rely on the 8.0 way of collection creation in a
                   sharded cluster. Namely, no implicit creations by the shards and no usage of the
@@ -159,18 +140,17 @@ feature_flags:
     default: true
     version: 8.0
     shouldBeFCVGated: true
+  featureFlagReplicaSetEndpoint:
+    description: When enabled, allows users to connect to a single-shard cluster with no dedicated config
+                 server using a replica set connection string.
+    cpp_varname: feature_flags::gFeatureFlagReplicaSetEndpoint
+    default: false
+    shouldBeFCVGated: true
   featureFlagFailOnDirectShardOperations:
     description: "Feature flag for erroring when a direct shard operation is detected."
     cpp_varname: feature_flags::gFailOnDirectShardOperations
     default: true
     version: 7.3
-    shouldBeFCVGated: true
-  # TODO (SERVER-87196): remove the flag below after 8.0 is released
-  featureFlagEnforceRoutingByNamespace:
-    description: "Bans routing by UUID"
-    cpp_varname: feature_flags::gEnforceRoutingByNamespace
-    default: true
-    version: 8.0
     shouldBeFCVGated: true
   featureFlagStopDDLCoordinatorsDuringTopologyChanges:
     description: "Feature flag to stop ShardingDDLCoordinators during sharding topology changes (i.e.
@@ -188,5 +168,38 @@ feature_flags:
   featureFlagCreateDatabaseDDLCoordinator:
     description: "Feature flag for enabling the sharding DDL coordinator for database creation."
     cpp_varname: feature_flags::gCreateDatabaseDDLCoordinator
+    default: true
+    version: 8.1
+    shouldBeFCVGated: true
+  # TODO (SERVER-95599): remove once 9.0 becomes last LTS.
+  featureFlagConfigDebugDumpSupported:
+    description: "The configDebugDump flag is supported in listCollections and $listCatalog."
+    cpp_varname: feature_flags::gConfigDebugDumpSupported
+    default: true
+    version: 8.1
+    shouldBeFCVGated: true
+  # TODO (SERVER-94367): remove once 9.0 becomes last LTS.
+  featureFlagListClusterCatalogAggStage:
+    description: "Feature flag for enabling the aggregation stage $listClusterCatalog"
+    cpp_varname: feature_flags::gListClusterCatalogAggStage
     default: false
     shouldBeFCVGated: true
+  # TODO (SERVER-97261): remove once 9.0 becomes last LTS.
+  featureFlagDualCatalogCache:
+    description: "Feature flag to enable one catalog cache for the shard role and another one for
+                  the router role."
+    cpp_varname: feature_flags::gDualCatalogCache
+    default: false
+    shouldBeFCVGated: false
+  featureFlagUseTopologyChangeCoordinators:
+    description: "Feature flag for enabling the coordinator based topology changes."
+    cpp_varname: feature_flags::gUseTopologyChangeCoordinators
+    default: false
+    shouldBeFCVGated: true
+  # TODO (SERVER-98118): remove once 9.0 becomes last LTS.
+  featureFlagShardAuthoritativeDbMetadata:
+    description: "Feature flag to enable the authoritative model to store shard-local information
+                  for database metadata."
+    cpp_varname: feature_flags::gShardAuthoritativeDbMetadata
+    default: false
+    shouldBeFCVGated: false

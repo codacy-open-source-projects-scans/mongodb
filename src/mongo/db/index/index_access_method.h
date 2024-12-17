@@ -29,13 +29,10 @@
 
 #pragma once
 
-#include <atomic>
 #include <boost/optional/optional.hpp>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
-#include <set>
 #include <utility>
 #include <vector>
 
@@ -43,26 +40,21 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index/multikey_metadata_access_stats.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/resumable_index_builds_gen.h"
-#include "mongo/db/sorter/sorter.h"
 #include "mongo/db/sorter/sorter_stats.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/sorted_data_interface.h"
-#include "mongo/db/yieldable.h"
+#include "mongo/util/functional.h"
 #include "mongo/util/shared_buffer_fragment.h"
 
 namespace mongo {
@@ -73,6 +65,10 @@ struct UpdateTicket;
 struct InsertDeleteOptions;
 class SortedDataIndexAccessMethod;
 struct CollectionOptions;
+
+namespace CollectionValidation {
+class ValidationOptions;
+}
 
 /**
  * An IndexAccessMethod is the interface through which all the mutation, lookup, and
@@ -91,13 +87,13 @@ class IndexAccessMethod {
 public:
     using ShouldRelaxConstraintsFn =
         std::function<bool(OperationContext* opCtx, const CollectionPtr& collection)>;
-    using OnSuppressedErrorFn = std::function<void(OperationContext* opCtx,
-                                                   const IndexCatalogEntry* entry,
-                                                   Status status,
-                                                   const BSONObj& obj,
-                                                   const boost::optional<RecordId>& loc)>;
-    using KeyHandlerFn = std::function<Status(const key_string::Value&)>;
-    using RecordIdHandlerFn = std::function<Status(const RecordId&)>;
+    using OnSuppressedErrorFn = unique_function<void(OperationContext* opCtx,
+                                                     const IndexCatalogEntry* entry,
+                                                     Status status,
+                                                     const BSONObj& obj,
+                                                     const boost::optional<RecordId>& loc)>;
+    using KeyHandlerFn = unique_function<Status(const key_string::Value&)>;
+    using RecordIdHandlerFn = unique_function<Status(const RecordId&)>;
 
     IndexAccessMethod() = default;
     virtual ~IndexAccessMethod() = default;
@@ -163,14 +159,15 @@ public:
      * only called once for the lifetime of the index
      * if called multiple times, is an error
      */
-    virtual Status initializeAsEmpty(OperationContext* opCtx) = 0;
+    virtual Status initializeAsEmpty() = 0;
 
     /**
      * Validates the index. If 'full' is false, only performs checks which do not traverse the
      * index. If 'full' is true, additionally traverses the index and validates its internal
      * structure.
      */
-    virtual IndexValidateResults validate(OperationContext* opCtx, bool full) const = 0;
+    virtual IndexValidateResults validate(
+        OperationContext* opCtx, const CollectionValidation::ValidationOptions& options) const = 0;
 
     /**
      * Returns the number of keys in the index, traversing the index to do so.
@@ -575,9 +572,11 @@ public:
                   int64_t* numInserted,
                   int64_t* numDeleted) final;
 
-    Status initializeAsEmpty(OperationContext* opCtx) final;
+    Status initializeAsEmpty() final;
 
-    IndexValidateResults validate(OperationContext* opCtx, bool full) const final;
+    IndexValidateResults validate(
+        OperationContext* opCtx,
+        const CollectionValidation::ValidationOptions& options) const final;
 
     int64_t numKeys(OperationContext* opCtx) const final;
 
@@ -658,16 +657,6 @@ private:
                       const IndexCatalogEntry* entry,
                       const key_string::Value& keyString,
                       bool dupsAllowed) const;
-
-    /**
-     * While inserting keys into index (from external sorter), if a duplicate key is detected
-     * (when duplicates are not allowed), 'onDuplicateRecord' will be called if passed, otherwise a
-     * DuplicateKey error will be returned.
-     */
-    Status _handleDuplicateKey(OperationContext* opCtx,
-                               const IndexCatalogEntry* entry,
-                               const key_string::Value& dataKey,
-                               const RecordIdHandlerFn& onDuplicateRecord);
 
     Status _indexKeysOrWriteToSideTable(OperationContext* opCtx,
                                         const CollectionPtr& coll,

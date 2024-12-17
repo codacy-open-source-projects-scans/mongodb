@@ -4,7 +4,7 @@
  *
  * @tags: [
  *   requires_fcv_63,
- *    # TODO (SERVER-88122): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  */
@@ -25,6 +25,14 @@ const shard0 = st.rs0;
 const shard1 = st.rs1;
 const shard2 = st.rs2;
 
+function getDefaultOwningShardInput(shardVersion) {
+    return {
+        shardKeyVal: {_id: "$_id"},
+        ns: destinationColl.getFullName(),
+        shardVersion: shardVersion,
+    };
+}
+
 // Retrieves the current shard version for the 'destinationColl' and returns the ShardVersion
 // object.
 function getCurrentShardVersion() {
@@ -37,17 +45,12 @@ function getCurrentShardVersion() {
 }
 
 // Returns a projection stage with the $_internalOwningShard expression.
-function buildProjectionStageWithOwningShardExpression(shardVersion) {
+function buildProjectionStageWithOwningShardExpression(
+    shardVersion, owningShardInput = getDefaultOwningShardInput(shardVersion)) {
     return {
         $project: {
             _id: 0,
-            shard: {
-                $_internalOwningShard: {
-                    shardKeyVal: {_id: "$_id"},
-                    ns: destinationColl.getFullName(),
-                    shardVersion: shardVersion,
-                },
-            },
+            shard: {$_internalOwningShard: owningShardInput},
             indexData: "$$ROOT",
         }
     };
@@ -62,23 +65,13 @@ function assertOwningShardExpressionResults(shardVersion, expectedResult) {
 
 // Asserts that $_internalOwningShard expression fails when routing information is stale.
 function assertOwningShardExpressionFailure(shardVersion) {
-    let expectedErrorCodes = [ErrorCodes.ShardCannotRefreshDueToLocksHeld];
-
-    // TODO SERVER-78379: Remove once 8.0 becomes last-lts. If fcv is lower than 7.1,
-    // $_internalOwningShard can throw StaleConfig when routing information is stale.
-    const fcvResult = assert.commandWorked(
-        st.shard0.getDB(db).adminCommand({getParameter: 1, featureCompatibilityVersion: 1}));
-    if (MongoRunner.compareBinVersions(fcvResult.featureCompatibilityVersion.version, "7.1") < 0) {
-        expectedErrorCodes.push(ErrorCodes.StaleConfig);
-    }
-
     const projectionStage = buildProjectionStageWithOwningShardExpression(shardVersion);
     assert.commandFailedWithCode(db.runCommand({
         aggregate: sourceColl.getName(),
         pipeline: [projectionStage, {$sort: {"indexData._id": 1}}],
         cursor: {}
     }),
-                                 expectedErrorCodes);
+                                 ErrorCodes.ShardCannotRefreshDueToLocksHeld);
 
     // Assert the expression fails while executing on the mongos.
     assert.commandFailedWithCode(db.runCommand({
@@ -138,5 +131,59 @@ assertOwningShardExpressionResults(shardVersion, expectedResult);
 const futureShardVersion =
     Object.assign({}, shardVersion, {t: new Timestamp(Math.pow(2, 32) - 1, 0)});
 assertOwningShardExpressionFailure(futureShardVersion);
+
+// Assert invalid inputs will fail with correct error codes.
+(() => {
+    // Missing input.
+    assert.commandFailedWithCode(db.runCommand({
+        aggregate: sourceColl.getName(),
+        pipeline: [buildProjectionStageWithOwningShardExpression(shardVersion, "")],
+        cursor: {}
+    }),
+                                 6868600);
+
+    // Missing argument.
+    assert.commandFailedWithCode(db.runCommand({
+        aggregate: sourceColl.getName(),
+        pipeline: [buildProjectionStageWithOwningShardExpression(
+            shardVersion, {shardKeyVal: {_id: "$_id"}, shardVersion: shardVersion})],
+        cursor: {}
+    }),
+                                 9567001);
+
+    // 'ns' wrong type.
+    assert.commandFailedWithCode(db.runCommand({
+        aggregate: sourceColl.getName(),
+        pipeline: [buildProjectionStageWithOwningShardExpression(
+            shardVersion,
+            {shardKeyVal: {_id: "$_id"}, shardVersion: shardVersion, ns: {doc: "this is a doc"}})],
+        cursor: {}
+    }),
+                                 9567001);
+
+    // 'shardVersion' wrong type.
+    assert.commandFailedWithCode(db.runCommand({
+        aggregate: sourceColl.getName(),
+        pipeline: [buildProjectionStageWithOwningShardExpression(shardVersion, {
+            shardKeyVal: {_id: "$_id"},
+            shardVersion: "shardVersion",
+            ns: destinationColl.getFullName()
+        })],
+        cursor: {}
+    }),
+                                 9567002);
+
+    // 'shardKeyVal' wrong type.
+    assert.commandFailedWithCode(db.runCommand({
+        aggregate: sourceColl.getName(),
+        pipeline: [buildProjectionStageWithOwningShardExpression(shardVersion, {
+            shardKeyVal: "{_id: $_id}",
+            shardVersion: shardVersion,
+            ns: destinationColl.getFullName()
+        })],
+        cursor: {}
+    }),
+                                 6868600);
+})();
 
 st.stop();

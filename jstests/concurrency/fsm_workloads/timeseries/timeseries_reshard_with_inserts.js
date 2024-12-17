@@ -4,7 +4,6 @@
  * @tags: [
  *   requires_timeseries,
  *   requires_sharding,
- *   featureFlagReshardingForTimeseries,
  *   does_not_support_transactions,
  *   assumes_balancer_off,
  *   requires_fcv_80,
@@ -19,6 +18,9 @@ import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/chunks.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 export const $config = (function() {
+    // This test manually shards the collection.
+    TestData.shardCollectionProbability = 0;
+
     const timeField = 'ts';
     const metaField = 'meta';
 
@@ -68,17 +70,9 @@ export const $config = (function() {
                 });
             }
 
-            assert.soon(() => {
-                const res = db[collName].insert(docs);
-
-                if (res.code == ErrorCodes.NoProgressMade) {
-                    print(`No progress made while inserting documents. Retrying.`);
-                    return false;
-                }
-
-                TimeseriesTest.assertInsertWorked(res);
-                return true;
-            });
+            retryOnRetryableError(() => {
+                TimeseriesTest.assertInsertWorked(db[collName].insert(docs));
+            }, 100 /* numRetries */, undefined /* sleepMs */, [ErrorCodes.NoProgressMade]);
 
             print(`Finished Inserting documents.`);
         },

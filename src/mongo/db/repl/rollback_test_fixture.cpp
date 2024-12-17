@@ -91,7 +91,6 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  const CollectionDropType dropType,
                                   bool markFromMigrate) override {
         // If the oplog is not disabled for this namespace, then we need to reserve an op time for
         // the drop.
@@ -108,10 +107,8 @@ public:
 
 void RollbackTest::setUp() {
     ServiceContextMongoDTest::setUp();
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
-    }
+    cc().setOperationUnkillable_ForTest();
+
     _storageInterface = new StorageInterfaceRollback();
     auto serviceContext = getServiceContext();
     auto consistencyMarkers = std::make_unique<ReplicationConsistencyMarkersMock>();
@@ -119,9 +116,6 @@ void RollbackTest::setUp() {
         std::make_unique<ReplicationRecoveryImpl>(_storageInterface, consistencyMarkers.get());
     _replicationProcess = std::make_unique<ReplicationProcess>(
         _storageInterface, std::move(consistencyMarkers), std::move(recovery));
-    _dropPendingCollectionReaper = new DropPendingCollectionReaper(_storageInterface);
-    DropPendingCollectionReaper::set(
-        serviceContext, std::unique_ptr<DropPendingCollectionReaper>(_dropPendingCollectionReaper));
     StorageInterface::set(serviceContext, std::unique_ptr<StorageInterface>(_storageInterface));
     _coordinator = new ReplicationCoordinatorRollbackMock(serviceContext);
     ReplicationCoordinator::set(serviceContext,
@@ -139,7 +133,7 @@ void RollbackTest::setUp() {
     auto observerRegistry = checked_cast<OpObserverRegistry*>(serviceContext->getOpObserver());
     observerRegistry->addObserver(std::make_unique<RollbackTestOpObserver>());
 
-    ReadWriteConcernDefaults::create(serviceContext, _lookupMock.getFetchDefaultsFn());
+    ReadWriteConcernDefaults::create(getService(), _lookupMock.getFetchDefaultsFn());
 }
 
 RollbackTest::ReplicationCoordinatorRollbackMock::ReplicationCoordinatorRollbackMock(

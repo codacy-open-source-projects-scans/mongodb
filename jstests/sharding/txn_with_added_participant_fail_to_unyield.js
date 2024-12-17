@@ -3,7 +3,7 @@
  * participant to the transaction fails to unyield its resources.
  * @tags: [
  *   requires_fcv_80,
- *    # TODO (SERVER-88127): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  */
@@ -38,6 +38,9 @@ const originalShard0Metrics =
     assert.commandWorked(st.shard0.adminCommand({serverStatus: 1})).transactions;
 const originalShard1Metrics =
     assert.commandWorked(st.shard1.adminCommand({serverStatus: 1})).transactions;
+
+// Refresh the routing information for the foreign collection in shard0 before running the checks.
+assert.commandWorked(st.shard0.adminCommand({_flushRoutingTableCacheUpdates: foreignNs}));
 
 const session = st.s.startSession();
 const sessionDB = session.getDatabase(dbName);

@@ -144,24 +144,11 @@ long long performDelete(OperationContext* opCtx,
 
 /**
  * Generates a WriteError for a given Status.
- *
- * This function may throw.
  */
 boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
                                                      const Status& status,
                                                      int index,
-                                                     size_t numErrors);
-
-/**
- * Generates a WriteError for a given Status. Does not handle tenant migration errors.
- *
- * Marked as 'noexcept' as we need to safely be able to call this function during exception
- * handling.
- */
-boost::optional<write_ops::WriteError> generateErrorNoTenantMigration(OperationContext* opCtx,
-                                                                      const Status& status,
-                                                                      int index,
-                                                                      size_t numErrors) noexcept;
+                                                     size_t numErrors) noexcept;
 
 /**
  * Updates the retryable write stats if the write op contains retry.
@@ -188,8 +175,8 @@ void logOperationAndProfileIfNeeded(OperationContext* opCtx, CurOp* curOp);
  * 'type' indicates whether the operation was induced by a standard write, a chunk migration, or a
  * time-series insert.
  *
- * Note: performInserts() gets called for both user and internal (like tenant collection cloner,
- * and initial sync/tenant migration oplog buffer) inserts.
+ * Note: performInserts() gets called for both user and internal (like initial sync oplog buffer)
+ * inserts.
  */
 WriteResult performInserts(OperationContext* opCtx,
                            const write_ops::InsertCommandRequest& op,
@@ -201,16 +188,6 @@ WriteResult performDeletes(OperationContext* opCtx,
                            const write_ops::DeleteCommandRequest& op,
                            OperationSource source = OperationSource::kStandard);
 
-Status performAtomicTimeseriesWrites(OperationContext* opCtx,
-                                     const std::vector<write_ops::InsertCommandRequest>& insertOps,
-                                     const std::vector<write_ops::UpdateCommandRequest>& updateOps);
-
-/**
- * Runs a time-series update command in a transaction and collects the write result from each
- * statement.
- *
- * Assumes the update command is a retryable write and targeted on the time-series view namespace.
- */
 void runTimeseriesRetryableUpdates(OperationContext* opCtx,
                                    const NamespaceString& bucketNs,
                                    const write_ops::UpdateCommandRequest& wholeOp,
@@ -228,16 +205,8 @@ void recordUpdateResultInOpDebug(const UpdateResult& updateResult, OpDebug* opDe
  */
 bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
                                       const CanonicalQuery& cq,
-                                      const DuplicateKeyErrorInfo& errorInfo);
-
-/**
- * Returns an InsertCommandReply if the timeseries writes succeeded.
- */
-write_ops::InsertCommandReply performTimeseriesWrites(
-    OperationContext* opCtx, const write_ops::InsertCommandRequest& request);
-
-write_ops::InsertCommandReply performTimeseriesWrites(
-    OperationContext* opCtx, const write_ops::InsertCommandRequest& request, CurOp* curOp);
+                                      const DuplicateKeyErrorInfo& errorInfo,
+                                      int retryAttempts);
 
 /*
  * Populates 'result' with the explain information for the write requests.

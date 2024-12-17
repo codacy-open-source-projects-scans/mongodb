@@ -50,6 +50,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/exec/exec_shard_filter_policy.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/dependencies.h"
@@ -144,7 +145,7 @@ class StubExplainInterface : public StubMongoProcessInterface {
     BSONObj preparePipelineAndExplain(Pipeline* ownedPipeline,
                                       ExplainOptions::Verbosity verbosity) override {
         std::unique_ptr<Pipeline, PipelineDeleter> pipeline(
-            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->opCtx));
+            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->getOperationContext()));
         BSONArrayBuilder bab;
         auto opts = SerializationOptions{.verbosity = boost::make_optional(verbosity)};
         auto pipelineVec = pipeline->writeExplainOps(opts);
@@ -155,9 +156,11 @@ class StubExplainInterface : public StubMongoProcessInterface {
     }
     std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
         Pipeline* ownedPipeline,
-        boost::optional<const AggregateCommandRequest&> aggRequest) override {
+        boost::optional<const AggregateCommandRequest&> aggRequest,
+        bool shouldUseCollectionDefaultCollator,
+        ExecShardFilterPolicy = AutomaticShardFiltering{}) override {
         std::unique_ptr<Pipeline, PipelineDeleter> pipeline(
-            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->opCtx));
+            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->getOperationContext()));
         return pipeline;
     }
 };
@@ -181,9 +184,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> assertPipelineOptimizesTo(
     AggregateCommandRequest request(aggNss, rawPipeline);
     boost::intrusive_ptr<ExpressionContextForTest> ctx =
         new ExpressionContextForTest(opCtx.get(), request);
-    ctx->mongoProcessInterface = std::make_shared<StubExplainInterface>();
+    ctx->setMongoProcessInterface(std::make_shared<StubExplainInterface>());
     unittest::TempDir tempDir("PipelineTest");
-    ctx->tempDir = tempDir.path();
+    ctx->setTempDir(tempDir.path());
 
     // For $graphLookup and $lookup, we have to populate the resolvedNamespaces so that the
     // operations will be able to have a resolved view definition.
@@ -2655,12 +2658,18 @@ TEST(PipelineOptimizationTest, MatchShouldMoveAcrossAddFieldsRenameWithExplicitC
 }
 
 TEST(PipelineOptimizationTest, PartiallyDependentMatchWithRenameShouldSplitAcrossAddFields) {
+    // The $match predicate has two parts:
+    //   1. A simple predicate on 'd'. This cannot be pushed down because 'd' is computed.
+    //   2. An $or on two fields: 'a' and 'x'.
+    // The $or can be pushed down, because:
+    //   - 'x' is preserved by the $addFields.
+    //   - 'a' is computed, but its value is available in field 'c' before the $addFields.
     std::string inputPipe =
-        "[{$addFields: {'a.b': '$c', d: {$add: ['$e', '$f']}}},"
-        "{$match: {$and: [{$or: [{'a.b': 1}, {x: 2}]}, {d: 3}]}}]";
+        "[{$addFields: {'a': '$c', d: {$add: ['$e', '$f']}}},"
+        "{$match: {$and: [{$or: [{'a': 1}, {x: 2}]}, {d: 3}]}}]";
     std::string outputPipe =
         "[{$match: {$or: [{c: {$eq: 1}}, {x: {$eq: 2}}]}},"
-        "{$addFields: {a: {b: '$c'}, d: {$add: ['$e', '$f']}}},"
+        "{$addFields: {a: '$c', d: {$add: ['$e', '$f']}}},"
         "{$match: {d: {$eq: 3}}}]";
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe);
 }
@@ -2803,9 +2812,19 @@ TEST(PipelineOptimizationTest, RenameShouldNotBeAppliedToDependentMatch) {
     assertPipelineOptimizesAndSerializesTo(pipeline, pipeline);
 }
 
-TEST(PipelineOptimizationTest, MatchCannotMoveAcrossAddFieldsRenameOfDottedPath) {
+TEST(PipelineOptimizationTest, MatchCannotMoveAcrossAddFieldsRenameOfDottedPathOnRight) {
+    // This one is illegal because the $b.c expression can reshape arrays.
     std::string pipeline = "[{$addFields: {a: '$b.c'}}, {$match: {a: {$eq: 1}}}]";
     assertPipelineOptimizesAndSerializesTo(pipeline, pipeline);
+}
+
+TEST(PipelineOptimizationTest, MatchCannotMoveAcrossAddFieldsRenameOfDottedPathOnLeft) {
+    // This one is illegal because the 'a.b' path can write through doubly-nested arrays,
+    // and it can be a noop when 'a' is empty-array.
+    std::string inputPipe = "[{$addFields: {'a.b': '$x'}}, {$match: {'a.b': {$eq: 1}}}]";
+    // It serializes using this equivalent nested syntax.
+    std::string outputPipe = "[{$addFields: {a: {b: '$x'}}}, {$match: {'a.b': {$eq: 1}}}]";
+    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe);
 }
 
 TEST(PipelineOptimizationTest, MatchCannotMoveAcrossProjectRenameOfDottedPath) {
@@ -2818,17 +2837,6 @@ TEST(PipelineOptimizationTest, MatchCannotMoveAcrossProjectRenameOfDottedPath) {
 TEST(PipelineOptimizationTest, MatchWithTypeShouldMoveAcrossRename) {
     std::string inputPipe = "[{$addFields: {a: '$b'}}, {$match: {a: {$type: 4}}}]";
     std::string outputPipe = "[{$match: {b: {$type: [4]}}}, {$addFields: {a: '$b'}}]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe);
-}
-
-TEST(PipelineOptimizationTest, MatchOnArrayFieldCanSplitAcrossRenameWithMapAndProject) {
-    std::string inputPipe =
-        "[{$project: {d: {$map: {input: '$a', as: 'iter', in: {e: '$$iter.b', f: {$add: "
-        "['$$iter.c', 1]}}}}}}, {$match: {'d.e': 1, 'd.f': 1}}]";
-    std::string outputPipe =
-        "[{$match: {'a.b': {$eq: 1}}}, {$project: {_id: true, d: {$map: {input: '$a', as: 'iter', "
-        "in: {e: '$$iter.b', f: {$add: ['$$iter.c', {$const: 1}]}}}}}}, {$match: {'d.f': {$eq: "
-        "1}}}]";
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe);
 }
 
@@ -2967,16 +2975,6 @@ TEST(PipelineOptimizationTest, MatchEqObjectCanNotSplitAcrossRenameWithMapAndPro
         )";
 
     assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe, serializedPipe);
-}
-
-TEST(PipelineOptimizationTest, MatchOnArrayFieldCanSplitAcrossRenameWithMapAndAddFields) {
-    std::string inputPipe =
-        "[{$addFields: {d: {$map: {input: '$a', as: 'iter', in: {e: '$$iter.b', f: {$add: "
-        "['$$iter.c', 1]}}}}}}, {$match: {'d.e': 1, 'd.f': 1}}]";
-    std::string outputPipe =
-        "[{$match: {'a.b': {$eq: 1}}}, {$addFields: {d: {$map: {input: '$a', as: 'iter', in: {e: "
-        "'$$iter.b', f: {$add: ['$$iter.c', {$const: 1}]}}}}}}, {$match: {'d.f': {$eq: 1}}}]";
-    assertPipelineOptimizesAndSerializesTo(inputPipe, outputPipe);
 }
 
 TEST(PipelineOptimizationTest, MatchCannotSwapWithLimit) {
@@ -3534,10 +3532,10 @@ public:
             _opCtx.get(),
             NamespaceString::createNamespaceString_forTest(
                 boost::none, "unittests", "pipeline_test"));
-        _expCtx->opCtx = _opCtx.get();
-        _expCtx->uuid = UUID::gen();
-        _expCtx->inRouter = options.inRouter;
-        setMockReplicationCoordinatorOnOpCtx(_expCtx->opCtx);
+        _expCtx->setOperationContext(_opCtx.get());
+        _expCtx->setUUID(UUID::gen());
+        _expCtx->setInRouter(options.inRouter);
+        setMockReplicationCoordinatorOnOpCtx(_expCtx->getOperationContext());
     }
 
     BSONObj changestreamStage(const std::string& stageStr) {
@@ -4346,9 +4344,9 @@ std::unique_ptr<Pipeline, PipelineDeleter> getOptimizedPipeline(const BSONObj in
     AggregateCommandRequest request(kTestNss, rawPipeline);
     boost::intrusive_ptr<ExpressionContextForTest> ctx =
         new ExpressionContextForTest(opCtx.get(), request);
-    ctx->mongoProcessInterface = std::make_shared<StubExplainInterface>();
+    ctx->setMongoProcessInterface(std::make_shared<StubExplainInterface>());
     unittest::TempDir tempDir("PipelineTest");
-    ctx->tempDir = tempDir.path();
+    ctx->setTempDir(tempDir.path());
 
     auto outputPipe = Pipeline::parse(request.getPipeline(), ctx);
     outputPipe->optimizePipeline();
@@ -4533,6 +4531,71 @@ TEST(PipelineOptimizationTest, CoalesceAdjacentExclusionProjectionsNestedSecond)
     assertPipelineOptimizesTo(inputPipe, outputPipe);
 }
 
+TEST(PipelineOptimizationTest, internalListCollectionsAbsorbsMatchOnDb) {
+    std::string inputPipe =
+        "["
+        " {$_internalListCollections: {}},"
+        " {$match: {db: 'testDb', a: 10}}"
+        "]";
+    std::string outputPipe =
+        "["
+        " {$_internalListCollections: {match: {db: {$eq: 'testDb'}}}},"
+        " {$match: {a: {$eq: 10}}}"
+        "]";
+    std::string serializedPipe =
+        "["
+        " {$_internalListCollections: {}},"
+        " {$match: {db: {$eq: 'testDb'}}},"
+        " {$match: {a: {$eq: 10}}}"
+        "]";
+    assertPipelineOptimizesAndSerializesTo(
+        inputPipe, outputPipe, serializedPipe, kAdminCollectionlessNss);
+}
+
+TEST(PipelineOptimizationTest, internalListCollectionsAbsorbsSeveralMatchesOnDb) {
+    std::string inputPipe =
+        "["
+        " {$_internalListCollections: {}},"
+        " {$match: {db: {$gt: 0}}},"
+        " {$match: {a: 10}},"
+        " {$match: {db: {$ne: 5}}}"
+        "]";
+    std::string outputPipe =
+        "["
+        " {$_internalListCollections: {match: {$and: [{db: {$gt: 0}}, {db: {$not: {$eq: "
+        "5}}}]}}},"
+        " {$match: {a: {$eq: 10}}}"
+        "]";
+    std::string serializedPipe =
+        "["
+        " {$_internalListCollections: {}},"
+        " {$match: {$and: [{db: {$gt: 0}}, {db: {$not: {$eq: 5}}}]}},"
+        " {$match: {a: {$eq: 10}}}"
+        "]";
+    assertPipelineOptimizesAndSerializesTo(
+        inputPipe, outputPipe, serializedPipe, kAdminCollectionlessNss);
+}
+
+TEST(PipelineOptimizationTest, internalAllCollectionStatsDoesNotAbsorbMatchNotOnDb) {
+    std::string inputPipe =
+        "["
+        " {$_internalListCollections: {}},"
+        " {$match: {a: 10}}"
+        "]";
+    std::string outputPipe =
+        "["
+        " {$_internalListCollections: {}},"
+        " {$match: {a: {$eq: 10}}}"
+        "]";
+    std::string serializedPipe =
+        "["
+        " {$_internalListCollections: {}},"
+        " {$match: {a: 10}}"
+        "]";
+    assertPipelineOptimizesAndSerializesTo(
+        inputPipe, outputPipe, serializedPipe, kAdminCollectionlessNss);
+}
+
 }  // namespace Local
 
 namespace Sharded {
@@ -4586,9 +4649,9 @@ public:
         AggregateCommandRequest request(kTestNss, rawPipeline);
         boost::intrusive_ptr<ExpressionContextForTest> ctx = createExpressionContext(request);
         unittest::TempDir tempDir("PipelineTest");
-        ctx->tempDir = tempDir.path();
-        ctx->mongoProcessInterface =
-            std::make_shared<Sharded::ShardMergerMongoProcessInterface>(getCatalogCacheMock());
+        ctx->setTempDir(tempDir.path());
+        ctx->setMongoProcessInterface(
+            std::make_shared<Sharded::ShardMergerMongoProcessInterface>(getCatalogCacheMock()));
 
         // For $graphLookup and $lookup, we have to populate the resolvedNamespaces so that the
         // operations will be able to have a resolved view definition.
@@ -4999,50 +5062,55 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupIfUsingAddFields) {
         "[{$addFields: {new: '$shardKey'}}, {$sort: {shardKey: 1}}, {$group: {_id: '$shardKey'}}]", /*inputPipeJson*/
         "[{$addFields: {new: '$shardKey'}}"
         ",{$sort: {sortKey: {shardKey: 1}}}"
-        ",{$group: {_id: '$shardKey'}}]",                     /*shardPipeJson*/
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]", /*mergePipeJson*/
+        ",{$group: {_id: '$shardKey', $willBeMerged: false}}]", /*shardPipeJson*/
+        // Empty merge as group is fully pushed down.
+        "[]", /*mergePipeJson*/
         shardKey);
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKey) {
     RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"_id"};
-    doTest("[{$sort: {a: 1}}, {$group: {_id: '$_id'}}]" /*inputPipeJson*/,
-           "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: '$_id'}}]" /*shardPipeJson*/,
-           "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
-           shardKey);
+    doTest(
+        "[{$sort: {a: 1}}, {$group: {_id: '$_id'}}]" /*inputPipeJson*/,
+        "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: '$_id', $willBeMerged: false}}]" /*shardPipeJson*/
+        ,
+        // Empty merge as group is fully pushed down.
+        "[]" /*mergePipeJson*/,
+        shardKey);
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKey) {
     RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a", "b"};
-    doTest(
-        "[{$sort: {a: 1}}, {$group: {_id: {a: '$a', b: '$b', c: '$c'}}}]" /*inputPipeJson*/,
-        "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: {a: '$a', b: '$b', c: '$c'}}}]" /*shardPipeJson*/
-        ,
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
-        shardKey);
+    doTest("[{$sort: {a: 1}}, {$group: {_id: {a: '$a', b: '$b', c: '$c'}}}]", /*inputPipeJson*/
+           "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: {a: '$a', b: '$b', c: '$c'}, "
+           "$willBeMerged: false}}]", /*shardPipeJson*/
+           // Empty merge as group is fully pushed down.
+           "[]", /*mergePipeJson*/
+           shardKey);
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyInArray) {
     RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a", "b"};
-    doTest("[{$sort: {a: 1}}, {$group: {_id: ['$a', '$b', '$c']}}]" /*inputPipeJson*/,
-           "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: ['$a', '$b', '$c']}}]" /*shardPipeJson*/
-           ,
-           "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
+    doTest("[{$sort: {a: 1}}, {$group: {_id: ['$a', '$b', '$c']}}]", /*inputPipeJson*/
+           "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: ['$a', '$b', '$c'], $willBeMerged: "
+           "false}}]", /*shardPipeJson*/
+           // Empty merge as group is fully pushed down.
+           "[]", /*mergePipeJson*/
            shardKey);
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyInNestedStructure) {
     RAIIServerParameterControllerForTest controller("featureFlagShardFilteringDistinctScan", true);
     const OrderedPathSet shardKey = {"a", "b"};
-    doTest(
-        "[{$sort: {a: 1}}, {$group: {_id: {foo:[{bar:'$a'}, '$b', '$c']}}}]" /*inputPipeJson*/,
-        "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: {foo:[{bar:'$a'}, '$b', '$c']}}}]" /*shardPipeJson*/
-        ,
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
-        shardKey);
+    doTest("[{$sort: {a: 1}}, {$group: {_id: {foo:[{bar:'$a'}, '$b', '$c']}}}]", /*inputPipeJson*/
+           "[{$sort: {sortKey: {a: 1}}}, {$group: {_id: {foo:[{bar:'$a'}, '$b', '$c']}, "
+           "$willBeMerged: false}}]", /*shardPipeJson*/
+           // Empty merge as group is fully pushed down.
+           "[]", /*mergePipeJson*/
+           shardKey);
 };
 
 TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyWithIrrelevantFieldsModified) {
@@ -5050,11 +5118,11 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnSupersetOfShardKeyWithIrrelev
     const OrderedPathSet shardKey = {"a", "b"};
     doTest(
         "[{$addFields: {c:{$const:'foobar'}}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b', "
-        "'$c']}}]" /*inputPipeJson*/,
+        "'$c']}}]", /*inputPipeJson*/
         "[{$addFields: {c:{$const:'foobar'}}}, {$sort: {sortKey: {a: 1}}}, {$group: {_id: ['$a', "
-        "'$b', '$c']}}]" /*shardPipeJson*/
-        ,
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
+        "'$b', '$c'], $willBeMerged: false}}]", /*shardPipeJson*/
+        // Empty merge as group is fully pushed down.
+        "[]", /*mergePipeJson*/
         shardKey);
 };
 
@@ -5064,8 +5132,9 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithDuplicatesViaRena
     doTest(
         "[{$project:{'a':true, b:'$a'}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b']}}]", /*inputPipeJson*/
         "[{$project:{_id:true, 'a':true, b:'$a'}}, {$sort: {sortKey: {a: 1}}}, {$group: {_id: "
-        "['$a', '$b']}}]",                                    /*shardPipeJson*/
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]", /*mergePipeJson*/
+        "['$a', '$b'], $willBeMerged: false}}]", /*shardPipeJson*/
+        // Empty merge as group is fully pushed down.
+        "[]", /*mergePipeJson*/
         shardKey);
 };
 
@@ -5074,8 +5143,10 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithDuplicatesViaRena
     const OrderedPathSet shardKey = {"a"};
     doTest(
         "[{$addFields:{b:'$a'}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b']}}]", /*inputPipeJson*/
-        "[{$addFields:{b:'$a'}}, {$sort: {sortKey: {a: 1}}}, {$group: {_id: ['$a', '$b']}}]", /*shardPipeJson*/
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]", /*mergePipeJson*/
+        "[{$addFields:{b:'$a'}}, {$sort: {sortKey: {a: 1}}}, {$group: {_id: ['$a', '$b'], "
+        "$willBeMerged: false}}]", /*shardPipeJson*/
+        // Empty merge as group is fully pushed down.
+        "[]", /*mergePipeJson*/
         shardKey);
 };
 
@@ -5085,8 +5156,9 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithUnrelatedExclusio
     doTest(
         "[{$project:{'c':false}}, {$sort: {a: 1}}, {$group: {_id: ['$a', '$b']}}]", /*inputPipeJson*/
         "[{$project:{'c':false, _id:true}}, {$sort: {sortKey: {a: 1}}}, {$group: {_id: ['$a', "
-        "'$b']}}]",                                           /*shardPipeJson*/
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]", /*mergePipeJson*/
+        "'$b'], $willBeMerged: false}}]", /*shardPipeJson*/
+        // Empty merge as group is fully pushed down.
+        "[]", /*mergePipeJson*/
         shardKey);
 };
 
@@ -5111,8 +5183,9 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithRenames) {
         "[{$project: {_id: true, rename: '$shardKey'}}"
         ",{$project: {_id: true, anotherRename: '$rename'}}"
         ",{$sort: {sortKey: {anotherRename: 1}}}"
-        ",{$group: {_id: '$anotherRename'}}]" /*shardPipeJson*/,
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
+        ",{$group: {_id: '$anotherRename', $willBeMerged: false}}]" /*shardPipeJson*/,
+        // Empty merge as group is fully pushed down.
+        "[]" /*mergePipeJson*/,
         shardKey);
 };
 
@@ -5127,8 +5200,9 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithMultipleRenames) 
         "[{$project: {_id: true, rename: '$shardKey'}}"
         ",{$project: {_id: true, anotherRename: '$rename', anotherRename2: '$rename'}}"
         ",{$sort: {sortKey: {anotherRename2: 1}}}"
-        ",{$group: {_id: '$anotherRename2'}}]" /*shardPipeJson*/,
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
+        ",{$group: {_id: '$anotherRename2', $willBeMerged: false}}]" /*shardPipeJson*/,
+        // Empty merge as group is fully pushed down.
+        "[]" /*mergePipeJson*/,
         shardKey);
 };
 
@@ -5140,8 +5214,9 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithMatchBetweenSortA
         ,
         "[{$match: {shardKey: {$eq: 'val'}}}"
         ",{$sort: {sortKey: {shardKey: 1}}}"
-        ",{$group: {_id: '$shardKey'}}]" /*shardPipeJson*/,
-        "[{$group: {_id: '$$ROOT._id', $doingMerge: true}}]" /*mergePipeJson*/,
+        ",{$group: {_id: '$shardKey', $willBeMerged: false}}]" /*shardPipeJson*/,
+        // Empty merge as group is fully pushed down.
+        "[]" /*mergePipeJson*/,
         shardKey);
 };
 
@@ -5152,8 +5227,9 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithFirstAccumulator)
         "[{$sort: {shardKey: 1}}, {$group: {_id: '$shardKey', first: {$first: '$other'}}}]" /*inputPipeJson*/
         ,
         "[{$sort: {sortKey: {shardKey: 1}}}, {$group: {_id: '$shardKey', first: {$first: "
-        "'$other'}}}]" /*shardPipeJson*/,
-        "[{$group: {_id: '$$ROOT._id', first: {$first: '$$ROOT.first'}, $doingMerge: true}}]" /*mergePipeJson*/
+        "'$other'}, $willBeMerged: false}}]" /*shardPipeJson*/,
+        // Empty merge as group is fully pushed down.
+        "[]" /*mergePipeJson*/
         ,
         shardKey);
 };
@@ -5166,10 +5242,11 @@ TEST_F(PipelineOptimizations, ShouldPushdownGroupOnShardKeyWithTopAccumulator) {
         ",{$group: {_id: '$shardKey', top: {$top: {output: '$other', sortBy: {other: 1}}}}}]" /*inputPipeJson*/
         ,
         "[{$sort: {sortKey: {shardKey: 1}}}"
-        ",{$group: {_id: '$shardKey', top: {$top: {output: '$other', sortBy: {other: 1}}}}}]" /*shardPipeJson*/
+        ",{$group: {_id: '$shardKey', top: {$top: {output: '$other', sortBy: {other: 1}}}, "
+        "$willBeMerged: false}}]" /*shardPipeJson*/
         ,
-        "[{$group: {_id: '$$ROOT._id', top: {$top: {output: '$$ROOT.top', sortBy: {other: 1}}}, "
-        "$doingMerge: true}}]" /*mergePipeJson*/,
+        // Empty merge as group is fully pushed down.
+        "[]" /*mergePipeJson*/,
         shardKey);
 };
 
@@ -5369,48 +5446,48 @@ TEST_F(PipelineOptimizationsShardMerger, LookUpShardedFromCollection) {
 
 }  // namespace needsSpecificShardMerger
 
-namespace mustRunOnMongoS {
+namespace mustRunOnRouter {
 using HostTypeRequirement = StageConstraints::HostTypeRequirement;
-using PipelineMustRunOnMongoSTest = AggregationContextFixture;
+using PipelineMustRunOnRouterTest = AggregationContextFixture;
 
-TEST_F(PipelineMustRunOnMongoSTest, UnsplittablePipelineMustRunOnMongoS) {
+TEST_F(PipelineMustRunOnRouterTest, UnsplittablePipelineMustRunOnRouter) {
     setExpCtx({.inRouter = true, .allowDiskUse = false});
-    auto pipeline = makePipeline({matchStage("{x: 5}"), runOnMongos()});
-    ASSERT_TRUE(pipeline->requiredToRunOnMongos());
+    auto pipeline = makePipeline({matchStage("{x: 5}"), runOnRouter()});
+    ASSERT_TRUE(pipeline->requiredToRunOnRouter());
 
     pipeline->optimizePipeline();
-    ASSERT_TRUE(pipeline->requiredToRunOnMongos());
+    ASSERT_TRUE(pipeline->requiredToRunOnRouter());
 }
 
-TEST_F(PipelineMustRunOnMongoSTest, UnsplittableMongoSPipelineAssertsIfDisallowedStagePresent) {
+TEST_F(PipelineMustRunOnRouterTest, UnsplittableRouterPipelineAssertsIfDisallowedStagePresent) {
     setExpCtx({.inRouter = true, .allowDiskUse = true});
-    auto pipeline = makePipeline({matchStage("{x: 5}"), runOnMongos(), sortStage("{x: 1}")});
+    auto pipeline = makePipeline({matchStage("{x: 5}"), runOnRouter(), sortStage("{x: 1}")});
     pipeline->optimizePipeline();
 
-    // The entire pipeline must run on mongoS, but $sort cannot do so when 'allowDiskUse' is true.
-    ASSERT_TRUE(pipeline->requiredToRunOnMongos());
-    ASSERT_NOT_OK(pipeline->canRunOnMongos());
+    // The entire pipeline must run on router, but $sort cannot do so when 'allowDiskUse' is true.
+    ASSERT_TRUE(pipeline->requiredToRunOnRouter());
+    ASSERT_NOT_OK(pipeline->canRunOnRouter());
 }
 
-DEATH_TEST_F(PipelineMustRunOnMongoSTest,
-             SplittablePipelineMustMergeOnMongoSAfterSplit,
+DEATH_TEST_F(PipelineMustRunOnRouterTest,
+             SplittablePipelineMustMergeOnRouterAfterSplit,
              "invariant") {
     setExpCtx({.inRouter = true, .allowDiskUse = false});
     auto pipeline =
-        makePipeline({matchStage("{x: 5}"), splitStage(HostTypeRequirement::kNone), runOnMongos()});
+        makePipeline({matchStage("{x: 5}"), splitStage(HostTypeRequirement::kNone), runOnRouter()});
 
-    // We don't need to run the entire pipeline on mongoS because we can split at
+    // We don't need to run the entire pipeline on router because we can split at
     // $_internalSplitPipeline.
-    ASSERT_FALSE(pipeline->requiredToRunOnMongos());
+    ASSERT_FALSE(pipeline->requiredToRunOnRouter());
 
     auto splitPipeline = sharded_agg_helpers::SplitPipeline::split(std::move(pipeline));
     ASSERT(splitPipeline.shardsPipeline);
     ASSERT(splitPipeline.mergePipeline);
 
-    ASSERT_TRUE(splitPipeline.mergePipeline->requiredToRunOnMongos());
+    ASSERT_TRUE(splitPipeline.mergePipeline->requiredToRunOnRouter());
 
-    // Calling 'requiredToRunOnMongos' on the shard pipeline will hit an invariant.
-    splitPipeline.shardsPipeline->requiredToRunOnMongos();
+    // Calling 'requiredToRunOnRouter' on the shard pipeline will hit an invariant.
+    splitPipeline.shardsPipeline->requiredToRunOnRouter();
 }
 
 /**
@@ -5425,51 +5502,51 @@ public:
     }
 };
 
-TEST_F(PipelineMustRunOnMongoSTest, SplitMongoSMergePipelineAssertsIfShardStagePresent) {
+TEST_F(PipelineMustRunOnRouterTest, SplitRouterMergePipelineAssertsIfShardStagePresent) {
     setExpCtx({.inRouter = true, .allowDiskUse = true});
     auto expCtx = getExpCtx();
-    expCtx->mongoProcessInterface = std::make_shared<FakeMongoProcessInterface>();
+    expCtx->setMongoProcessInterface(std::make_shared<FakeMongoProcessInterface>());
     auto pipeline = makePipeline(
-        {matchStage("{x: 5}"), splitStage(HostTypeRequirement::kNone), runOnMongos(), outStage()});
+        {matchStage("{x: 5}"), splitStage(HostTypeRequirement::kNone), runOnRouter(), outStage()});
 
-    // We don't need to run the entire pipeline on mongoS because we can split at
+    // We don't need to run the entire pipeline on router because we can split at
     // $_internalSplitPipeline.
-    ASSERT_FALSE(pipeline->requiredToRunOnMongos());
+    ASSERT_FALSE(pipeline->requiredToRunOnRouter());
 
     auto splitPipeline = sharded_agg_helpers::SplitPipeline::split(std::move(pipeline));
 
-    // The merge pipeline must run on mongoS, but $out needs to run on  the primary shard.
-    ASSERT_TRUE(splitPipeline.mergePipeline->requiredToRunOnMongos());
-    ASSERT_NOT_OK(splitPipeline.mergePipeline->canRunOnMongos());
+    // The merge pipeline must run on router, but $out needs to run on the primary shard.
+    ASSERT_TRUE(splitPipeline.mergePipeline->requiredToRunOnRouter());
+    ASSERT_NOT_OK(splitPipeline.mergePipeline->canRunOnRouter());
 }
 
-TEST_F(PipelineMustRunOnMongoSTest, SplittablePipelineAssertsIfMongoSStageOnShardSideOfSplit) {
+TEST_F(PipelineMustRunOnRouterTest, SplittablePipelineAssertsIfRouterStageOnShardSideOfSplit) {
     setExpCtx({.inRouter = true, .allowDiskUse = false});
     auto pipeline = makePipeline(
-        {matchStage("{x: 5}"), runOnMongos(), splitStage(HostTypeRequirement::kAnyShard)});
+        {matchStage("{x: 5}"), runOnRouter(), splitStage(HostTypeRequirement::kAnyShard)});
     pipeline->optimizePipeline();
 
-    // The 'runOnMongos' stage comes before any splitpoint, so this entire pipeline must run on
-    // mongoS. However, the pipeline *cannot* run on mongoS and *must* split at
-    // $_internalSplitPipeline due to the latter's 'anyShard' requirement. The mongoS stage would
+    // The 'runOnRouter' stage comes before any splitpoint, so this entire pipeline must run on
+    // rotuer. However, the pipeline *cannot* run on router and *must* split at
+    // $_internalSplitPipeline due to the latter's 'anyShard' requirement. The rotuer stage would
     // end up on the shard side of this split, and so it asserts.
-    ASSERT_TRUE(pipeline->requiredToRunOnMongos());
-    ASSERT_NOT_OK(pipeline->canRunOnMongos());
+    ASSERT_TRUE(pipeline->requiredToRunOnRouter());
+    ASSERT_NOT_OK(pipeline->canRunOnRouter());
 }
 
-TEST_F(PipelineMustRunOnMongoSTest, SplittablePipelineRunsUnsplitOnMongoSIfSplitpointIsEligible) {
+TEST_F(PipelineMustRunOnRouterTest, SplittablePipelineRunsUnsplitOnRouterIfSplitpointIsEligible) {
     setExpCtx({.inRouter = true, .allowDiskUse = false});
     auto pipeline =
-        makePipeline({matchStage("{x: 5}"), runOnMongos(), splitStage(HostTypeRequirement::kNone)});
+        makePipeline({matchStage("{x: 5}"), runOnRouter(), splitStage(HostTypeRequirement::kNone)});
     pipeline->optimizePipeline();
 
-    // The 'runOnMongos' stage is before the splitpoint, so this entire pipeline must run on mongoS.
-    // In this case, the splitpoint is itself eligible to run on mongoS, and so we are able to
+    // The 'runOnRouter' stage is before the splitpoint, so this entire pipeline must run on router.
+    // In this case, the splitpoint is itself eligible to run on router, and so we are able to
     // return true.
-    ASSERT_TRUE(pipeline->requiredToRunOnMongos());
+    ASSERT_TRUE(pipeline->requiredToRunOnRouter());
 }
 
-}  // namespace mustRunOnMongoS
+}  // namespace mustRunOnRouter
 
 namespace DeferredSort {
 using PipelineDeferredMergeSortTest = AggregationContextFixture;
@@ -5551,13 +5628,14 @@ public:
         auto ctx = AggregationContextFixture::getExpCtx();
 
         // The db name string is always set to "a" (collectionless or not).
-        ctx->ns = (options.hasCollectionName)
-            ? kTestNss  // Sets to a.collection when there should be a collection name.
-            : NamespaceString::makeCollectionlessAggregateNSS(
-                  DatabaseName::createDatabaseName_forTest(boost::none, "a"));
+        ctx->setNamespaceString(
+            (options.hasCollectionName)
+                ? kTestNss  // Sets to a.collection when there should be a collection name.
+                : NamespaceString::makeCollectionlessAggregateNSS(
+                      DatabaseName::createDatabaseName_forTest(boost::none, "a")));
 
         if (options.setMockReplCoord) {
-            setMockReplicationCoordinatorOnOpCtx(ctx->opCtx);
+            setMockReplicationCoordinatorOnOpCtx(ctx->getOperationContext());
         }
         return ctx;
     }
@@ -5639,7 +5717,7 @@ TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsValid) {
 TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsNotValidWithoutChangeStream) {
     const std::vector<BSONObj> rawPipeline = {fromjson("{$changeStreamSplitLargeEvent: {}}")};
     auto ctx = getExpCtx({.hasCollectionName = true, .setMockReplCoord = true});
-    ctx->changeStreamSpec = boost::none;
+    ctx->setChangeStreamSpec(boost::none);
 
     ASSERT_THROWS_CODE(
         Pipeline::parse(rawPipeline, ctx), DBException, ErrorCodes::IllegalOperation);
@@ -5673,7 +5751,7 @@ TEST_F(PipelineValidateTest, ChangeStreamSplitLargeEventIsValidAfterRedact) {
 using DocumentSourceDisallowedInTransactions = DocumentSourceDisallowedInTransactions;
 TEST_F(PipelineValidateTest, TopLevelPipelineValidatedForStagesIllegalInTransactions) {
     auto ctx = AggregationContextFixture::getExpCtx();
-    ctx->opCtx->setInMultiDocumentTransaction();
+    ctx->getOperationContext()->setInMultiDocumentTransaction();
 
     // Make a pipeline with a legal $match, and then an illegal mock stage, and verify that pipeline
     // creation fails with the expected error code.
@@ -5685,7 +5763,7 @@ TEST_F(PipelineValidateTest, TopLevelPipelineValidatedForStagesIllegalInTransact
 
 TEST_F(PipelineValidateTest, FacetPipelineValidatedForStagesIllegalInTransactions) {
     auto ctx = AggregationContextFixture::getExpCtx();
-    ctx->opCtx->setInMultiDocumentTransaction();
+    ctx->getOperationContext()->setInMultiDocumentTransaction();
 
     const std::vector<BSONObj> rawPipeline = {
         fromjson("{$facet: {subPipe: [{$match: {}}, {$out: 'outColl'}]}}")};
@@ -5788,7 +5866,7 @@ TEST_F(PipelineDependenciesTest,
     auto ctx = getExpCtx();
 
     // When needsMerge is true, the consumer might implicitly use textScore, if it's available.
-    ctx->needsMerge = true;
+    ctx->setNeedsMerge(true);
 
     auto pipeline = makePipeline({});
     auto deps = pipeline->getDependencies(DepsTracker::kAllMetadata & ~DepsTracker::kOnlyTextScore);
@@ -5799,7 +5877,7 @@ TEST_F(PipelineDependenciesTest,
     ASSERT_TRUE(deps.getNeedsMetadata(DocumentMetadataFields::kTextScore));
 
     // When needsMerge is false, if no stage explicitly uses textScore then we know it isn't needed.
-    ctx->needsMerge = false;
+    ctx->setNeedsMerge(false);
 
     pipeline = makePipeline({});
     deps = pipeline->getDependencies(DepsTracker::kAllMetadata & ~DepsTracker::kOnlyTextScore);

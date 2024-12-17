@@ -2,12 +2,12 @@
 BUILD files in the "src/" subtree.
 """
 
+load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
+load("@com_github_grpc_grpc//bazel:generate_cc.bzl", "generate_cc")
+load("@com_github_grpc_grpc//bazel:protobuf.bzl", "well_known_proto_libs")
 load("@poetry//:dependencies.bzl", "dependency")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
-load("@com_github_grpc_grpc//bazel:generate_cc.bzl", "generate_cc")
-load("@com_github_grpc_grpc//bazel:protobuf.bzl", "well_known_proto_libs")
-load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load(
     "//bazel:header_deps.bzl",
     "HEADER_DEP_SUFFIX",
@@ -305,13 +305,22 @@ SASL_WINDOWS_LINKFLAGS = select({
     "//conditions:default": [],
 })
 
-SASL_WINDOWS_LIB_FILES = select({
-    "@platforms//os:windows": ["@windows_sasl//:libraries"],
-    "//conditions:default": [],
-})
-
-SASL_WINDOWS_INCLUDE_FILES = select({
-    "@platforms//os:windows": ["@windows_sasl//:includes"],
+GLOBAL_WINDOWS_LIBRAY_LINKFLAGS = select({
+    "@platforms//os:windows": [
+        "bcrypt.lib",
+        "Dnsapi.lib",
+        "Crypt32.lib",
+        "Version.lib",
+        "Winmm.lib",
+        "Iphlpapi.lib",
+        "Pdh.lib",
+        "kernel32.lib",
+        "shell32.lib",
+        "ws2_32.lib",
+        "DbgHelp.lib",
+        "Psapi.lib",
+        "Secur32.lib",
+    ],
     "//conditions:default": [],
 })
 
@@ -480,6 +489,11 @@ GCC_OR_CLANG_WARNINGS_COPTS = select({
         # SERVER-76472 we don't try to maintain ABI so disable warnings about
         # possible ABI issues.
         "-Wno-psabi",
+
+        # TODO(SERVER-97447): Remove this once we're fully on the v5 toolchain.
+        # In the meantime, we need to suppress some warnings that are only
+        # recognized by the new compilers.
+        "-Wno-unknown-warning-option",
     ],
     "//conditions:default": [],
 })
@@ -605,6 +619,9 @@ GCC_OR_CLANG_GENERAL_COPTS = select({
 
         # Disable TBAA optimization
         "-fno-strict-aliasing",
+
+        # Show colors even though bazel captures stdout/stderr
+        "-fdiagnostics-color",
     ],
     "//conditions:default": [],
 })
@@ -637,6 +654,23 @@ DWARF_VERSION_FEATURES = select({
     ],
     "//bazel/config:dwarf_version_5_linux": [
         "dwarf-5",
+    ],
+    "//conditions:default": [],
+})
+
+# Set the debug level for copts and linker
+DEBUG_LEVEL_FEATURES = select({
+    "//bazel/config:gcc_or_clang_dbg_level_0": [
+        "g0",
+    ],
+    "//bazel/config:gcc_or_clang_dbg_level_1": [
+        "g1",
+    ],
+    "//bazel/config:gcc_or_clang_dbg_level_2": [
+        "g2",
+    ],
+    "//bazel/config:gcc_or_clang_dbg_level_3": [
+        "g3",
     ],
     "//conditions:default": [],
 })
@@ -676,6 +710,7 @@ EXTRA_GLOBAL_LIBS_LINKFLAGS = select({
     "@platforms//os:linux": [
         "-lm",
         "-lresolv",
+        "-latomic",
     ],
     "@platforms//os:macos": [
         "-lresolv",
@@ -1039,6 +1074,7 @@ DETECT_ODR_VIOLATIONS_LINKFLAGS = select({
 # These are added as both copts and linker flags.
 GDWARF_FEATURES = select({
     "//bazel/config:linux_clang": ["dwarf32"],
+    "//bazel/config:linux_gcc_fission": ["dwarf32"],  # gdb crashes with -gsplit-dwarf and -gdwarf64
     # SCons implementation originally used a compiler check to verify that
     # -gdwarf64 was supported. If this creates incompatibility issues, we may
     # need to fallback to -gdwarf32 in certain cases.
@@ -1051,7 +1087,7 @@ GDWARF_FEATURES = select({
 # These are added as both copts and linker flags. This should also be added after any debugging flags on the command
 # line to ensure debugging is disabled.
 DISABLE_DEBUGGING_SYMBOLS_FEATURE = select({
-    "//bazel/config:not_windows_debug_symbols_disabled": ["disable_debug_symbols"],
+    "//bazel/config:not_windows_debug_symbols_disabled": ["disable_debug_symbols", "-per_object_debug_info"],
     "//conditions:default": [],
 })
 
@@ -1095,10 +1131,19 @@ GCC_OR_CLANG_LINKFLAGS = select({
 })
 
 COMPRESS_DEBUG_COPTS = select({
-    # Disable debug compression in both the assembler and linker
-    # by default.
+    # Disable debug compression in assembler by default unless using debug fission.
+    # Debug compression significantly reduces .o, .dwo, and .a sizes, and with
+    # fission enabled, the linker sees so little of the dwarf that decompression
+    # isn't a problem.
+    "//bazel/config:fission_enabled": [
+        "-Wa,--compress-debug-sections",
+    ],
     "//bazel/config:linux_gcc": [
         "-Wa,--nocompress-debug-sections",
+    ],
+    # subsumes both of the two above - if both are true, we want compression
+    "//bazel/config:linux_gcc_fission": [
+        "-Wa,--compress-debug-sections",
     ],
     "//conditions:default": [],
 })
@@ -1201,21 +1246,29 @@ COVERAGE_FLAGS = select({
     "//conditions:default": [],
 })
 
+# Passed to both the compiler and linker
+PGO_PROFILE_FLAGS = select({
+    "//bazel/config:pgo_profile_enabled": [
+        "-fprofile-instr-generate",
+    ],
+    "//conditions:default": [],
+})
+
+MACOS_SSL_LINKFLAGS = select({
+    "//bazel/config:ssl_enabled_macos": [
+        "-framework CoreFoundation",
+        "-framework Security",
+    ],
+    "//conditions:default": [],
+})
+
 MONGO_GLOBAL_INCLUDE_DIRECTORIES = [
     "-Isrc",
     "-I$(GENDIR)/src",
-    "-Isrc/third_party/immer/dist",
-    "-Isrc/third_party/SafeInt",
     "-I$(GENDIR)/src/mongo/db/modules/enterprise/src",
     "-Isrc/mongo/db/modules/enterprise/src",
     "-Isrc/third_party/valgrind/include",
 ]
-
-MONGO_GLOBAL_ACCESSIBLE_HEADERS = [
-    "//src/third_party/immer:headers",
-    "//src/third_party/SafeInt:headers",
-    "//src/third_party/valgrind/include/valgrind:valgrind.h",
-] + SASL_WINDOWS_INCLUDE_FILES
 
 MONGO_GLOBAL_SRC_DEPS = [
     "//src/third_party/abseil-cpp:absl_base",
@@ -1225,6 +1278,10 @@ MONGO_GLOBAL_SRC_DEPS = [
     "//src/third_party/libstemmer_c:stemmer",
     "//src/third_party/murmurhash3:murmurhash3",
     "//src/third_party/tomcrypt-1.18.2:tomcrypt",
+    "//src/third_party/immer:headers",
+    "//src/third_party/SafeInt:headers",
+    "//src/third_party/sasl:windows_sasl",
+    "//src/third_party/valgrind:headers",
 ]
 
 MONGO_GLOBAL_DEFINES = (
@@ -1273,7 +1330,8 @@ MONGO_GLOBAL_COPTS = (
     SYMBOL_ORDER_COPTS +
     GCC_WARNINGS_COPTS +
     SASL_WINDOWS_COPTS +
-    COVERAGE_FLAGS
+    COVERAGE_FLAGS +
+    PGO_PROFILE_FLAGS
 )
 
 MONGO_GLOBAL_LINKFLAGS = (
@@ -1298,13 +1356,16 @@ MONGO_GLOBAL_LINKFLAGS = (
     DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS +
     THIN_LTO_FLAGS +
     SYMBOL_ORDER_LINKFLAGS +
+    COVERAGE_FLAGS +
+    GLOBAL_WINDOWS_LIBRAY_LINKFLAGS +
     SASL_WINDOWS_LINKFLAGS +
-    COVERAGE_FLAGS
+    MACOS_SSL_LINKFLAGS +
+    PGO_PROFILE_FLAGS
 )
 
-MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS = SYMBOL_ORDER_FILES + SASL_WINDOWS_LIB_FILES
+MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS = SYMBOL_ORDER_FILES
 
-MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES + OVERLOADED_VIRTUAL_FEATURES + DISABLE_DEBUGGING_SYMBOLS_FEATURE
+MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES + DEBUG_LEVEL_FEATURES + OVERLOADED_VIRTUAL_FEATURES + DISABLE_DEBUGGING_SYMBOLS_FEATURE
 
 MONGO_COPTS_THIRD_PARTY = UBSAN_OPTS_THIRD_PARTY
 
@@ -1314,7 +1375,7 @@ def force_includes_copt(package_name, name):
     if package_name.startswith("src/mongo"):
         basic_h = "mongo/platform/basic.h"
         return select({
-            "@platforms//os:windows": ["/FI", basic_h],
+            "@platforms//os:windows": ["/FI" + basic_h],
             "//conditions:default": ["-include", basic_h],
         })
 
@@ -1326,7 +1387,7 @@ def force_includes_copt(package_name, name):
             "//bazel/config:linux_x86_64": ["-include", "third_party/mozjs/platform/x86_64/linux/build/js-config.h"],
             "//bazel/config:macos_aarch64": ["-include", "third_party/mozjs/platform/aarch64/macOS/build/js-config.h"],
             "//bazel/config:macos_x86_64": ["-include", "third_party/mozjs/platform/x86_64/macOS/build/js-config.h"],
-            "//bazel/config:windows_x86_64": ["/FI", "third_party/mozjs/platform/x86_64/windows/build/js-config.h"],
+            "//bazel/config:windows_x86_64": ["/FI" + "third_party/mozjs/platform/x86_64/windows/build/js-config.h"],
         })
 
     return []
@@ -1390,7 +1451,9 @@ def mongo_cc_library(
         defines = [],
         additional_linker_inputs = [],
         features = [],
-        exec_properties = {}):
+        exec_properties = {},
+        no_undefined_ref_DO_NOT_USE = True,
+        **kwargs):
     """Wrapper around cc_library.
 
     Args:
@@ -1448,6 +1511,8 @@ def mongo_cc_library(
         hdrs = hdrs + ["//src/mongo:mongo_config_header"]
         if name != "boost_assert_shim":
             deps += MONGO_GLOBAL_SRC_DEPS
+            if name != "_global_header_bypass":
+                deps += ["//src/mongo:_global_header_bypass"]
 
     if "modules/enterprise" in native.package_name():
         enterprise_compatible = select({
@@ -1457,12 +1522,26 @@ def mongo_cc_library(
     else:
         enterprise_compatible = []
 
-    if "compile_requires_large_memory" in tags:
+    if "third_party" in native.package_name():
+        tags = tags + ["third_party"]
+
+    if "compile_requires_large_memory_gcc" in tags:
         exec_properties |= select({
             "//bazel/config:gcc_x86_64": {
                 "Pool": "large_mem_x86_64",
             },
             "//bazel/config:gcc_aarch64": {
+                "Pool": "large_memory_arm64",
+            },
+            "//conditions:default": {},
+        })
+
+    if "compile_requires_large_memory_sanitizer" in tags:
+        exec_properties |= select({
+            "//bazel/config:any_sanitizer_x86_64": {
+                "Pool": "large_mem_x86_64",
+            },
+            "//bazel/config:any_sanitizer_aarch64": {
                 "Pool": "large_memory_arm64",
             },
             "//conditions:default": {},
@@ -1511,6 +1590,17 @@ def mongo_cc_library(
         "//bazel/config:windows_x86_64": [],
     })
 
+    if no_undefined_ref_DO_NOT_USE:
+        undefined_ref_flag = select({
+            "//bazel/config:sanitize_address_required_settings": [],
+            "//bazel/config:sanitize_thread_required_settings": [],
+            "@platforms//os:macos": [],
+            "@platforms//os:windows": [],
+            "//conditions:default": ["-Wl,-z,defs"],
+        })
+    else:
+        undefined_ref_flag = []
+
     create_header_dep(
         name = name + HEADER_DEP_SUFFIX,
         header_deps = header_deps,
@@ -1528,7 +1618,7 @@ def mongo_cc_library(
     cc_library(
         name = name + SHARED_ARCHIVE_SUFFIX,
         srcs = srcs + SANITIZER_DENYLIST_HEADERS,
-        hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
+        hdrs = hdrs + fincludes_hdr,
         deps = deps + cc_deps + [name + HEADER_DEP_SUFFIX],
         textual_hdrs = textual_hdrs,
         visibility = visibility,
@@ -1548,11 +1638,12 @@ def mongo_cc_library(
         }) + target_compatible_with + enterprise_compatible,
         additional_linker_inputs = additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
         exec_properties = exec_properties,
+        **kwargs
     )
     cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs + SANITIZER_DENYLIST_HEADERS,
-        hdrs = hdrs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS,
+        hdrs = hdrs + fincludes_hdr,
         deps = deps + cc_deps + [name + HEADER_DEP_SUFFIX],
         textual_hdrs = textual_hdrs,
         visibility = visibility,
@@ -1573,6 +1664,7 @@ def mongo_cc_library(
         target_compatible_with = target_compatible_with + enterprise_compatible,
         additional_linker_inputs = additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
         exec_properties = exec_properties,
+        **kwargs
     )
 
     # Creates a shared library version of our target only if
@@ -1584,7 +1676,7 @@ def mongo_cc_library(
         deps = [name + WITH_DEBUG_SUFFIX],
         visibility = visibility,
         tags = tags,
-        user_link_flags = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + non_transitive_dyn_linkopts + rpath_flags + visibility_support_shared_flags,
+        user_link_flags = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + undefined_ref_flag + non_transitive_dyn_linkopts + rpath_flags + visibility_support_shared_flags,
         target_compatible_with = select({
             "//bazel/config:linkstatic_disabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
@@ -1602,7 +1694,7 @@ def mongo_cc_library(
         name = name,
         binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
         type = "library",
-        tags = tags,
+        tags = tags + ["mongo_library"],
         enabled = SEPARATE_DEBUG_ENABLED,
         enable_pdb = PDB_GENERATION_ENABLED,
         cc_shared_library = select({
@@ -1616,6 +1708,27 @@ def mongo_cc_library(
         visibility = visibility,
         deps = deps + cc_deps + [name + HEADER_DEP_SUFFIX],
     )
+
+def write_sources_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".sources_list")
+    ctx.actions.write(
+        out,
+        "\n".join(ctx.attr.sources),
+    )
+    return [
+        DefaultInfo(
+            files = depset([out]),
+        ),
+    ]
+
+write_sources = rule(
+    write_sources_impl,
+    attrs = {
+        "sources": attr.string_list(
+            doc = "the sources used to build the binary",
+        ),
+    },
+)
 
 def _mongo_cc_binary_and_program(
         name,
@@ -1635,7 +1748,10 @@ def _mongo_cc_binary_and_program(
         defines = [],
         additional_linker_inputs = [],
         features = [],
-        _program_type = ""):
+        exec_properties = {},
+        skip_global_deps = [],
+        _program_type = "",
+        **kwargs):
     if linkstatic == True:
         fail("""Linking specific targets statically is not supported.
         The mongo build must link entirely statically or entirely dynamically.
@@ -1644,21 +1760,56 @@ def _mongo_cc_binary_and_program(
     if native.package_name().startswith("src/mongo"):
         srcs = srcs + ["//src/mongo:mongo_config_header"]
         deps += MONGO_GLOBAL_SRC_DEPS
+        deps += ["//src/mongo:_global_header_bypass"]
 
     if "modules/enterprise" in native.package_name():
         enterprise_compatible = select({
             "//bazel/config:build_enterprise_enabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
         })
+
+        if "modules/enterprise/src/fle" not in native.package_name():
+            target_compatible_with += select({
+                "//bazel/config:ssl_enabled": [],
+                "//conditions:default": ["@platforms//:incompatible"],
+            })
     else:
         enterprise_compatible = []
+
+    if "compile_requires_large_memory_gcc" in tags:
+        exec_properties |= select({
+            "//bazel/config:gcc_x86_64": {
+                "Pool": "large_mem_x86_64",
+            },
+            "//bazel/config:gcc_aarch64": {
+                "Pool": "large_memory_arm64",
+            },
+            "//conditions:default": {},
+        })
+
+    if "compile_requires_large_memory_sanitizer" in tags:
+        exec_properties |= select({
+            "//bazel/config:any_sanitizer_x86_64": {
+                "Pool": "large_mem_x86_64",
+            },
+            "//bazel/config:any_sanitizer_aarch64": {
+                "Pool": "large_memory_arm64",
+            },
+            "//conditions:default": {},
+        })
 
     fincludes_copt = force_includes_copt(native.package_name(), name)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
     package_specific_copts = package_specific_copt(native.package_name())
     package_specific_linkflags = package_specific_linkflag(native.package_name())
 
-    all_deps = deps + LIBUNWIND_DEPS + TCMALLOC_DEPS
+    all_deps = deps
+
+    if "libunwind" not in skip_global_deps:
+        all_deps += LIBUNWIND_DEPS
+
+    if "allocator" not in skip_global_deps:
+        all_deps += TCMALLOC_DEPS
 
     linux_rpath_flags = [
         "-Wl,-z,origin",
@@ -1682,9 +1833,16 @@ def _mongo_cc_binary_and_program(
         header_deps = header_deps,
     )
 
+    exec_properties |= select({
+        "//bazel/config:link_timeout_enabled": {
+            "cpp_link.timeout": "600",
+        },
+        "//conditions:default": {},
+    })
+
     args = {
         "name": name + WITH_DEBUG_SUFFIX,
-        "srcs": srcs + fincludes_hdr + MONGO_GLOBAL_ACCESSIBLE_HEADERS + SANITIZER_DENYLIST_HEADERS,
+        "srcs": srcs + fincludes_hdr + SANITIZER_DENYLIST_HEADERS,
         "deps": all_deps + [name + HEADER_DEP_SUFFIX],
         "visibility": visibility,
         "testonly": testonly,
@@ -1704,9 +1862,28 @@ def _mongo_cc_binary_and_program(
             "//bazel/config:linkstatic_disabled": deps,
             "//conditions:default": [],
         }),
-        "target_compatible_with": target_compatible_with + enterprise_compatible,
+        "target_compatible_with": target_compatible_with + enterprise_compatible + select({
+            "//bazel/config:shared_archive_enabled": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
         "additional_linker_inputs": additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
-    }
+        "exec_properties": exec_properties,
+    } | kwargs
+
+    create_link_deps(
+        name = name + LINK_DEP_SUFFIX,
+        target_name = name,
+        link_deps = all_deps,
+        tags = ["scons_link_lists"],
+        testonly = testonly,
+        target_compatible_with = target_compatible_with + enterprise_compatible,
+    )
+
+    write_sources(
+        name = name + "_sources_list",
+        sources = srcs,
+        tags = ["scons_link_lists"],
+    )
 
     if _program_type == "binary":
         cc_binary(**args)
@@ -1750,7 +1927,10 @@ def mongo_cc_binary(
         target_compatible_with = [],
         defines = [],
         additional_linker_inputs = [],
-        features = []):
+        features = [],
+        exec_properties = {},
+        skip_global_deps = [],
+        **kwargs):
     """Wrapper around cc_binary.
 
     Args:
@@ -1777,6 +1957,8 @@ def mongo_cc_binary(
         depend on this.
       additional_linker_inputs: Any additional files that you may want to pass
         to the linker, for example, linker scripts.
+      skip_global_deps: Globally injected dependencies to skip adding as a
+        dependency (options: "libunwind", "allocator").
     """
     _mongo_cc_binary_and_program(
         name,
@@ -1786,7 +1968,7 @@ def mongo_cc_binary(
         testonly,
         visibility,
         data,
-        tags,
+        tags + ["mongo_binary"],
         copts,
         linkopts,
         includes,
@@ -1796,7 +1978,10 @@ def mongo_cc_binary(
         defines,
         additional_linker_inputs,
         features,
+        exec_properties,
+        skip_global_deps,
         _program_type = "binary",
+        **kwargs
     )
 
 def mongo_cc_test(
@@ -1815,7 +2000,9 @@ def mongo_cc_test(
         target_compatible_with = [],
         defines = [],
         additional_linker_inputs = [],
-        features = []):
+        features = [],
+        exec_properties = {},
+        **kwargs):
     """Wrapper around cc_test.
 
     Args:
@@ -1860,7 +2047,50 @@ def mongo_cc_test(
         defines,
         additional_linker_inputs,
         features,
+        exec_properties,
         _program_type = "test",
+        **kwargs
+    )
+
+def mongo_cc_unit_test(
+        name,
+        srcs = [],
+        deps = [],
+        header_deps = [],
+        visibility = None,
+        data = [],
+        tags = [],
+        copts = [],
+        linkopts = [],
+        includes = [],
+        linkstatic = False,
+        local_defines = [],
+        target_compatible_with = [],
+        defines = [],
+        additional_linker_inputs = [],
+        features = [],
+        exec_properties = {},
+        has_custom_mainline = False,
+        **kwargs):
+    mongo_cc_test(
+        name = name,
+        srcs = srcs,
+        deps = deps + ([] if has_custom_mainline else ["//src/mongo/unittest:unittest_main"]),
+        header_deps = header_deps,
+        visibility = visibility,
+        data = data,
+        tags = tags + ["mongo_unittest"],
+        copts = copts,
+        linkopts = linkopts,
+        includes = includes,
+        linkstatic = linkstatic,
+        local_defines = local_defines,
+        target_compatible_with = target_compatible_with,
+        defines = defines,
+        additional_linker_inputs = additional_linker_inputs,
+        features = features,
+        exec_properties = exec_properties,
+        **kwargs
     )
 
 IdlInfo = provider(
@@ -1929,7 +2159,7 @@ def idl_generator_impl(ctx):
         ),
     ]
 
-idl_generator = rule(
+idl_generator_rule = rule(
     idl_generator_impl,
     attrs = {
         "deps": attr.label_list(
@@ -1963,6 +2193,39 @@ idl_generator = rule(
     fragments = ["py"],
 )
 
+def write_target_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".gen_source_list")
+    ctx.actions.write(
+        out,
+        "//" + ctx.label.package + ":" + ctx.attr.target_name,
+    )
+    return [
+        DefaultInfo(
+            files = depset([out]),
+        ),
+    ]
+
+write_target = rule(
+    write_target_impl,
+    attrs = {
+        "target_name": attr.string(
+            doc = "the name of the target to record",
+        ),
+    },
+)
+
+def idl_generator(name, tags = [], **kwargs):
+    write_target(
+        name = name + "_gen_source_tag",
+        target_name = name,
+        tags = ["scons_link_lists"],
+    )
+    idl_generator_rule(
+        name = name,
+        tags = tags + ["gen_source"],
+        **kwargs
+    )
+
 def symlink_impl(ctx):
     ctx.actions.symlink(
         output = ctx.outputs.output,
@@ -1971,7 +2234,7 @@ def symlink_impl(ctx):
 
     return [DefaultInfo(files = depset([ctx.outputs.output]))]
 
-symlink = rule(
+symlink_rule = rule(
     symlink_impl,
     attrs = {
         "input": attr.label(
@@ -1983,6 +2246,13 @@ symlink = rule(
         ),
     },
 )
+
+def symlink(name, tags = [], **kwargs):
+    symlink_rule(
+        name = name,
+        tags = tags + ["gen_source"],
+        **kwargs
+    )
 
 def strip_deps_impl(ctx):
     cc_toolchain = find_cpp_toolchain(ctx)
@@ -2033,10 +2303,14 @@ dummy_file = rule(
 def mongo_proto_library(
         name,
         srcs,
+        tags = [],
         **kwargs):
+    features = kwargs.pop("features", [])
     proto_library(
         name = name,
         srcs = srcs,
+        tags = tags + ["gen_source"],
+        features = features + MONGO_GLOBAL_FEATURES,
         **kwargs
     )
 
@@ -2049,11 +2323,17 @@ def mongo_proto_library(
 def mongo_cc_proto_library(
         name,
         deps,
+        tags = [],
         **kwargs):
     native.cc_proto_library(
-        name = name,
+        name = name + "_raw",
         deps = deps,
+        tags = tags + ["gen_source"],
         **kwargs
+    )
+    strip_deps(
+        name = name,
+        input = name + "_raw",
     )
 
 def mongo_cc_grpc_library(
@@ -2065,6 +2345,8 @@ def mongo_cc_grpc_library(
         proto_only = False,
         well_known_protos = False,
         generate_mocks = False,
+        tags = [],
+        no_undefined_ref_DO_NOT_USE = True,
         **kwargs):
     codegen_grpc_target = "_" + name + "_grpc_codegen"
     generate_cc(
@@ -2073,6 +2355,7 @@ def mongo_cc_grpc_library(
         plugin = "//src/third_party/grpc:grpc_cpp_plugin",
         well_known_protos = well_known_protos,
         generate_mocks = generate_mocks,
+        tags = tags + ["gen_source"],
         **kwargs
     )
 
@@ -2092,5 +2375,119 @@ def mongo_cc_grpc_library(
         deps = deps +
                ["//src/third_party/grpc:grpc++_codegen_proto"],
         cc_deps = [":" + cc_proto_target],
+        no_undefined_ref_DO_NOT_USE = no_undefined_ref_DO_NOT_USE,
+        **kwargs
+    )
+
+def mongo_idl_library(
+        name,
+        src,
+        idl_deps = [],
+        idl_hdrs = [],
+        deps = [],
+        **kwargs):
+    """
+    Args:
+      name: The name of the IDL library.
+      src: The IDL src.
+      idl_deps: The idl_generator deps.
+      idl_hdrs: The idl_generator hdrs.
+      deps: The mongo_cc_library deps.
+    """
+
+    idl_gen_name = name + "_gen"
+    idl_generator(
+        name = idl_gen_name,
+        src = src,
+        hdrs = idl_hdrs,
+        deps = idl_deps,
+    )
+
+    mongo_cc_library(
+        name = name,
+        srcs = [idl_gen_name],
+        deps = deps,
+        **kwargs
+    )
+
+def mongo_cc_benchmark(
+        name,
+        srcs = [],
+        deps = [],
+        header_deps = [],
+        visibility = None,
+        data = [],
+        tags = [],
+        copts = [],
+        linkopts = [],
+        includes = [],
+        linkstatic = False,
+        local_defines = [],
+        target_compatible_with = [],
+        defines = [],
+        additional_linker_inputs = [],
+        features = [],
+        exec_properties = {},
+        has_custom_mainline = False,
+        **kwargs):
+    mongo_cc_test(
+        name = name,
+        srcs = srcs,
+        deps = deps + ([] if has_custom_mainline else ["//src/mongo/unittest:benchmark_main"]),
+        header_deps = header_deps,
+        visibility = visibility,
+        data = data,
+        tags = tags + ["mongo_benchmark"],
+        copts = copts,
+        linkopts = linkopts,
+        includes = includes,
+        linkstatic = linkstatic,
+        local_defines = local_defines,
+        target_compatible_with = target_compatible_with,
+        defines = defines,
+        additional_linker_inputs = additional_linker_inputs,
+        features = features,
+        exec_properties = exec_properties,
+        **kwargs
+    )
+
+def mongo_cc_integration_test(
+        name,
+        srcs = [],
+        deps = [],
+        header_deps = [],
+        visibility = None,
+        data = [],
+        tags = [],
+        copts = [],
+        linkopts = [],
+        includes = [],
+        linkstatic = False,
+        local_defines = [],
+        target_compatible_with = [],
+        defines = [],
+        additional_linker_inputs = [],
+        features = [],
+        exec_properties = {},
+        has_custom_mainline = False,
+        **kwargs):
+    mongo_cc_test(
+        name = name,
+        srcs = srcs,
+        deps = deps + ([] if has_custom_mainline else ["//src/mongo/unittest:integration_test_main"]),
+        header_deps = header_deps,
+        visibility = visibility,
+        data = data,
+        tags = tags + ["mongo_integration_test"],
+        copts = copts,
+        linkopts = linkopts,
+        includes = includes,
+        linkstatic = linkstatic,
+        local_defines = local_defines,
+        target_compatible_with = target_compatible_with,
+        defines = defines,
+        additional_linker_inputs = additional_linker_inputs,
+        features = features,
+        exec_properties = exec_properties,
         **kwargs
     )

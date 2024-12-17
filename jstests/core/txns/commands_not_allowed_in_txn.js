@@ -6,8 +6,6 @@
 //   not_allowed_with_signed_security_token,
 //   uses_snapshot_read_concern,
 //   uses_transactions,
-//   # Tenant migrations don't support applyOps.
-//   tenant_migration_incompatible,
 // ]
 
 // TODO (SERVER-39704): Remove the following load after SERVER-39704 is completed
@@ -138,9 +136,8 @@ if (!runningOnMongos) {
             op: "u",
             ns: testColl.getFullName(),
             o2: {_id: 0},
-            o:
-
-                {$v: 2, diff: {u: {a: 5}}}
+            o: {$v: 2, diff: {u: {a: 5}}},
+            b: true
         }]
     });
 }

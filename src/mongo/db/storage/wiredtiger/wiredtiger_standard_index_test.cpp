@@ -35,149 +35,124 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/sorted_data_interface_test_assert.h"
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
 
-TEST(WiredTigerStandardIndexText, CursorInActiveTxnAfterNext) {
-    auto harnessHelper = newSortedDataInterfaceHarnessHelper();
+class WiredTigerStandardIndexText : public SortedDataInterfaceTest {};
+
+TEST_F(WiredTigerStandardIndexText, CursorInActiveTxnAfterNext) {
     bool unique = false;
     bool partial = false;
-    auto sdi = harnessHelper->newSortedDataInterface(unique, partial);
+    auto sdi = harnessHelper()->newSortedDataInterface(opCtx(), unique, partial);
 
     // Populate data.
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(recoveryUnit());
         auto ks = makeKeyString(sdi.get(), BSON("" << 1), RecordId(1));
-        auto res = sdi->insert(opCtx.get(), ks, true);
-        ASSERT_OK(res);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, true));
 
         ks = makeKeyString(sdi.get(), BSON("" << 2), RecordId(2));
-        res = sdi->insert(opCtx.get(), ks, true);
-        ASSERT_OK(res);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, true));
 
-        uow.commit();
+        txn.commit();
     }
 
     // Cursors should always ensure they are in an active transaction when next() is called.
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx.get()));
-
-        auto cursor = sdi->newCursor(opCtx.get());
+        auto cursor = sdi->newCursor(opCtx());
         auto res = cursor->seek(
             makeKeyStringForSeek(sdi.get(), BSONObj(), true, true).finishAndGetBuffer());
         ASSERT(res);
 
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(recoveryUnit().isActive());
 
-        // Committing a WriteUnitOfWork will end the current transaction.
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_TRUE(ru->isActive());
-        wuow.commit();
-        ASSERT_FALSE(ru->isActive());
+        // Committing a transaction will end the current transaction.
+        StorageWriteTransaction txn(recoveryUnit());
+        ASSERT_TRUE(recoveryUnit().isActive());
+        txn.commit();
+        ASSERT_FALSE(recoveryUnit().isActive());
 
         // If a cursor is used after a WUOW commits, it should implicitly start a new transaction.
         ASSERT(cursor->next());
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(recoveryUnit().isActive());
     }
 }
 
-TEST(WiredTigerStandardIndexText, CursorInActiveTxnAfterSeek) {
-    auto harnessHelper = newSortedDataInterfaceHarnessHelper();
+TEST_F(WiredTigerStandardIndexText, CursorInActiveTxnAfterSeek) {
     bool unique = false;
     bool partial = false;
-    auto sdi = harnessHelper->newSortedDataInterface(unique, partial);
+    auto sdi = harnessHelper()->newSortedDataInterface(opCtx(), unique, partial);
 
     // Populate data.
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(recoveryUnit());
         auto ks = makeKeyString(sdi.get(), BSON("" << 1), RecordId(1));
-        auto res = sdi->insert(opCtx.get(), ks, true);
-        ASSERT_OK(res);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, true));
 
         ks = makeKeyString(sdi.get(), BSON("" << 2), RecordId(2));
-        res = sdi->insert(opCtx.get(), ks, true);
-        ASSERT_OK(res);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, true));
 
-        uow.commit();
+        txn.commit();
     }
 
     // Cursors should always ensure they are in an active transaction when seek() is called.
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx.get()));
-
-        auto cursor = sdi->newCursor(opCtx.get());
+        auto cursor = sdi->newCursor(opCtx());
 
         bool forward = true;
         bool inclusive = true;
         auto seekKs = makeKeyStringForSeek(sdi.get(), BSON("" << 1), forward, inclusive);
         ASSERT(cursor->seek(seekKs.finishAndGetBuffer()));
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(recoveryUnit().isActive());
 
-        // Committing a WriteUnitOfWork will end the current transaction.
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_TRUE(ru->isActive());
-        wuow.commit();
-        ASSERT_FALSE(ru->isActive());
+        // Committing a transaction will end the current transaction.
+        StorageWriteTransaction txn(recoveryUnit());
+        ASSERT_TRUE(recoveryUnit().isActive());
+        txn.commit();
+        ASSERT_FALSE(recoveryUnit().isActive());
 
         // If a cursor is used after a WUOW commits, it should implicitly start a new
         // transaction.
         ASSERT(cursor->seek(seekKs.finishAndGetBuffer()));
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(recoveryUnit().isActive());
     }
 }
 
-TEST(WiredTigerUniqueIndexTest, OldFormatKeys) {
+class WiredTigerUniqueIndexTest : public SortedDataInterfaceTest {};
+
+TEST_F(WiredTigerUniqueIndexTest, OldFormatKeys) {
     FailPointEnableBlock createOldFormatIndex("WTIndexCreateUniqueIndexesInOldFormat");
 
-    auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     const bool unique = true;
     const bool partial = false;
-    auto sdi = harnessHelper->newSortedDataInterface(unique, partial);
+    auto sdi = harnessHelper()->newSortedDataInterface(opCtx(), unique, partial);
 
     const bool dupsAllowed = false;
 
     // Populate index with all old format keys.
     {
         FailPointEnableBlock insertOldFormatKeys("WTIndexInsertUniqueKeysInOldFormat");
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(recoveryUnit());
         auto ks = makeKeyString(sdi.get(), BSON("" << 1), RecordId(1));
-        auto res = sdi->insert(opCtx.get(), ks, dupsAllowed);
-        ASSERT_OK(res);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, dupsAllowed));
 
         ks = makeKeyString(sdi.get(), BSON("" << 2), RecordId(2));
-        res = sdi->insert(opCtx.get(), ks, dupsAllowed);
-        ASSERT_OK(res);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, dupsAllowed));
 
         ks = makeKeyString(sdi.get(), BSON("" << 3), RecordId(3));
-        res = sdi->insert(opCtx.get(), ks, dupsAllowed);
-        ASSERT_OK(res);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, dupsAllowed));
 
-        uow.commit();
+        txn.commit();
     }
 
     // Ensure cursors return the correct data
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        auto cursor = sdi->newCursor(opCtx.get());
+        auto cursor = sdi->newCursor(opCtx());
 
         bool forward = true;
         bool inclusive = true;
@@ -197,33 +172,29 @@ TEST(WiredTigerUniqueIndexTest, OldFormatKeys) {
 
     // Ensure we can't insert duplicate keys in the new format
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(recoveryUnit());
         auto ks = makeKeyString(sdi.get(), BSON("" << 1), RecordId(1));
-        auto res = sdi->insert(opCtx.get(), ks, dupsAllowed);
-        ASSERT_EQ(ErrorCodes::DuplicateKey, res.code());
+        ASSERT_SDI_INSERT_DUPLICATE_KEY(
+            sdi->insert(opCtx(), ks, dupsAllowed), BSON("" << 1), boost::none);
 
         ks = makeKeyString(sdi.get(), BSON("" << 2), RecordId(2));
-        res = sdi->insert(opCtx.get(), ks, dupsAllowed);
-        ASSERT_EQ(ErrorCodes::DuplicateKey, res.code());
+        ASSERT_SDI_INSERT_DUPLICATE_KEY(
+            sdi->insert(opCtx(), ks, dupsAllowed), BSON("" << 2), boost::none);
 
         ks = makeKeyString(sdi.get(), BSON("" << 3), RecordId(3));
-        res = sdi->insert(opCtx.get(), ks, dupsAllowed);
-        ASSERT_EQ(ErrorCodes::DuplicateKey, res.code());
+        ASSERT_SDI_INSERT_DUPLICATE_KEY(
+            sdi->insert(opCtx(), ks, dupsAllowed), BSON("" << 3), boost::none);
     }
 
     // Ensure that it is not possible to remove a key with a mismatched RecordId.
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(recoveryUnit());
         // The key "1" exists, but with RecordId 1, so this should not remove anything.
         auto ks = makeKeyString(sdi.get(), BSON("" << 1), RecordId(2));
-        sdi->unindex(opCtx.get(), ks, dupsAllowed);
-        uow.commit();
+        sdi->unindex(opCtx(), ks, dupsAllowed);
+        txn.commit();
 
-        auto cur = sdi->newCursor(opCtx.get());
+        auto cur = sdi->newCursor(opCtx());
         auto seekKs = makeKeyStringForSeek(sdi.get(), BSON("" << 1), true, true);
         auto result = cur->seek(seekKs.finishAndGetBuffer());
         ASSERT(result);
@@ -232,15 +203,13 @@ TEST(WiredTigerUniqueIndexTest, OldFormatKeys) {
 
     // Ensure we can remove an old format key and replace it with a new one.
     {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(recoveryUnit());
         auto ks = makeKeyString(sdi.get(), BSON("" << 1), RecordId(1));
-        sdi->unindex(opCtx.get(), ks, dupsAllowed);
+        sdi->unindex(opCtx(), ks, dupsAllowed);
 
-        auto res = sdi->insert(opCtx.get(), ks, dupsAllowed);
-        ASSERT_OK(res);
-        uow.commit();
+        auto res = sdi->insert(opCtx(), ks, dupsAllowed);
+        ASSERT_SDI_INSERT_OK(sdi->insert(opCtx(), ks, dupsAllowed));
+        txn.commit();
     }
 }
 }  // namespace

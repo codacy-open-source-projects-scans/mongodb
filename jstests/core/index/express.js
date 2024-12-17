@@ -20,16 +20,16 @@
  */
 
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {
     getPlanStage,
-    getQueryPlanner,
-    getWinningPlan,
+    getWinningPlanFromExplain,
     isExpress
 } from "jstests/libs/query/analyze_plan.js";
-import {runWithParamsAllNodes} from "jstests/libs/query/optimizer_utils.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
+import {setParameterOnAllHosts} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
 const coll = db.getCollection('express_coll');
 
@@ -49,6 +49,35 @@ function runExpressTest(
         usesExpress,
         isExpress(db, explain),
         "Expected the query to " + (usesExpress ? "" : "not ") + "use express: " + tojson(explain));
+}
+
+function runWithParamsAllNodes(db, keyValPairs, fn) {
+    let prevVals = [];
+
+    try {
+        for (let i = 0; i < keyValPairs.length; i++) {
+            const flag = keyValPairs[i].key;
+            const valIn = keyValPairs[i].value;
+            const val = (typeof valIn === 'object') ? JSON.stringify(valIn) : valIn;
+
+            let getParamObj = {};
+            getParamObj["getParameter"] = 1;
+            getParamObj[flag] = 1;
+            const prevVal = db.adminCommand(getParamObj);
+            prevVals.push(prevVal[flag]);
+
+            setParameterOnAllHosts(DiscoverTopology.findNonConfigNodes(db.getMongo()), flag, val);
+        }
+
+        return fn();
+    } finally {
+        for (let i = 0; i < keyValPairs.length; i++) {
+            const flag = keyValPairs[i].key;
+
+            setParameterOnAllHosts(
+                DiscoverTopology.findNonConfigNodes(db.getMongo()), flag, prevVals[i]);
+        }
+    }
 }
 
 const docs = [
@@ -220,7 +249,7 @@ if (isShardedColl) {
     assert(!isExpress(db, explain), tojson(explain));
 } else {
     assert(isExpress(db, explain), tojson(explain));
-    let express = getPlanStage(getWinningPlan(getQueryPlanner(explain)), "EXPRESS_IXSCAN");
+    let express = getPlanStage(getWinningPlanFromExplain(explain), "EXPRESS_IXSCAN");
     assert(express && express.indexName == "a_1_b_1", tojson(explain));
 }
 
@@ -241,7 +270,7 @@ if (!isShardedColl && !FixtureHelpers.isStandalone(db) &&
         explain = assert.commandWorked(
             db.runCommand({explain: {find: coll.getName(), filter: {a: 1}, limit: 1}}));
         assert(isExpress(db, explain), tojson(explain));
-        let express = getPlanStage(getWinningPlan(getQueryPlanner(explain)), "EXPRESS_IXSCAN");
+        let express = getPlanStage(getWinningPlanFromExplain(explain), "EXPRESS_IXSCAN");
         assert(express && express.indexName == "a_1_b_1_c_1", tojson(explain));
     });
 

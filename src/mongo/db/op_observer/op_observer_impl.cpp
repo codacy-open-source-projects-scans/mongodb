@@ -70,8 +70,6 @@
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
-#include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_options.h"
@@ -92,8 +90,6 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/s/catalog/type_index_catalog.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
@@ -410,26 +406,6 @@ void OpObserverImpl::onStartIndexBuildSinglePhase(OperationContext* opCtx,
         boost::none);
 }
 
-void OpObserverImpl::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
-                                                  const NamespaceString& nss) {
-    if (!shouldTimestampIndexBuildSinglePhase(opCtx, nss)) {
-        return;
-    }
-
-    onInternalOpMessage(
-        opCtx,
-        {},
-        boost::none,
-        BSON("msg" << std::string(str::stream() << "Aborting indexes. Coll: "
-                                                << NamespaceStringUtil::serialize(
-                                                       nss, SerializationContext::stateDefault()))),
-        boost::none,
-        boost::none,
-        boost::none,
-        boost::none,
-        boost::none);
-}
-
 void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
                                         const NamespaceString& nss,
                                         const UUID& collUUID,
@@ -522,20 +498,6 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
     invariant(std::distance(fromMigrate.begin(), fromMigrate.end()) == std::distance(begin, end),
               oplogEntryTemplate->toReplOperation().toBSON().toString());
 
-    // If this oplog entry is from a tenant migration, include the tenant migration
-    // UUID and optional donor timeline metadata.
-    if (const auto& recipientInfo = repl::tenantMigrationInfo(opCtx)) {
-        oplogEntryTemplate->setFromTenantMigration(recipientInfo->uuid);
-        if (oplogEntryTemplate->getTid() &&
-            change_stream_serverless_helpers::isChangeStreamEnabled(
-                opCtx, *oplogEntryTemplate->getTid()) &&
-            recipientInfo->donorOplogEntryData) {
-            oplogEntryTemplate->setDonorOpTime(recipientInfo->donorOplogEntryData->donorOpTime);
-            oplogEntryTemplate->setDonorApplyOpsIndex(
-                recipientInfo->donorOplogEntryData->applyOpsIndex);
-        }
-    }
-
     const size_t count = end - begin;
     // Either no recordIds were passed in, or the number passed in is equal to the number
     // of inserts that happened.
@@ -608,14 +570,8 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
     auto lastOpTime = opTimes.back();
     invariant(!lastOpTime.isNull());
     auto wallClockTime = oplogEntryTemplate->getWallClockTime();
-    operationLogger->logOplogRecords(opCtx,
-                                     nss,
-                                     &records,
-                                     timestamps,
-                                     oplogWrite.getCollection(),
-                                     lastOpTime,
-                                     wallClockTime,
-                                     /*isAbortIndexBuild=*/false);
+    operationLogger->logOplogRecords(
+        opCtx, nss, &records, timestamps, oplogWrite.getCollection(), lastOpTime, wallClockTime);
     wuow.commit();
     return opTimes;
 }
@@ -1249,7 +1205,6 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
                                               const UUID& uuid,
                                               std::uint64_t numRecords,
-                                              const CollectionDropType dropType,
                                               bool markFromMigrate) {
     uassert(50715,
             "dropping the server configuration collection (admin.system.version) is not allowed.",
@@ -1588,12 +1543,6 @@ void OpObserverImpl::onUnpreparedTransactionCommit(
     const auto& oplogSlots = reservedSlots;
     const auto& applyOpsOplogSlotAndOperationAssignment = applyOpsOperationAssignment;
 
-    // Throw TenantMigrationConflict error if the database for the transaction statements is being
-    // migrated. We only need check the namespace of the first statement since a transaction's
-    // statements must all be for the same tenant.
-    tenant_migration_access_blocker::checkIfCanWriteOrThrow(
-        opCtx, statements.begin()->getNss().dbName(), oplogSlots.back().getTimestamp());
-
     if (MONGO_unlikely(hangAndFailUnpreparedCommitAfterReservingOplogSlot.shouldFail())) {
         hangAndFailUnpreparedCommitAfterReservingOplogSlot.pauseWhileSet(opCtx);
         uasserted(51268, "hangAndFailUnpreparedCommitAfterReservingOplogSlot fail point enabled");
@@ -1709,14 +1658,6 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
     auto oplogSlots = _operationLogger->getNextOpTimes(
         opCtx, applyOpsOplogSlotAndOperationAssignment.numberOfOplogSlotsRequired);
 
-    // Throw TenantMigrationConflict error if the database for the transaction statements is being
-    // migrated. We only need check the namespace of the first statement since a batch's statements
-    // must all be for the same tenant.
-    const auto& statements = batchedOps->getOperationsForOpObserver();
-    const auto& firstOpNss = statements.begin()->getNss();
-    tenant_migration_access_blocker::checkIfCanWriteOrThrow(
-        opCtx, firstOpNss.dbName(), oplogSlots.back().getTimestamp());
-
     boost::optional<repl::ReplOperation::ImageBundle> noPrePostImage;
 
     if (!gFeatureFlagLargeBatchedOperations.isEnabled(
@@ -1804,6 +1745,7 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
     // retryable batched write.
     auto txnParticipant = TransactionParticipant::get(opCtx);
     if (txnParticipant) {
+        const auto& statements = batchedOps->getOperationsForOpObserver();
         for (const auto& statement : statements) {
             txnParticipant.addToAffectedNamespaces(opCtx, statement.getNss());
         }

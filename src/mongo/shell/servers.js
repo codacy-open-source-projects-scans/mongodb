@@ -1200,10 +1200,6 @@ var stopMongoProgram = function(conn, signal, opts, waitpid) {
               returnCode);
     }
 
-    if (conn.undoLiveRecordPid) {
-        _stopUndoLiveRecord(conn.undoLiveRecordPid);
-    }
-
     return returnCode;
 };
 
@@ -1379,9 +1375,7 @@ function appendSetParameterArgs(argArray) {
                 argArray.push(...["--setParameter", "backtraceLogFile=" + backtraceLogFilePath]);
             }
 
-            // TODO(SERVER-95610): update once this change is backported and in 8.0 versions
-            if ((programMajorMinorVersion < 800 && programMajorMinorVersion >= 600) ||
-                programMajorMinorVersion > 810) {
+            if (programMajorMinorVersion >= 600) {
                 const parameters = jsTest.options().setParameters;
                 const reshardingDefaults = {
                     'reshardingDelayBeforeRemainingOperationTimeQueryMillis': 0
@@ -1472,8 +1466,10 @@ function appendSetParameterArgs(argArray) {
             }
 
             // Reduce the default value for `orphanCleanupDelaySecs` to 1 sec to speed up jstests.
-            if (!argArrayContainsSetParameterValue('orphanCleanupDelaySecs=')) {
-                argArray.push(...['--setParameter', 'orphanCleanupDelaySecs=1']);
+            if (programMajorMinorVersion >= 360) {
+                if (!argArrayContainsSetParameterValue('orphanCleanupDelaySecs=')) {
+                    argArray.push(...['--setParameter', 'orphanCleanupDelaySecs=1']);
+                }
             }
 
             // Increase the default value for `receiveChunkWaitForRangeDeleterTimeoutMS` to 90
@@ -1542,6 +1538,16 @@ function appendSetParameterArgs(argArray) {
                 }
             }
         }
+
+        // Increase the default config server command timeout to 5 minutes to avoid spurious
+        // failures on slow machines. New option in 7.3. Applies to both mongos and mongod and
+        // should not overwrite values passed via TestData, so we check after merging TestData
+        // setParameters into the arg array.
+        if (programMajorMinorVersion >= 730) {
+            if (!argArrayContainsSetParameterValue('defaultConfigCommandTimeoutMS=')) {
+                argArray.push(...['--setParameter', 'defaultConfigCommandTimeoutMS=300000']);
+            }
+        }
     }
 
     return argArray;
@@ -1557,16 +1563,14 @@ function appendSetParameterArgs(argArray) {
  *
  * @param {int} [pid] the process id of the node to connect to.
  * @param {int} [port] the port of the node to connect to.
- * @param {int} [undoLiveRecordPid=null] the process id of the `live-record` process.
  * @returns a new Mongo connection object, or null if the process gracefully terminated.
  */
-MongoRunner.awaitConnection = function({pid, port, undoLiveRecordPid = null} = {}) {
+MongoRunner.awaitConnection = function({pid, port} = {}) {
     var conn = null;
     assert.soon(function() {
         try {
             conn = new Mongo("127.0.0.1:" + port);
             conn.pid = pid;
-            conn.undoLiveRecordPid = undoLiveRecordPid;
             return true;
         } catch (e) {
             var res = checkProgram(pid);
@@ -1574,9 +1578,6 @@ MongoRunner.awaitConnection = function({pid, port, undoLiveRecordPid = null} = {
                 print("mongo program was not running at " + port +
                       ", process ended with exit code: " + res.exitCode);
                 serverExitCodeMap[port] = res.exitCode;
-                if (undoLiveRecordPid) {
-                    _stopUndoLiveRecord(undoLiveRecordPid);
-                }
                 if (res.exitCode !== MongoRunner.EXIT_CLEAN) {
                     throw new MongoRunner.StopError(res.exitCode);
                 }
@@ -1586,21 +1587,6 @@ MongoRunner.awaitConnection = function({pid, port, undoLiveRecordPid = null} = {
         return false;
     }, "unable to connect to mongo program on port " + port, 600 * 1000);
     return conn;
-};
-
-var _runUndoLiveRecord = function(pid) {
-    var argArray = [jsTestOptions().undoRecorderPath, "-p", pid];
-    return _startMongoProgram.apply(null, argArray);
-};
-
-var _stopUndoLiveRecord = function(undoLiveRecordPid) {
-    print("Saving the UndoDB recording; it may take a few minutes...");
-    var undoReturnCode = waitProgram(undoLiveRecordPid);
-    if (undoReturnCode !== 0) {
-        throw new Error(
-            "Undo live-record failed to terminate correctly. This is likely a bug in Undo. " +
-            "Please record any logs and send them to the #server-testing Slack channel");
-    }
 };
 
 /**
@@ -1636,22 +1622,16 @@ MongoRunner._startWithArgs = function(argArray, env, waitForConnect) {
         pid = _startMongoProgram({args: argArray, env: env});
     }
 
-    let undoLiveRecordPid = null;
-    if (jsTestOptions().undoRecorderPath) {
-        undoLiveRecordPid = _runUndoLiveRecord(pid);
-    }
-
     delete serverExitCodeMap[port];
     if (!waitForConnect) {
         print("Skip waiting to connect to node with pid=" + pid + ", port=" + port);
         return {
             pid: pid,
             port: port,
-            undoLiveRecordPid: undoLiveRecordPid,
         };
     }
 
-    return MongoRunner.awaitConnection({pid, port, undoLiveRecordPid});
+    return MongoRunner.awaitConnection({pid, port});
 };
 
 /**

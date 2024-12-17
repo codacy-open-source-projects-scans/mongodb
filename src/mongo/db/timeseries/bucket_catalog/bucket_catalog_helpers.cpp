@@ -29,13 +29,10 @@
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
 
-#include <algorithm>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <type_traits>
 
 #include <boost/optional/optional.hpp>
 
@@ -43,18 +40,13 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
-#include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
-#include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
@@ -89,7 +81,6 @@ StatusWith<std::pair<const BSONObj, const BSONObj>> extractMinAndMax(const BSONO
  * Generates a match filter used to identify suitable buckets for reopening, represented by:
  *
  * {$and:
- *       [{"control.version":1}, // Only when gTimeseriesAlwaysUseCompressedBuckets is disabled.
  *       {$or: [{"control.closed":{$exists:false}},
  *              {"control.closed":false}]
  *       },
@@ -105,13 +96,6 @@ BSONObj generateReopeningMatchFilter(const Date_t& time,
                                      const std::string& controlMinTimePath,
                                      const std::string& maxDataTimeFieldPath,
                                      int64_t bucketMaxSpanSeconds) {
-    boost::optional<BSONObj> versionFilter;
-    if (!feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        // The bucket must be uncompressed.
-        versionFilter = BSON(kControlVersionPath << kTimeseriesControlUncompressedVersion);
-    }
-
     // The bucket cannot be closed (aka open for new measurements).
     auto closedFlagFilter =
         BSON("$or" << BSON_ARRAY(BSON(kControlClosedPath << BSON("$exists" << false))
@@ -138,14 +122,8 @@ BSONObj generateReopeningMatchFilter(const Date_t& time,
     // full and we do not want to insert future measurements into it.
     auto measurementSizeFilter = BSON(maxDataTimeFieldPath << BSON("$exists" << false));
 
-    if (versionFilter) {
-        return BSON("$and" << BSON_ARRAY(*versionFilter << closedFlagFilter << timeRangeFilter
-                                                        << metaFieldFilter
-                                                        << measurementSizeFilter));
-    } else {
-        return BSON("$and" << BSON_ARRAY(closedFlagFilter << timeRangeFilter << metaFieldFilter
-                                                          << measurementSizeFilter));
-    }
+    return BSON("$and" << BSON_ARRAY(closedFlagFilter << timeRangeFilter << metaFieldFilter
+                                                      << measurementSizeFilter));
 }
 
 }  // namespace
@@ -180,7 +158,7 @@ std::vector<BSONObj> generateReopeningPipeline(const Date_t& time,
     return pipeline;
 }
 
-StatusWith<MinMax> generateMinMaxFromBucketDoc(TrackingContext& trackingContext,
+StatusWith<MinMax> generateMinMaxFromBucketDoc(tracking::Context& trackingContext,
                                                const BSONObj& bucketDoc,
                                                const StringDataComparator* comparator) {
     auto swDocs = extractMinAndMax(bucketDoc);
@@ -197,7 +175,7 @@ StatusWith<MinMax> generateMinMaxFromBucketDoc(TrackingContext& trackingContext,
     }
 }
 
-StatusWith<Schema> generateSchemaFromBucketDoc(TrackingContext& trackingContext,
+StatusWith<Schema> generateSchemaFromBucketDoc(tracking::Context& trackingContext,
                                                const BSONObj& bucketDoc,
                                                const StringDataComparator* comparator) {
     auto swDocs = extractMinAndMax(bucketDoc);

@@ -80,7 +80,8 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/cost_based_ranker/qsn_estimator.h"
+#include "mongo/db/query/cost_based_ranker/cardinality_estimator.h"
+#include "mongo/db/query/cost_based_ranker/cost_estimator.h"
 #include "mongo/db/query/distinct_access.h"
 #include "mongo/db/query/eof_node_type.h"
 #include "mongo/db/query/find_command.h"
@@ -146,6 +147,8 @@ void logNumberOfSolutions(size_t numSolutions) {
 }  // namespace log_detail
 
 namespace {
+MONGO_FAIL_POINT_DEFINE(queryPlannerAlwaysFails);
+
 /**
  * Attempts to apply the index tags from 'branchCacheData' to 'orChild'. If the index assignments
  * cannot be applied, return the error from the process. Otherwise the tags are applied and success
@@ -1008,6 +1011,10 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                 "options"_attr = optionString(params.mainCollectionInfo.options),
                 "query"_attr = redact(query.toString()));
 
+    if (auto scoped = queryPlannerAlwaysFails.scoped(); MONGO_unlikely(scoped.isActive())) {
+        tasserted(9656400, "Hit queryPlannerAlwaysFails fail point");
+    }
+
     for (size_t i = 0; i < params.mainCollectionInfo.indexes.size(); ++i) {
         LOGV2_DEBUG(20968,
                     5,
@@ -1614,32 +1621,90 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
                       "No indexed plans available, and running with 'notablescan' 2");
     }
 
+    // If CanonicalQuery is distinct-like and we haven't generated a plan that features
+    // a DISTINCT_SCAN, we should use SBE instead.
+    if (isDistinctMultiplanningEnabled && query.isSbeCompatible() && query.getDistinct()) {
+        const bool noDistinctScans = std::none_of(out.begin(), out.end(), [](const auto& soln) {
+            return soln->hasNode(STAGE_DISTINCT_SCAN);
+        });
+        if (noDistinctScans) {
+            return Status(ErrorCodes::NoDistinctScansForDistinctEligibleQuery,
+                          "No DISTINCT_SCAN plans available");
+        }
+    }
+
     return {std::move(out)};
 }  // QueryPlanner::plan
 
 StatusWith<QueryPlanner::CostBasedRankerResult> QueryPlanner::planWithCostBasedRanking(
-    const CanonicalQuery& query, const QueryPlannerParams& params) {
+    const CanonicalQuery& query,
+    const QueryPlannerParams& params,
+    const ce::SamplingEstimator* samplingEstimator) {
+    using namespace cost_based_ranker;
+
     auto statusWithMultiPlanSolns = QueryPlanner::plan(query, params);
     if (!statusWithMultiPlanSolns.isOK()) {
         return statusWithMultiPlanSolns.getStatus();
     }
-    // This is a temporary stub implementation of CBR which arbitrarily picks the last of the
-    // enumerated plans.
 
-    cost_based_ranker::EstimateMap estimates;
-    for (auto&& soln : statusWithMultiPlanSolns.getValue()) {
-        cost_based_ranker::estimatePlanCost(*soln, &estimates);
-    }
+    auto cbrMode = query.getExpCtx()->getQueryKnobConfiguration().getPlanRankerMode();
+    EstimateMap estimates;
+    CardinalityEstimator cardEstimator(
+        *params.mainCollectionInfo.collStats, samplingEstimator, estimates, cbrMode);
+    CostEstimator costEstimator(estimates);
 
+    std::vector<std::unique_ptr<QuerySolution>> allSoln =
+        std::move(statusWithMultiPlanSolns.getValue());
+    // This set of plans contains the optimal plan. If 'acceptedSoln' contains a single
+    // plan, then that is the optimal (winning) plan chosen by the planner. Otherwise, if there is
+    // more than one plan, those plans are sent to the multi-planner to choose the winning plan.
     std::vector<std::unique_ptr<QuerySolution>> acceptedSoln;
+    // The set of plans that definitely do not contain the optimal plan. This set is used for
+    // explain to show all rejected plans.
     std::vector<std::unique_ptr<QuerySolution>> rejectedSoln;
 
-    for (auto it = statusWithMultiPlanSolns.getValue().begin();
-         it != std::prev(statusWithMultiPlanSolns.getValue().end());
-         ++it) {
-        rejectedSoln.push_back(std::move(*it));
+    CostEstimate bestCost = maxCost;
+    std::unique_ptr<QuerySolution> bestSoln;
+    for (auto&& soln : allSoln) {
+        auto ceRes = cardEstimator.estimatePlan(*soln);
+        if (!ceRes.isOK()) {
+            // This plan's cardinality cannot be estimated.
+            if (cbrMode == QueryPlanRankerModeEnum::kAutomaticCE) {
+                // In automatic CE mode fallback to multi-planning for inestimable plans.
+                acceptedSoln.push_back(std::move(soln));
+            } else {
+                // All other CE modes are considered "strict", that is, when a CE method couldn't
+                // be applied, this is considered a user error.
+                return ceRes.getStatus();
+            }
+        } else {
+            CostEstimate curCost = costEstimator.estimatePlan(*soln);
+            // Note that the cost comparison operators used here are approximate within some
+            // epsilon as implemented by the overloaded comparisons for estimates.
+            if (curCost < bestCost) {
+                if (bestSoln) {
+                    rejectedSoln.push_back(std::move(bestSoln));
+                }
+                bestSoln = std::move(soln);
+                bestCost = curCost;
+            } else {
+                // TODO SERVER-97933: handle equal cost plans in a deterministic way
+                // For now, we pick one and put the other in rejected plans.
+                rejectedSoln.push_back(std::move(soln));
+            }
+        }
     }
-    acceptedSoln.push_back(std::move(statusWithMultiPlanSolns.getValue().back()));
+    if (bestSoln) {
+        acceptedSoln.push_back(std::move(bestSoln));
+    }
+    if (acceptedSoln.size() > 1) {
+        // Put the plan with lowest cost (among the estimated plans) first.
+        std::swap(acceptedSoln.front(), acceptedSoln.back());
+    }
+    tassert(9751901,
+            "Some plan has fallen into the gray zone between accepted and rejected QSNs.",
+            acceptedSoln.size() + rejectedSoln.size() == allSoln.size());
+
     return QueryPlanner::CostBasedRankerResult{.solutions = std::move(acceptedSoln),
                                                .rejectedPlans = std::move(rejectedSoln),
                                                .estimates = std::move(estimates)};
@@ -1672,6 +1737,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                      groupStage->getIdExpression(),
                                                      groupStage->getAccumulationStatements(),
                                                      groupStage->doingMerge(),
+                                                     groupStage->willBeMerged(),
                                                      isLastSource /* shouldProduceBson */);
             continue;
         }
@@ -1686,7 +1752,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                     lookupStage->getFromNs(),
                     lookupStage->getForeignField()->fullPath(),
                     secondaryCollInfos,
-                    query.getExpCtx()->allowDiskUse,
+                    query.getExpCtx()->getAllowDiskUse(),
                     query.getCollator());
 
             if (!lookupStage->hasUnwindSrc()) {
@@ -1951,7 +2017,8 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
         const CanonicalQuery& cq, const CollectionPtr& coll)> getSolutionCachedData,
     const CollectionPtr& collection,
     const CanonicalQuery& query,
-    const QueryPlannerParams& params) {
+    const QueryPlannerParams& params,
+    const ce::SamplingEstimator* samplingEstimator) {
     invariant(query.getPrimaryMatchExpression()->matchType() == MatchExpression::OR);
     invariant(query.getPrimaryMatchExpression()->numChildren(),
               "Cannot plan subqueries for an $or with no children");
@@ -2005,8 +2072,8 @@ StatusWith<QueryPlanner::SubqueriesPlanningResult> QueryPlanner::planSubqueries(
 
             if (query.getExpCtx()->getQueryKnobConfiguration().getPlanRankerMode() !=
                 QueryPlanRankerModeEnum::kMultiPlanning) {
-                auto statusWithCBRSolns =
-                    QueryPlanner::planWithCostBasedRanking(*branchResult->canonicalQuery, params);
+                auto statusWithCBRSolns = QueryPlanner::planWithCostBasedRanking(
+                    *branchResult->canonicalQuery, params, samplingEstimator);
                 if (!statusWithCBRSolns.isOK()) {
                     str::stream ss;
                     ss << "Can't plan for subchild " << branchResult->canonicalQuery->toString()

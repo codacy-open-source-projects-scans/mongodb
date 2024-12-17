@@ -104,9 +104,10 @@ public:
         SerializationOptions opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
         if (!applyHmac) {
             opts.transformIdentifiers = false;
-            opts.transformIdentifiersCallback = defaultHmacStrategy;
+            opts.transformIdentifiersCallback = opts.defaultHmacStrategy;
         }
-        return findKey.toBson(expCtx->opCtx, opts, SerializationContext::stateDefault());
+        return findKey.toBson(
+            expCtx->getOperationContext(), opts, SerializationContext::stateDefault());
     }
 
     BSONObj makeQueryStatsKeyAggregateRequest(AggregateCommandRequest acr,
@@ -127,9 +128,10 @@ public:
         opts.literalPolicy = literalPolicy;
         if (!applyHmac) {
             opts.transformIdentifiers = false;
-            opts.transformIdentifiersCallback = defaultHmacStrategy;
+            opts.transformIdentifiersCallback = opts.defaultHmacStrategy;
         }
-        return aggKey->toBson(expCtx->opCtx, opts, SerializationContext::stateDefault());
+        return aggKey->toBson(
+            expCtx->getOperationContext(), opts, SerializationContext::stateDefault());
     }
 };
 
@@ -235,7 +237,7 @@ TEST_F(QueryStatsStoreTest, EvictionTest) {
         fcr->setMax(BSON("z" << 25));
         fcr->setMin(BSON("z" << 80));
         fcr->setSort(BSON("sortVal" << 1 << "otherSort" << -1));
-        auto expCtx = makeExpressionContext(opCtx.get(), *fcr);
+        auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx.get(), *fcr).build();
         auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(fcr)}));
 
         key = std::make_unique<query_stats::FindKey>(expCtx, *parsedFind, collectionType);
@@ -272,7 +274,7 @@ TEST_F(QueryStatsStoreTest, GenerateMaxBsonSizeQueryShape) {
     fcr.setFilter(bob.obj());
     auto fcrCopy = std::make_unique<FindCommandRequest>(fcr);
     auto opCtx = makeOperationContext();
-    auto expCtx = makeExpressionContext(opCtx.get(), *fcrCopy);
+    auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx.get(), *fcrCopy).build();
     auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(fcrCopy)}));
     RAIIServerParameterControllerForTest controller("featureFlagQueryStats", true);
 
@@ -521,7 +523,7 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
                                                   << "tag")
                                              << BSON("some"
                                                      << "other tag")));
-    ReadPreferenceSetting::get(expCtx->opCtx) =
+    ReadPreferenceSetting::get(expCtx->getOperationContext()) =
         uassertStatusOK(ReadPreferenceSetting::fromInnerBSON(readPreference));
     key = makeQueryStatsKeyFindRequest(fcr, expCtx, true);
 
@@ -1140,8 +1142,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
     acr.setCursor(cursorOptions);
     acr.setMaxTimeMS(500);
     acr.setBypassDocumentValidation(true);
-    expCtx->opCtx->setComment(BSON("comment"
-                                   << "note to self"));
+    expCtx->getOperationContext()->setComment(BSON("comment"
+                                                   << "note to self"));
     shapified = makeQueryStatsKeyAggregateRequest(
         acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -1347,8 +1349,8 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestEmptyFields
 TEST_F(QueryStatsStoreTest,
        CorrectlyTokenizesAggregateCommandRequestPipelineWithSecondaryNamespaces) {
     auto expCtx = make_intrusive<ExpressionContextForTest>(kDefaultTestNss.nss());
-    auto nsToUnionWith =
-        NamespaceString::createNamespaceString_forTest(expCtx->ns.dbName(), "otherColl");
+    auto nsToUnionWith = NamespaceString::createNamespaceString_forTest(
+        expCtx->getNamespaceString().dbName(), "otherColl");
     expCtx->addResolvedNamespaces({nsToUnionWith});
 
     AggregateCommandRequest acr(kDefaultTestNss.nss());

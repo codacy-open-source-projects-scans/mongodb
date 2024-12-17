@@ -287,8 +287,16 @@ void ProjectionNode::reportComputedPaths(OrderedPathSet* computedPaths,
         auto exprComputedPaths = computedPair.second->getComputedPaths(exprPath);
         computedPaths->insert(exprComputedPaths.paths.begin(), exprComputedPaths.paths.end());
 
-        for (auto&& rename : exprComputedPaths.renames) {
-            (*renamedPaths)[rename.first] = rename.second;
+        if (renamedPaths) {
+            for (auto&& rename : exprComputedPaths.renames) {
+                (*renamedPaths)[rename.first] = rename.second;
+            }
+        } else {
+            // If caller is asking us not to report into 'renamedPaths', then report into
+            // 'computedPaths' instead.
+            for (auto&& rename : exprComputedPaths.renames) {
+                computedPaths->insert(rename.first);
+            }
         }
 
         if (complexRenamedPaths) {
@@ -297,8 +305,17 @@ void ProjectionNode::reportComputedPaths(OrderedPathSet* computedPaths,
             }
         }
     }
+
     for (auto&& childPair : _children) {
-        childPair.second->reportComputedPaths(computedPaths, renamedPaths, complexRenamedPaths);
+        // Below the top level, do not track renames: everything is a computed path.
+        // For example we can't consider {$addFields: {'a.b': "$x"}} to be a rename,
+        // because if 'a' is an array then 'a.b' can point to zero or more than one
+        // location in the document.
+        //
+        // If we knew which fields are not arrays, we could be more precise: in this
+        // example if 'a' is not an array, then 'a.b' will write to exactly one place
+        // in the document.
+        childPair.second->reportComputedPaths(computedPaths, nullptr, nullptr);
     }
 }
 
@@ -313,16 +330,13 @@ void ProjectionNode::optimize() {
     _maxFieldsToProject = maxFieldsToProject();
 }
 
-Document ProjectionNode::serialize(boost::optional<ExplainOptions::Verbosity> explain,
-                                   const SerializationOptions& options) const {
+Document ProjectionNode::serialize(const SerializationOptions& options) const {
     MutableDocument outputDoc;
-    serialize(explain, &outputDoc, options);
+    serialize(&outputDoc, options);
     return outputDoc.freeze();
 }
 
-void ProjectionNode::serialize(boost::optional<ExplainOptions::Verbosity> explain,
-                               MutableDocument* output,
-                               const SerializationOptions& options) const {
+void ProjectionNode::serialize(MutableDocument* output, const SerializationOptions& options) const {
     // Determine the boolean value for projected fields in the explain output.
     const bool projVal = isIncluded();
 
@@ -341,7 +355,7 @@ void ProjectionNode::serialize(boost::optional<ExplainOptions::Verbosity> explai
         auto childIt = _children.find(field);
         if (childIt != _children.end()) {
             MutableDocument subDoc;
-            childIt->second->serialize(explain, &subDoc, options);
+            childIt->second->serialize(&subDoc, options);
             output->addField(options.serializeFieldPathFromString(field), subDoc.freezeToValue());
         } else {
             tassert(7241727,

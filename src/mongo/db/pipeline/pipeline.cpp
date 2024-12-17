@@ -64,11 +64,13 @@
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/pipeline/search/search_helper.h"
+#include "mongo/db/pipeline/search/search_helper_bson_obj.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/query/bson/dotted_path_support.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/views/resolved_view.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
@@ -112,7 +114,7 @@ Value appendCommonExecStats(Value docSource, const CommonStats& stats) {
 void validateTopLevelPipeline(const Pipeline& pipeline) {
     // Verify that the specified namespace is valid for the initial stage of this pipeline.
     auto expCtx = pipeline.getContext();
-    const NamespaceString& nss = expCtx->ns;
+    const NamespaceString& nss = expCtx->getNamespaceString();
 
     const auto& sources = pipeline.getSources();
 
@@ -160,7 +162,7 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
                 hasChangeStreamSplitLargeEventStage = true;
             }
         }
-        auto spec = isChangeStream ? expCtx->changeStreamSpec : boost::none;
+        auto spec = isChangeStream ? expCtx->getChangeStreamSpec() : boost::none;
         auto hasSplitEventResumeToken = spec &&
             change_stream::resolveResumeTokenFromSpec(expCtx, *spec).fragmentNum.has_value();
         uassert(ErrorCodes::ChangeStreamFatalError,
@@ -171,7 +173,7 @@ void validateTopLevelPipeline(const Pipeline& pipeline) {
 
     // Verify that usage of $searchMeta and $search is legal. Note that on routers, we defer this
     // check until after we've established cursors on the shards to resolve any views.
-    if (expCtx->opCtx->getServiceContext() && !expCtx->inRouter) {
+    if (expCtx->getOperationContext()->getServiceContext() && !expCtx->getInRouter()) {
         search_helpers::assertSearchMetaAccessValid(sources, expCtx.get());
     }
 }
@@ -235,8 +237,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::parseCommon(
         stages.insert(stages.end(), parsedSources.begin(), parsedSources.end());
     }
 
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline(new Pipeline(std::move(stages), expCtx),
-                                                        PipelineDeleter(expCtx->opCtx));
+    std::unique_ptr<Pipeline, PipelineDeleter> pipeline(
+        new Pipeline(std::move(stages), expCtx), PipelineDeleter(expCtx->getOperationContext()));
 
     // First call the top level validator, unless this is a $facet
     // (nested) pipeline. Then call the context-specific validator if one
@@ -288,8 +290,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::parseFacetPipeline(
 
 std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::create(
     SourceContainer stages, const intrusive_ptr<ExpressionContext>& expCtx) {
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline(new Pipeline(std::move(stages), expCtx),
-                                                        PipelineDeleter(expCtx->opCtx));
+    std::unique_ptr<Pipeline, PipelineDeleter> pipeline(
+        new Pipeline(std::move(stages), expCtx), PipelineDeleter(expCtx->getOperationContext()));
 
     constexpr bool alreadyOptimized = false;
     pipeline->validateCommon(alreadyOptimized);
@@ -337,15 +339,16 @@ void Pipeline::validateCommon(bool alreadyOptimized) const {
         }
 
         // Verify that we are not attempting to run a router-only stage on a data bearing node.
-        uassert(40644,
-                str::stream() << stage->getSourceName() << " can only be run on router",
-                !(constraints.hostRequirement == HostTypeRequirement::kMongoS && !pCtx->inRouter));
-
         uassert(
-            ErrorCodes::OperationNotSupportedInTransaction,
-            str::stream() << "Stage not supported inside of a multi-document transaction: "
-                          << stage->getSourceName(),
-            !(pCtx->opCtx->inMultiDocumentTransaction() && !constraints.isAllowedInTransaction()));
+            40644,
+            str::stream() << stage->getSourceName() << " can only be run on router",
+            !(constraints.hostRequirement == HostTypeRequirement::kRouter && !pCtx->getInRouter()));
+
+        uassert(ErrorCodes::OperationNotSupportedInTransaction,
+                str::stream() << "Stage not supported inside of a multi-document transaction: "
+                              << stage->getSourceName(),
+                !(pCtx->getOperationContext()->inMultiDocumentTransaction() &&
+                  !constraints.isAllowedInTransaction()));
 
         // Verify that a stage which can only appear once doesn't appear more than that.
         uassert(7183900,
@@ -423,7 +426,7 @@ bool Pipeline::aggHasWriteStage(const BSONObj& cmd) {
 }
 
 void Pipeline::detachFromOperationContext() {
-    pCtx->opCtx = nullptr;
+    pCtx->setOperationContext(nullptr);
 
     for (auto&& source : _sources) {
         source->detachFromOperationContext();
@@ -434,7 +437,7 @@ void Pipeline::detachFromOperationContext() {
 }
 
 void Pipeline::reattachToOperationContext(OperationContext* opCtx) {
-    pCtx->opCtx = opCtx;
+    pCtx->setOperationContext(opCtx);
 
     for (auto&& source : _sources) {
         source->reattachToOperationContext(opCtx);
@@ -456,12 +459,12 @@ void Pipeline::checkValidOperationContext() const {
     tassert(7406000,
             str::stream()
                 << "All DocumentSources and subpipelines must have the same operation context",
-            validateOperationContext(getContext()->opCtx));
+            validateOperationContext(getContext()->getOperationContext()));
 }
 
 void Pipeline::dispose(OperationContext* opCtx) {
     try {
-        pCtx->opCtx = opCtx;
+        pCtx->setOperationContext(opCtx);
 
         // Make sure all stages are connected, in case we are being disposed via an error path and
         // were not stitched at the time of the error.
@@ -531,10 +534,10 @@ boost::optional<ShardId> Pipeline::needsSpecificShardMerger() const {
     return boost::none;
 }
 
-bool Pipeline::needsMongosMerger() const {
+bool Pipeline::needsRouterMerger() const {
     return std::any_of(_sources.begin(), _sources.end(), [&](const auto& stage) {
         return stage->constraints(SplitState::kSplitForMerge).resolvedHostTypeRequirement(pCtx) ==
-            HostTypeRequirement::kMongoS;
+            HostTypeRequirement::kRouter;
     });
 }
 
@@ -553,7 +556,7 @@ bool Pipeline::needsShard() const {
     });
 }
 
-bool Pipeline::requiredToRunOnMongos() const {
+bool Pipeline::requiredToRunOnRouter() const {
     invariant(_splitState != SplitState::kSplitForShards);
 
     for (auto&& stage : _sources) {
@@ -565,12 +568,12 @@ bool Pipeline::requiredToRunOnMongos() const {
 
         auto hostRequirement = stage->constraints(_splitState).resolvedHostTypeRequirement(pCtx);
 
-        // If a mongoS-only stage occurs before a splittable stage, or if the pipeline is already
-        // split, this entire pipeline must run on mongoS.
-        if (hostRequirement == HostTypeRequirement::kMongoS) {
+        // If a router-only stage occurs before a splittable stage, or if the pipeline is already
+        // split, this entire pipeline must run on router.
+        if (hostRequirement == HostTypeRequirement::kRouter) {
             LOGV2_DEBUG(8346100,
                         1,
-                        "stage {stage} is required to run on mongoS",
+                        "stage {stage} is required to run on router",
                         "stage"_attr = stage->getSourceName());
             return true;
         }
@@ -755,7 +758,7 @@ DepsTracker Pipeline::getDependenciesForContainer(
         // There is a text score available. If we are the first half of a split pipeline, then we
         // have to assume future stages might depend on the textScore (unless we've encountered a
         // stage that doesn't preserve metadata).
-        if (expCtx->needsMerge && !knowAllMeta) {
+        if (expCtx->getNeedsMerge() && !knowAllMeta) {
             deps.setNeedsMetadata(DocumentMetadataFields::kTextScore, true);
         }
     } else {
@@ -766,7 +769,7 @@ DepsTracker Pipeline::getDependenciesForContainer(
     return deps;
 }
 
-Status Pipeline::canRunOnMongos() const {
+Status Pipeline::canRunOnRouter() const {
     for (auto&& stage : _sources) {
         auto constraints = stage->constraints(_splitState);
         auto hostRequirement = constraints.resolvedHostTypeRequirement(pCtx);
@@ -777,7 +780,7 @@ Status Pipeline::canRunOnMongos() const {
         const bool mustWriteToDisk =
             (constraints.diskRequirement == DiskUseRequirement::kWritesPersistentData);
         const bool mayWriteTmpDataAndDiskUseIsAllowed =
-            (pCtx->allowDiskUse && !pCtx->opCtx->readOnly() &&
+            (pCtx->getAllowDiskUse() && !pCtx->getOperationContext()->readOnly() &&
              constraints.diskRequirement == DiskUseRequirement::kWritesTmpData);
         const bool needsDisk = (mustWriteToDisk || mayWriteTmpDataAndDiskUseIsAllowed);
 
@@ -889,8 +892,18 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
     pipeline->validateCommon(alreadyOptimized);
 
     if (opts.attachCursorSource) {
-        pipeline = expCtx->mongoProcessInterface->preparePipelineForExecution(
-            pipeline.release(), opts.shardTargetingPolicy, std::move(opts.readConcern));
+        // Creating AggregateCommandRequest in order to pass all necessary 'opts' to the
+        // preparePipelineForExecution().
+        AggregateCommandRequest aggRequest(expCtx->getNamespaceString(),
+                                           pipeline->serializeToBson());
+        pipeline = expCtx->getMongoProcessInterface()->preparePipelineForExecution(
+            expCtx,
+            aggRequest,
+            pipeline.release(),
+            boost::none /* shardCursorsSortSpec */,
+            opts.shardTargetingPolicy,
+            std::move(opts.readConcern),
+            opts.useCollectionDefaultCollator);
     }
 
     return pipeline;
@@ -924,12 +937,14 @@ std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipeline(
     pipeline->validateCommon(alreadyOptimized);
     aggRequest.setPipeline(pipeline->serializeToBson());
 
-    return expCtx->mongoProcessInterface->preparePipelineForExecution(aggRequest,
-                                                                      pipeline.release(),
-                                                                      expCtx,
-                                                                      shardCursorsSortSpec,
-                                                                      opts.shardTargetingPolicy,
-                                                                      std::move(readConcern));
+    return expCtx->getMongoProcessInterface()->preparePipelineForExecution(
+        expCtx,
+        aggRequest,
+        pipeline.release(),
+        shardCursorsSortSpec,
+        opts.shardTargetingPolicy,
+        std::move(readConcern),
+        opts.useCollectionDefaultCollator);
 }
 
 Pipeline::SourceContainer::iterator Pipeline::optimizeEndOfPipeline(
@@ -945,20 +960,53 @@ Pipeline::SourceContainer::iterator Pipeline::optimizeEndOfPipeline(
     return std::next(itr);
 }
 
+std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::viewPipelineHelperForSearch(
+    const boost::intrusive_ptr<ExpressionContext>& subPipelineExpCtx,
+    ResolvedNamespace resolvedNs,
+    std::vector<BSONObj> currentPipeline,
+    MakePipelineOptions opts,
+    NamespaceString originalNs) {
+    // Search queries on mongot-indexed views behave differently than non-search aggregations on
+    // views. When a user pipeline contains a $search/$vectorSearch stage, idLookup will apply the
+    // view transforms as part of its subpipeline. In this way, the view stages will always
+    // be applied directly after $_internalSearchMongotRemote and before the remaining
+    // stages of the user pipeline. This is to ensure the stages following
+    // $search/$vectorSearch in the user pipeline will receive the modified documents: when
+    // storedSource is disabled, idLookup will retrieve full/unmodified documents during
+    // (from the _id values returned by mongot), apply the view's data transforms, and pass
+    // said transformed documents through the rest of the user pipeline.
+
+    // For returnStoredSource queries, the documents returned by mongot already include the
+    // fields transformed by the view pipeline. As such, mongod doesn't need to apply
+    // the view pipeline after idLookup. But for regular/non-stored source search queries, we
+    // need to set the resolved namespace so that idLookup knows to apply the view.
+    if (!search_helper_bson_obj::isStoredSource(currentPipeline)) {
+        const ResolvedView resolvedView{resolvedNs.ns, resolvedNs.pipeline, BSONObj()};
+        search_helpers::setResolvedNamespaceForSearch(originalNs, resolvedView, subPipelineExpCtx);
+    }
+    // return the user pipeline without appending the view stages.
+    return Pipeline::makePipeline(currentPipeline, subPipelineExpCtx, opts);
+}
 std::unique_ptr<Pipeline, PipelineDeleter> Pipeline::makePipelineFromViewDefinition(
     const boost::intrusive_ptr<ExpressionContext>& subPipelineExpCtx,
-    ExpressionContext::ResolvedNamespace resolvedNs,
+    ResolvedNamespace resolvedNs,
     std::vector<BSONObj> currentPipeline,
-    MakePipelineOptions opts) {
+    MakePipelineOptions opts,
+    NamespaceString originalNs) {
 
     // Update subpipeline's ExpressionContext with the resolved namespace.
-    subPipelineExpCtx->ns = resolvedNs.ns;
+    subPipelineExpCtx->setNamespaceString(resolvedNs.ns);
 
     if (resolvedNs.pipeline.empty()) {
         return Pipeline::makePipeline(currentPipeline, subPipelineExpCtx, opts);
     }
-    auto resolvedPipeline = std::move(resolvedNs.pipeline);
 
+    if (search_helper_bson_obj::isMongotPipeline(currentPipeline)) {
+        return Pipeline::viewPipelineHelperForSearch(
+            subPipelineExpCtx, resolvedNs, currentPipeline, opts, originalNs);
+    }
+
+    auto resolvedPipeline = std::move(resolvedNs.pipeline);
     // When we get a resolved pipeline back, we may not yet have its namespaces available in the
     // expression context, e.g. if the view's pipeline contains a $lookup on another collection.
     LiteParsedPipeline liteParsedPipeline(resolvedNs.ns, resolvedPipeline);

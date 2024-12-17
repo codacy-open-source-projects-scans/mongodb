@@ -95,7 +95,6 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -441,6 +440,13 @@ public:
             return _cmd.getGenericArguments();
         }
 
+        bool canRetryOnStaleConfigOrShardCannotRefreshDueToLocksHeld(
+            const OpMsgRequest& request) const override {
+            // Can not rerun the command when executing a GetMore command as the cursor may already
+            // be lost.
+            return false;
+        }
+
         /**
          * Implements populating 'nextBatch' with up to 'batchSize' documents from the plan executor
          * 'exec'. Outputs the number of documents and relevant size statistics in 'numResults' and
@@ -725,12 +731,6 @@ public:
                 curOp->setGenericCursor(lk, cursorPin->toGenericCursor());
             }
 
-            // If this is a change stream cursor, check whether the tenant has migrated elsewhere.
-            if (cursorPin->getExecutor()->getPostBatchResumeToken()["_data"]) {
-                tenant_migration_access_blocker::assertCanGetMoreChangeStream(opCtx,
-                                                                              _cmd.getDbName());
-            }
-
             // If the 'failGetMoreAfterCursorCheckout' failpoint is enabled, throw an exception with
             // the given 'errorCode' value, or ErrorCodes::InternalError if 'errorCode' is omitted.
             failGetMoreAfterCursorCheckout.executeIf(
@@ -894,7 +894,7 @@ public:
             };
 
             // Counted as a getMore, not as a command.
-            globalOpCounters.gotGetMore();
+            serviceOpCounters(opCtx).gotGetMore();
             auto curOp = CurOp::get(opCtx);
             NamespaceString nss = ns();
             int64_t cursorId = _cmd.getCommandParameter();

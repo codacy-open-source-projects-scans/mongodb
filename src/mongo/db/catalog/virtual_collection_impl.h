@@ -48,7 +48,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/capped_visibility.h"
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_options.h"
@@ -56,6 +55,7 @@
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/catalog/virtual_collection_options.h"
+#include "mongo/db/collection_crud/capped_visibility.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/matcher/expression_parser.h"
@@ -63,10 +63,10 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/change_stream_pre_and_post_images_options_gen.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/virtual_collection/external_record_store.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
 #include "mongo/db/storage/durable_catalog_entry.h"
-#include "mongo/db/storage/external_record_store.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
@@ -495,15 +495,15 @@ public:
     }
 
     long long numRecords(OperationContext* opCtx) const final {
-        return _shared->_recordStore->numRecords(opCtx);
+        return _shared->_recordStore->numRecords();
     }
 
     long long dataSize(OperationContext* opCtx) const final {
-        return _shared->_recordStore->dataSize(opCtx);
+        return _shared->_recordStore->dataSize();
     }
 
     bool isEmpty(OperationContext* opCtx) const final {
-        return _shared->_recordStore->dataSize(opCtx) == 0LL;
+        return _shared->_recordStore->dataSize() == 0LL;
     }
 
     inline int averageObjectSize(OperationContext* opCtx) const override {

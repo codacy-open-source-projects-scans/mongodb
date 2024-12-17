@@ -34,7 +34,8 @@
 #include <utility>
 
 #include "mongo/base/checked_cast.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/storage_engine_init.h"
@@ -144,7 +145,11 @@ public:
         bool _createShardingState = true;
     };
 
-    explicit MongoDScopedGlobalServiceContextForTest(Options options);
+    MongoDScopedGlobalServiceContextForTest(Options options, bool shouldSetupTL);
+    MongoDScopedGlobalServiceContextForTest(
+        ServiceContext::UniqueServiceContext serviceContextHolder,
+        Options options,
+        bool shouldSetupTL);
 
     ~MongoDScopedGlobalServiceContextForTest() override;
 
@@ -152,9 +157,20 @@ public:
         return _journalListener.get();
     }
 
+    OpObserverRegistry* opObserverRegistry() {
+        return _opObserverRegistry;
+    }
+
 private:
+    static ServiceContext::UniqueServiceContext makeServiceContext(
+        bool useMockClock,
+        Milliseconds autoAdvancingMockClockIncrement,
+        std::unique_ptr<TickSource> tickSource);
+
     // The JournalListener must stay alive as long as the storage engine is running.
     std::unique_ptr<JournalListener> _journalListener;
+
+    OpObserverRegistry* _opObserverRegistry;
 
     struct {
         std::string engine;
@@ -162,7 +178,7 @@ private:
         bool repair;
     } _stashedStorageParams;
 
-    unittest::TempDir _tempDir;
+    unittest::TempDir _tempDir{"service_context_d_test_fixture"};
 };
 
 class ServiceContextMongoDTest : public ServiceContextTest {
@@ -170,12 +186,19 @@ public:
     using Options = MongoDScopedGlobalServiceContextForTest::Options;
 
     ServiceContextMongoDTest() : ServiceContextMongoDTest{Options{}} {}
+    explicit ServiceContextMongoDTest(
+        std::unique_ptr<MongoDScopedGlobalServiceContextForTest> scopedServiceContext)
+        : ServiceContextTest(std::move(scopedServiceContext)) {}
     explicit ServiceContextMongoDTest(Options options)
-        : ServiceContextTest(
-              std::make_unique<MongoDScopedGlobalServiceContextForTest>(std::move(options))) {}
+        : ServiceContextTest(std::make_unique<MongoDScopedGlobalServiceContextForTest>(
+              std::move(options), shouldSetupTL)) {}
 
     JournalListener* journalListener() const {
         return mongoDscopedServiceContext()->journalListener();
+    }
+
+    OpObserverRegistry* opObserverRegistry() {
+        return mongoDscopedServiceContext()->opObserverRegistry();
     }
 
 private:

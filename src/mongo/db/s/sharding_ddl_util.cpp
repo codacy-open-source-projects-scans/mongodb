@@ -34,6 +34,7 @@
 #include <array>
 #include <boost/cstdint.hpp>
 #include <boost/smart_ptr.hpp>
+#include <cstddef>
 #include <cstdint>
 #include <iterator>
 #include <ostream>
@@ -44,6 +45,7 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bson_field.h"
@@ -90,6 +92,7 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/rpc/unique_message.h"
+#include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_collection_gen.h"
@@ -102,6 +105,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/set_allow_migrations_gen.h"
 #include "mongo/s/shard_key_pattern.h"
+#include "mongo/s/shard_version_factory.h"
 #include "mongo/s/sharding_cluster_parameters_gen.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -123,6 +127,8 @@
 
 
 namespace mongo {
+
+using namespace fmt::literals;
 
 static const size_t kSerializedErrorStatusMaxSize = 1024 * 2;
 
@@ -175,7 +181,7 @@ void deleteChunks(OperationContext* opCtx,
     auto hint = BSON(ChunkType::collectionUUID() << 1 << ChunkType::min() << 1);
 
     BatchedCommandRequest request([&] {
-        write_ops::DeleteCommandRequest deleteOp(ChunkType::ConfigNS);
+        write_ops::DeleteCommandRequest deleteOp(NamespaceString::kConfigsvrChunksNamespace);
         deleteOp.setDeletes({[&] {
             write_ops::DeleteOpEntry entry;
             entry.setQ(BSON(ChunkType::collectionUUID << collectionUUID));
@@ -377,17 +383,51 @@ void removeTagsMetadataFromConfig(OperationContext* opCtx,
                                              << nss.toStringForErrorMsg());
 }
 
-void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONObj& filter) {
+void removeQueryAnalyzerMetadata(OperationContext* opCtx,
+                                 const std::vector<UUID>& collectionUUIDs) {
+    auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+    std::vector<mongo::write_ops::DeleteOpEntry> deleteOps;
+    for (size_t i = 0; i < collectionUUIDs.size(); ++i) {
+        write_ops::DeleteOpEntry entry;
+        entry.setQ(BSON(analyze_shard_key::QueryAnalyzerDocument::kCollectionUuidFieldName
+                        << collectionUUIDs[i]));
+        entry.setMulti(false);
+        deleteOps.push_back(std::move(entry));
+        // Ensure that a single batch request does not exceed the maximum BSON size. Considering
+        // that each UUID is encoded using 16 bytes, using kMaxWriteBatchSize ensures that each
+        // command will weigh around 1.6MB.
+        if (deleteOps.size() == write_ops::kMaxWriteBatchSize || i + 1 == collectionUUIDs.size()) {
+            write_ops::DeleteCommandRequest deleteCmd(
+                NamespaceString::kConfigQueryAnalyzersNamespace);
+            generic_argument_util::setMajorityWriteConcern(deleteCmd);
+            deleteCmd.setDeletes(std::move(deleteOps));
+            const auto deleteResult = configShard->runCommandWithFixedRetryAttempts(
+                opCtx,
+                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                DatabaseName::kConfig,
+                deleteCmd.toBSON(),
+                Shard::RetryPolicy::kIdempotent);
+
+            uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(deleteResult),
+                                       str::stream()
+                                           << "Failed to remove query analyzer documents");
+            deleteOps.clear();
+        }
+    }
+}
+
+void removeQueryAnalyzerMetadata(OperationContext* opCtx,
+                                 const NamespaceString& nss,
+                                 const OperationSessionInfo& osi) {
     auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
     write_ops::DeleteCommandRequest deleteCmd(NamespaceString::kConfigQueryAnalyzersNamespace);
-    deleteCmd.setDeletes({[&] {
-        write_ops::DeleteOpEntry entry;
-        entry.setQ(filter);
-        entry.setMulti(true);
-        return entry;
-    }()});
+    generic_argument_util::setOperationSessionInfo(deleteCmd, osi);
     generic_argument_util::setMajorityWriteConcern(deleteCmd);
-
+    write_ops::DeleteOpEntry entry;
+    entry.setQ(BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName
+                    << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault())));
+    entry.setMulti(false);
+    deleteCmd.setDeletes({std::move(entry)});
     const auto deleteResult = configShard->runCommandWithFixedRetryAttempts(
         opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
@@ -395,10 +435,8 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONOb
         deleteCmd.toBSON(),
         Shard::RetryPolicy::kIdempotent);
 
-    uassertStatusOKWithContext(
-        Shard::CommandResponse::getEffectiveStatus(deleteResult),
-        str::stream() << "Failed to remove query analyzer documents that match the filter"
-                      << filter);
+    uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(deleteResult),
+                               str::stream() << "Failed to remove query analyzer documents");
 }
 
 void removeCollAndChunksMetadataFromConfig(
@@ -434,12 +472,9 @@ void removeCollAndChunksMetadataFromConfig(
 void checkRenamePreconditions(OperationContext* opCtx,
                               const NamespaceString& toNss,
                               const boost::optional<CollectionType>& optToCollType,
+                              bool isSourceUnsharded,
                               const bool dropTarget) {
-    uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Namespace of target collection too long. Namespace: "
-                          << toNss.toStringForErrorMsg()
-                          << " Max: " << NamespaceString::MaxNsShardedCollectionLen,
-            toNss.size() <= NamespaceString::MaxNsShardedCollectionLen);
+    sharding_ddl_util::assertNamespaceLengthLimit(toNss, isSourceUnsharded);
 
     if (!dropTarget) {
         // Check that the target collection doesn't exist if dropTarget is not set
@@ -466,9 +501,8 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadyTrackedWithOpt
     const BSONObj& collation,
     bool unique,
     bool unsplittable) {
-    auto cri = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, nss));
-    const auto& cm = cri.cm;
+    auto cm = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(opCtx, nss));
 
     if (!cm.hasRoutingTable()) {
         return boost::none;
@@ -490,7 +524,8 @@ boost::optional<CreateCollectionResponse> checkIfCollectionAlreadyTrackedWithOpt
                 SimpleBSONObjComparator::kInstance.evaluate(defaultCollator == collation) &&
                 cm.isUnique() == unique && cm.isUnsplittable() == unsplittable);
 
-    CreateCollectionResponse response(cri.getCollectionVersion());
+    CreateCollectionResponse response(
+        ShardVersionFactory::make(cm, boost::none /* index version */));
     response.setCollectionUUID(cm.getUUID());
     return response;
 }
@@ -580,11 +615,13 @@ void sendDropCollectionParticipantCommandToShards(OperationContext* opCtx,
                                                   const OperationSessionInfo& osi,
                                                   bool fromMigrate,
                                                   bool dropSystemCollections,
-                                                  const boost::optional<UUID>& collectionUUID) {
+                                                  const boost::optional<UUID>& collectionUUID,
+                                                  bool requireCollectionEmpty) {
     ShardsvrDropCollectionParticipant dropCollectionParticipant(nss);
     dropCollectionParticipant.setFromMigrate(fromMigrate);
     dropCollectionParticipant.setDropSystemCollections(dropSystemCollections);
     dropCollectionParticipant.setCollectionUUID(collectionUUID);
+    dropCollectionParticipant.setRequireCollectionEmpty(requireCollectionEmpty);
     generic_argument_util::setOperationSessionInfo(dropCollectionParticipant, osi);
     generic_argument_util::setMajorityWriteConcern(dropCollectionParticipant);
     auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ShardsvrDropCollectionParticipant>>(
@@ -712,13 +749,14 @@ std::vector<BatchedCommandRequest> getOperationsToCreateOrShardCollectionOnShard
     }
 
     write_ops::DeleteCommandRequest deleteChunkIfTheCollectionExistsAsUnsplittable(
-        ChunkType::ConfigNS);
+        NamespaceString::kConfigsvrChunksNamespace);
     deleteChunkIfTheCollectionExistsAsUnsplittable.setDeletes({[&] {
         auto deleteQuery = BSON(ChunkType::collectionUUID.name() << uuid);
         return write_ops::DeleteOpEntry{std::move(deleteQuery), false /* multi */};
     }()});
 
-    write_ops::InsertCommandRequest insertChunks(ChunkType::ConfigNS, std::move(chunkEntries));
+    write_ops::InsertCommandRequest insertChunks(NamespaceString::kConfigsvrChunksNamespace,
+                                                 std::move(chunkEntries));
     insertChunks.setWriteCommandRequestBase([] {
         write_ops::WriteCommandRequestBase wcb;
         wcb.setOrdered(false);
@@ -826,6 +864,18 @@ void assertDataMovementAllowed() {
             "Cannot migrate data in a cluster before a second shard has been successfully added",
             clusterHasTwoOrMoreShards);
 }
+
+
+void assertNamespaceLengthLimit(const NamespaceString& nss, bool isUnsharded) {
+    auto maxNsLen = isUnsharded ? NamespaceString::MaxUserNsCollectionLen
+                                : NamespaceString::MaxUserNsShardedCollectionLen;
+    uassert(
+        ErrorCodes::InvalidNamespace,
+        "Namespace too log. The namespace {} is {} characters long, but the maximum allowed is {}"_format(
+            nss.toStringForErrorMsg(), nss.size(), maxNsLen),
+        nss.size() <= maxNsLen);
+}
+
 
 }  // namespace sharding_ddl_util
 }  // namespace mongo

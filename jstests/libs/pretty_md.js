@@ -7,6 +7,7 @@
 import {normalizeArray, tojsonMultiLineSortKeys} from "jstests/libs/golden_test.js";
 import {
     formatExplainRoot,
+    getEngine,
 } from "jstests/libs/query/analyze_plan.js";
 
 let sectionCount = 1;
@@ -60,6 +61,9 @@ export function outputAggregationPlanAndResults(
     code(normalizeArray(results, shouldSortResults));
 
     subSection("Summarized explain");
+    if (!explain.hasOwnProperty("shards")) {
+        line("Execution Engine: " + getEngine(explain));
+    }
     code(tojsonMultiLineSortKeys(flatPlan));
 
     linebreak();
@@ -107,6 +111,58 @@ export function outputPlanCacheStats(coll) {
     linebreak();
 }
 
+function stripFields(obj, fields) {
+    if (typeof obj === 'object') {
+        for (let name of fields) {
+            delete obj[name];
+        }
+        for (let value of Object.values(obj)) {
+            stripFields(value, fields);
+        }
+    } else if (Array.isArray(obj)) {
+        for (let elem in obj) {
+            stripFields(elem, fields);
+        }
+    }
+}
+
+/**
+ * Format the explain result for a given find query.
+ */
+export function outputShardedFindSummaryAndResults(queryObj) {
+    const explain = queryObj.explain();
+    const winningPlan = explain.queryPlanner.winningPlan;
+
+    subSection(`Find : "${tojson(queryObj._filter)}", additional params: ${
+        tojson(queryObj._additionalCmdParams)}`);
+
+    subSection("Stage");
+    codeOneLine(winningPlan.stage);
+
+    subSection("Shard winning plans");
+    let previous;
+    for (let shard of winningPlan.shards) {
+        // Most queries will result in identical plans across shards.
+        // To minimise visual clutter when reviewing golden output, de-dupe
+        // identical shard results.
+        let shardPlan = shard.winningPlan.queryPlan || shard.winningPlan;
+        // Strip out fields which vary with and without feature flags for a consistent
+        // golden output.
+        stripFields(shardPlan, ["isCached", "planNodeId"]);
+        let current = tojsonMultiLineSortKeys(shardPlan);
+        if (previous != current) {
+            code(current);
+            previous = current;
+        }
+    }
+
+    subSection("Results");
+    let res = queryObj.toArray();
+    code(tojson(res));
+    linebreak();
+    return res;
+}
+
 /**
  * Helper function that manually computes the unique values for the given key in the given
  * collection (filtered on `filter`). Useful to compare with the actual output from a distinct()
@@ -115,6 +171,7 @@ export function outputPlanCacheStats(coll) {
  */
 function getUniqueResults(coll, key, filter) {
     return Array
-        .from(new Set(coll.find(filter, {[key]: 1, _id: 0}).toArray().map(o => o ? o[key] : null)))
+        .from(new Set(
+            coll.find(filter, {[key]: 1, _id: 0}).toArray().flatMap(o => o ? o[key] : null)))
         .sort();
 }

@@ -75,7 +75,6 @@
 #include "mongo/db/catalog/drop_indexes.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
@@ -89,12 +88,13 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/global_settings.h"
-#include "mongo/db/index/index_build_interceptor.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_metadata_access_stats.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/index/skipped_record_tracker.h"
-#include "mongo/db/index_build_entry_helpers.h"
+#include "mongo/db/index_builds/index_build_entry_helpers.h"
+#include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/multi_index_block.h"
+#include "mongo/db/index_builds/skipped_record_tracker.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
@@ -106,7 +106,6 @@
 #include "mongo/db/query/wildcard_multikey_paths.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/apply_ops.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
@@ -398,10 +397,8 @@ public:
         // to avoid the invariant in ReplClientInfo::setLastOp that the optime only goes forward.
         repl::ReplClientInfo::forClient(_opCtx->getClient()).clearLastOp();
 
-        auto registry = std::make_unique<OpObserverRegistry>();
-        registry->addObserver(
+        opObserverRegistry()->addObserver(
             std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
-        _opCtx->getServiceContext()->setOpObserver(std::move(registry));
 
         repl::createOplog(_opCtx);
 
@@ -1861,11 +1858,6 @@ private:
 
 public:
     void run(bool simulatePrimary) {
-        auto storageInterface = repl::StorageInterface::get(_opCtx);
-        repl::DropPendingCollectionReaper::set(
-            _opCtx->getServiceContext(),
-            std::make_unique<repl::DropPendingCollectionReaper>(storageInterface));
-
         auto storageEngine = _opCtx->getServiceContext()->getStorageEngine();
         auto durableCatalog = storageEngine->getCatalog();
 

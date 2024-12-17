@@ -15,7 +15,6 @@ import {
     ChangeStreamTest,
     isChangeStreamPassthrough
 } from "jstests/libs/query/change_stream_util.js";
-import {TwoPhaseDropCollectionTest} from "jstests/replsets/libs/two_phase_drops.js";
 
 const coll = assertDropAndRecreateCollection(db, "change_post_image");
 const cst = new ChangeStreamTest(db);
@@ -136,11 +135,8 @@ cursor = cst.startWatchingChanges({
     aggregateOptions: {cursor: {batchSize: 0}}
 });
 
-// Drop the collection and wait until two-phase drop finishes.
+// Drop the collection.
 assertDropCollection(db, coll.getName());
-assert.soon(function() {
-    return !TwoPhaseDropCollectionTest.collectionIsPendingDropInDatabase(db, coll.getName());
-});
 // If this test is running with secondary read preference, it's necessary for the drop
 // to propagate to all secondary nodes and be available for majority reads before we can
 // assume looking up the document will fail.
@@ -192,6 +188,11 @@ assertCreateCollection(db, coll.getName());
 // collection.
 assert.commandWorked(coll.insert({_id: "fullDocument is lookup 2"}));
 
+// If this test is running with secondary read preference, it's necessary for the insert
+// to propagate to all secondary nodes and be available for majority reads before we can
+// assume looking up the document will succeed.
+FixtureHelpers.awaitLastOpCommitted(db);
+
 // After a collection has been dropped and re-created, verify a change stream can be created with
 // 'fullDocument: updateLookup' using a resume token from before the collection was dropped.
 cursor = cst.startWatchingChanges({
@@ -209,13 +210,13 @@ assert.eq(latestChange.operationType, "insert");
 assert(latestChange.hasOwnProperty("fullDocument"));
 assert.eq(latestChange.fullDocument, {_id: "fullDocument is lookup 2"});
 
-// The next entry is the 'update' operation. Confirm that the next entry's post-image is null
-// because the original collection (i.e. the collection that the 'update' was applied to) has
-// been dropped and the new incarnation of the collection has a different UUID.
+// The next entry is the 'update' operation. Confirm that the next entry's post-image is not-null
+// even though the original collection has been dropped and the new incarnation of the collection
+// with the same name has a different UUID.
 latestChange = cst.getOneChange(cursor);
 assert.eq(latestChange.operationType, "update");
 assert(latestChange.hasOwnProperty("fullDocument"));
-assert.eq(latestChange.fullDocument, null);
+assert.eq(latestChange.fullDocument, {"_id": "fullDocument is lookup 2"});
 
 jsTestLog("Testing full document lookup with a real getMore");
 assert.commandWorked(coll.insert({_id: "getMoreEnabled"}));
@@ -238,10 +239,6 @@ cursor = cst.startWatchingChanges({
 });
 assert.commandWorked(coll.insert({_id: "testing invalidate"}));
 assertDropCollection(db, coll.getName());
-// Wait until two-phase drop finishes.
-assert.soon(function() {
-    return !TwoPhaseDropCollectionTest.collectionIsPendingDropInDatabase(db, coll.getName());
-});
 latestChange = cst.getOneChange(cursor);
 assert.eq(latestChange.operationType, "insert");
 latestChange = cst.getOneChange(cursor);

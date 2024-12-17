@@ -20,7 +20,7 @@
  *   # SERVER-56565 avoid CS stepdowns, since  an election may trigger a  refresh of stale metadata
  *   # that form part of the test setup.
  *   does_not_support_stepdowns,
- *    # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  */
@@ -399,6 +399,7 @@ let testCases = {
     transitionToDedicatedConfigServer: {skip: "primary only"},
     transitionToShardedCluster: {skip: "primary only"},
     unshardCollection: {skip: "primary only"},
+    untrackUnshardedCollection: {skip: "primary only"},
     update: {skip: "primary only"},
     updateRole: {skip: "primary only"},
     updateSearchIndex: {skip: "primary only"},

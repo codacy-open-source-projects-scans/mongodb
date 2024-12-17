@@ -93,7 +93,9 @@ vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& ele
     vector<pair<string, vector<BSONObj>>> rawFacetPipelines;
     for (auto&& facetElem : elem.embeddedObject()) {
         const auto facetName = facetElem.fieldNameStringData();
-        FieldPath::uassertValidFieldName(facetName);
+        uassertStatusOKWithContext(
+            FieldPath::validateFieldName(facetName),
+            "$facet pipeline names must follow the naming rules of field path expressions.");
         uassert(40170,
                 str::stream() << "arguments to $facet must be arrays, " << facetName << " is type "
                               << typeName(facetElem.type()),
@@ -150,7 +152,7 @@ std::unique_ptr<DocumentSourceFacet::LiteParsed> DocumentSourceFacet::LiteParsed
     std::vector<LiteParsedPipeline> liteParsedPipelines;
 
     for (auto&& rawPipeline : extractRawPipelines(spec)) {
-        liteParsedPipelines.emplace_back(LiteParsedPipeline(nss, rawPipeline.second));
+        liteParsedPipelines.emplace_back(nss, rawPipeline.second);
     }
 
     return std::make_unique<DocumentSourceFacet::LiteParsed>(spec.fieldName(),
@@ -178,7 +180,7 @@ void DocumentSourceFacet::setSource(DocumentSource* source) {
 void DocumentSourceFacet::doDispose() {
     for (auto&& facet : _facets) {
         facet.pipeline.get_deleter().dismissDisposal();
-        facet.pipeline->dispose(pExpCtx->opCtx);
+        facet.pipeline->dispose(pExpCtx->getOperationContext());
     }
 }
 
@@ -260,7 +262,7 @@ void DocumentSourceFacet::reattachToOperationContext(OperationContext* opCtx) {
 }
 
 bool DocumentSourceFacet::validateOperationContext(const OperationContext* opCtx) const {
-    return getContext()->opCtx == opCtx &&
+    return getContext()->getOperationContext() == opCtx &&
         std::all_of(_facets.begin(), _facets.end(), [opCtx](const auto& f) {
                return f.pipeline->validateOperationContext(opCtx);
            });
@@ -268,16 +270,16 @@ bool DocumentSourceFacet::validateOperationContext(const OperationContext* opCtx
 
 StageConstraints DocumentSourceFacet::constraints(Pipeline::SplitState state) const {
     // Currently we don't split $facet to have a merger part and a shards part (see SERVER-24154).
-    // This means that if any stage in any of the $facet pipelines needs to run on mongoS, then the
+    // This means that if any stage in any of the $facet pipelines needs to run on router, then the
     // entire $facet stage must run there.
-    static const HostTypeRequirement kDefinitiveHost = HostTypeRequirement::kMongoS;
+    static const HostTypeRequirement kDefinitiveHost = HostTypeRequirement::kRouter;
     HostTypeRequirement host = HostTypeRequirement::kNone;
     boost::optional<ShardId> mergeShardId;
 
     // Iterate through each pipeline to determine the HostTypeRequirement for the $facet stage.
     // Because we have already validated that there are no conflicting HostTypeRequirements during
-    // parsing, if we observe a host type of 'kMongos' in any of the pipelines then the entire
-    // $facet stage must run on mongos and iteration can stop. At the end of this process, 'host'
+    // parsing, if we observe a host type of 'kRouter' in any of the pipelines then the entire
+    // $facet stage must run on router and iteration can stop. At the end of this process, 'host'
     // will be the $facet's final HostTypeRequirement.
     for (auto fi = _facets.begin(); fi != _facets.end() && host != kDefinitiveHost; fi++) {
         const auto& sources = fi->pipeline->getSources();
@@ -370,7 +372,7 @@ void DocumentSourceFacet::addVariableRefs(std::set<Variables::Id>* refs) const {
 intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
 
-    boost::optional<std::string> needsMongoS;
+    boost::optional<std::string> needsRouter;
     boost::optional<std::string> needsShard;
 
     std::vector<FacetPipeline> facetPipelines;
@@ -398,21 +400,21 @@ intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
         // These checks potentially require that we check the catalog to determine where our data
         // lives. In circumstances where we aren't actually running the query, we don't need to do
         // this (and it can erroneously error - SERVER-83912).
-        if (expCtx->mongoProcessInterface->isExpectedToExecuteQueries()) {
+        if (expCtx->getMongoProcessInterface()->isExpectedToExecuteQueries()) {
             // Validate that none of the facet pipelines have any conflicting HostTypeRequirements.
             // This verifies both that all stages within each pipeline are consistent, and that the
             // pipelines are consistent with one another.
             if (!needsShard && pipeline->needsShard()) {
                 needsShard.emplace(facetName);
             }
-            if (!needsMongoS && pipeline->needsMongosMerger()) {
-                needsMongoS.emplace(facetName);
+            if (!needsRouter && pipeline->needsRouterMerger()) {
+                needsRouter.emplace(facetName);
             }
             uassert(ErrorCodes::IllegalOperation,
-                    str::stream() << "$facet pipeline '" << *needsMongoS
-                                  << "' must run on mongoS, but '" << *needsShard
+                    str::stream() << "$facet pipeline '" << *needsRouter
+                                  << "' must run on router, but '" << *needsShard
                                   << "' requires a shard",
-                    !(needsShard && needsMongoS));
+                    !(needsShard && needsRouter));
         }
 
         facetPipelines.emplace_back(facetName, std::move(pipeline));

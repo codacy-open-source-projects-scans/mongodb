@@ -5,13 +5,14 @@
  *   featureFlagShardFilteringDistinctScan,
  * ]
  */
-import {outputDistinctPlanAndResults, section} from "jstests/libs/pretty_md.js";
+import {outputDistinctPlanAndResults, section, subSection} from "jstests/libs/pretty_md.js";
 
 const coll = db[jsTestName()];
 
 section("No DISTINCT_SCAN candidate considered");
 coll.drop();
 coll.createIndex({x: 1});
+coll.createIndex({x: -1});
 coll.createIndex({y: 1, x: 1});
 coll.createIndex({z: 1, y: 1});
 coll.insertMany([
@@ -25,9 +26,19 @@ coll.insertMany([
 ]);
 outputDistinctPlanAndResults(coll, "x", {x: {$gt: 3}, z: 5});
 
+coll.insertMany([{x: [1, 2, 3]}, {x: [3, 4, 5]}]);
+
+subSection("No DISTINCT_SCAN candidate considered due to multikeyness");
+outputDistinctPlanAndResults(coll, "x", {x: 3});
+outputDistinctPlanAndResults(coll, "x", {x: {$gt: 3}, z: 5});
+
+subSection("Only DISTINCT_SCAN candidates considered despite multikeyness");
+outputDistinctPlanAndResults(coll, "x");
+
 section("Only DISTINCT_SCAN candidates considered");
 coll.drop();
 coll.createIndex({x: 1, y: 1});
+coll.createIndex({x: -1, y: 1});
 coll.createIndex({y: 1, x: 1});
 coll.createIndex({x: 1, z: 1, y: 1});
 coll.insertMany([
@@ -39,6 +50,8 @@ coll.insertMany([
     {x: 8, y: 7, z: 3},
     {x: 8, y: 8, z: 3},
 ]);
+outputDistinctPlanAndResults(coll, "x");
+outputDistinctPlanAndResults(coll, "x", {x: 3});
 outputDistinctPlanAndResults(coll, "x", {x: {$gt: 3}, y: 5});
 
 section("Prefer DISTINCT_SCAN for many duplicate values in the collection");
@@ -50,7 +63,7 @@ coll.createIndex({x: 1, y: 1});
 coll.createIndex({y: 1, z: 1});
 outputDistinctPlanAndResults(coll, "x", {x: {$gt: -1}, y: {$lt: 250}});
 
-section("Prefer IXSCAN for no duplicate values in the collection");
+section("Prefer FETCH + filter + IXSCAN for more selective predicate on y");
 coll.drop();
 for (let i = 0; i < 100; ++i)
     coll.insert({x: i, y: i + 100, z: i + 200});

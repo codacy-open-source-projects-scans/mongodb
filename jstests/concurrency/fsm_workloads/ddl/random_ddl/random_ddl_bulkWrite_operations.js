@@ -10,7 +10,9 @@
  *   does_not_support_stepdowns,
  *   # Can be removed once PM-1965-Milestone-1 is completed.
  *   does_not_support_transactions,
- *   requires_fcv_80
+ *   requires_fcv_80,
+ *   # Relies on internalInsertMaxBatchSize to be 64 or above, but it may be fuzzed to lower values.
+ *   does_not_support_config_fuzzer,
  *  ]
  */
 
@@ -222,6 +224,23 @@ export const $config = (function() {
                       ' collection:' + targetThreadColl);
             const inconsistencies = db[targetThreadColl].checkMetadataConsistency().toArray();
             assert.eq(0, inconsistencies.length, tojson(inconsistencies));
+        },
+        untrackUnshardedCollection: function untrackUnshardedCollection(db, collName, connCache) {
+            // Note this command will behave as no-op in case the collection is not tracked.
+            const namespace = `${db}.${collName}`;
+            jsTestLog(`Started to untrack collection ${namespace}`);
+            assert.commandWorkedOrFailedWithCode(
+                db.adminCommand({untrackUnshardedCollection: namespace}), [
+                    // Handles the case where the collection is not located on its primary
+                    ErrorCodes.OperationFailed,
+                    // Handles the case where the collection is sharded
+                    ErrorCodes.InvalidNamespace,
+                    // Handles the case where the collection/db does not exist
+                    ErrorCodes.NamespaceNotFound,
+                    //  TODO (SERVER-96072) remove this error once the command is backported.
+                    ErrorCodes.CommandNotFound,
+                ]);
+            jsTestLog(`Untrack collection completed`);
         },
         BulkWrite: function(db, collName, connCache) {
             let tid = this.tid;

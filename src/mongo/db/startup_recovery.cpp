@@ -55,13 +55,13 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/collection_validation.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/multi_index_block.h"
+#include "mongo/db/catalog/validate/collection_validation.h"
+#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
@@ -74,17 +74,18 @@
 #include "mongo/db/feature_compatibility_version_document_gen.h"
 #include "mongo/db/feature_compatibility_version_documentation.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/multi_index_block.h"
+#include "mongo/db/index_builds/rebuild_indexes.h"
+#include "mongo/db/index_builds/resumable_index_builds_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/rebuild_indexes.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repair.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl_set_member_in_standalone_mode.h"
-#include "mongo/db/resumable_index_builds_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -263,7 +264,7 @@ auto downgradeError =
     Status{ErrorCodes::MustDowngrade,
            str::stream() << "UPGRADE PROBLEM: The data files need to be fully upgraded to version "
                             "4.4 before attempting a binary upgrade; see "
-                         << feature_compatibility_version_documentation::kUpgradeLink
+                         << feature_compatibility_version_documentation::upgradeLink()
                          << " for more details."};
 
 /**
@@ -558,7 +559,7 @@ void cleanupPreImagesCollectionAfterUncleanShutdown(OperationContext* opCtx,
 // The optional parameter `startupTimeElapsedBuilder` is for adding time elapsed of tasks done in
 // this function into one single builder that records the time elapsed during startup. Its default
 // value is nullptr because we only want to time this function when it is called during startup.
-void reconcileCatalogAndRebuildUnfinishedIndexes(
+void reconcileCatalogAndRestartUnfinishedIndexBuilds(
     OperationContext* opCtx,
     StorageEngine* storageEngine,
     StorageEngine::LastShutdownState lastShutdownState,
@@ -568,8 +569,7 @@ void reconcileCatalogAndRebuildUnfinishedIndexes(
     {
         auto scopedTimer = createTimeElapsedBuilderScopedTimer(
             opCtx->getServiceContext()->getFastClockSource(),
-            "Drop abandoned idents and get back indexes that need to be rebuilt or builds that "
-            "need to be restarted",
+            "Drop abandoned idents and get back index builds that need to be restarted",
             startupTimeElapsedBuilder);
         reconcileResult =
             fassert(40593,
@@ -597,51 +597,6 @@ void reconcileCatalogAndRebuildUnfinishedIndexes(
         clearTempFilesExceptForResumableBuilds(reconcileResult.indexBuildsToResume, tempDir);
     }
 
-    // Determine which indexes need to be rebuilt. rebuildIndexesOnCollection() requires that all
-    // indexes on that collection are done at once, so we use a map to group them together.
-    stdx::unordered_map<NamespaceString, IndexNameObjs> nsToIndexNameObjMap;
-    auto catalog = CollectionCatalog::get(opCtx);
-    for (auto&& idxIdentifier : reconcileResult.indexesToRebuild) {
-        const NamespaceString collNss = idxIdentifier.nss;
-        const std::string& indexName = idxIdentifier.indexName;
-        auto swIndexSpecs =
-            getIndexNameObjs(catalog->lookupCollectionByNamespace(opCtx, collNss),
-                             [&indexName](const std::string& name) { return name == indexName; });
-        if (!swIndexSpecs.isOK() || swIndexSpecs.getValue().first.empty()) {
-            fassert(40590,
-                    {ErrorCodes::InternalError,
-                     str::stream() << "failed to get index spec for index " << indexName
-                                   << " in collection " << collNss.toStringForErrorMsg()});
-        }
-
-        auto& indexesToRebuild = swIndexSpecs.getValue();
-        invariant(indexesToRebuild.first.size() == 1 && indexesToRebuild.second.size() == 1,
-                  str::stream() << "Num Index Names: " << indexesToRebuild.first.size()
-                                << " Num Index Objects: " << indexesToRebuild.second.size());
-        auto& ino = nsToIndexNameObjMap[collNss];
-        ino.first.emplace_back(std::move(indexesToRebuild.first.back()));
-        ino.second.emplace_back(std::move(indexesToRebuild.second.back()));
-    }
-
-    {
-        auto scopedTimer =
-            createTimeElapsedBuilderScopedTimer(opCtx->getServiceContext()->getFastClockSource(),
-                                                "Rebuild indexes for collections",
-                                                startupTimeElapsedBuilder);
-        for (const auto& entry : nsToIndexNameObjMap) {
-            const auto collNss = entry.first;
-
-            for (const auto& indexName : entry.second.first) {
-                LOGV2(21004, "Rebuilding index", logAttrs(collNss), "index"_attr = indexName);
-            }
-
-            CollectionWriter collWriter(opCtx, collNss);
-            std::vector<BSONObj> indexSpecs = entry.second.second;
-            fassert(40592,
-                    rebuildIndexesOnCollection(opCtx, collWriter, indexSpecs, RepairData::kNo));
-        }
-    }
-
     // Two-phase index builds depend on an eventually-replicated 'commitIndexBuild' oplog entry to
     // complete. Therefore, when a replica set member is started in standalone mode, we cannot
     // restart the index build because it will never complete.
@@ -650,9 +605,9 @@ void reconcileCatalogAndRebuildUnfinishedIndexes(
         return;
     }
 
-    // Once all unfinished indexes have been rebuilt, restart any unfinished index builds. This will
-    // not build any indexes to completion, but rather start the background thread to build the
-    // index, and wait for a replicated commit or abort oplog entry.
+    // Restart any unfinished index builds. This will not build any indexes to completion, but
+    // rather start the background thread to build the index, and wait for a replicated commit or
+    // abort oplog entry.
     IndexBuildsCoordinator::get(opCtx)->restartIndexBuildsForRecovery(
         opCtx, reconcileResult.indexBuildsToRestart, reconcileResult.indexBuildsToResume);
 }
@@ -870,9 +825,8 @@ void startupRecovery(OperationContext* opCtx,
         FeatureCompatibilityVersion::initializeForStartup(opCtx);
     }
 
-    // Drops abandoned idents. Rebuilds unfinished indexes and restarts incomplete two-phase
-    // index builds.
-    reconcileCatalogAndRebuildUnfinishedIndexes(
+    // Drops abandoned idents. Restarts incomplete two-phase index builds.
+    reconcileCatalogAndRestartUnfinishedIndexBuilds(
         opCtx, storageEngine, lastShutdownState, startupTimeElapsedBuilder);
 
     const bool usingReplication =
@@ -891,8 +845,6 @@ void startupRecovery(OperationContext* opCtx,
             ensureCollectionProperties(opCtx, dbName, EnsureIndexPolicy::kBuildMissing));
 
         if (usingReplication) {
-            // We only care about _id indexes and drop-pending collections if we are in a replset.
-            checkForIdIndexesAndDropPendingCollections(opCtx, dbName);
             // Ensure oplog is capped (mongodb does not guarantee order of inserts on noncapped
             // collections)
             if (dbName == DatabaseName::kLocal) {

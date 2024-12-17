@@ -2,12 +2,9 @@
  * This test uses nested view to refer to a view that is created on top of another view. This test
  * validates that mongod correctly resolves the underlying namespace of the nested view in its
  * request to mongot by asserting the results of the $search query
- *
- * @tags: [
- * requires_mongot_1_40
- * ]
  */
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
+import {createSearchIndex, dropSearchIndex} from "jstests/libs/search.js";
 import {assertViewAppliedCorrectly} from "jstests/with_mongot/e2e/lib/explain_utils.js";
 
 const testDb = db.getSiblingDB(jsTestName());
@@ -31,8 +28,7 @@ assert.commandWorked(testDb.createView("nestedView", viewName, nestedViewPipelin
 // Cannot create index as the view 'addFields' was deleted or its source collection has changed
 
 let nestedView = testDb["nestedView"];
-assert.commandWorked(
-    nestedView.createSearchIndex({name: "foo", definition: {"mappings": {"dynamic": true}}}));
+createSearchIndex(nestedView, {name: "foo", definition: {"mappings": {"dynamic": true}}});
 let pipeline = [{
     $search: {
         index: "foo",
@@ -56,3 +52,4 @@ let expectedResults = [
 ];
 
 assertArrayEq({actual: results, expected: expectedResults});
+dropSearchIndex(nestedView, {name: "foo"});

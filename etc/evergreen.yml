@@ -97,7 +97,7 @@ parameters:
     value: "etc/evergreen.yml"
     description: "path to this file"
 
-commit_queue_aliases: &commit_queue_aliases
+commit_queue_aliases:
   - variant: "commit-queue"
     task: "^(bazel_.*|run_.*|compile_.*|lint_.*|jsCore|version_gen_validation|validate_commit_message|resmoke_validation_tests|buildscripts_test)$"
     variant_tags: []
@@ -106,14 +106,26 @@ commit_queue_aliases: &commit_queue_aliases
     variant_tags: []
     task_tags: ["clang_tidy"]
 
-github_pr_aliases: *commit_queue_aliases
+github_pr_aliases:
+  - variant: "commit-queue"
+    task: "^(bazel_.*|run_.*|compile_.*|lint_.*|jsCore|version_gen_validation|validate_commit_message|resmoke_validation_tests|buildscripts_test)$"
+    variant_tags: []
+    task_tags: []
+  - variant: "^(amazon-linux2-arm64-static-compile|linux-x86-dynamic-compile-required)$"
+    variant_tags: []
+    task_tags: ["clang_tidy"]
+  - variant: "^(AL2023-arm64-coverage|rhel-93-64-bit-coverage)$"
+    task: ".*"
 
 patch_aliases:
   - alias: required
     variant_tags: ["required"]
     task: ".*"
   - alias: query
-    variant: "^(.*query-patch-only|linux-x86-dynamic-compile)$"
+    variant: "^(.*query-patch-only|amazon-linux2-arm64-static-compile)$"
+    task: ".*"
+  - alias: query-quick
+    variant: "^(.*query-quick-patch-only|linux-x86-dynamic-compile)$"
     task: ".*"
   - alias: security
     variant: "^(.*security-patch-only|linux-x86-dynamic-compile|windows-compile-required)$"
@@ -134,6 +146,10 @@ patch_aliases:
     description: "Run tests and report code coverage"
     variant: ".*-coverage"
     task: ".*"
+  - alias: unittestcoverage
+    description: "Run unit tests and report code coverage"
+    variant: ".*-coverage"
+    task: "^(compile_and_run_unittests_.*|bazel_coverage)$"
   - alias: cluster_scalability
     variant_tags: ["cluster_scalability_only"]
     task_tags: ["cluster_scalability_only"]

@@ -46,7 +46,7 @@ selector:
 
     # Expects reads to die with a particular error, but other errors are possible if the read is part
     # of a transaction (e.g. ErrorCodes.LockTimeout).
-    - jstests/concurrency/fsm_workloads/drop_index_during_replan.js
+    - jstests/concurrency/fsm_workloads/query/drop_index_during_replan.js
     - jstests/concurrency/fsm_workloads/query/drop_index_during_lookup.js
 
     ##
@@ -149,6 +149,8 @@ executor:
     tests: true
   config:
     shell_options:
+      eval: >-
+        await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
           runInsideTransaction: true
@@ -158,6 +160,7 @@ executor:
           runningWithShardStepdowns: true
           killShards: true
           traceExceptions: false
+          implicitlyShardOnCreateCollectionOnly: true
           useActionPermittedFile: [ContinuousStepdown]
   hooks:
     # We use a stepdown interval of 15 seconds because we will retry all commands in a transaction
@@ -187,7 +190,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     configsvr_options:
       num_nodes: 3
       all_nodes_electable: true
@@ -212,7 +214,6 @@ executor:
         roleGraphInvalidationIsFatal: 1
         queryAnalysisWriterIntervalSecs: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

@@ -20,7 +20,7 @@ import {isConfigCommitted} from "jstests/replsets/rslib.js";
 
 let rst = new ReplSetTest({nodes: 4, useBridge: true});
 rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 const node0 = rst.getPrimary();
 const [node1, node2, node3] = rst.getSecondaries();
@@ -63,7 +63,7 @@ const parallelShell = startParallelShell(
     }, C1), node0.port);
 
 assert.commandWorked(node1.adminCommand({replSetStepUp: 1}));
-rst.awaitNodesAgreeOnPrimary(rst.kDefaultTimeoutMS, [node1, node2, node3], node1);
+rst.awaitNodesAgreeOnPrimary(rst.timeoutMS, [node1, node2, node3], node1);
 jsTestLog("Current replica set topology: [node0 (Primary)] [node1 (Primary), node2, node3]");
 assert.soon(() => node1.getDB('admin').runCommand({hello: 1}).isWritablePrimary);
 assert.soon(() => isConfigCommitted(node1));
@@ -81,8 +81,8 @@ assert.soon(() => isConfigCommitted(node1));
 node0.reconnect([node1, node2, node3]);
 // The newly connected node will receive a heartbeat with a higher term, and
 // step down from being primary. The reconfig command issued to this node, C1, will fail.
-rst.waitForState(node0, ReplSetTest.State.SECONDARY);
-rst.awaitNodesAgreeOnPrimary(rst.kDefaultTimeoutMS, [node0, node1, node3], node1);
+rst.awaitSecondaryNodes(null, [node0]);
+rst.awaitNodesAgreeOnPrimary(rst.timeoutMS, [node0, node1, node3], node1);
 rst.waitForConfigReplication(node1);
 assert.eq(C2, rst.getReplSetConfigFromNode());
 
@@ -97,4 +97,10 @@ assert.soon(() => isConfigCommitted(node1));
 rst.waitForConfigReplication(node1);
 rst.awaitNodesAgreeOnPrimary();
 parallelShell();
+// Node0 could have gone through a rollback after reconnecting with the Node1, the
+// new primary. Make sure all secondaries are out of a recovering state before
+// attempting to shutdown the replica set.
+assert.commandWorked(rst.getPrimary().adminCommand(
+    {appendOplogNote: 1, data: {msg: "dummy write to the new primary"}}));
+rst.awaitReplication();
 rst.stopSet();

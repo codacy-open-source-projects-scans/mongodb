@@ -48,13 +48,13 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/capped_visibility.h"
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/collection_options_gen.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/collection_crud/capped_visibility.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/matcher/expression.h"
@@ -868,7 +868,7 @@ inline std::unique_ptr<CollatorInterface> getUserCollator(OperationContext* opCt
  * the collection-default collation and also returns a flag indicating whether the user-provided
  * collation matches the collection default collation.
  */
-std::pair<std::unique_ptr<CollatorInterface>, ExpressionContext::CollationMatchesDefault>
+std::pair<std::unique_ptr<CollatorInterface>, ExpressionContextCollationMatchesDefault>
 resolveCollator(OperationContext* opCtx, BSONObj userCollation, const CollectionPtr& collection);
 
 }  // namespace mongo

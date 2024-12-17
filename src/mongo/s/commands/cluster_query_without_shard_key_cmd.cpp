@@ -57,8 +57,6 @@
 #include "mongo/db/commands/query_cmd/explain_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -151,7 +149,8 @@ BSONObj parseSortPattern(OperationContext* opCtx,
         collator = uassertStatusOK(CollatorFactoryInterface::get(opCtx->getServiceContext())
                                        ->makeFromBSON(parsedInfo.collation));
     }
-    auto expCtx = make_intrusive<ExpressionContext>(opCtx, std::move(collator), nss);
+    auto expCtx =
+        ExpressionContextBuilder{}.opCtx(opCtx).collator(std::move(collator)).ns(nss).build();
     auto sortPattern = SortPattern(parsedInfo.sort.value_or(BSONObj()), expCtx);
     return sortPattern.serialize(SortPattern::SortKeySerialization::kForSortKeyMerging).toBson();
 }
@@ -174,8 +173,7 @@ std::set<ShardId> getShardsToTarget(OperationContext* opCtx,
                                                      boost::none,  // explain
                                                      parsedInfo.let,
                                                      boost::none /* legacyRuntimeConstants */);
-    getShardIdsForQuery(
-        expCtx, query, collation, cm, &allShardsContainingChunksForNs, nullptr /* info */);
+    getShardIdsForQuery(expCtx, query, collation, cm, &allShardsContainingChunksForNs);
 
     // We must either get a subset of shards to target in the case of a partial shard key or we must
     // target all shards.
@@ -224,7 +222,7 @@ BSONObj createAggregateCmdObj(
 
     aggregate.setCollation(parsedInfo.collation);
     aggregate.setIsClusterQueryWithoutShardKeyCmd(true);
-    aggregate.setFromMongos(true);
+    aggregation_request_helper::setFromRouter(aggregate, true);
 
     if (parsedInfo.sort) {
         aggregate.setNeedsMerge(true);
@@ -461,7 +459,6 @@ public:
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
                 Shard::RetryPolicy::kNoRetry);
 
-            BSONObj targetDoc;
             Response res;
             bool wasStatementExecuted = false;
             std::vector<RemoteCursor> remoteCursors;
@@ -491,13 +488,13 @@ public:
                     // Since the retryable write history check happens before a write is executed,
                     // we can just use an empty BSONObj for the target doc.
                     res.setTargetDoc(BSONObj::kEmptyObject);
-                    res.setShardId(boost::optional<mongo::StringData>(response.shardId));
+                    res.setShardId(response.shardId.toString());
                     wasStatementExecuted = true;
                     continue;
                 }
 
-                remoteCursors.emplace_back(RemoteCursor(
-                    response.shardId.toString(), *response.shardHostAndPort, std::move(cursor)));
+                remoteCursors.emplace_back(
+                    response.shardId.toString(), *response.shardHostAndPort, std::move(cursor));
             }
 
             // For retryable writes, if the statement had already been executed successfully on a
@@ -606,8 +603,8 @@ public:
             while (!ars.done()) {
                 auto response = ars.next();
                 uassertStatusOK(response.swResponse);
-                responses.push_back(response);
                 shardId = response.shardId;
+                responses.push_back(std::move(response));
             }
 
             const auto millisElapsed = timer.millis();
@@ -664,9 +661,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(ClusterQueryWithoutShardKeyCmd)
-    .requiresFeatureFlag(&feature_flags::gFeatureFlagUpdateOneWithoutShardKey)
-    .forRouter();
+MONGO_REGISTER_COMMAND(ClusterQueryWithoutShardKeyCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

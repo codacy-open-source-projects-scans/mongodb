@@ -29,10 +29,6 @@ selector:
     - jstests/core/**/geo_s2explain.js # inputStage in different spot in explain().
     - jstests/core/**/geo_s2sparse.js # keysPerIndex in different spot in validate().
     - jstests/core/**/operation_latency_histogram.js # Stats are counted differently on mongos, SERVER-24880.
-    # The following tests fail because of divergent dropCollection behavior between standalones and
-    # sharded clusters. These tests expect a second drop command to error, whereas in sharded clusters
-    # we expect a second drop to return status OK.
-    - jstests/core/**/explain_upsert.js
 
     # Reads from system.views.
     - jstests/core/views/views_drop.js
@@ -85,7 +81,7 @@ selector:
     - jstests/core/**/sortj.js
     - jstests/core/**/sort_with_meta_operator.js
     - jstests/core/**/tailable_skip_limit.js
-    - jstests/core/timeseries/timeseries_special_indexes_metadata.js
+    - jstests/core/timeseries/ddl/timeseries_special_indexes_metadata.js
     - jstests/core/**/type_array.js
     - jstests/core/**/uniqueness.js
     - jstests/core/**/unset2.js
@@ -120,11 +116,11 @@ selector:
     - jstests/core/**/list_sessions.js
 
     # $indexStats
-    - jstests/core/timeseries/timeseries_index_stats.js
+    - jstests/core/timeseries/ddl/timeseries_index_stats.js
 
     # $collStats
     - jstests/core/**/operation_latency_histogram.js
-    - jstests/core/query/collstats/views_coll_stats.js
+    - jstests/core/catalog/collstats/views_coll_stats.js
     - jstests/core/views/views_stats.js
 
     # Errors expected to happen in tests, which can cause transactions to get aborted.
@@ -232,6 +228,9 @@ selector:
     # Does not support tojson of command objects.
     - jstests/core/**/query/SERVER-23626.js
 
+    # Creates a session explicitly causing override to resume a transaction that was not started.
+    - jstests/core_sharding/refine_collection_shard_key.js
+
   exclude_with_any_tags:
     # "Cowardly refusing to override read concern of command: ..."
     - assumes_read_concern_unchanged
@@ -254,7 +253,7 @@ selector:
     - uses_parallel_shell
     - does_not_support_causal_consistency
     - requires_timeseries # Transactions not supported
-
+    - requires_2_or_more_shards
 executor:
   archive:
     hooks:

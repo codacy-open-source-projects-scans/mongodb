@@ -216,14 +216,13 @@ void assertCanWrite_inlock(OperationContext* opCtx, const NamespaceString& nss) 
 
 void recordStatsForTopCommand(OperationContext* opCtx) {
     auto curOp = CurOp::get(opCtx);
-    Top::get(opCtx->getClient()->getServiceContext())
-        .record(opCtx,
-                curOp->getNSS(),
-                curOp->getLogicalOp(),
-                Top::LockType::WriteLocked,
-                durationCount<Microseconds>(curOp->elapsedTimeExcludingPauses()),
-                curOp->isCommand(),
-                curOp->getReadWriteType());
+    Top::getDecoration(opCtx).record(opCtx,
+                                     curOp->getNSS(),
+                                     curOp->getLogicalOp(),
+                                     Top::LockType::WriteLocked,
+                                     curOp->elapsedTimeExcludingPauses(),
+                                     curOp->isCommand(),
+                                     curOp->getReadWriteType());
 }
 
 void checkIfTransactionOnCappedColl(const CollectionPtr& coll, bool inTransaction) {
@@ -636,7 +635,10 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                     auto cq = uassertStatusOK(
                         parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, updateRequest));
                     if (!write_ops_exec::shouldRetryDuplicateKeyException(
-                            updateRequest, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>())) {
+                            updateRequest,
+                            *cq,
+                            *ex.extraInfo<DuplicateKeyErrorInfo>(),
+                            retryAttempts)) {
                         throw;
                     }
 

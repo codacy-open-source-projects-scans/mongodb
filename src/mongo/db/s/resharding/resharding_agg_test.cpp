@@ -177,7 +177,7 @@ public:
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) final {
         std::unique_ptr<Pipeline, PipelineDeleter> pipeline(
-            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->opCtx));
+            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->getOperationContext()));
 
         pipeline->addInitialSource(
             DocumentSourceMock::createForTest(_mockResults, pipeline->getContext()));
@@ -185,12 +185,13 @@ public:
     }
 
     std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
         Pipeline* pipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
-        boost::optional<BSONObj> readConcern = boost::none) final {
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseDefaultCollectionCollator = false) final {
         return preparePipelineForExecution(pipeline, shardTargetingPolicy, std::move(readConcern));
     }
 
@@ -211,10 +212,10 @@ public:
     boost::optional<Document> lookupSingleDocument(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const NamespaceString& nss,
-        UUID collectionUUID,
+        boost::optional<UUID> collectionUUID,
         const Document& documentKey,
         boost::optional<BSONObj> readConcern) override {
-        DBDirectClient client(expCtx->opCtx);
+        DBDirectClient client(expCtx->getOperationContext());
         auto result = client.findOne(nss, documentKey.toBson());
         if (result.isEmpty()) {
             return boost::none;
@@ -419,8 +420,8 @@ protected:
         std::deque<DocumentSource::GetNextResult> pipelineSource) {
         // Set up the oplog collection state for $lookup and $graphLookup calls.
         auto expCtx = createExpressionContext();
-        expCtx->ns = NamespaceString::kRsOplogNamespace;
-        expCtx->mongoProcessInterface = std::make_shared<MockMongoInterface>(pipelineSource);
+        expCtx->setNamespaceString(NamespaceString::kRsOplogNamespace);
+        expCtx->setMongoProcessInterface(std::make_shared<MockMongoInterface>(pipelineSource));
 
         auto pipeline = resharding::createOplogFetchingPipelineForResharding(
             expCtx,
@@ -581,8 +582,8 @@ TEST_F(ReshardingAggTest, VerifyPipelineOutputHasOplogSchema) {
                                                                 Document(deleteOplog.toBSON())};
 
     boost::intrusive_ptr<ExpressionContext> expCtx = createExpressionContext();
-    expCtx->ns = NamespaceString::kRsOplogNamespace;
-    expCtx->mongoProcessInterface = std::make_shared<MockMongoInterface>(pipelineSource);
+    expCtx->setNamespaceString(NamespaceString::kRsOplogNamespace);
+    expCtx->setMongoProcessInterface(std::make_shared<MockMongoInterface>(pipelineSource));
 
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline =
         resharding::createOplogFetchingPipelineForResharding(
@@ -682,8 +683,8 @@ TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxn) {
 
     boost::intrusive_ptr<ExpressionContext> expCtx = createExpressionContext();
     // Set up the oplog collection state for $lookup and $graphLookup calls.
-    expCtx->ns = NamespaceString::kRsOplogNamespace;
-    expCtx->mongoProcessInterface = std::make_shared<MockMongoInterface>(pipelineSource);
+    expCtx->setNamespaceString(NamespaceString::kRsOplogNamespace);
+    expCtx->setMongoProcessInterface(std::make_shared<MockMongoInterface>(pipelineSource));
 
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline =
         resharding::createOplogFetchingPipelineForResharding(
@@ -1627,7 +1628,7 @@ TEST_F(ReshardingAggWithStorageTest, RetryableFindAndModifyWithImageLookup) {
 
     std::deque<DocumentSource::GetNextResult> pipelineSource{Document(oplog.toBSON())};
     auto expCtx = createExpressionContext(opCtx());
-    expCtx->ns = NamespaceString::kRsOplogNamespace;
+    expCtx->setNamespaceString(NamespaceString::kRsOplogNamespace);
 
     {
         auto mockMongoInterface = std::make_shared<MockMongoInterface>(pipelineSource);
@@ -1635,7 +1636,7 @@ TEST_F(ReshardingAggWithStorageTest, RetryableFindAndModifyWithImageLookup) {
         // the UUID so it doesn't matter what the value here is.
         mockMongoInterface->setCollectionOptions(NamespaceString::kConfigImagesNamespace,
                                                  BSON("uuid" << UUID::gen()));
-        expCtx->mongoProcessInterface = std::move(mockMongoInterface);
+        expCtx->setMongoProcessInterface(std::move(mockMongoInterface));
     }
 
     auto pipeline = resharding::createOplogFetchingPipelineForResharding(
@@ -1729,15 +1730,14 @@ TEST_F(ReshardingAggWithStorageTest,
             Document{inputApplyOpsOplog3.toBSON()}};
 
         auto expCtx = createExpressionContext(opCtx());
-        expCtx->ns = NamespaceString::kRsOplogNamespace;
-
+        expCtx->setNamespaceString(NamespaceString::kRsOplogNamespace);
         {
             auto mockMongoInterface = std::make_shared<MockMongoInterface>(pipelineSource);
             // Register a dummy uuid just to not make test crash. The stub for findSingleDoc ignores
             // the UUID so it doesn't matter what the value here is.
             mockMongoInterface->setCollectionOptions(NamespaceString::kConfigImagesNamespace,
                                                      BSON("uuid" << UUID::gen()));
-            expCtx->mongoProcessInterface = std::move(mockMongoInterface);
+            expCtx->setMongoProcessInterface(std::move(mockMongoInterface));
         }
 
         auto pipeline = resharding::createOplogFetchingPipelineForResharding(

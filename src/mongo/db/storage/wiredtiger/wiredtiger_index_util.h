@@ -32,9 +32,8 @@
 #include <cstdint>
 #include <string>
 
-#include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/validate_results.h"
+#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/util/interruptible.h"
@@ -63,6 +62,7 @@ public:
 
     static void validateStructure(WiredTigerRecoveryUnit&,
                                   const std::string& uri,
+                                  const boost::optional<std::string>& configurationOverride,
                                   IndexValidateResults& results);
 };
 

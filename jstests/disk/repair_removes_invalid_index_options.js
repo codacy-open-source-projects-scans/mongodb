@@ -36,28 +36,17 @@ let port;
 
     testColl = createCollWithInvalidIndex(testColl);
 
+    // Skip validation on shutdown since the invalid index options are still on the catalog and
+    // the index validator will detect an inconsistency between `$listCatalog` and `listIndexes`.
+    TestData.skipCollectionAndIndexValidation = true;
     MongoRunner.stopMongod(mongod);
+    TestData.skipCollectionAndIndexValidation = false;
 
     jsTestLog("Exiting startStandaloneWithInvalidIndexSpec.");
 })();
 
 /**
- * Test 1: Verify that restarting mongod without --repair will crash due to the invalid options in
- * the index specification.
- */
-(function restartAndVerifyMongodCrashes() {
-    jsTestLog("Entering restartAndVerifyMongodCrashes....");
-    assert.throws(() => {
-        startMongodOnExistingPath(dbPath);
-    });
-
-    assert(rawMongoProgramOutput().match("Fatal assertion.*28782"),
-           "Mongod should have aborted due to an invalid index descriptor.");
-    jsTestLog("Exiting restartAndVerifyMongodCrashes.");
-})();
-
-/**
- * Test 2: Verify that restarting mongod with --repair will remove the invalid index options.
+ * Verify that restarting mongod with --repair will remove the invalid index options.
  */
 (function runRepairAndVerifyIndexIsRepaired() {
     jsTestLog("Entering runRepairAndVerifyIndexIsRepaired....");

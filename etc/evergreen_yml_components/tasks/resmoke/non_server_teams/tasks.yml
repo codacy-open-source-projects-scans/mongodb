@@ -156,13 +156,6 @@ tasks:
       - func: "generate resmoke tasks"
 
   - <<: *gen_burn_in_task_template
-    name: burn_in_tasks_gen
-    tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
-    patch_only: true
-    commands:
-      - func: "generate resmoke tasks"
-
-  - <<: *gen_burn_in_task_template
     name: burn_in_tests_gen
     tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
     patch_only: true
@@ -206,7 +199,8 @@ tasks:
           multiversion_sanity_check_last_lts_old_new_new: last_lts
       - func: "generate resmoke tasks"
         vars:
-          run_no_feature_flag_tests: "true"
+          resmoke_args: >-
+            --runNoFeatureFlagTests
 
   - <<: *task_template
     name: resmoke_end2end_tests
@@ -284,7 +278,7 @@ tasks:
       - func: "run tests"
 
   - <<: *task_template
-    name: streams_external_api
+    name: streams_https
     tags: ["assigned_to_jira_team_streams", "default"]
     commands:
       - func: "do setup"

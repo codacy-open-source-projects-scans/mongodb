@@ -106,13 +106,9 @@ class EvictCacheWalkStat(Stat):
         flags += ',cache_walk'
         Stat.__init__(self, name, EvictCacheWalkStat.prefix, desc, flags)
 class EvictStat(Stat):
-    prefix = 'eviction'
+    prefix = 'cache'
     def __init__(self, name, desc, flags=''):
         Stat.__init__(self, name, EvictStat.prefix, desc, flags)
-class JoinStat(Stat):
-    prefix = 'join'
-    def __init__(self, name, desc, flags=''):
-        Stat.__init__(self, name, JoinStat.prefix, desc, flags)
 class LockStat(Stat):
     prefix = 'lock'
     def __init__(self, name, desc, flags=''):
@@ -121,10 +117,6 @@ class LogStat(Stat):
     prefix = 'log'
     def __init__(self, name, desc, flags=''):
         Stat.__init__(self, name, LogStat.prefix, desc, flags)
-class LSMStat(Stat):
-    prefix = 'LSM'
-    def __init__(self, name, desc, flags=''):
-        Stat.__init__(self, name, LSMStat.prefix, desc, flags)
 class SessionStat(Stat):
     prefix = 'session'
     def __init__(self, name, desc, flags=''):
@@ -207,6 +199,7 @@ conn_stats = [
     ##########################################
     # Backup statistics
     ##########################################
+    BackupStat('backup_bits_clr', 'backup total bits cleared'),
     BackupStat('backup_blocks', 'total modified incremental blocks'),
     BackupStat('backup_cursor_open', 'backup cursor open', 'no_clear,no_scale'),
     BackupStat('backup_dup_open', 'backup duplicate cursor open', 'no_clear,no_scale'),
@@ -281,6 +274,8 @@ conn_stats = [
     CacheStat('cache_read_app_time', 'application threads page read from disk to cache time (usecs)'),
     CacheStat('cache_write_app_count', 'application threads page write from cache to disk count'),
     CacheStat('cache_write_app_time', 'application threads page write from cache to disk time (usecs)'),
+    CacheStat('npos_evict_walk_max', 'eviction walk restored - had to walk this many pages', 'max_aggregate,no_scale'),
+    CacheStat('npos_read_walk_max', 'npos read - had to walk this many pages', 'max_aggregate,no_scale'),
 
     ##########################################
     # Eviction statistics
@@ -326,6 +321,8 @@ conn_stats = [
     EvictStat('eviction_queue_empty', 'eviction server candidate queue empty when topping up'),
     EvictStat('eviction_queue_not_empty', 'eviction server candidate queue not empty when topping up'),
     EvictStat('eviction_reentry_hs_eviction_milliseconds', 'total milliseconds spent inside reentrant history store evictions in a reconciliation', 'no_clear,no_scale,size'),
+    EvictStat('eviction_restored_pos', 'eviction walk restored position'),
+    EvictStat('eviction_restored_pos_differ', 'eviction walk restored position differs from the saved one'),
     EvictStat('eviction_server_evict_attempt', 'evict page attempts by eviction server'),
     EvictStat('eviction_server_evict_fail', 'evict page failures by eviction server'),
     # Note eviction_server_evict_attempt - eviction_server_evict_fail = evict page successes by eviction server.
@@ -350,11 +347,20 @@ conn_stats = [
     EvictStat('eviction_target_strategy_dirty', 'eviction walk target strategy only dirty pages'),
     EvictStat('eviction_timed_out_ops', 'operations timed out waiting for space in cache'),
     EvictStat('eviction_walk', 'pages walked for eviction'),
+    EvictStat('eviction_walk_from_root', 'eviction walks started from root of tree'),
     EvictStat('eviction_walk_leaf_notfound', 'eviction server waiting for a leaf page'),
     EvictStat('eviction_walk_passes', 'eviction passes of a file'),
+    EvictStat('eviction_walk_random_returns_null_position', 'eviction walks random search fails to locate a page, results in a null position'),
+    EvictStat('eviction_walk_restart', 'eviction walks restarted'),
+    EvictStat('eviction_walk_saved_pos', 'eviction walks started from saved location in tree'),
     EvictStat('eviction_walk_sleeps', 'eviction walk most recent sleeps for checkpoint handle gathering'),
+    EvictStat('eviction_walks_abandoned', 'eviction walks abandoned'),
     EvictStat('eviction_walks_active', 'files with active eviction walks', 'no_clear,no_scale'),
+    EvictStat('eviction_walks_ended', 'eviction walks reached end of tree'),
+    EvictStat('eviction_walks_gave_up_no_targets', 'eviction walks gave up because they saw too many pages and found no candidates'),
+    EvictStat('eviction_walks_gave_up_ratio', 'eviction walks gave up because they saw too many pages and found too few candidates'),
     EvictStat('eviction_walks_started', 'files with new eviction walks started'),
+    EvictStat('eviction_walks_stopped', 'eviction walks gave up because they restarted their walk twice'),
     EvictStat('eviction_worker_evict_attempt', 'evict page attempts by eviction worker threads'),
     EvictStat('eviction_worker_evict_fail', 'evict page failures by eviction worker threads'),
     # Note eviction_worker_evict_attempt - eviction_worker_evict_fail = evict page successes by eviction worker threads.
@@ -594,18 +600,6 @@ conn_stats = [
     LogStat('log_zero_fills', 'log files manually zero-filled'),
 
     ##########################################
-    # LSM statistics
-    ##########################################
-    LSMStat('lsm_rows_merged', 'rows merged in an LSM tree'),
-    LSMStat('lsm_work_queue_app', 'application work units currently queued', 'no_clear,no_scale'),
-    LSMStat('lsm_work_queue_manager', 'merge work units currently queued', 'no_clear,no_scale'),
-    LSMStat('lsm_work_queue_max', 'tree queue hit maximum'),
-    LSMStat('lsm_work_queue_switch', 'switch work units currently queued', 'no_clear,no_scale'),
-    LSMStat('lsm_work_units_created', 'tree maintenance operations scheduled'),
-    LSMStat('lsm_work_units_discarded', 'tree maintenance operations discarded'),
-    LSMStat('lsm_work_units_done', 'tree maintenance operations executed'),
-
-    ##########################################
     # Performance Histogram Stats
     ##########################################
     PerfHistStat('perf_hist_fsread_latency_gt1000', 'file system read latency histogram (bucket 7) - 1000ms+'),
@@ -694,12 +688,11 @@ conn_stats = [
     SessionOpStat('session_table_compact_timeout', 'table compact timeout', 'no_clear,no_scale'),
     SessionOpStat('session_table_create_fail', 'table create failed calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_create_import_fail', 'table create with import failed calls', 'no_clear,no_scale'),
+    SessionOpStat('session_table_create_import_repair', 'table create with import repair calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_create_import_success', 'table create with import successful calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_create_success', 'table create successful calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_drop_fail', 'table drop failed calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_drop_success', 'table drop successful calls', 'no_clear,no_scale'),
-    SessionOpStat('session_table_rename_fail', 'table rename failed calls', 'no_clear,no_scale'),
-    SessionOpStat('session_table_rename_success', 'table rename successful calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_salvage_fail', 'table salvage failed calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_salvage_success', 'table salvage successful calls', 'no_clear,no_scale'),
     SessionOpStat('session_table_truncate_fail', 'table truncate failed calls', 'no_clear,no_scale'),
@@ -777,7 +770,6 @@ conn_stats = [
     YieldStat('application_cache_time', 'application thread time waiting for cache (usecs)'),
     YieldStat('application_evict_snapshot_refreshed', 'application thread snapshot refreshed for eviction'),
     YieldStat('child_modify_blocked_page', 'page reconciliation yielded due to child modification'),
-    YieldStat('conn_close_blocked_lsm', 'connection close yielded for lsm manager shutdown'),
     YieldStat('dhandle_lock_blocked', 'data handle lock yielded'),
     YieldStat('page_busy_blocked', 'page acquire busy blocked'),
     YieldStat('page_del_rollback_blocked', 'page delete rollback time sleeping for state change (usecs)'),
@@ -924,20 +916,6 @@ dsrc_stats = [
     CursorStat('cursor_update_bytes_changed', 'update value size change', 'size'),
 
     ##########################################
-    # LSM statistics
-    ##########################################
-    LSMStat('bloom_count', 'bloom filters in the LSM tree', 'no_scale'),
-    LSMStat('bloom_false_positive', 'bloom filter false positives'),
-    LSMStat('bloom_hit', 'bloom filter hits'),
-    LSMStat('bloom_miss', 'bloom filter misses'),
-    LSMStat('bloom_page_evict', 'bloom filter pages evicted from cache'),
-    LSMStat('bloom_page_read', 'bloom filter pages read into cache'),
-    LSMStat('bloom_size', 'total size of bloom filters', 'no_scale,size'),
-    LSMStat('lsm_chunk_count', 'chunks in the LSM tree', 'no_scale'),
-    LSMStat('lsm_generation_max', 'highest merge generation in the LSM tree', 'max_aggregate,no_scale'),
-    LSMStat('lsm_lookup_no_bloom', 'queries that could have benefited from a Bloom filter that did not exist'),
-
-    ##########################################
     # Reconciliation statistics
     ##########################################
     RecStat('rec_dictionary', 'dictionary matches'),
@@ -976,6 +954,8 @@ conn_dsrc_stats = [
     # Cache and eviction statistics
     ##########################################
     CacheStat('cache_bytes_dirty', 'tracked dirty bytes in the cache', 'no_clear,no_scale,size'),
+    CacheStat('cache_bytes_dirty_internal', 'tracked dirty internal page bytes in the cache', 'no_clear,no_scale,size'),
+    CacheStat('cache_bytes_dirty_leaf', 'tracked dirty leaf page bytes in the cache', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_dirty_total', 'bytes dirty in the cache cumulative', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_inuse', 'bytes currently in the cache', 'no_clear,no_scale,size'),
     CacheStat('cache_bytes_read', 'bytes read into cache', 'size'),
@@ -1009,15 +989,6 @@ conn_dsrc_stats = [
     CacheStat('cache_eviction_target_page_lt32', 'eviction walk target pages histogram - 10-31'),
     CacheStat('cache_eviction_target_page_lt64', 'eviction walk target pages histogram - 32-63'),
     CacheStat('cache_eviction_target_page_reduced', 'eviction walk target pages reduced due to history store cache pressure'),
-    CacheStat('cache_eviction_walk_from_root', 'eviction walks started from root of tree'),
-    CacheStat('cache_eviction_walk_random_returns_null_position', 'eviction walks random search fails to locate a page, results in a null position'),
-    CacheStat('cache_eviction_walk_restart', 'eviction walks restarted'),
-    CacheStat('cache_eviction_walk_saved_pos', 'eviction walks started from saved location in tree'),
-    CacheStat('cache_eviction_walks_abandoned', 'eviction walks abandoned'),
-    CacheStat('cache_eviction_walks_ended', 'eviction walks reached end of tree'),
-    CacheStat('cache_eviction_walks_gave_up_no_targets', 'eviction walks gave up because they saw too many pages and found no candidates'),
-    CacheStat('cache_eviction_walks_gave_up_ratio', 'eviction walks gave up because they saw too many pages and found too few candidates'),
-    CacheStat('cache_eviction_walks_stopped', 'eviction walks gave up because they restarted their walk twice'),
     CacheStat('cache_hs_btree_truncate', 'history store table truncation to remove all the keys of a btree'),
     CacheStat('cache_hs_btree_truncate_dryrun', 'history store table truncations that would have happened in non-dryrun mode'),
     CacheStat('cache_hs_insert', 'history store table insert calls'),
@@ -1120,12 +1091,6 @@ conn_dsrc_stats = [
     CursorErrorStat('cursor_update_error', 'cursor update calls that return an error'),
 
     ##########################################
-    # LSM statistics
-    ##########################################
-    LSMStat('lsm_checkpoint_throttle', 'sleep for LSM checkpoint throttle'),
-    LSMStat('lsm_merge_throttle', 'sleep for LSM merge throttle'),
-
-    ##########################################
     # Reconciliation statistics
     ##########################################
     RecStat('rec_overflow_key_leaf', 'leaf-page overflow keys'),
@@ -1179,17 +1144,6 @@ conn_dsrc_stats = [
     TxnStat('txn_rts_sweep_hs_keys', 'rollback to stable sweeping history store keys'),
     TxnStat('txn_rts_sweep_hs_keys_dryrun', 'rollback to stable history store keys that would have been swept in non-dryrun mode'),
     TxnStat('txn_update_conflict', 'update conflicts'),
-]
-
-##########################################
-# Cursor Join statistics
-##########################################
-join_stats = [
-    JoinStat('bloom_false_positive', 'bloom filter false positives'),
-    JoinStat('bloom_insert', 'items inserted into a bloom filter'),
-    JoinStat('iterated', 'items iterated'),
-    JoinStat('main_access', 'accesses to the main table'),
-    JoinStat('membership_check', 'checks that conditions of membership are satisfied'),
 ]
 
 ##########################################

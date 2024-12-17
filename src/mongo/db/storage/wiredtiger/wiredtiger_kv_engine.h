@@ -35,8 +35,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
-#include <functional>
-#include <list>
 #include <map>
 #include <memory>
 #include <set>
@@ -54,7 +52,6 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/storage/backup_block.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/kv/kv_engine.h"
@@ -290,6 +287,7 @@ public:
 
     Status dropIdent(RecoveryUnit* ru,
                      StringData ident,
+                     bool identHasSizeInfo,
                      const StorageEngine::DropIdentCallback& onDrop = nullptr) override;
 
     void dropIdentForImport(Interruptible&, RecoveryUnit&, StringData ident) override;
@@ -407,25 +405,17 @@ public:
     void syncSizeInfo(bool sync) const;
 
     /*
-     * The oplog manager is always accessible, but this method will start the background thread to
-     * control oplog entry visibility for reads.
-     *
-     * On mongod, the background thread will be started when the oplog record store is created, and
-     * stopped when the oplog record store is destroyed. For unit tests, the background thread may
-     * be started and stopped multiple times as tests create and destroy the oplog record store.
+     * Registers the oplog and initializes the oplog manager
      */
-    void startOplogManager(OperationContext* opCtx, WiredTigerRecordStore* oplogRecordStore);
-    void haltOplogManager(WiredTigerRecordStore* oplogRecordStore, bool shuttingDown);
+    void initializeOplogVisibility(OperationContext* opCtx,
+                                   WiredTigerRecordStore* oplogRecordStore);
 
     /*
-     * Always returns a non-nil pointer. However, the WiredTigerOplogManager may not have been
-     * initialized and its background refreshing thread may not be running.
+     * Always returns a non-null pointer and is valid for the lifetime of this KVEngine. However,
+     * the WiredTigerOplogManager may not have been initialized, which happens after the oplog
+     * RecordStore is constructed.
      *
-     * A caller that wants to get the oplog read timestamp, or call
-     * `waitForAllEarlierOplogWritesToBeVisible`, is advised to first see if the oplog manager is
-     * running with a call to `isRunning`.
-     *
-     * A caller that simply wants to call `triggerOplogVisibilityUpdate` may do so without concern.
+     * See WiredTigerOplogManager for details on thread safety.
      */
     WiredTigerOplogManager* getOplogManager() const {
         return _oplogManager.get();
@@ -500,16 +490,7 @@ public:
      */
     boost::optional<Timestamp> getOplogNeededForCrashRecovery() const final;
 
-    /**
-     * Returns oplog that may not be truncated. This method is a function of oplog needed for
-     * rollback and oplog needed for crash recovery. This method considers different states the
-     * storage engine can be running in, such as running in in-memory mode.
-     *
-     * This method returning Timestamp::min() implies no oplog should be truncated and
-     * Timestamp::max() means oplog can be truncated freely based on user oplog size
-     * configuration.
-     */
-    Timestamp getPinnedOplog() const;
+    Timestamp getPinnedOplog() const final;
 
     ClockSource* getClockSource() const {
         return _clockSource;
@@ -617,7 +598,11 @@ private:
     void _openWiredTiger(const std::string& path, const std::string& wtOpenConfig);
 
     Status _salvageIfNeeded(const char* uri);
-    void _ensureIdentPath(StringData ident);
+
+    // Guarantees that the necessary directories exist in case the ident lives in a subdirectory of
+    // the database (i.e. because of --directoryPerDb). The caller should hold the lock until
+    // whatever they were doing with the ident has been persisted to disk.
+    [[nodiscard]] stdx::unique_lock<stdx::mutex> _ensureIdentPath(StringData ident);
 
     /**
      * Recreates a WiredTiger ident from the provided URI by dropping and recreating the ident.
@@ -665,6 +650,10 @@ private:
     std::pair<JournalListener*, boost::optional<JournalListener::Token>>
     _getJournalListenerWithToken(OperationContext* opCtx, UseJournalListener useListener);
 
+    // Removes empty directories associated with ident (or subdirectories, when startPos is set).
+    // Returns true if directories were removed (or there weren't any to remove).
+    bool _removeIdentDirectoryIfEmpty(StringData ident, size_t startPos = 0);
+
     mutable stdx::mutex _oldestActiveTransactionTimestampCallbackMutex;
     StorageEngine::OldestActiveTransactionTimestampCallback
         _oldestActiveTransactionTimestampCallback;
@@ -675,10 +664,7 @@ private:
     std::unique_ptr<WiredTigerSessionCache> _sessionCache;
     ClockSource* const _clockSource;
 
-    // Mutex to protect use of _oplogRecordStore by this instance of KV engine.
-    mutable stdx::mutex _oplogManagerMutex;
-    const WiredTigerRecordStore* _oplogRecordStore = nullptr;
-    std::unique_ptr<WiredTigerOplogManager> _oplogManager;
+    const std::unique_ptr<WiredTigerOplogManager> _oplogManager;
 
     std::string _canonicalName;
     std::string _path;
@@ -757,5 +743,9 @@ private:
 
     // Tracks the time since the last _waitUntilDurableSession reset().
     Timer _timeSinceLastDurabilitySessionReset;
+
+    // Prevents a database's directory from being deleted concurrently with creation (necessary for
+    // --directoryPerDb).
+    stdx::mutex _directoryModificationMutex;
 };
 }  // namespace mongo

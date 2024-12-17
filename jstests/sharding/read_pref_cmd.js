@@ -3,7 +3,7 @@
  * of 5MB across all sharding tests in wiredTiger.
  * @tags: [
  *   resource_intensive,
- *    # TODO (SERVER-88127): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  *    requires_scripting
  * ]
@@ -220,7 +220,7 @@ let testConnReadPreference = function(
             mapreduce: kShardedCollName,
             map: mapFunc,
             reduce: reduceFunc,
-            out: {replace: 'mrOut'},
+            out: {replace: 'mrOut_noninline_sharded'},
             comment: comment
         },
                 isMongos ? allowedOnSecondary.kAlways : allowedOnSecondary.kNever,
@@ -236,7 +236,7 @@ let testConnReadPreference = function(
                 mapreduce: kUnshardedCollName,
                 map: mapFunc,
                 reduce: reduceFunc,
-                out: {replace: 'mrOut'},
+                out: {replace: 'mrOut_noninline_unsharded'},
                 comment: comment
             },
             isMongos ? allowedOnSecondary.kAlways : allowedOnSecondary.kNever,
@@ -247,12 +247,13 @@ let testConnReadPreference = function(
             mapreduce: kUnshardedCollName,
             map: mapFunc,
             reduce: reduceFunc,
-            out: {replace: 'mrOut'}
+            out: {replace: 'mrOut_noninline_unsharded'}
         },
                 allowedOnSecondary.kNever,
                 false,
-                formatProfileQuery(kUnshardedNs,
-                                   {mapreduce: kUnshardedCollName, 'out.replace': 'mrOut'}));
+                formatProfileQuery(
+                    kUnshardedNs,
+                    {mapreduce: kUnshardedCollName, 'out.replace': 'mrOut_noninline_unsharded'}));
     }
 
     // Test other commands that can be sent to secondary.

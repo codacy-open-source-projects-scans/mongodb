@@ -68,14 +68,13 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
@@ -90,12 +89,10 @@
 #include "mongo/db/repl/rollback_impl_gen.h"
 #include "mongo/db/repl/split_prepare_session_manager.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/s/type_shard_identity.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_recovery.h"
-#include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -116,8 +113,6 @@
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/s/catalog/type_config_version.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
@@ -126,7 +121,6 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
-#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
 
@@ -354,11 +348,11 @@ void RollbackImpl::_killAllUserOperations(OperationContext* opCtx) {
     int numOpsRunning = 0;
 
     for (ServiceContext::LockedClientsCursor cursor(serviceCtx); Client* client = cursor.next();) {
-        ClientLock lk(client);
-        if (client->isFromSystemConnection() && !client->canKillSystemOperationInStepdown(lk)) {
+        if (!client->canKillOperationInStepdown()) {
             continue;
         }
 
+        ClientLock lk(client);
         OperationContext* toKill = client->getOperationContext();
 
         if (toKill && toKill->getOpID() == opCtx->getOpID()) {
@@ -720,9 +714,7 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
     _rollbackStats.truncateTimestamp = truncatePoint;
     _listener->onSetOplogTruncateAfterPoint(truncatePoint);
 
-    // Align the drop pending reaper state with what's on disk. Oplog recovery depends on those
-    // being consistent.
-    _resetDropPendingState(opCtx);
+    _checkForAllIdIndexes(opCtx);
 
     // Run the recovery process.
     _replicationProcess->getReplicationRecovery()->recoverFromOplog(opCtx, stableTimestamp);
@@ -731,11 +723,6 @@ void RollbackImpl::_runPhaseFromAbortToReconstructPreparedTxns(
     // Sets the correct post-rollback counts on any collections whose counts changed during the
     // rollback.
     _correctRecordStoreCounts(opCtx);
-
-    if (_replicationCoordinator->getSettings().isServerless()) {
-        tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx);
-    }
-    ServerlessOperationLockRegistry::recoverLocks(opCtx);
 
     // Reconstruct prepared transactions after counts have been adjusted. Since prepared
     // transactions were aborted (i.e. the in-memory counts were rolled-back) before computing
@@ -1008,7 +995,7 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
                           "Shard identity document rollback detected",
                           "oplogEntry"_attr = redact(oplogEntry.toBSONForLogging()));
         } else if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-                   opNss == VersionType::ConfigNS) {
+                   opNss == NamespaceString::kConfigVersionNamespace) {
             // Check if the creation of the config server config version document is being rolled
             // back.
             _observerInfo.configServerConfigVersionRolledBack = true;
@@ -1416,17 +1403,12 @@ void RollbackImpl::_transitionFromRollbackToSecondary(OperationContext* opCtx) {
     }
 }
 
-void RollbackImpl::_resetDropPendingState(OperationContext* opCtx) {
-    // TODO(SERVER-38671): Remove this line when drop-pending idents are always supported with this
-    // rolback method. Until then, we should assume that pending drops can be handled by either the
-    // replication subsystem or the storage engine.
-    DropPendingCollectionReaper::get(opCtx)->clearDropPendingState();
-
+void RollbackImpl::_checkForAllIdIndexes(OperationContext* opCtx) {
     auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
     std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
     for (const auto& dbName : dbNames) {
         Lock::DBLock dbLock(opCtx, dbName, MODE_X);
-        checkForIdIndexesAndDropPendingCollections(opCtx, dbName);
+        checkForIdIndexes(opCtx, dbName);
     }
 }
 

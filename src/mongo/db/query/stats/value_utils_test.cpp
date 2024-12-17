@@ -27,13 +27,18 @@
  *    it in the license file.
  */
 
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/index_bounds_builder.h"
-#include "mongo/db/query/index_bounds_builder_test.h"
+#include "mongo/db/query/index_bounds_builder_test_fixture.h"
+#include "mongo/db/query/stats/test_utils.h"
 
 #include "mongo/db/query/interval.h"
+#include "mongo/db/query/stats/value_utils.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 
@@ -71,7 +76,7 @@ void assertSameTypeBracketedInterval(const Interval& interval) {
     sbe::value::ValueGuard startGuard{startTag, startVal};
     sbe::value::ValueGuard endGuard{endTag, endVal};
 
-    ASSERT(sameTypeBracketedInterval(startTag, interval.endInclusive, endTag, endVal));
+    ASSERT(sameTypeBracketInterval(startTag, interval.endInclusive, endTag, endVal));
 }
 
 TEST_F(ValueUtilsTest, SameTypeBracketedIntervalEqual) {
@@ -220,5 +225,264 @@ TEST_F(ValueUtilsTest, SameTypeBracketedIntervalGteNan) {
     assertSameTypeBracketedInterval(interval);
 }
 
+
+TEST_F(ValueUtilsTest, SameTypeClassAlignsWithMinComparison) {
+    auto allTypeTagPairs = generateAllTypeTagPairs();
+
+    // Asserts that sameTypeClass() behaves the same as the alternative implementation
+    // sameTypeClassByComparingMin() which compares the minimum values in BSON.
+    for (auto typeTagPair : allTypeTagPairs) {
+        bool lhs = sameTypeClassByComparingMin(typeTagPair.first, typeTagPair.second);
+        bool rhs = sameTypeClass(typeTagPair.first, typeTagPair.second);
+        ASSERT_EQ(lhs, rhs) << "first tag: " << typeTagPair.first
+                            << " second tag: " << typeTagPair.second << " sameTypeClass: " << lhs
+                            << " compareTypeTags: " << rhs;
+    }
+}
+
+TEST_F(ValueUtilsTest, GetMinBoundAlignsWithAppendMinForType) {
+    // Asserts that the behavior of getMinBound() is consistent with the BSON implementation
+    // appendMinForType().
+    for (size_t t = 0; t < size_t(sbe::value::TypeTags::TypeTagsMax); ++t) {
+        auto tag = static_cast<sbe::value::TypeTags>(t);
+
+        // Excludes all the extended types which are unsupported.
+        auto bsonType = sbe::value::tagToType(tag);
+        if (bsonType == BSONType::EOO) {
+            continue;
+        }
+        auto [actual, inclusive] = getMinBound(tag);
+
+        BSONObjBuilder builder;
+        builder.appendMinForType("", bsonType);
+        auto obj = builder.obj();
+        auto elem = obj.firstElement();
+        auto expected = sbe::bson::convertFrom<false>(elem);
+        sbe::value::ValueGuard guard{expected};
+
+        auto res = stats::compareValues(
+            actual.getTag(), actual.getValue(), expected.first, expected.second);
+        ASSERT_EQ(res, 0) << "tag: " << tag << ", getMinBound() returns: " << actual.get()
+                          << ", expected returning: " << expected;
+        ASSERT_TRUE(inclusive);
+    }
+}
+
+TEST_F(ValueUtilsTest, GetMaxBoundAlignsWithAppendMaxForType) {
+    // Asserts that the behavior of getMaxBound() is consistent with the BSON implementation
+    // appendMaxForType().
+    for (size_t t = 0; t < size_t(sbe::value::TypeTags::TypeTagsMax); ++t) {
+        auto tag = static_cast<sbe::value::TypeTags>(t);
+
+        // Excludes all the extended types which are unsupported.
+        auto bsonType = sbe::value::tagToType(tag);
+        if (bsonType == BSONType::EOO) {
+            continue;
+        }
+        auto [actual, inclusive] = getMaxBound(tag);
+
+        BSONObjBuilder builder;
+        builder.appendMaxForType("", bsonType);
+        auto obj = builder.obj();
+        auto elem = obj.firstElement();
+        auto expected = sbe::bson::convertFrom<false>(elem);
+        sbe::value::ValueGuard guard{expected};
+
+        auto res = stats::compareValues(
+            actual.getTag(), actual.getValue(), expected.first, expected.second);
+        ASSERT_EQ(res, 0) << "tag: " << tag << ", getMaxBound() returns: " << actual.get()
+                          << ", expected returning: " << expected;
+        ASSERT_EQ(inclusive, !isVariableWidthType(tag));
+    }
+}
+
+TEST_F(ValueUtilsTest, CanEstimateTypeViaTypeCounts) {
+    // Asserts that canEstimateTypeViaTypeCounts() returns true if the type has only single possible
+    // value, or the type is boolean. Otherwise, the function returns false.
+    for (size_t t = 0; t < size_t(sbe::value::TypeTags::TypeTagsMax); ++t) {
+        auto tag = static_cast<sbe::value::TypeTags>(t);
+
+        // Excludes all the extended types which are unsupported.
+        auto bsonType = sbe::value::tagToType(tag);
+        if (bsonType == BSONType::EOO) {
+            ASSERT_FALSE(stats::canEstimateTypeViaTypeCounts(tag));
+            continue;
+        }
+        auto [min, minInclusive] = getMinBound(tag);
+        auto [max, maxInclusive] = getMaxBound(tag);
+        if (min == max || tag == sbe::value::TypeTags::Boolean) {
+            ASSERT_TRUE(stats::canEstimateTypeViaTypeCounts(tag));
+        } else {
+            ASSERT_FALSE(stats::canEstimateTypeViaTypeCounts(tag));
+        }
+    }
+}
+
+TEST_F(ValueUtilsTest, ReturnsTrueForFullBracketIntervals) {
+    // Asserts that isFullBracketInterval() returns true for all full bracket intervals of each
+    // BSONType.
+    for (int t = -1; t < BSONType::MaxKey; ++t) {
+        if (!isValidBSONType(t) || t == BSONType::EOO || t == BSONType::Array) {
+            continue;
+        }
+        BSONObj obj = BSON("a" << BSON("$type" << t));
+        auto interval = buildInterval(obj);
+
+        // Converts to SBE values.
+        bool startInclusive = interval.startInclusive;
+        bool endInclusive = interval.endInclusive;
+        auto [startTag, startVal] = sbe::bson::convertFrom<false>(interval.start);
+        auto [endTag, endVal] = sbe::bson::convertFrom<false>(interval.end);
+        sbe::value::ValueGuard startGuard{startTag, startVal};
+        sbe::value::ValueGuard endGuard{endTag, endVal};
+
+        ASSERT_TRUE(
+            isFullBracketInterval(startTag, startVal, startInclusive, endTag, endVal, endInclusive))
+            << "type: " << typeName(BSONType(t));
+    }
+}
+
+TEST_F(ValueUtilsTest, ReturnsFalseForNonFullBracketIntervalsWithStaticWidthType) {
+    auto [start, startInclusive] = getMinBound(sbe::value::TypeTags::NumberInt32);
+    auto [end, endInclusive] = getMaxBound(sbe::value::TypeTags::NumberInt32);
+
+    // Asserts that the interval [start, end] can be considered as a full bracket
+    // interval if inclusiveness are both inclusive.
+    ASSERT_TRUE(isFullBracketInterval(start.getTag(),
+                                      start.getValue(),
+                                      startInclusive,
+                                      end.getTag(),
+                                      end.getValue(),
+                                      endInclusive));
+
+    // Asserts that the function returns false if either bound is exclusive.
+    ASSERT_FALSE(isFullBracketInterval(start.getTag(),
+                                       start.getValue(),
+                                       false /*startInclusive*/,
+                                       end.getTag(),
+                                       end.getValue(),
+                                       false /*endInclusive*/));
+
+    ASSERT_FALSE(isFullBracketInterval(start.getTag(),
+                                       start.getValue(),
+                                       true /*startInclusive*/,
+                                       end.getTag(),
+                                       end.getValue(),
+                                       false /*endInclusive*/));
+
+    ASSERT_FALSE(isFullBracketInterval(start.getTag(),
+                                       start.getValue(),
+                                       false /*startInclusive*/,
+                                       end.getTag(),
+                                       end.getValue(),
+                                       true /*endInclusive*/));
+}
+
+TEST_F(ValueUtilsTest, ReturnsFalseForNonFullBracketIntervalsWithVariableWidthType) {
+    auto [start, startInclusive] = getMinBound(sbe::value::TypeTags::StringSmall);
+    auto [end, endInclusive] = getMaxBound(sbe::value::TypeTags::StringSmall);
+
+    // Asserts that the interval [start, end] can be considered as a full bracket
+    // interval if inclusiveness are both inclusive.
+    ASSERT_TRUE(isFullBracketInterval(start.getTag(),
+                                      start.getValue(),
+                                      startInclusive,
+                                      end.getTag(),
+                                      end.getValue(),
+                                      endInclusive));
+
+    // Asserts that the function returns false if 'endInclusive' is true.
+    ASSERT_FALSE(isFullBracketInterval(start.getTag(),
+                                       start.getValue(),
+                                       startInclusive /*startInclusive*/,
+                                       end.getTag(),
+                                       end.getValue(),
+                                       true /*endInclusive*/));
+
+    // Asserts that the function returns false the end bound is incorrect.
+    ASSERT_FALSE(isFullBracketInterval(start.getTag(),
+                                       start.getValue(),
+                                       true /*startInclusive*/,
+                                       start.getTag(),
+                                       start.getValue(),
+                                       endInclusive /*endInclusive*/));
+
+    // Asserts that the short-circuit returns false when the function detects the end tag is not the
+    // next type of the start tag.
+    ASSERT_FALSE(isFullBracketInterval(start.getTag(),
+                                       start.getValue(),
+                                       startInclusive,
+                                       sbe::value::TypeTags::Array,
+                                       end.getValue(),
+                                       endInclusive));
+}
+
+TEST_F(ValueUtilsTest, BracketizeSingleTypeInterval) {
+    using TypeTags = sbe::value::TypeTags;
+    auto [startTag, startVal] = makeInt64Value(100);
+    auto [endTag, endVal] = makeInt64Value(200);
+    auto intervals = bracketizeInterval(
+        startTag, startVal, false /*startInclusive*/, endTag, endVal, false /*endInclusive*/);
+
+    std::pair<std::pair<SBEValue, bool>, std::pair<SBEValue, bool>> expected{
+        {SBEValue{makeInt64Value(100)}, false}, {SBEValue{makeInt64Value(200)}, false}};
+
+    // Asserts that if the interval is single-type interval, it will not be bracketized. The
+    // returned sub-intervals will contain exactly one interval which is the itself.
+    ASSERT_EQ(intervals.size(), 1);
+    ASSERT_EQ(intervals[0], expected);
+}
+
+TEST_F(ValueUtilsTest, BracketizeSameTypeBracketInterval) {
+    using TypeTags = sbe::value::TypeTags;
+    // This test checks if bracketizeInterval can correctly handle the interval (100, ""), which is
+    // equivalent of (100, inf]. Despite the different type tags, (100, "") is still of the same
+    // type bracket.
+    auto [startTag, startVal] = makeInt64Value(100);
+    auto [endTag, endVal] = sbe::value::makeNewString("");
+    auto intervals = bracketizeInterval(
+        startTag, startVal, false /*startInclusive*/, endTag, endVal, false /*endInclusive*/);
+
+    std::pair<std::pair<SBEValue, bool>, std::pair<SBEValue, bool>> expected{
+        {SBEValue{makeInt64Value(100)}, false}, {sbe::value::makeNewString(""), false}};
+
+    // Asserts that if the interval is a of the same type bracket, it will not be bracketized. The
+    // returned sub-intervals will contain exactly one interval which is the itself.
+    ASSERT_EQ(intervals.size(), 1);
+    ASSERT_EQ(intervals[0], expected);
+}
+
+TEST_F(ValueUtilsTest, BracketizeMixedTypeInterval) {
+    using TypeTags = sbe::value::TypeTags;
+    auto [startTag, startVal] = makeInt64Value(100);
+    auto [endTag, endVal] = makeBooleanValue(1);
+    auto intervals = bracketizeInterval(
+        startTag, startVal, false /*startInclusive*/, endTag, endVal, false /*endInclusive*/);
+
+    std::vector<std::pair<std::pair<SBEValue, bool>, std::pair<SBEValue, bool>>> expected = {
+        {{SBEValue{makeInt64Value(100)}, false}, getMaxBound(TypeTags::NumberInt64)},
+        {getMinBound(TypeTags::StringSmall), getMaxBound(TypeTags::StringSmall)},
+        {getMinBound(TypeTags::Object), getMaxBound(TypeTags::Object)},
+        {getMinBound(TypeTags::Array), getMaxBound(TypeTags::Array)},
+        {getMinBound(TypeTags::bsonBinData), getMaxBound(TypeTags::bsonBinData)},
+        {getMinBound(TypeTags::ObjectId), getMaxBound(TypeTags::ObjectId)},
+        {getMinBound(TypeTags::Boolean), {SBEValue{makeBooleanValue(1)}, false}},
+    };
+    for (size_t i = 0; i < intervals.size(); ++i) {
+        ASSERT_EQ(intervals[i], expected[i]);
+    }
+}
+
+TEST_F(ValueUtilsTest, BracketizeEmptyInterval) {
+    using TypeTags = sbe::value::TypeTags;
+    auto [startTag, startVal] = makeInt64Value(100);
+    auto [endTag, endVal] = makeInt64Value(100);
+    auto intervals = bracketizeInterval(
+        startTag, startVal, false /*startInclusive*/, endTag, endVal, true /*endInclusive*/);
+
+    // (100, 100] is an empty interval as no number is included. We expect the returned
+    // sub-intervals to be an empty vector.
+    ASSERT_EQ(intervals.size(), 0);
+}
 
 }  // namespace mongo::stats

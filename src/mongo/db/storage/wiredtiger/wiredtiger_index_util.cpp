@@ -163,9 +163,11 @@ bool WiredTigerIndexUtil::isEmpty(OperationContext* opCtx,
     return false;
 }
 
-void WiredTigerIndexUtil::validateStructure(WiredTigerRecoveryUnit& ru,
-                                            const std::string& uri,
-                                            IndexValidateResults& results) {
+void WiredTigerIndexUtil::validateStructure(
+    WiredTigerRecoveryUnit& ru,
+    const std::string& uri,
+    const boost::optional<std::string>& configurationOverride,
+    IndexValidateResults& results) {
     if (ru.getSessionCache()->isEphemeral()) {
         return;
     }
@@ -174,21 +176,23 @@ void WiredTigerIndexUtil::validateStructure(WiredTigerRecoveryUnit& ru,
         std::string msg = str::stream() << "verify() returned an error. "
                                         << "This indicates structural damage. "
                                         << "Not examining individual index entries.";
+        results.setHasStructuralDamage(true);
         results.addError(msg);
         return;
     }
 
-    auto err = WiredTigerUtil::verifyTable(ru, uri, results.getErrorsUnsafe());
+    auto err =
+        WiredTigerUtil::verifyTable(ru, uri, configurationOverride, results.getErrorsUnsafe());
     if (err == EBUSY) {
         std::string msg = str::stream()
             << "Could not complete validation of " << uri << ". "
             << "This is a transient issue as the collection was actively "
                "in use by other operations.";
 
-        LOGV2_WARNING(51781,
-                      "Could not complete validation. This is a transient issue as "
-                      "the collection was actively in use by other operations",
-                      "uri"_attr = uri);
+        LOGV2_PROD_ONLY(51781,
+                        "Could not complete validation. This is a transient issue as "
+                        "the collection was actively in use by other operations",
+                        "uri"_attr = uri);
 
         results.addWarning(msg);
     } else if (err) {
@@ -200,6 +204,7 @@ void WiredTigerIndexUtil::validateStructure(WiredTigerRecoveryUnit& ru,
                     "examining individual index entries.",
                     "error"_attr = wiredtiger_strerror(err));
 
+        results.setHasStructuralDamage(true);
         results.addError(msg);
     }
 }

@@ -55,6 +55,7 @@
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/notification.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
@@ -521,6 +522,39 @@ TEST_F(NetworkInterfaceMockTest, CancelCommandAfterResponse) {
 
     ASSERT_EQ(before, after);
     ASSERT_OK(deferred.get().status);
+}
+
+TEST_F(NetworkInterfaceMockTest, DrainUnfinishedNetworkOperations) {
+    auto client = getGlobalServiceContext()->getService()->makeClient("NetworkInterfaceMockTest");
+    startNetwork();
+
+    TaskExecutor::CallbackHandle cb{};
+    RemoteCommandRequest request{kUnimportantRequest};
+    RemoteCommandResponse resp = RemoteCommandResponse::make_forTest(BSON("foo"
+                                                                          << "bar"),
+                                                                     Milliseconds(30));
+
+    auto deferred = net().startCommand(cb, request, nullptr, CancellationToken::uncancelable());
+
+    {
+        NetworkInterfaceMock::InNetworkGuard guard(&net());
+        ASSERT_TRUE(net().hasReadyRequests());
+        auto req = net().getNextReadyRequest();
+        ASSERT_FALSE(req->isFinished());
+        // Schedule a response to be processed by drainUnfinishedNetworkOperations.
+        net().scheduleResponse(req, net().now(), resp);
+
+        // Check that drainUnfinishedNetworkOperations processes the response.
+        net().drainUnfinishedNetworkOperations();
+
+        ASSERT_TRUE(req->isFinished());
+        ASSERT_FALSE(net().hasReadyRequests());
+    }
+
+    // Make sure that the request is fulfilled.
+    auto opCtx = client->makeOperationContext();
+    opCtx->setDeadlineAfterNowBy(Seconds(30), ErrorCodes::ExceededTimeLimit);
+    ASSERT_OK(deferred.get(opCtx.get()).status);
 }
 
 TEST_F(NetworkInterfaceMockTest, TestNumReadyRequests) {

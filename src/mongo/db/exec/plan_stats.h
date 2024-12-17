@@ -478,6 +478,10 @@ struct DistinctScanStats : public SpecificStats {
 
     // How many keys did we look at while distinct-ing?
     size_t keysExamined = 0;
+    // The total number of full documents touched by the embedded fetch stage, if one exists.
+    size_t docsExamined = 0;
+    // How many chunk skips were performed while distinct-ing?
+    size_t chunkSkips = 0;
 
     BSONObj keyPattern;
 
@@ -498,6 +502,8 @@ struct DistinctScanStats : public SpecificStats {
     bool isUnique = false;
     bool isShardFiltering = false;
     bool isFetching = false;
+    // TODO SERVER-92983: Remove once feature flag is removed.
+    bool isShardFilteringDistinctScanEnabled = false;
 
     // >1 if we're traversing the index forwards and <1 if we're traversing it backwards.
     int direction = 1;

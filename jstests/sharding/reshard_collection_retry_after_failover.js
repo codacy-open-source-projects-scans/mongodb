@@ -5,7 +5,7 @@
  * @tags: [
  *   featureFlagReshardingImprovements,
  *   requires_fcv_72,
- *    # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  *   uses_atclustertime,
  * ]
@@ -29,7 +29,8 @@ const getTempUUID = (tempNs) => {
     return getUUIDFromConfigCollections(mongos, tempCollection.getFullName());
 };
 
-const reshardingTest = new ReshardingTest({numDonors: 1, minimumOperationDurationMS: 0});
+const reshardingTest = new ReshardingTest(
+    {numDonors: 1, minimumOperationDurationMS: 0, initiateWithDefaultElectionTimeout: true});
 reshardingTest.setup();
 const donorShardNames = reshardingTest.donorShardNames;
 const recipientShardNames = reshardingTest.recipientShardNames;

@@ -10,7 +10,7 @@
  *  requires_timeseries,
  *  requires_non_retryable_writes,
  *  # Timeseries do not support multi-document transactions with inserts.
- *   does_not_support_transactions,
+ *  does_not_support_transactions,
  * ]
  */
 

@@ -87,13 +87,13 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/unittest/golden_test_base.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/buildinfo.h"
 #include "mongo/util/ctype.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/represent_as.h"
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"  // IWYU pragma: keep
-#include "mongo/util/version.h"
 
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
@@ -382,7 +382,7 @@ BSONObj isWindows(const BSONObj& a, void* data) {
 BSONObj getBuildInfo(const BSONObj& a, void* data) {
     uassert(16822, "getBuildInfo accepts no arguments", a.nFields() == 0);
     BSONObjBuilder b;
-    VersionInfoInterface::instance().appendBuildInfo(&b);
+    ::mongo::getBuildInfo().serialize(&b);
     return BSON("" << b.done());
 }
 
@@ -1083,6 +1083,12 @@ BSONObj _compareStringsWithCollation(const BSONObj& input, void*) {
 
     CollatorFactoryICU collationFactory;
     auto collator = uassertStatusOK(collationFactory.makeFromBSON(collatorSpec.Obj()));
+
+    if (collator == nullptr) {
+        // 'makeFromBSON' will return a nullptr if the collator spec contains '{locale:
+        // "simple"}'. In this case we can go with a simple binary comparison.
+        return BSON("" << left.valueStringData().compare(right.valueStringData()));
+    }
 
     int cmp = collator->compare(left.valueStringData(), right.valueStringData());
     return BSON("" << cmp);

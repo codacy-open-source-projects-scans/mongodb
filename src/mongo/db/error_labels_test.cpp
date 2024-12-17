@@ -75,18 +75,6 @@ TEST(IsTransientTransactionErrorTest, PreparedTransactionInProgressIsTransient) 
                                             false /* isCommitOrAbort */));
 }
 
-TEST(IsTransientTransactionErrorTest, TenantMigrationCommittedIsTransient) {
-    ASSERT_TRUE(isTransientTransactionError(ErrorCodes::TenantMigrationCommitted,
-                                            false /* hasWriteConcernError */,
-                                            false /* isCommitOrAbort */));
-}
-
-TEST(IsTransientTransactionErrorTest, TenantMigrationAbortedIsTransient) {
-    ASSERT_TRUE(isTransientTransactionError(ErrorCodes::TenantMigrationAborted,
-                                            false /* hasWriteConcernError */,
-                                            false /* isCommitOrAbort */));
-}
-
 TEST(IsTransientTransactionErrorTest, ShardCannotRefreshDueToLocksHeldIsTransient) {
     ASSERT_TRUE(isTransientTransactionError(ErrorCodes::ShardCannotRefreshDueToLocksHeld,
                                             false /* hasWriteConcernError */,
@@ -413,8 +401,8 @@ TEST_F(ErrorLabelBuilderTest,
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
                               commandName,
-                              ErrorCodes::WriteConcernFailed,
-                              ErrorCodes::WriteConcernFailed,
+                              ErrorCodes::WriteConcernTimeout,
+                              ErrorCodes::WriteConcernTimeout,
                               false /* isInternalClient */,
                               false /* isMongos */,
                               false /* isComingFromRouter */,
@@ -431,7 +419,7 @@ TEST_F(ErrorLabelBuilderTest,
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
                               commandName,
-                              ErrorCodes::WriteConcernFailed,
+                              ErrorCodes::WriteConcernTimeout,
                               ErrorCodes::PrimarySteppedDown,
                               false /* isInternalClient */,
                               false /* isMongos */,
@@ -580,34 +568,40 @@ TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorAppliesToChangeStreamAgg
     auto aggRequest = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(cmdObj));
     ASSERT_TRUE(LiteParsedPipeline(aggRequest).hasChangeStream());
 
-    // The label applies to a $changeStream "aggregate" command.
-    std::string commandName = "aggregate";
-    setCommand(cmdObj);
-    ErrorLabelBuilder resumableAggBuilder(opCtx(),
-                                          sessionInfo,
-                                          commandName,
-                                          ErrorCodes::NetworkTimeout,
-                                          boost::none,
-                                          false /* isInternalClient */,
-                                          false /* isMongos */,
-                                          false /* isComingFromRouter  */,
-                                          repl::OpTime{},
-                                          repl::OpTime{});
-    ASSERT_TRUE(resumableAggBuilder.isResumableChangeStreamError());
-    // The label applies to a "getMore" command on a $changeStream cursor.
-    commandName = "getMore";
-    setGetMore(cmdObj);
-    ErrorLabelBuilder resumableGetMoreBuilder(opCtx(),
+    for (auto&& errorCode : {ErrorCodes::NetworkTimeout,
+                             ErrorCodes::QueryPlanKilled,
+                             ErrorCodes::ResumeTenantChangeStream,
+                             ErrorCodes::FailedToSatisfyReadPreference}) {
+        // The label applies to a $changeStream "aggregate" command.
+        std::string commandName = "aggregate";
+        setCommand(cmdObj);
+        ErrorLabelBuilder resumableAggBuilder(opCtx(),
                                               sessionInfo,
                                               commandName,
-                                              ErrorCodes::NetworkTimeout,
+                                              errorCode,
                                               boost::none,
                                               false /* isInternalClient */,
                                               false /* isMongos */,
                                               false /* isComingFromRouter  */,
                                               repl::OpTime{},
                                               repl::OpTime{});
-    ASSERT_TRUE(resumableGetMoreBuilder.isResumableChangeStreamError());
+        ASSERT_TRUE(resumableAggBuilder.isResumableChangeStreamError());
+
+        // The label applies to a "getMore" command on a $changeStream cursor.
+        commandName = "getMore";
+        setGetMore(cmdObj);
+        ErrorLabelBuilder resumableGetMoreBuilder(opCtx(),
+                                                  sessionInfo,
+                                                  commandName,
+                                                  errorCode,
+                                                  boost::none,
+                                                  false /* isInternalClient */,
+                                                  false /* isMongos */,
+                                                  false /* isComingFromRouter  */,
+                                                  repl::OpTime{},
+                                                  repl::OpTime{});
+        ASSERT_TRUE(resumableGetMoreBuilder.isResumableChangeStreamError());
+    }
 }
 
 TEST_F(ErrorLabelBuilderTest, ResumableChangeStreamErrorDoesNotApplyToNonResumableErrors) {
@@ -729,8 +723,8 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelApplied) {
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
                               commandName,
-                              ErrorCodes::WriteConcernFailed,
-                              ErrorCodes::WriteConcernFailed,
+                              ErrorCodes::WriteConcernTimeout,
+                              ErrorCodes::WriteConcernTimeout,
                               false,
                               false /* isMongos */,
                               false /* isComingFromRouter */,
@@ -745,8 +739,8 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelNotAppliedAfterWrite) {
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
                               commandName,
-                              ErrorCodes::WriteConcernFailed,
-                              ErrorCodes::WriteConcernFailed,
+                              ErrorCodes::WriteConcernTimeout,
+                              ErrorCodes::WriteConcernTimeout,
                               false,
                               false /* isMongos */,
                               false /* isComingFromRouter */,
@@ -761,8 +755,8 @@ TEST_F(ErrorLabelBuilderTest, NoWritesPerformedLabelNotAppliedIfUnknown) {
     ErrorLabelBuilder builder(opCtx(),
                               sessionInfo,
                               commandName,
-                              ErrorCodes::WriteConcernFailed,
-                              ErrorCodes::WriteConcernFailed,
+                              ErrorCodes::WriteConcernTimeout,
+                              ErrorCodes::WriteConcernTimeout,
                               false,
                               false /* isMongos */,
                               false /* isComingFromRouter */,

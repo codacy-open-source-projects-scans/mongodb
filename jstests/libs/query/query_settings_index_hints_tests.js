@@ -1,12 +1,14 @@
+import {anyEq} from "jstests/aggregation/extras/utils.js";
 import {getExplainCommand} from "jstests/libs/cmd_object_utils.js";
+import {getCollectionName, isTimeSeriesCollection} from "jstests/libs/cmd_object_utils.js";
 import {
     everyWinningPlan,
-    flattenQueryPlanTree,
+    formatQueryPlanner,
     getAggPlanStages,
     getEngine,
     getPlanStages,
     getQueryPlanners,
-    getWinningPlan,
+    getWinningPlanFromExplain,
     isAlwaysFalsePlan,
     isEofPlan,
     isIdhackOrExpress,
@@ -60,13 +62,10 @@ export class QuerySettingsIndexHintsTests {
             networkErrorAndTxnOverrideConfig.retryOnNetworkErrors;
 
         // If the collection used is a view, determine the underlying collection being used.
-        const collInfo = this._db.getCollectionInfos({name: collOrViewName})[0];
-        let collName = collOrViewName;
-        if (collInfo !== undefined && collInfo.options.hasOwnProperty('viewOn')) {
-            collName = collInfo.options.viewOn;
-        }
+        const collName = getCollectionName(this._db, command);
         const collHasPartialIndexes = this._db[collName].getIndexes().some(
             (idx) => idx.hasOwnProperty('partialFilterExpression'));
+        const isTimeSeriesColl = isTimeSeriesCollection(this._db, collName);
 
         const shouldCheckPlanCache =
             // Single solution plans are not cached in classic, therefore do not perform plan cache
@@ -102,7 +101,10 @@ export class QuerySettingsIndexHintsTests {
             !TestData.isRunningInitialSync &&
             // If the test is running shard key analysis, it may affect the plan cache by generating
             // and additional entry.
-            !TestData.isAnalyzingShardKey;
+            !TestData.isAnalyzingShardKey &&
+            // For timeseries collections with featureFlagSbeFull turned on, it is not possible to
+            // run the planCacheClear command because it is a view, so we cannot acquire lock.
+            !isTimeSeriesColl;
 
         if (!shouldCheckPlanCache) {
             return;
@@ -146,7 +148,7 @@ export class QuerySettingsIndexHintsTests {
         return this.assertIndexUse(cmd, expectedIndex, (explain) => {
             return getQueryPlanners(explain)
                 .filter(queryPlanner => queryPlanner.namespace == `${ns.db}.${ns.coll}`)
-                .map(getWinningPlan)
+                .map(queryPlan => getWinningPlanFromExplain(queryPlan, false))
                 .flatMap(winningPlan => getPlanStages(winningPlan, "IXSCAN"));
         });
     }
@@ -161,7 +163,7 @@ export class QuerySettingsIndexHintsTests {
 
         this.assertIndexUse(cmd, expectedIndex, (explain) => {
             return getQueryPlanners(explain)
-                .map(getWinningPlan)
+                .map(queryPlan => getWinningPlanFromExplain(queryPlan, false))
                 .flatMap(winningPlan => getPlanStages(winningPlan, "EQ_LOOKUP"))
                 .map(stage => {
                     stage.keyPattern = stage.indexKeyPattern;
@@ -185,7 +187,7 @@ export class QuerySettingsIndexHintsTests {
     assertDistinctScanStage(cmd, expectedIndex) {
         return this.assertIndexUse(cmd, expectedIndex, (explain) => {
             return getQueryPlanners(explain)
-                .map(getWinningPlan)
+                .map(queryPlan => getWinningPlanFromExplain(queryPlan, false))
                 .flatMap(winningPlan => getPlanStages(winningPlan, "DISTINCT_SCAN"));
         });
     }
@@ -193,7 +195,7 @@ export class QuerySettingsIndexHintsTests {
     assertCollScanStage(cmd, allowedDirections) {
         const explain = assert.commandWorked(this._db.runCommand({explain: cmd}));
         const collscanStages = getQueryPlanners(explain)
-                                   .map(getWinningPlan)
+                                   .map(queryPlan => getWinningPlanFromExplain(queryPlan, false))
                                    .flatMap(winningPlan => getPlanStages(winningPlan, "COLLSCAN"));
         assert.gte(collscanStages.length, 1, explain);
         for (const collscanStage of collscanStages) {
@@ -385,7 +387,8 @@ export class QuerySettingsIndexHintsTests {
         const settings = {indexHints: {ns, allowedIndexes: [this.indexAB]}};
         const getWinningPlansForQuery = (query) => {
             const explain = assert.commandWorked(this._db.runCommand({explain: query}));
-            return getQueryPlanners(explain).map(getWinningPlan);
+            return getQueryPlanners(explain).map(queryPlan =>
+                                                     getWinningPlanFromExplain(queryPlan, false));
         };
 
         this._qsutils.withQuerySettings(querySettingsQuery, settings, () => {
@@ -416,7 +419,8 @@ export class QuerySettingsIndexHintsTests {
             this._qsutils.withQuerySettings(
                 {...query, $db: querySettingsQuery.$db}, settings, () => {
                     const explain = assert.commandWorked(this._db.runCommand({explain: query}));
-                    winningPlans = getQueryPlanners(explain).map(getWinningPlan);
+                    winningPlans = getQueryPlanners(explain).map(
+                        queryPlan => getWinningPlanFromExplain(queryPlan, false));
                 });
             return winningPlans;
         };
@@ -435,8 +439,10 @@ export class QuerySettingsIndexHintsTests {
     assertQuerySettingsFallback(querySettingsQuery, ns) {
         const query = this._qsutils.withoutDollarDB(querySettingsQuery);
         const settings = {indexHints: {ns, allowedIndexes: ["doesnotexist"]}};
-        const getWinningStages = (explain) =>
-            getQueryPlanners(explain).flatMap(getWinningPlan).flatMap(flattenQueryPlanTree);
+        const getAllQueryPlans = (explain) => getQueryPlanners(explain).flatMap(queryPlanner => {
+            const {winningPlan, rejectedPlans} = formatQueryPlanner(queryPlanner);
+            return rejectedPlans.concat([winningPlan]);
+        });
 
         // It's not guaranteed for all the queries to preserve the order of the stages when
         // replanning (namely in the case of subplanning with $or statements). Flatten the plan tree
@@ -446,17 +452,16 @@ export class QuerySettingsIndexHintsTests {
         const explainWithoutQuerySettings = assert.commandWorked(
             this._db.runCommand(explainCmd),
             `Failed running ${tojson(explainCmd)} before setting query settings`);
-        const winningStagesWithoutQuerySettings = getWinningStages(explainWithoutQuerySettings);
+        const queryPlansWithoutQuerySettings = getAllQueryPlans(explainWithoutQuerySettings);
         this._qsutils.withQuerySettings(querySettingsQuery, settings, () => {
             const explainWithQuerySettings = assert.commandWorked(
                 this._db.runCommand(explainCmd),
-                `Failed running ${tojson(explainCmd)} after settings query settings`);
-            const winningStagesWithQuerySettings = getWinningStages(explainWithQuerySettings);
-            assert.sameMembers(
-                winningStagesWithQuerySettings,
-                winningStagesWithoutQuerySettings,
-                "Expected the query without query settings and the one with settings to have " +
-                    "identical plan stages.");
+                `Failed running ${tojson(explainCmd)} after setting query settings`);
+            const queryPlansWithQuerySettings = getAllQueryPlans(explainWithQuerySettings);
+            assert(anyEq(queryPlansWithoutQuerySettings, queryPlansWithQuerySettings),
+                   "Expected the query without query settings and the one with query settings to " +
+                       "have identical plans: " + tojson(queryPlansWithoutQuerySettings) +
+                       " != " + tojson(queryPlansWithQuerySettings));
             assert.eq(
                 explainWithQuerySettings.pipeline,
                 explainWithoutQuerySettings.pipeline,

@@ -52,8 +52,8 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/feature_compatibility_version_document_gen.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/index_builds_coordinator_mongod.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/repl/collection_cloner.h"
@@ -186,7 +186,9 @@ class InitialSyncerTest : public executor::ThreadPoolExecutorTest,
                           public SyncSourceSelector,
                           public ScopedGlobalServiceContextForTest {
 public:
-    InitialSyncerTest() : _threadClient(getGlobalServiceContext()->getService()) {}
+    InitialSyncerTest()
+        : ScopedGlobalServiceContextForTest(ServiceContext::make(
+              std::make_unique<ClockSourceMock>(), std::make_unique<ClockSourceMock>())) {}
 
     executor::ThreadPoolMock::Options makeThreadPoolMockOptions() const override;
     executor::ThreadPoolMock::Options makeClonerThreadPoolMockOptions() const;
@@ -406,14 +408,12 @@ protected:
         auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(service, replSettings);
         repl::ReplicationCoordinator::set(service, std::move(replCoord));
 
-        service->setFastClockSource(std::make_unique<ClockSourceMock>());
-        service->setPreciseClockSource(std::make_unique<ClockSourceMock>());
         ThreadPool::Options dbThreadPoolOptions;
         dbThreadPoolOptions.poolName = "dbthread";
         dbThreadPoolOptions.minThreads = 1U;
         dbThreadPoolOptions.maxThreads = 1U;
         dbThreadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
+            Client::initThread(threadName, getGlobalServiceContext()->getService());
         };
         _dbWorkThreadPool = std::make_unique<ThreadPool>(dbThreadPoolOptions);
         _dbWorkThreadPool->startup();
@@ -473,7 +473,7 @@ protected:
         threadPoolOptions.minThreads = 1U;
         threadPoolOptions.maxThreads = 1U;
         threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
+            Client::initThread(threadName, getGlobalServiceContext()->getService());
         };
 
         auto dataReplicatorExternalState = std::make_unique<DataReplicatorExternalStateMock>();
@@ -554,8 +554,7 @@ protected:
         ASSERT_TRUE(net->hasReadyRequests());
 
         if (cmdName != "") {
-            const NetworkInterfaceMock::NetworkOperationIterator req =
-                net->getFrontOfUnscheduledQueue();
+            const NetworkInterfaceMock::NetworkOperationIterator req = net->getFrontOfReadyQueue();
             const BSONObj reqBSON = req->getRequest().cmdObj;
             const BSONElement cmdElem = reqBSON.firstElement();
             auto reqCmdName = cmdElem.fieldNameStringData();
@@ -592,7 +591,7 @@ protected:
 private:
     DataReplicatorExternalStateMock* _externalState;
     std::unique_ptr<InitialSyncer> _initialSyncer;
-    ThreadClient _threadClient;
+    ThreadClient _threadClient{getServiceContext()->getService()};
     bool _executorThreadShutdownComplete = false;
 };
 
@@ -863,14 +862,13 @@ TEST_F(InitialSyncerTest, StartupSetsInitialSyncFlagOnSuccess) {
     ASSERT_TRUE(_replicationProcess->getConsistencyMarkers()->getInitialSyncFlag(opCtx.get()));
 }
 
-TEST_F(InitialSyncerTest, StartupSetsInitialDataTimestampAndStableTimestampOnSuccess) {
+TEST_F(InitialSyncerTest, StartupSetsInitialDataTimestampOnSuccess) {
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
 
     // Set initial data timestamp forward first.
     auto serviceCtx = opCtx.get()->getServiceContext();
     _storageInterface->setInitialDataTimestamp(serviceCtx, Timestamp(5, 5));
-    _storageInterface->setStableTimestamp(serviceCtx, Timestamp(6, 6));
 
     ASSERT_OK(initialSyncer->startup(opCtx.get(), maxAttempts));
     ASSERT_TRUE(initialSyncer->isActive());
@@ -1107,9 +1105,15 @@ TEST_F(InitialSyncerTest, InitialSyncerTransitionsToCompleteWhenFinishCallbackTh
     };
 
     _syncSourceSelector->setChooseNewSyncSourceResult_forTest(HostAndPort());
+    auto hangBeforeFinish = globalFailPointRegistry().find("initialSyncHangBeforeFinish");
+    auto timesEnteredFailPoint = hangBeforeFinish->setMode(FailPoint::alwaysOn);
+
     ASSERT_OK(initialSyncer->startup(opCtx.get(), maxAttempts));
 
     ASSERT_OK(initialSyncer->shutdown());
+
+    hangBeforeFinish->waitForTimesEntered(timesEnteredFailPoint + 1);
+    hangBeforeFinish->setMode(FailPoint::off);
     initialSyncer->join();
 
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, _lastApplied);
@@ -2084,11 +2088,8 @@ TEST_F(
         .times(1);
 
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     // Start the real work.
     ASSERT_OK(initialSyncer->startup(opCtx.get(), initialSyncMaxAttempts));
@@ -2127,11 +2128,8 @@ TEST_F(InitialSyncerTest,
     auto net = getNet();
     int baseRollbackId = 1;
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     {
         executor::NetworkInterfaceMock::InNetworkGuard guard(net);
@@ -2226,12 +2224,8 @@ TEST_F(InitialSyncerTest,
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
 
@@ -2278,12 +2272,8 @@ TEST_F(
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -2524,12 +2514,8 @@ TEST_F(InitialSyncerTest, InitialSyncerRetriesLastOplogEntryFetcherNetworkError)
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -3169,12 +3155,8 @@ TEST_F(InitialSyncerTest, InitialSyncerHandlesNetworkErrorsFromRollbackCheckerAf
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -3485,12 +3467,8 @@ TEST_F(InitialSyncerTest, LastOpTimeShouldBeSetEvenIfNoOperationsAreAppliedAfter
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -4167,12 +4145,8 @@ TEST_F(InitialSyncerTest,
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     doSuccessfulInitialSyncWithOneBatch();
 }
@@ -4183,12 +4157,8 @@ TEST_F(InitialSyncerTest,
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     auto initialSyncer = &getInitialSyncer();
     auto opCtx = makeOpCtx();
@@ -4500,12 +4470,8 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgress) {
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     // Skip clearing initial sync progress so that we can check initialSyncStatus fields after
     // initial sync is complete.
@@ -4869,12 +4835,8 @@ TEST_F(InitialSyncerTest, GetInitialSyncProgressReturnsCorrectProgressForNetwork
     // InitialSyncerTest does not construct ServiceEntryPoint and this causes a segmentation fault
     // when reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
 
     // Skip clearing initial sync progress so that we can check initialSyncStatus fields after
     // initial sync is complete.

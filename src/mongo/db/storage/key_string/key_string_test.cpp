@@ -37,7 +37,6 @@
 #include <limits>
 #include <memory>
 #include <random>
-#include <system_error>
 #include <vector>
 
 #include "mongo/base/error_codes.h"
@@ -56,7 +55,6 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/stdx/future.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
@@ -747,7 +745,7 @@ TEST_F(KeyStringBuilderTest, KeyStringBuilderOrdering) {
     ASSERT_NE(0, memcmp(data1.getBuffer(), data2.getBuffer(), data1.getSize()));
 }
 
-TEST_F(KeyStringBuilderTest, KeyStringBuilderDiscriminator) {
+TEST_F(KeyStringBuilderTest, KeyStringBuilderExclusiveBeforeDiscriminator) {
     // test that when passed in a Discriminator it gets added.
     BSONObj doc = BSON("fieldA" << 1 << "fieldB" << 2);
     key_string::HeapBuilder ks(
@@ -755,10 +753,32 @@ TEST_F(KeyStringBuilderTest, KeyStringBuilderDiscriminator) {
     ks.appendBSONElement(doc["fieldA"]);
     ks.appendBSONElement(doc["fieldB"]);
     key_string::Value data = ks.release();
-    uint8_t appendedDiscriminator = (uint8_t)(*(data.getBuffer() + (data.getSize() - 2)));
-    uint8_t end = (uint8_t)(*(data.getBuffer() + (data.getSize() - 1)));
-    ASSERT_EQ((uint8_t)'\001', appendedDiscriminator);
-    ASSERT_EQ((uint8_t)'\004', end);
+    uint8_t appendedDiscriminator = (uint8_t)(*(data.getBuffer() + (data.getSize() - 1)));
+    ASSERT_EQ(1, appendedDiscriminator);
+}
+
+TEST_F(KeyStringBuilderTest, KeyStringBuilderExclusiveAfterDiscriminator) {
+    // test that when passed in a Discriminator it gets added.
+    BSONObj doc = BSON("fieldA" << 1 << "fieldB" << 2);
+    key_string::HeapBuilder ks(
+        key_string::Version::V1, ALL_ASCENDING, key_string::Discriminator::kExclusiveAfter);
+    ks.appendBSONElement(doc["fieldA"]);
+    ks.appendBSONElement(doc["fieldB"]);
+    key_string::Value data = ks.release();
+    uint8_t appendedDiscriminator = (uint8_t)(*(data.getBuffer() + (data.getSize() - 1)));
+    ASSERT_EQ(254, appendedDiscriminator);
+}
+
+TEST_F(KeyStringBuilderTest, KeyStringBuilderInclusiveDiscriminator) {
+    // test that when passed in a Discriminator it gets added.
+    BSONObj doc = BSON("fieldA" << 1 << "fieldB" << 2);
+    key_string::HeapBuilder ks(
+        key_string::Version::V1, ALL_ASCENDING, key_string::Discriminator::kInclusive);
+    ks.appendBSONElement(doc["fieldA"]);
+    ks.appendBSONElement(doc["fieldB"]);
+    key_string::Value data = ks.release();
+    uint8_t appendedDiscriminator = (uint8_t)(*(data.getBuffer() + (data.getSize() - 1)));
+    ASSERT_EQ(4, appendedDiscriminator);
 }
 
 TEST_F(KeyStringBuilderTest, KeyStringValueCompareWithoutDiscriminator1) {

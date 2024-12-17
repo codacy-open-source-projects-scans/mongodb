@@ -49,7 +49,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/index/expression_params.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/s2_common.h"
 #include "mongo/db/index_names.h"
@@ -801,31 +800,6 @@ bool isIndexEligibleForRightSideOfLookupPushdown(const IndexEntry& index,
         !index.sparse && CollatorInterface::collatorsMatch(collator, index.collator);
 }
 
-/**
- * Sets the lowPriority parameter on the given node if it is an unbounded collection scan.
- */
-void deprioritizeUnboundedCollectionScan(QuerySolutionNode* solnRoot,
-                                         const FindCommandRequest& findCommand) {
-    if (solnRoot->getType() != StageType::STAGE_COLLSCAN) {
-        return;
-    }
-
-    auto sort = findCommand.getSort();
-    if (findCommand.getLimit() &&
-        (sort.isEmpty() || sort[query_request_helper::kNaturalSortField])) {
-        // There is a limit with either no sort or the natural sort.
-        return;
-    }
-
-    auto collScan = checked_cast<CollectionScanNode*>(solnRoot);
-    if (collScan->minRecord || collScan->maxRecord) {
-        // This scan is not unbounded.
-        return;
-    }
-
-    collScan->lowPriority = true;
-}
-
 bool isShardedCollScan(QuerySolutionNode* solnRoot) {
     return solnRoot->getType() == StageType::STAGE_SHARDING_FILTER &&
         solnRoot->children.size() == 1 &&
@@ -973,8 +947,7 @@ void QueryPlannerAnalysis::analyzeGeo(const QueryPlannerParams& params,
         }
 
         S2IndexingParams params;
-        ExpressionParams::initialize2dsphereParams(
-            indexEntry.infoObj, indexEntry.collator, &params);
+        index2dsphere::initialize2dsphereParams(indexEntry.infoObj, indexEntry.collator, &params);
 
         if (params.indexVersion < S2_INDEX_VERSION_3) {
             continue;
@@ -1339,8 +1312,6 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
 
     const FindCommandRequest& findCommand = query.getFindCommandRequest();
 
-    deprioritizeUnboundedCollectionScan(solnRoot.get(), findCommand);
-
     // solnRoot finds all our results.  Let's see what transformations we must perform to the
     // data.
 
@@ -1457,11 +1428,19 @@ std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
 
     // Try to convert the query solution to have a DISTINCT_SCAN.
     if (isDistinctScanMultiplanningEnabled && query.getDistinct()) {
-        turnIxscanIntoDistinctScan(query,
-                                   params,
-                                   soln.get(),
-                                   query.getDistinct()->getKey(),
-                                   query.getDistinct()->isDistinctScanDirectionFlipped());
+        // Finalizing a distinct scan plan means pushing FETCH and SHARDING_FILTER stages to the
+        // distinct scan. If the plan is already using a distinct scan, a failure in
+        // finalizing it means we might be left with an invalid plan.
+        const bool mustFinalizeDistinctScan = soln->hasNode(STAGE_DISTINCT_SCAN);
+        const bool didFinalizeDistinctScan =
+            finalizeDistinctScan(query,
+                                 params,
+                                 soln.get(),
+                                 query.getDistinct()->getKey(),
+                                 query.getDistinct()->isDistinctScanDirectionFlipped());
+        tassert(9488000,
+                "Couldn't finalize a distinct scan plan",
+                !mustFinalizeDistinctScan || didFinalizeDistinctScan);
     }
 
     return soln;

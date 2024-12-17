@@ -99,7 +99,7 @@ const BSONObj kNoSuchTransactionResponse =
     BSON("ok" << 0 << "code" << ErrorCodes::NoSuchTransaction << kErrorLabelsFieldName
               << BSON_ARRAY(ErrorLabel::kTransientTransaction));
 
-const BSONObj kWriteConcernError = BSON("code" << ErrorCodes::WriteConcernFailed << "errmsg"
+const BSONObj kWriteConcernError = BSON("code" << ErrorCodes::WriteConcernTimeout << "errmsg"
                                                << "mock");
 const BSONObj kResWithWriteConcernError =
     BSON("ok" << 1 << "writeConcernError" << kWriteConcernError);
@@ -420,8 +420,14 @@ void assertTxnMetadata(BSONObj obj,
     }
 }
 
-class TxnAPITest : public ServiceContextTest {
+class TxnAPITest : service_context_test::WithSetupTransportLayer,
+                   public SharedClockSourceAdapterServiceContextTest {
+    explicit TxnAPITest(std::shared_ptr<ClockSourceMock> mockClock)
+        : SharedClockSourceAdapterServiceContextTest(mockClock), _mockClock(std::move(mockClock)) {}
+
 protected:
+    TxnAPITest() : TxnAPITest(std::make_shared<ClockSourceMock>()) {}
+
     void setUp() final {
         ServiceContextTest::setUp();
 
@@ -482,6 +488,10 @@ protected:
         return _mockClient;
     }
 
+    ClockSourceMock* mockClock() {
+        return _mockClock.get();
+    }
+
     MockResourceYielder* resourceYielder() {
         return _resourceYielder;
     }
@@ -539,6 +549,7 @@ protected:
     }
 
 private:
+    std::shared_ptr<ClockSourceMock> _mockClock;
     ServiceContext::UniqueOperationContext _opCtx;
     std::shared_ptr<executor::ThreadPoolTaskExecutor> _executor;
 
@@ -1160,7 +1171,7 @@ TEST_F(TxnAPITest, DoesNotRetryOnNonTransientCommitErrorWithNonRetryableCommitWC
         });
     ASSERT(swResult.getStatus().isOK());
     ASSERT_EQ(swResult.getValue().cmdStatus, ErrorCodes::NoSuchTransaction);
-    ASSERT_EQ(swResult.getValue().wcError.toStatus(), ErrorCodes::WriteConcernFailed);
+    ASSERT_EQ(swResult.getValue().wcError.toStatus(), ErrorCodes::WriteConcernTimeout);
     ASSERT_EQ(swResult.getValue().getEffectiveStatus(), ErrorCodes::NoSuchTransaction);
 
     ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
@@ -1292,8 +1303,8 @@ TEST_F(TxnAPITest, OwnSession_NonRetryableCommitWCError) {
         });
     ASSERT(swResult.getStatus().isOK());
     ASSERT(swResult.getValue().cmdStatus.isOK());
-    ASSERT_EQ(swResult.getValue().wcError.toStatus(), ErrorCodes::WriteConcernFailed);
-    ASSERT_EQ(swResult.getValue().getEffectiveStatus(), ErrorCodes::WriteConcernFailed);
+    ASSERT_EQ(swResult.getValue().wcError.toStatus(), ErrorCodes::WriteConcernTimeout);
+    ASSERT_EQ(swResult.getValue().getEffectiveStatus(), ErrorCodes::WriteConcernTimeout);
 
     ASSERT_EQ(1, InternalTransactionMetrics::get(opCtx())->getStarted());
     ASSERT_EQ(0, InternalTransactionMetrics::get(opCtx())->getRetriedTransactions());
@@ -1507,7 +1518,7 @@ TEST_F(TxnAPITest, RunThrowsOnCommitWCError) {
                                  return SemiFuture<void>::makeReady();
                              }),
         DBException,
-        ErrorCodes::WriteConcernFailed);
+        ErrorCodes::WriteConcernTimeout);
 }
 
 TEST_F(TxnAPITest, UnyieldsAfterBodyError) {
@@ -2337,12 +2348,10 @@ TEST_F(TxnAPITest, OwnSession_CommitTransactionRetryLimitOnTransientErrors) {
 TEST_F(TxnAPITest, MaxTimeMSIsSetIfOperationContextHasDeadlineAndIgnoresDefaultRetryLimit) {
     FailPointEnableBlock fp("overrideTransactionApiMaxRetriesToThree");
 
-    const std::shared_ptr<ClockSourceMock> mockClock = std::make_shared<ClockSourceMock>();
-    mockClock->reset(getServiceContext()->getFastClockSource()->now());
-    getServiceContext()->setFastClockSource(std::make_unique<SharedClockSourceAdapter>(mockClock));
+    mockClock()->reset(getServiceContext()->getFastClockSource()->now());
     int maxTimeMS = 1000 * 60 * 60 * 24;        // 1 day.
     int advanceTimeByMS = 1000 * 60 * 60 * 23;  // 23 hours.
-    opCtx()->setDeadlineByDate(mockClock->now() + Milliseconds(maxTimeMS),
+    opCtx()->setDeadlineByDate(mockClock()->now() + Milliseconds(maxTimeMS),
                                ErrorCodes::MaxTimeMSExpired);
 
     // txnNumber will be incremented upon the release of a session.
@@ -2374,7 +2383,7 @@ TEST_F(TxnAPITest, MaxTimeMSIsSetIfOperationContextHasDeadlineAndIgnoresDefaultR
             // is disabled when a deadline is set.
             uassert(ErrorCodes::HostUnreachable, "Host unreachable error", attempt > 3);
 
-            mockClock->advance(Milliseconds(advanceTimeByMS));
+            mockClock()->advance(Milliseconds(advanceTimeByMS));
 
             // The commit response.
             mockClient()->setNextCommandResponse(kOKCommandResponse);

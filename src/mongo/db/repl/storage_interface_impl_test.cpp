@@ -73,6 +73,7 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/unittest/assert.h"
@@ -101,7 +102,7 @@ template <typename T>
 NamespaceString makeNamespace(const T& t, const std::string& suffix = "") {
     return NamespaceString::createNamespaceString_forTest(
         std::string("local." + t.getSuiteName() + "_" + t.getTestName())
-            .substr(0, NamespaceString::MaxNsCollectionLen - suffix.length()) +
+            .substr(0, NamespaceString::MaxUserNsCollectionLen - suffix.length()) +
         suffix);
 }
 
@@ -442,6 +443,8 @@ TEST_F(StorageInterfaceImplTest,
         storage.insertDocuments(opCtx, {nss.dbName(), *options.uuid}, transformInserts({op})));
 }
 
+MONGO_COMPILER_DIAGNOSTIC_PUSH
+MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wuninitialized")
 TEST_F(StorageInterfaceImplTest,
        InsertDocumentsInsertsDocumentsOneAtATimeWhenAllAtOnceInsertingFails) {
     // Create a collection that does not support all-at-once inserting.
@@ -469,6 +472,7 @@ TEST_F(StorageInterfaceImplTest,
     // Check collection contents.
     _assertDocumentsInCollectionEquals(opCtx, nss, {doc1.doc, doc2.doc});
 }
+MONGO_COMPILER_DIAGNOSTIC_POP
 
 TEST_F(StorageInterfaceImplTest, InsertDocumentsSavesOperationsReturnsOpTimeOfLastOperation) {
     // Create fake oplog collection to hold operations.
@@ -600,7 +604,7 @@ TEST_F(StorageInterfaceImplTest, CreateCollectionWithIDIndexCommits) {
 
     AutoGetCollectionForReadCommand coll(opCtx, nss);
     ASSERT(coll);
-    ASSERT_EQ(coll->getRecordStore()->numRecords(opCtx), 2LL);
+    ASSERT_EQ(coll->getRecordStore()->numRecords(), 2LL);
     auto collIdxCat = coll->getIndexCatalog();
     auto idIdxDesc = collIdxCat->findIdIndex(opCtx);
     auto count = getIndexKeyCount(opCtx, collIdxCat, idIdxDesc);
@@ -632,7 +636,7 @@ void _testDestroyUncommitedCollectionBulkLoader(
     // Bulk loader is used to create indexes. The collection is not dropped when the bulk loader is
     // destroyed.
     ASSERT_TRUE(coll);
-    ASSERT_EQ(1LL, coll->getRecordStore()->numRecords(opCtx));
+    ASSERT_EQ(1LL, coll->getRecordStore()->numRecords());
 
     // IndexCatalog::numIndexesTotal() includes unfinished indexes. We need to ensure that
     // the bulk loader drops the unfinished indexes.

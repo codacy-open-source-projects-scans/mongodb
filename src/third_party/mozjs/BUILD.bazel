@@ -47,8 +47,7 @@ PLATFORM_INCLUDES = select({
 
 PLATFORM_COPTS = select({
     config: [
-        "/FI" if os == "windows" else "-include",
-        "$(location platform/{}/{}/build/js-confdefs.h)".format(arch, os),
+        ("/FI" if os == "windows" else "-include") + "$(location platform/{}/{}/build/js-confdefs.h)".format(arch, os),
     ] + (["-mavx2"] if arch == "x86_64" and os != "windows" else [])
     for config, (arch, os) in PLATFORMS.items()
 } | {
@@ -247,9 +246,7 @@ mongo_cc_library(
 
             # Disable warnings for third party libraries as no action will be taken to fix them
             # and they just clutter the output logs
-            "-Wno-invalid-offsetof",
             "-Wno-unused-variable",
-            "-Wno-class-memaccess",
             "-Wno-implicit-fallthrough",
 
             # TODO(SERVER-77205): Review and Possibly Remove '-Wno-deprecated'
@@ -293,10 +290,21 @@ mongo_cc_library(
             "__Wno_invalid_offsetof__",
         ],
     }),
+    features = select({
+        "@platforms//os:linux": ["no_invalid_offsetof_warning"],
+        "//conditions:default": [],
+    }) + select({
+        "//bazel/config:compiler_type_gcc": ["no_class_memaccess_warning"],
+        "//conditions:default": [],
+    }),
     includes = [
         "include",
         "mongo_sources",
     ] + PLATFORM_INCLUDES,
+    linkopts = select({
+        "@platforms//os:macos": ["-Wl,-undefined,dynamic_lookup"],
+        "//conditions:default": [""],
+    }),
     local_defines = [
         "IMPL_MFBT=1",
         "U_NO_DEFAULT_INCLUDE_UTF_HEADERS=1",
@@ -317,6 +325,7 @@ mongo_cc_library(
         "@platforms//cpu:x86_64": ["WASM_HUGE_MEMORY=1"],
         "//conditions:default": [],
     }),
+    no_undefined_ref_DO_NOT_USE = False,
     textual_hdrs = glob([
         # Not all files are meant to be compiled but still need to be available
         # for inclusions like `#include "somefile.cpp"`.

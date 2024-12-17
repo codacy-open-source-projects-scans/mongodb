@@ -6,6 +6,8 @@
  *    requires_fcv_80,
  *    featureFlagReplicaSetEndpoint,
  *    featureFlagRouterPort,
+ *    # TODO SERVER-98511: Enable this test.
+ *    __TEMPORARILY_DISABLED__,
  * ]
  */
 
@@ -48,10 +50,6 @@ function runTest(connString, getShard0PrimaryFunc, upgradeFunc, downgradeFunc, t
 
     // Reconnect after the connection was closed due to restart.
     reconnect(conn);
-
-    // TODO SERVER-88213 Remove the enableSharding command below once transitionToShardedCluster
-    // registers databases
-    assert.commandWorked(conn.adminCommand({enableSharding: dbName}));
 
     const docAfterUpgrade = conn.getDB(dbName).getCollection(collName).findOne({x: 1});
     assert.neq(docAfterUpgrade, null);
@@ -106,7 +104,7 @@ function runStandaloneTest(oldBinVersion, oldFCVVersion) {
 function runReplicaSetTest(oldBinVersion, oldFCVVersion) {
     const rst = new ReplSetTest({nodes: 2, nodeOptions: {binVersion: oldBinVersion}});
     rst.startSet();
-    rst.initiate();
+    rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
     const connStringOpts = extractReplicaSetNameAndHosts(rst.getPrimary());
     const connString = makeReplicaSetConnectionString(

@@ -73,7 +73,6 @@
 #include "mongo/client/dbclient_connection.h"  // IWYU pragma: keep
 #include "mongo/config.h"                      // IWYU pragma: keep
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/named_pipe.h"
 #include "mongo/db/traffic_reader.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -84,10 +83,12 @@
 #include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/transport/named_pipe/named_pipe.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/destructor_guard.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit_code.h"
+#include "mongo/util/pcre.h"
 #include "mongo/util/shared_buffer.h"
 #include "mongo/util/signal_win32.h"  // IWYU pragma: keep
 #include "mongo/util/text.h"          // IWYU pragma: keep
@@ -144,19 +145,49 @@ void retryWithBackOff(std::function<void(void)> func) {
 }
 #endif
 
+// Filters lines that match the regex pattern
+std::string filterLinesWithRegex(const std::string& input, const pcre::Regex& regex) {
+    std::stringstream ss(input);
+    std::string line;
+    std::ostringstream result;
+    while (std::getline(ss, line)) {
+        if (regex.match(line)) {
+            result << line << std::endl;
+        }
+    }
+
+    return result.str();
+}
+
 }  // namespace
 
-// Output up to BSONObjMaxUserSize characters of the most recent log output in order to
-// avoid hitting the 16MB size limit of a BSONObject.
+// Output up to BSONObjMaxUserSize characters of the most recent log output.
+//
+// Users must send a regex as the only argument, which will be passed as a string.
+// It is mandatory to provide this argument.
+//
+// The function will only return logs that match the specified regex.
+// If the resulting logs exceed BSONObjMaxUserSize, the function will raise an exception.
+// Ensure the provided regex is well-picked to filter only the desired logs and avoid exceeding the
+// size limit.
 BSONObj RawMongoProgramOutput(const BSONObj& args, void* data) {
     auto programOutputLogger =
         ProgramRegistry::get(getGlobalServiceContext())->getProgramOutputMultiplexer();
     std::string programLog = programOutputLogger->str();
+    uassert(ErrorCodes::BadValue,
+            "A regex pattern must be provided as the only argument. Please ensure you pass a valid "
+            "regex string to filter the logs.",
+            !singleArg(args).isNaN());
+    std::string regexPattern = singleArg(args).String();
+    pcre::Regex regex(regexPattern);
+    programLog = filterLinesWithRegex(programLog, regex);
     std::size_t sz = programLog.size();
-    const string& outputStr =
-        sz > BSONObjMaxUserSize ? programLog.substr(sz - BSONObjMaxUserSize) : programLog;
+    uassert(ErrorCodes::BadValue,
+            "The filtered logs exceed the BSONObjMaxUserSize limit of 16MB. Please use a more "
+            "constrained regex pattern to reduce the size of the returned logs.",
+            sz <= BSONObjMaxUserSize);
 
-    return BSON("" << outputStr);
+    return BSON("" << programLog);
 }
 
 BSONObj ClearRawMongoProgramOutput(const BSONObj& args, void* data) {
@@ -489,10 +520,6 @@ int killDb(int port, ProcessId _pid, int signal, const BSONObj& opt, bool waitPi
         return static_cast<int>(ExitCode::fail);
     }
 
-    if (signal == SIGKILL) {
-        sleepmillis(4000);  // allow operating system to reclaim resources
-    }
-
     return exitCode;
 }
 
@@ -575,14 +602,14 @@ BSONObj ConvertTrafficRecordingToBSON(const BSONObj& a, void* data) {
     return BSON("" << arr);
 }
 
-int KillMongoProgramInstances() {
+int KillMongoProgramInstances(int signal) {
     vector<ProcessId> pids;
     auto registry = ProgramRegistry::get(getGlobalServiceContext());
     registry->getRegisteredPids(pids);
     int returnCode = static_cast<int>(ExitCode::clean);
     for (auto&& pid : pids) {
         int port = registry->portForPid(pid);
-        int code = killDb(port != -1 ? port : 0, pid, SIGTERM);
+        int code = killDb(port != -1 ? port : 0, pid, signal);
         if (code != static_cast<int>(ExitCode::clean)) {
             LOGV2_INFO(
                 22823, "Process exited with error code", "pid"_attr = pid, "code"_attr = code);
@@ -909,6 +936,10 @@ std::vector<ProcessId> getRunningMongoChildProcessIds() {
                      return !isDead;
                  });
     return outPids;
+}
+
+std::vector<ProcessId> getRegisteredPidsHistory() {
+    return ProgramRegistry::get(getGlobalServiceContext())->getRegisteredPidsHistory();
 }
 
 BSONObj RunningMongoChildProcessIds(const BSONObj&, void*) {

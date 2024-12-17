@@ -456,8 +456,8 @@ void processFLEFindD(OperationContext* opCtx,
 
 void processFLECountD(OperationContext* opCtx,
                       const NamespaceString& nss,
-                      CountCommandRequest* countCommand) {
-    fle::processCountCommand(opCtx, nss, countCommand, &getTransactionWithRetriesForMongoD);
+                      CountCommandRequest& countCommand) {
+    fle::processCountCommand(opCtx, nss, &countCommand, &getTransactionWithRetriesForMongoD);
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineD(
@@ -476,8 +476,14 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
                                 const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
                                 const boost::optional<BSONObj>& letParameters,
                                 const BSONObj& query) {
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx, fle::collatorFromBSON(opCtx, collation), nss, runtimeConstants, letParameters);
+
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx)
+                      .collator(fle::collatorFromBSON(opCtx, collation))
+                      .ns(nss)
+                      .runtimeConstants(runtimeConstants)
+                      .letParameters(letParameters)
+                      .build();
     return fle::rewriteQuery(opCtx,
                              expCtx,
                              nss,

@@ -36,9 +36,6 @@
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <cstdint>
-#include <memory>
-#include <set>
-#include <vector>
 
 #include <boost/optional/optional.hpp>
 
@@ -53,7 +50,6 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/catalog/backwards_compatible_collection_options_util.h"
-#include "mongo/db/catalog/capped_utils.h"
 #include "mongo/db/catalog/coll_mod.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
@@ -68,8 +64,6 @@
 #include "mongo/db/catalog/health_log_gen.h"
 #include "mongo/db/catalog/health_log_interface.h"
 #include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
-#include "mongo/db/catalog/index_build_oplog_entry.h"
-#include "mongo/db/catalog/index_builds_manager.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog/rename_collection.h"
@@ -81,10 +75,9 @@
 #include "mongo/db/client.h"
 #include "mongo/db/coll_mod_gen.h"
 #include "mongo/db/collection_crud/capped_collection_maintenance.h"
+#include "mongo/db/collection_crud/capped_utils.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/create_gen.h"
-#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
@@ -95,7 +88,10 @@
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_build_oplog_entry.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_manager.h"
+#include "mongo/db/index_builds/resumable_index_builds_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_util.h"
@@ -118,11 +114,8 @@
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
-#include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/repl/timestamp_block.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
-#include "mongo/db/resumable_index_builds_gen.h"
 #include "mongo/db/s/sharding_index_catalog_ddl_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -274,7 +267,9 @@ void createIndexForApplyOps(OperationContext* opCtx,
                           << indexNss.toStringForErrorMsg(),
             indexCollection);
 
-    OpCounters* opCounters = opCtx->writesAreReplicated() ? &globalOpCounters : &replOpCounters;
+    OpCounters* opCounters = opCtx->writesAreReplicated()
+        ? &serviceOpCounters(ClusterRole::ShardServer)
+        : &replOpCounters;
     opCounters->gotInsert();
     if (opCtx->writesAreReplicated()) {
         ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForInsert(
@@ -307,14 +302,7 @@ void createIndexForApplyOps(OperationContext* opCtx,
                             << indexCollection->uuid() << "; original index spec: " << indexSpec);
     const auto constraints = IndexBuildsManager::IndexConstraints::kRelax;
 
-    // Run single-phase builds synchronously with oplog batch application. For tenant migrations,
-    // the recipient needs to build the index on empty collections to completion within the same
-    // storage transaction. This is in order to eliminate a window of time where we can reload the
-    // catalog through startup or rollback and detect the index in an incomplete state. Before
-    // SERVER-72618 this was possible and would require us to remove the index from the catalog to
-    // allow replication recovery to rebuild it. The result of this was an untimestamped write to
-    // the catalog. This only applies to empty collection index builds during tenant migration and
-    // is resolved by calling `createIndexesOnEmptyCollection` on empty collections.
+    // Run single-phase builds synchronously with oplog batch application.
     //
     // Single phase builds are only used for empty collections, and to rebuild indexes admin.system
     // collections. See SERVER-47439.
@@ -395,7 +383,7 @@ void writeToImageCollection(OperationContext* opCtx,
         write_ops::UpdateModification::parseFromClassicUpdate(imageEntry.toBSON()));
     request.setFromOplogApplication(true);
     request.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
-    // This code path can also be hit by things such as `applyOps` and tenant migrations.
+    // This code path can also be hit by things such as `applyOps.`
     ::mongo::update(opCtx, collection, request);
 }
 
@@ -418,8 +406,7 @@ void logOplogRecords(OperationContext* opCtx,
                      const std::vector<Timestamp>& timestamps,
                      const CollectionPtr& oplogCollection,
                      OpTime finalOpTime,
-                     Date_t wallTime,
-                     bool isAbortIndexBuild) {
+                     Date_t wallTime) {
     auto replCoord = ReplicationCoordinator::get(opCtx);
     if (replCoord->getSettings().isReplSet() && !replCoord->canAcceptWritesFor(opCtx, nss)) {
         str::stream ss;
@@ -430,19 +417,6 @@ void logOplogRecords(OperationContext* opCtx,
         }
         ss << "]";
         uasserted(ErrorCodes::NotWritablePrimary, ss);
-    }
-
-    // Throw TenantMigrationConflict error if the database for 'nss' is being migrated. The oplog
-    // entry for renameCollection has 'nss' set to the fromCollection's ns. renameCollection can be
-    // across databases, but a tenant will never be able to rename into a database with a different
-    // prefix, so it is safe to use the fromCollection's db's prefix for this check.
-    //
-    // Skip the check if this is an "abortIndexBuild" oplog entry since it is safe to the abort an
-    // index build on the donor after the blockTimestamp, plus if an index build fails to commit due
-    // to TenantMigrationConflict, we need to be able to abort the index build and clean up.
-    if (!isAbortIndexBuild) {
-        tenant_migration_access_blocker::checkIfCanWriteOrThrow(
-            opCtx, nss.dbName(), timestamps.back());
     }
 
     Status result = insertDocumentsForOplog(opCtx, oplogCollection, records, timestamps);
@@ -500,18 +474,6 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
                 oplogEntry->getStatementIds().empty());
         return {};
     }
-    // If this oplog entry is from a tenant migration, include the tenant migration
-    // UUID and optional donor timeline metadata.
-    if (const auto& recipientInfo = tenantMigrationInfo(opCtx)) {
-        oplogEntry->setFromTenantMigration(recipientInfo->uuid);
-        if (oplogEntry->getTid() &&
-            change_stream_serverless_helpers::isChangeStreamEnabled(opCtx, *oplogEntry->getTid()) &&
-            recipientInfo->donorOplogEntryData) {
-            oplogEntry->setDonorOpTime(recipientInfo->donorOplogEntryData->donorOpTime);
-            oplogEntry->setDonorApplyOpsIndex(recipientInfo->donorOplogEntryData->applyOpsIndex);
-        }
-    }
-
 
     // TODO SERVER-51301 to remove this block.
     if (oplogEntry->getOpType() == repl::OpTypeEnum::kNoop) {
@@ -551,16 +513,7 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry) {
     std::vector<Record> records{
         {RecordId(), RecordData(bsonOplogEntry.objdata(), bsonOplogEntry.objsize())}};
     std::vector<Timestamp> timestamps{slot.getTimestamp()};
-    const auto isAbortIndexBuild = oplogEntry->getOpType() == OpTypeEnum::kCommand &&
-        parseCommandType(oplogEntry->getObject()) == OplogEntry::CommandType::kAbortIndexBuild;
-    logOplogRecords(opCtx,
-                    oplogEntry->getNss(),
-                    &records,
-                    timestamps,
-                    oplog,
-                    slot,
-                    wallClockTime,
-                    isAbortIndexBuild);
+    logOplogRecords(opCtx, oplogEntry->getNss(), &records, timestamps, oplog, slot, wallClockTime);
     wuow.commit();
     return slot;
 }
@@ -1044,14 +997,6 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
           const auto& entry = *op;
           const auto& cmd = entry.getObject();
           auto nss = extractNsFromUUIDorNs(opCtx, entry.getNss(), entry.getUuid(), cmd);
-          if (nss.isDropPendingNamespace()) {
-              LOGV2(21253,
-                    "applyCommand: collection is already in a drop-pending state, ignoring "
-                    "collection drop",
-                    logAttrs(nss),
-                    "command"_attr = redact(cmd));
-              return Status::OK();
-          }
           // Parse optime from oplog entry unless we are applying this command in standalone or on a
           // primary (replicated writes enabled).
           OpTime opTime;
@@ -1217,28 +1162,16 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
 };
 
 // Writes a change stream pre-image 'preImage' associated with oplog entry 'oplogEntry' and a write
-// operation to collection 'collection'. If we are writing the pre-image during oplog application
-// on a secondary for a serverless tenant migration, we will use the timestamp and applyOpsIndex
-// from the donor timeline. If we are applying this entry on a primary during tenant oplog
-// application, we skip writing of the pre-image. The op observer will handle inserting the
-// correct pre-image on the primary in this case.
+// operation to collection 'collection'.
 void writeChangeStreamPreImage(OperationContext* opCtx,
                                const CollectionPtr& collection,
                                const mongo::repl::OplogEntry& oplogEntry,
                                const BSONObj& preImage) {
     Timestamp timestamp;
     int64_t applyOpsIndex;
-    // If donorOpTime is set on the oplog entry, this is a write that is being applied on a
-    // secondary during the oplog catchup phase of a tenant migration. Otherwise, we are either
-    // applying a steady state write operation on a secondary or applying a write on the primary
-    // during tenant migration oplog catchup.
-    if (const auto& donorOpTime = oplogEntry.getDonorOpTime()) {
-        timestamp = donorOpTime->getTimestamp();
-        applyOpsIndex = oplogEntry.getDonorApplyOpsIndex().get_value_or(0);
-    } else {
-        timestamp = oplogEntry.getTimestampForPreImage();
-        applyOpsIndex = oplogEntry.getApplyOpsIndex();
-    }
+
+    timestamp = oplogEntry.getTimestampForPreImage();
+    applyOpsIndex = oplogEntry.getApplyOpsIndex();
 
     ChangeStreamPreImageId preImageId{collection->uuid(), timestamp, applyOpsIndex};
     ChangeStreamPreImage preImageDocument{
@@ -1387,7 +1320,8 @@ Status applyOperation_inlock(OperationContext* opCtx,
     // whether writes are replicated.
     const bool shouldUseGlobalOpCounters =
         mode == repl::OplogApplication::Mode::kApplyOpsCmd || opCtx->writesAreReplicated();
-    OpCounters* opCounters = shouldUseGlobalOpCounters ? &globalOpCounters : &replOpCounters;
+    OpCounters* opCounters =
+        shouldUseGlobalOpCounters ? &serviceOpCounters(ClusterRole::ShardServer) : &replOpCounters;
 
     auto opType = op.getOpType();
     if (opType == OpTypeEnum::kNoop) {
@@ -1520,15 +1454,6 @@ Status applyOperation_inlock(OperationContext* opCtx,
             !requestNss.isTemporaryReshardingCollection();
     };
 
-
-    // We are applying this entry on the primary during tenant oplog application. Decorate the opCtx
-    // with donor timeline metadata so that it will be available in the op observer and available
-    // for use here when oplog entries are logged.
-    if (auto& recipientInfo = tenantMigrationInfo(opCtx)) {
-        recipientInfo->donorOplogEntryData =
-            DonorOplogEntryData(op.getOpTime(), op.getApplyOpsIndex());
-    }
-
     switch (opType) {
         case OpTypeEnum::kInsert: {
             uassert(ErrorCodes::NamespaceNotFound,
@@ -1538,32 +1463,18 @@ Status applyOperation_inlock(OperationContext* opCtx,
             if (opOrGroupedInserts.isGroupedInserts()) {
                 // Grouped inserts.
 
-                // Cannot apply an array insert with applyOps command.  But can apply grouped
-                // inserts on primary as part of a tenant migration.
+                // Cannot apply an array insert with applyOps command.
                 uassert(ErrorCodes::OperationFailed,
                         "Cannot apply an array insert with applyOps",
-                        !opCtx->writesAreReplicated() || tenantMigrationInfo(opCtx));
+                        !opCtx->writesAreReplicated());
 
                 std::vector<InsertStatement> insertObjs;
                 const auto insertOps = opOrGroupedInserts.getGroupedInserts();
                 WriteUnitOfWork wuow(opCtx);
-                if (!opCtx->writesAreReplicated()) {
-                    for (const auto& iOp : insertOps) {
-                        invariant(iOp->getTerm());
-                        insertObjs.emplace_back(
-                            iOp->getObject(), iOp->getTimestamp(), iOp->getTerm().value());
-                    }
-                } else {
-                    // Applying grouped inserts on the primary as part of a tenant migration.
-                    // We assign new optimes as the optimes on the donor are not relevant to
-                    // the recipient.
-                    std::vector<OplogSlot> slots = getNextOpTimes(opCtx, insertOps.size());
-                    auto slotIter = slots.begin();
-                    for (const auto& iOp : insertOps) {
-                        insertObjs.emplace_back(
-                            iOp->getObject(), slotIter->getTimestamp(), slotIter->getTerm());
-                        slotIter++;
-                    }
+                for (const auto& iOp : insertOps) {
+                    invariant(iOp->getTerm());
+                    insertObjs.emplace_back(
+                        iOp->getObject(), iOp->getTimestamp(), iOp->getTerm().value());
                 }
 
                 // If an oplog entry has a recordId, this means that the collection is a
@@ -1790,7 +1701,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
             // guarantee, which then means we shouldn't apply these optimizations.
             write_ops::UpdateModification::DiffOptions options;
             if (mode == OplogApplication::Mode::kSecondary && collection->getTimeseriesOptions() &&
-                !op.getCheckExistenceForDiffInsert() && !op.getFromTenantMigration()) {
+                !op.getCheckExistenceForDiffInsert()) {
                 options.mustCheckExistenceForInsertOperations = false;
             }
             auto updateMod = write_ops::UpdateModification::parseFromOplogEntry(o, options);
@@ -2193,7 +2104,9 @@ Status applyCommand_inlock(OperationContext* opCtx,
 
     // Choose opCounters based on running on standalone/primary or secondary by checking
     // whether writes are replicated.
-    OpCounters* opCounters = opCtx->writesAreReplicated() ? &globalOpCounters : &replOpCounters;
+    OpCounters* opCounters = opCtx->writesAreReplicated()
+        ? &serviceOpCounters(ClusterRole::ShardServer)
+        : &replOpCounters;
     opCounters->gotCommand();
 
     BSONObj o = op->getObject();
@@ -2494,7 +2407,7 @@ void establishOplogRecordStoreForLogging(OperationContext* opCtx, RecordStore* r
 void signalOplogWaiters() {
     const auto& oplog = LocalOplogInfo::get(getGlobalServiceContext())->getRecordStore();
     if (oplog) {
-        oplog->getCappedInsertNotifier()->notifyAll();
+        oplog->capped()->getInsertNotifier()->notifyAll();
     }
 }
 

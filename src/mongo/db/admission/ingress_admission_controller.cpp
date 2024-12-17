@@ -48,14 +48,11 @@ const ConstructorActionRegistererType<ServiceContext> onServiceContextCreate{
     }};
 }  // namespace
 
-IngressAdmissionController::IngressAdmissionController() {}
-
 void IngressAdmissionController::init() {
-    _ticketHolder =
-        std::make_unique<SemaphoreTicketHolder>(&getIngressAdmissionController.owner(*this),
-                                                gIngressAdmissionControllerTicketPoolSize.load(),
-                                                false,
-                                                SemaphoreTicketHolder::ResizePolicy::kImmediate);
+    _ticketHolder = std::make_unique<TicketHolder>(&getIngressAdmissionController.owner(*this),
+                                                   gIngressAdmissionControllerTicketPoolSize.load(),
+                                                   false,
+                                                   TicketHolder::ResizePolicy::kImmediate);
 }
 
 IngressAdmissionController& IngressAdmissionController::get(OperationContext* opCtx) {

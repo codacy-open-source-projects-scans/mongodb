@@ -39,7 +39,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
-#include <new>
 #include <ostream>
 #include <string>
 #include <utility>
@@ -47,7 +46,6 @@
 
 #include "mongo/base/data_view.h"
 #include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -56,17 +54,15 @@
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/collection_validation.h"
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog/multi_index_block.h"
-#include "mongo/db/catalog/validate_results.h"
+#include "mongo/db/catalog/validate/collection_validation.h"
+#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
@@ -74,23 +70,23 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_build_interceptor.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/bson_collection_catalog_entry.h"
 #include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/storage/durable_catalog_entry.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
+#include "mongo/db/storage/sorted_data_interface_test_assert.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -1142,9 +1138,8 @@ public:
                                         sortedDataInterface->getOrdering(),
                                         recordId)
                     .release();
-            auto insertStatus =
-                sortedDataInterface->insert(&_opCtx, indexKey, true /* dupsAllowed */);
-            ASSERT_OK(insertStatus);
+            ASSERT_SDI_INSERT_OK(
+                sortedDataInterface->insert(&_opCtx, indexKey, true /* dupsAllowed */));
             commitTransaction();
         }
 
@@ -1530,7 +1525,8 @@ public:
             });
 
             ASSERT_EQ(false, results.isValid());
-            ASSERT_EQ(static_cast<size_t>(2), totalErrors(results));
+            // Inconsistencies in 'a' and '_id', '_id' count mismatch
+            ASSERT_EQ(static_cast<size_t>(3), totalErrors(results));
             ASSERT_EQ(static_cast<size_t>(1), totalNonTransientWarnings(results));
             ASSERT_EQ(static_cast<size_t>(2), results.getExtraIndexEntries().size());
             ASSERT_EQ(static_cast<size_t>(0), results.getMissingIndexEntries().size());
@@ -1965,7 +1961,8 @@ public:
 
             ASSERT_EQ(false, results.isValid());
             ASSERT_EQ(false, results.getRepaired());
-            ASSERT_EQ(static_cast<size_t>(2), totalErrors(results));
+            // Inconsistencies in 'a' and '_id', '_id' count mismatch
+            ASSERT_EQ(static_cast<size_t>(3), totalErrors(results));
             ASSERT_EQ(static_cast<size_t>(1), totalNonTransientWarnings(results));
             ASSERT_EQ(static_cast<size_t>(2), results.getExtraIndexEntries().size());
             ASSERT_EQ(static_cast<size_t>(0), results.getMissingIndexEntries().size());
@@ -2151,7 +2148,7 @@ public:
                     commitTransaction();
                 }
 
-                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, entry));
+                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, coll(), entry));
             }
 
             releaseDb();
@@ -2401,7 +2398,7 @@ public:
                     commitTransaction();
                 }
 
-                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, entry));
+                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, coll(), entry));
             }
 
             releaseDb();
@@ -2706,7 +2703,7 @@ public:
                     commitTransaction();
                 }
 
-                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, entry));
+                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, coll(), entry));
             }
 
             // Insert the key on b.
@@ -2753,7 +2750,7 @@ public:
                     commitTransaction();
                 }
 
-                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, entry));
+                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, coll(), entry));
             }
 
             releaseDb();
@@ -3319,7 +3316,7 @@ public:
                     commitTransaction();
                 }
 
-                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, entry));
+                ASSERT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, coll(), entry));
             }
 
             // Insert the key on "a".
@@ -3366,7 +3363,7 @@ public:
                     commitTransaction();
                 }
 
-                ASSERT_NOT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, entry));
+                ASSERT_NOT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, coll(), entry));
             }
 
             releaseDb();
@@ -3557,7 +3554,7 @@ public:
             ASSERT_EQ(3, results.getNumRemovedCorruptRecords());
 
             // Check that the corrupted records have been removed from the record store.
-            ASSERT_EQ(0, rs->numRecords(&_opCtx));
+            ASSERT_EQ(0, rs->numRecords());
 
             dumpOnErrorGuard.dismiss();
         }
@@ -4542,7 +4539,7 @@ public:
                     commitTransaction();
                 }
 
-                ASSERT_NOT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, entry));
+                ASSERT_NOT_OK(interceptor->checkDuplicateKeyConstraints(&_opCtx, coll(), entry));
             }
 
             releaseDb();

@@ -91,8 +91,6 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
-#include "mongo/db/repl/tenant_migration_donor_access_blocker.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/session.h"
@@ -100,6 +98,7 @@
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
@@ -259,7 +258,7 @@ protected:
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx.get());
         mongoDSessionCatalog->onStepUp(opCtx.get());
 
-        ReadWriteConcernDefaults::create(getServiceContext(), _lookupMock.getFetchDefaultsFn());
+        ReadWriteConcernDefaults::create(getService(), _lookupMock.getFetchDefaultsFn());
 
         reset(opCtx.get(), nss, uuid);
         reset(opCtx.get(), nss1, uuid1);
@@ -736,7 +735,6 @@ TEST_F(OpObserverTest, OnDropCollectionReturnsDropOpTime) {
                                     nss,
                                     uuid,
                                     0U,
-                                    OpObserver::CollectionDropType::kTwoPhase,
                                     /*markFromMigrate=*/false);
         dropOpTime = OpObserver::Times::get(opCtx.get()).reservedOpTimes.front();
         wunit.commit();
@@ -773,7 +771,6 @@ TEST_F(OpObserverTest, OnDropCollectionInlcudesTenantId) {
                                     nss,
                                     uuid,
                                     0U,
-                                    OpObserver::CollectionDropType::kTwoPhase,
                                     /*markFromMigrate=*/false);
         wunit.commit();
     }
@@ -2221,50 +2218,6 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
     ASSERT_FALSE(oplogEntryObj.getBoolField("prepare"));
 }
 
-class OpObserverServerlessTransactionTest : public OpObserverTransactionTest {
-private:
-    // Needs to override to set serverless mode.
-    repl::ReplSettings createReplSettings() override {
-        return repl::createServerlessReplSettings();
-    }
-};
-
-TEST_F(OpObserverServerlessTransactionTest,
-       OnUnpreparedTransactionCommitChecksIfTenantMigrationIsBlockingWrites) {
-    // Add a tenant migration access blocker on donor for blocking writes.
-    auto donorMtab = std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), uuid);
-    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).add(kTenantId, donorMtab);
-
-    auto txnParticipant = TransactionParticipant::get(opCtx());
-    txnParticipant.unstashTransactionResources(opCtx(), "insert");
-
-    std::vector<InsertStatement> insert;
-    insert.emplace_back(0,
-                        BSON("_id" << 0 << "data"
-                                   << "x"));
-
-    {
-        AutoGetCollection autoColl(opCtx(), kNssUnderTenantId, MODE_IX);
-        opObserver().onInserts(opCtx(),
-                               *autoColl,
-                               insert.begin(),
-                               insert.end(),
-                               /*recordIds=*/{},
-                               /*fromMigrate=*/std::vector<bool>(insert.size(), false),
-                               /*defaultFromMigrate=*/false);
-    }
-
-    donorMtab->startBlockingWrites();
-
-    auto txnOps = txnParticipant.retrieveCompletedTransactionOperations(opCtx());
-    ASSERT_EQUALS(txnOps->getNumberOfPrePostImagesToWrite(), 0);
-    ASSERT_THROWS_CODE(commitUnpreparedTransaction<OpObserverImpl>(opCtx(), opObserver()),
-                       DBException,
-                       ErrorCodes::TenantMigrationConflict);
-
-    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).shutDown();
-}
-
 /**
  * Test fixture for testing OpObserver behavior specific to retryable findAndModify.
  */
@@ -2921,11 +2874,8 @@ class BatchedWriteOutputsTest : public OpObserverTest {
 public:
     void setUp() override {
         OpObserverTest::setUp();
-
-        auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
-        opObserverRegistry->addObserver(
+        opObserverRegistry()->addObserver(
             std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
-        getServiceContext()->setOpObserver(std::move(opObserverRegistry));
     }
 
 protected:
@@ -4899,7 +4849,7 @@ TEST_F(OpObserverLargeTransactionTest, LargeTransactionCreatesMultipleOplogEntri
 }
 
 TEST_F(OpObserverTest, OnRollbackInvalidatesDefaultRWConcernCache) {
-    auto& rwcDefaults = ReadWriteConcernDefaults::get(getServiceContext());
+    auto& rwcDefaults = ReadWriteConcernDefaults::get(getService());
     auto opCtx = getClient()->makeOperationContext();
 
     // Put initial defaults in the cache.
@@ -4978,36 +4928,6 @@ private:
         return repl::createServerlessReplSettings();
     }
 };
-
-TEST_F(OpObserverServerlessTest, OnInsertChecksIfTenantMigrationIsBlockingWrites) {
-    auto opCtx = cc().makeOperationContext();
-
-    // Add a tenant migration access blocker on donor for blocking writes.
-    auto donorMtab = std::make_shared<TenantMigrationDonorAccessBlocker>(getServiceContext(), uuid);
-    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).add(kTenantId, donorMtab);
-    donorMtab->startBlockingWrites();
-
-    std::vector<InsertStatement> insert;
-    insert.emplace_back(BSON("_id" << 0 << "data"
-                                   << "x"));
-
-    {
-        AutoGetCollection autoColl(opCtx.get(), kNssUnderTenantId, MODE_IX);
-        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
-        ASSERT_THROWS_CODE(
-            opObserver.onInserts(opCtx.get(),
-                                 *autoColl,
-                                 insert.begin(),
-                                 insert.end(),
-                                 /*recordIds=*/{},
-                                 /*fromMigrate=*/std::vector<bool>(insert.size(), false),
-                                 /*defaultFromMigrate=*/false),
-            DBException,
-            ErrorCodes::TenantMigrationConflict);
-    }
-
-    TenantMigrationAccessBlockerRegistry::get(getServiceContext()).shutDown();
-}
 
 }  // namespace
 }  // namespace mongo

@@ -27,98 +27,15 @@
  *    it in the license file.
  */
 
-#include <mutex>
-
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/transaction_resources.h"
 
 namespace mongo {
-namespace {
-void validateWriteAllowed(OperationContext* opCtx) {
-    uassert(ErrorCodes::IllegalOperation,
-            "Cannot execute a write operation in read-only mode",
-            !opCtx->readOnly());
-}
-
-}  // namespace
-
-RecordStore::RecordStore(boost::optional<UUID> uuid, StringData identName, bool isCapped)
-    : _ident(std::make_shared<Ident>(identName.toString())),
-      _uuid(uuid),
-      _cappedInsertNotifier(isCapped ? std::make_shared<CappedInsertNotifier>() : nullptr) {}
-
-void RecordStore::deleteRecord(OperationContext* opCtx, const RecordId& dl) {
-    validateWriteAllowed(opCtx);
-    doDeleteRecord(opCtx, dl);
-}
-
-Status RecordStore::insertRecords(OperationContext* opCtx,
-                                  std::vector<Record>* inOutRecords,
-                                  const std::vector<Timestamp>& timestamps) {
-    validateWriteAllowed(opCtx);
-    return doInsertRecords(opCtx, inOutRecords, timestamps);
-}
-
-Status RecordStore::updateRecord(OperationContext* opCtx,
-                                 const RecordId& recordId,
-                                 const char* data,
-                                 int len) {
-    validateWriteAllowed(opCtx);
-    return doUpdateRecord(opCtx, recordId, data, len);
-}
-
-StatusWith<RecordData> RecordStore::updateWithDamages(OperationContext* opCtx,
-                                                      const RecordId& loc,
-                                                      const RecordData& oldRec,
-                                                      const char* damageSource,
-                                                      const DamageVector& damages) {
-    validateWriteAllowed(opCtx);
-    return doUpdateWithDamages(opCtx, loc, oldRec, damageSource, damages);
-}
-
-Status RecordStore::truncate(OperationContext* opCtx) {
-    validateWriteAllowed(opCtx);
-    return doTruncate(opCtx);
-}
-
-Status RecordStore::rangeTruncate(OperationContext* opCtx,
-                                  const RecordId& minRecordId,
-                                  const RecordId& maxRecordId,
-                                  int64_t hintDataSizeDiff,
-                                  int64_t hintNumRecordsDiff) {
-    validateWriteAllowed(opCtx);
-    invariant(minRecordId != RecordId() || maxRecordId != RecordId(),
-              "Ranged truncate must have one bound defined");
-    invariant(minRecordId <= maxRecordId, "Start position cannot be after end position");
-    return doRangeTruncate(opCtx, minRecordId, maxRecordId, hintDataSizeDiff, hintNumRecordsDiff);
-}
-
-void RecordStore::cappedTruncateAfter(OperationContext* opCtx,
-                                      const RecordId& end,
-                                      bool inclusive,
-                                      const AboutToDeleteRecordCallback& aboutToDelete) {
-    validateWriteAllowed(opCtx);
-    doCappedTruncateAfter(opCtx, end, inclusive, aboutToDelete);
-}
-
-bool RecordStore::haveCappedWaiters() const {
-    return _cappedInsertNotifier && _cappedInsertNotifier.use_count() > 1;
-}
-
-void RecordStore::notifyCappedWaitersIfNeeded() {
-    if (haveCappedWaiters())
-        _cappedInsertNotifier->notifyAll();
-}
-
-StatusWith<int64_t> RecordStore::compact(OperationContext* opCtx, const CompactOptions& options) {
-    validateWriteAllowed(opCtx);
-    return doCompact(opCtx, options);
-}
-
 
 void CappedInsertNotifier::notifyAll() const {
     stdx::lock_guard<stdx::mutex> lk(_mutex);

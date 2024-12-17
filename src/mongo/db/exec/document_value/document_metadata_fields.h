@@ -40,6 +40,8 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
@@ -85,6 +87,15 @@ public:
         // New fields must be added before the kNumFields sentinel.
         kNumFields
     };
+
+    /**
+     * Parses the MetaType from a given type name.
+     *
+     * Throws a user exception if the provided name is not a recognized name as argument to $meta.
+     */
+    static DocumentMetadataFields::MetaType parseMetaType(StringData name);
+
+    static StringData serializeMetaType(DocumentMetadataFields::MetaType type);
 
     /**
      * Reads serialized metadata out of 'buf', and uses it to populate 'out'. Expects 'buf' to have
@@ -152,6 +163,17 @@ public:
         return static_cast<bool>(_holder);
     }
 
+    /**
+     * Sets the given MetaType field to the Value provided.
+     *
+     * Throws a user exception if the type of the Value is not compatible with the type held in the
+     * metadata holder.
+     *
+     * The sort key cannot be set using this method since it must also be specified if the sort key
+     * is a single element sort key.
+     */
+    void setMetaFieldFromValue(MetaType type, Value val);
+
     bool hasTextScore() const {
         return _holder && _holder->metaFields.test(MetaType::kTextScore);
     }
@@ -164,6 +186,8 @@ public:
     void setTextScore(double score) {
         _setCommon(MetaType::kTextScore);
         _holder->textScore = score;
+        // The 'score' metadata field is also set, with the value of the 'textScore'.
+        setScore(score);
     }
 
     bool hasRandVal() const {
@@ -239,6 +263,8 @@ public:
     void setSearchScore(double score) {
         _setCommon(MetaType::kSearchScore);
         _holder->searchScore = score;
+        // The 'score' metadata field is also set, with the value of the 'textScore'.
+        setScore(score);
     }
 
     bool hasSearchHighlights() const {
@@ -355,6 +381,8 @@ public:
     void setVectorSearchScore(double vectorSearchScore) {
         _setCommon(MetaType::kVectorSearchScore);
         _holder->vectorSearchScore = vectorSearchScore;
+        // The 'score' metadata field is also set, with the value of the 'textScore'.
+        setScore(vectorSearchScore);
     }
 
     bool hasSearchSequenceToken() const {
@@ -381,8 +409,11 @@ public:
     }
 
     void setScore(double score) {
-        _setCommon(MetaType::kScore);
-        _holder->score = score;
+        if (feature_flags::gFeatureFlagRankFusionFull.isEnabledUseLastLTSFCVWhenUninitialized(
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            _setCommon(MetaType::kScore);
+            _holder->score = score;
+        }
     }
 
     void serializeForSorter(BufBuilder& buf) const;

@@ -43,6 +43,7 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/interruptible.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -362,6 +363,7 @@ public:
     }
 
 private:
+    friend class WiredTigerSession;
     WT_CONNECTION* _conn;             // not owned
     ClockSource* const _clockSource;  // not owned
     WiredTigerKVEngine* _engine;      // not owned, might be NULL

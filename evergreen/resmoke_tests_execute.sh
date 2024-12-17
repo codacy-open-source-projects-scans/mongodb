@@ -109,17 +109,17 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     extra_args="$extra_args --mongodSetParameter \"{'jsHeapLimitMB':10}\""
   fi
 
-  # Even though all feature flags may be enabled on a variant, often times we do not want to run
-  # feature flag tests because they will most likely fail. For example, during multiversion testing,
-  # all feature flags may be enabled on the latest version, but running feature flag specific tests on
-  # older versions (last-lts/last-continuous) will likely fail because those features most likely do not exist.
-  if [[ ${run_no_feature_flag_tests} == "true" ]]; then
-    extra_args="$extra_args --runNoFeatureFlagTests"
-  fi
-
   # Introduce JS_GC_ZEAL to be used specifically under mongod/mongos.
   if [[ "${build_variant}" = "enterprise-rhel-8-64-bit-dynamic-spider-monkey-dbg" && ! -z "${mongo_mozjs_options}" ]]; then
     extra_args="$extra_args --mozjsJsGcZeal='${mongo_mozjs_options}'"
+  fi
+
+  if [ "${is_patch}" = "true" ]; then
+    extra_args="$extra_args --patchBuild"
+  fi
+
+  if [ "${skip_symbolization}" = "true" ]; then
+    extra_args="$extra_args --skipSymbolization"
   fi
 
   path_value="$PATH:/data/multiversion"
@@ -143,7 +143,6 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     $resmoke_env_options \
     ${resmoke_wrapper} \
     $python buildscripts/resmoke.py run \
-    ${record_with} \
     ${resmoke_args} \
     $extra_args \
     ${test_flags} \
@@ -168,16 +167,6 @@ if [[ ${disable_unit_tests} = "false" && ! -f ${skip_tests} ]]; then
     --cedarReportFile=cedar_report.json
   resmoke_exit_code=$?
   set -o errexit
-
-  if [[ -n "${record_with}" ]]; then
-    recording_size=$( (du -ch ./*.undo ./*.undo.tokeep || true) | grep total)
-    echo "UndoDB produced recordings that were $recording_size (uncompressed) on disk"
-    # Unittests recordings are renamed so there's never a need to store any .undo files.
-    if [[ $resmoke_exit_code = 0 || "${task_name}" == "run_unittests_with_recording" ]]; then
-      echo "Removing UndoDB recordings of successful tests."
-      rm *.undo || true
-    fi
-  fi
 
   # 74 is exit code for IOError on POSIX systems, which is raised when the machine is
   # shutting down.

@@ -32,7 +32,9 @@
 #include <boost/optional/optional.hpp>
 #include <string_view>
 
+#include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
@@ -62,13 +64,13 @@ MONGO_FAIL_POINT_DEFINE(allowAllSetQuerySettings);
 
 void failIfRejectedBySettings(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                               const QuerySettings& settings) {
-    if (expCtx->explain) {
+    if (expCtx->getExplain()) {
         // Explaining queries which _would_ be rejected if executed is still useful;
         // do not fail here.
         return;
     }
     if (settings.getReject()) {
-        auto* opCtx = expCtx->opCtx;
+        auto* opCtx = expCtx->getOperationContext();
         const Command* curCommand = CommandInvocation::get(opCtx)->definition();
         auto* curOp = CurOp::get(opCtx);
         auto query = curOp->opDescription();
@@ -80,7 +82,7 @@ void failIfRejectedBySettings(const boost::intrusive_ptr<ExpressionContext>& exp
                             {logv2::LogComponent::kQueryRejected},
                             "Query rejected by QuerySettings",
                             "queryShapeHash"_attr = curOp->getQueryShapeHash()->toHexString(),
-                            "ns"_attr = CurOp::get(expCtx->opCtx)->getNS(),
+                            "ns"_attr = CurOp::get(expCtx->getOperationContext())->getNS(),
                             "command"_attr = redact(cmdToLog.getObject()));
         uasserted(ErrorCodes::QueryRejectedBySettings, "Query rejected by admin query settings");
     }
@@ -159,6 +161,44 @@ void setQueryShapeHash(OperationContext* opCtx, const QueryShapeHash& hash) {
 bool requestComesFromMongosOrSentDirectlyToShard(Client* client) {
     return client->isInternalClient() || client->isInDirectClient();
 }
+
+void validateIndexKeyPatternStructure(const IndexHint& hint) {
+    if (auto&& keyPattern = hint.getIndexKeyPattern()) {
+        uassert(9646000, "key pattern index can't be empty", keyPattern->nFields() > 0);
+        auto status = index_key_validate::validateKeyPattern(
+            *keyPattern, IndexDescriptor::getDefaultIndexVersion());
+        uassert(
+            9646001, status.withContext("invalid index key pattern hint").reason(), status.isOK());
+    }
+};
+
+void validateQuerySettingsKeyPatternIndexHints(const IndexHintSpec& hintSpec) {
+    const auto& allowedIndexes = hintSpec.getAllowedIndexes();
+    std::for_each(allowedIndexes.begin(), allowedIndexes.end(), validateIndexKeyPatternStructure);
+}
+
+void sanitizeKeyPatternIndexHints(QueryShapeConfiguration& queryShapeItem) {
+    const auto isInvalidIndexHint = [&](const IndexHint& hint) {
+        try {
+            validateIndexKeyPatternStructure(hint);
+            return false;
+        } catch (const DBException&) {
+            LOGV2_WARNING(9646002,
+                          "invalid key pattern index hint in "
+                          "query settings",
+                          "indexHint"_attr = hint.getIndexKeyPattern()->toString(),
+                          "queryShapeShash"_attr =
+                              queryShapeItem.getQueryShapeHash().toHexString());
+            return true;
+        }
+    };
+    if (auto&& hints = queryShapeItem.getSettings().getIndexHints()) {
+        for (auto&& spec : *hints) {
+            std::erase_if(spec.getAllowedIndexes(), isInvalidIndexHint);
+        }
+    }
+}
+
 }  // namespace
 
 /*
@@ -243,13 +283,14 @@ RepresentativeQueryInfo createRepresentativeInfoDistinct(
     const auto serializationContext =
         parsedDistinctCommand->distinctCommandRequest->getSerializationContext();
     auto serializedQueryShape =
-        distinctCmdShape.toBson(expCtx->opCtx,
+        distinctCmdShape.toBson(expCtx->getOperationContext(),
                                 SerializationOptions::kDebugQueryShapeSerializeOptions,
                                 serializationContext);
 
     return RepresentativeQueryInfo{
         .serializedQueryShape = serializedQueryShape,
-        .queryShapeHash = distinctCmdShape.sha256Hash(expCtx->opCtx, serializationContext),
+        .queryShapeHash =
+            distinctCmdShape.sha256Hash(expCtx->getOperationContext(), serializationContext),
         .namespaceString = nssOrUuid.nss(),
         .involvedNamespaces = {nssOrUuid.nss()},
         .encryptionInformation = boost::none,
@@ -275,8 +316,8 @@ RepresentativeQueryInfo createRepresentativeInfoAgg(OperationContext* opCtx,
     auto involvedNamespaces = parsedPipeline.getInvolvedNamespaces();
     // We also need to add the main namespace because 'addResolvedNamespaces' only
     // adds the foreign collections.
-    auto resolvedNs = ExpressionContext::ResolvedNamespace{aggregateCommandRequest.getNamespace(),
-                                                           aggregateCommandRequest.getPipeline()};
+    auto resolvedNs = ResolvedNamespace{aggregateCommandRequest.getNamespace(),
+                                        aggregateCommandRequest.getPipeline()};
     involvedNamespaces.insert(resolvedNs.ns);
 
     // When parsing the pipeline, we try to resolve the namespaces, which requires the resolved
@@ -291,7 +332,7 @@ RepresentativeQueryInfo createRepresentativeInfoAgg(OperationContext* opCtx,
     const auto serializationContext = aggregateCommandRequest.getSerializationContext();
     AggCmdShape aggCmdShape{aggregateCommandRequest, nss, involvedNamespaces, *pipeline, expCtx};
     auto serializedQueryShape =
-        aggCmdShape.toBson(expCtx->opCtx,
+        aggCmdShape.toBson(expCtx->getOperationContext(),
                            SerializationOptions::kDebugQueryShapeSerializeOptions,
                            serializationContext);
 
@@ -299,7 +340,8 @@ RepresentativeQueryInfo createRepresentativeInfoAgg(OperationContext* opCtx,
     // complexity of determining if a pipeline is eligible or not for IDHACK.
     return RepresentativeQueryInfo{
         .serializedQueryShape = serializedQueryShape,
-        .queryShapeHash = aggCmdShape.sha256Hash(expCtx->opCtx, serializationContext),
+        .queryShapeHash =
+            aggCmdShape.sha256Hash(expCtx->getOperationContext(), serializationContext),
         .namespaceString = nss,
         .involvedNamespaces = std::move(involvedNamespaces),
         .encryptionInformation = aggregateCommandRequest.getEncryptionInformation(),
@@ -334,11 +376,6 @@ QuerySettings lookupQuerySettingsForFind(const boost::intrusive_ptr<ExpressionCo
                 return query_settings::QuerySettings();
             }
 
-            // No query settings lookup on internal dbs or system collections in user dbs.
-            if (nss.isOnInternalDb() || nss.isSystem()) {
-                return query_settings::QuerySettings();
-            }
-
             // No query settings for queries with encryption information.
             if (parsedFind.findCommandRequest->getEncryptionInformation()) {
                 return query_settings::QuerySettings();
@@ -347,9 +384,15 @@ QuerySettings lookupQuerySettingsForFind(const boost::intrusive_ptr<ExpressionCo
             // If the incoming request comes from mongos, then no additional query setting lookup
             // has to be performed, rather, if there are query settings associated with the request,
             // they should be attached to the command by mongos.
-            if (requestComesFromMongosOrSentDirectlyToShard(expCtx->opCtx->getClient())) {
+            if (requestComesFromMongosOrSentDirectlyToShard(
+                    expCtx->getOperationContext()->getClient())) {
                 return parsedFind.findCommandRequest->getQuerySettings().value_or(
                     query_settings::QuerySettings());
+            }
+
+            // No query settings lookup on internal dbs or system collections in user dbs.
+            if (nss.isOnInternalDb() || nss.isSystem()) {
+                return query_settings::QuerySettings();
             }
 
             // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
@@ -359,7 +402,7 @@ QuerySettings lookupQuerySettingsForFind(const boost::intrusive_ptr<ExpressionCo
                 return query_settings::QuerySettings();
             }
 
-            auto* opCtx = expCtx->opCtx;
+            auto* opCtx = expCtx->getOperationContext();
             const auto& serializationContext =
                 parsedFind.findCommandRequest->getSerializationContext();
             auto& opDebug = CurOp::get(opCtx)->debug();
@@ -370,7 +413,7 @@ QuerySettings lookupQuerySettingsForFind(const boost::intrusive_ptr<ExpressionCo
                 }
 
                 return query_shape::FindCmdShape(parsedFind, expCtx)
-                    .sha256Hash(expCtx->opCtx, serializationContext);
+                    .sha256Hash(expCtx->getOperationContext(), serializationContext);
             }();
             setQueryShapeHash(opCtx, hash);
 
@@ -406,11 +449,6 @@ QuerySettings lookupQuerySettingsForAgg(
     const NamespaceString& nss) {
     QuerySettings settings = [&]() {
         try {
-            // No query settings lookup on internal dbs or system collections in user dbs.
-            if (nss.isOnInternalDb() || nss.isSystem()) {
-                return query_settings::QuerySettings();
-            }
-
             // No query settings for queries with encryption information.
             if (aggregateCommandRequest.getEncryptionInformation()) {
                 return query_settings::QuerySettings();
@@ -423,10 +461,16 @@ QuerySettings lookupQuerySettingsForAgg(
             // part of the command if the command was created as part of the view resolution. In
             // that case the query settings looked up for the original command are attached to
             // 'aggregateCommandRequest'.
-            if (requestComesFromMongosOrSentDirectlyToShard(expCtx->opCtx->getClient()) ||
+            if (requestComesFromMongosOrSentDirectlyToShard(
+                    expCtx->getOperationContext()->getClient()) ||
                 aggregateCommandRequest.getQuerySettings().has_value()) {
                 return aggregateCommandRequest.getQuerySettings().value_or(
                     query_settings::QuerySettings());
+            }
+
+            // No query settings lookup on internal dbs or system collections in user dbs.
+            if (nss.isOnInternalDb() || nss.isSystem()) {
+                return query_settings::QuerySettings();
             }
 
             // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
@@ -436,7 +480,7 @@ QuerySettings lookupQuerySettingsForAgg(
                 return query_settings::QuerySettings();
             }
 
-            auto* opCtx = expCtx->opCtx;
+            auto* opCtx = expCtx->getOperationContext();
             const auto& serializationContext = aggregateCommandRequest.getSerializationContext();
             auto& opDebug = CurOp::get(opCtx)->debug();
             auto hash = [&]() {
@@ -479,19 +523,19 @@ QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<Expressi
                                              const NamespaceString& nss) {
     QuerySettings settings = [&]() {
         try {
-            // No query settings lookup on internal dbs or system collections in user dbs.
-            if (nss.isOnInternalDb() || nss.isSystem()) {
-                return query_settings::QuerySettings();
-            }
-
             // If the incoming request comes from mongos, then no additional query setting lookup
             // has to be performed, rather, if there are query settings associated with the request,
             // they should be attached to the command by mongos.
-            if (requestComesFromMongosOrSentDirectlyToShard(expCtx->opCtx->getClient())) {
+            if (requestComesFromMongosOrSentDirectlyToShard(
+                    expCtx->getOperationContext()->getClient())) {
                 return parsedDistinct.distinctCommandRequest->getQuerySettings().value_or(
                     query_settings::QuerySettings());
             }
 
+            // No query settings lookup on internal dbs or system collections in user dbs.
+            if (nss.isOnInternalDb() || nss.isSystem()) {
+                return query_settings::QuerySettings();
+            }
 
             // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
             // this could run during startup while the FCV is still uninitialized.
@@ -500,7 +544,7 @@ QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<Expressi
                 return query_settings::QuerySettings();
             }
 
-            auto* opCtx = expCtx->opCtx;
+            auto* opCtx = expCtx->getOperationContext();
             const auto& serializationContext =
                 parsedDistinct.distinctCommandRequest->getSerializationContext();
             auto& opDebug = CurOp::get(opCtx)->debug();
@@ -511,7 +555,7 @@ QuerySettings lookupQuerySettingsForDistinct(const boost::intrusive_ptr<Expressi
                 }
 
                 return query_shape::DistinctCmdShape(parsedDistinct, expCtx)
-                    .sha256Hash(expCtx->opCtx, serializationContext);
+                    .sha256Hash(expCtx->getOperationContext(), serializationContext);
             }();
             setQueryShapeHash(opCtx, hash);
 
@@ -578,6 +622,7 @@ void validateQuerySettingsIndexHints(const auto& indexHints) {
         uassert(8727501,
                 "invalid index hint: 'ns.coll' field is missing",
                 hint.getNs().getColl().has_value());
+        validateQuerySettingsKeyPatternIndexHints(hint);
         auto nss = NamespaceStringUtil::deserialize(*hint.getNs().getDb(), *hint.getNs().getColl());
         auto [it, emplaced] = collectionsWithAppliedIndexHints.emplace(nss, hint);
         uassert(7746608,
@@ -672,5 +717,21 @@ void simplifyQuerySettings(QuerySettings& settings) {
     }
 }
 
+// TODO SERVER-97546 Remove PQS index hint sanitization.
+void sanitizeQuerySettingsHints(std::vector<QueryShapeConfiguration>& queryShapeConfigs) {
+    std::erase_if(queryShapeConfigs, [](QueryShapeConfiguration& queryShapeItem) {
+        auto& settings = queryShapeItem.getSettings();
+        sanitizeKeyPatternIndexHints(queryShapeItem);
+        simplifyQuerySettings(settings);
+        if (isDefault(settings)) {
+            LOGV2_WARNING(9646003,
+                          "query settings became default after index hint sanitization",
+                          "queryShapeShash"_attr = queryShapeItem.getQueryShapeHash().toHexString(),
+                          "queryInstance"_attr = queryShapeItem.getRepresentativeQuery());
+            return true;
+        }
+        return false;
+    });
+}
 }  // namespace utils
 }  // namespace mongo::query_settings

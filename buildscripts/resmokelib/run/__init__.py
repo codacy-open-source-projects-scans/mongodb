@@ -77,47 +77,12 @@ class TestRunner(Subcommand):
             # bother waiting for all log output to be flushed to logkeeper.
             return
 
-        if logging.buildlogger.is_log_output_incomplete():
-            # If we already failed to write log output to logkeeper, then we don't bother waiting
-            # for any remaining log output to be flushed as it'll likely fail too. Exiting without
-            # joining the flush thread here also means that resmoke.py won't hang due a logger from
-            # a fixture or a background hook not being closed.
-            self._exit_on_incomplete_logging()
-
         flush_success = logging.flush.stop_thread()
         if not flush_success:
             self._resmoke_logger.error(
                 "Failed to flush all logs within a reasonable amount of time, "
                 "treating logs as incomplete"
             )
-
-        if not flush_success or logging.buildlogger.is_log_output_incomplete():
-            self._exit_on_incomplete_logging()
-
-    def _exit_on_incomplete_logging(self):
-        if self._exit_code == 0:
-            # We don't anticipate users to look at passing Evergreen tasks very often that even if
-            # the log output is incomplete, we'd still rather not show anything in the Evergreen UI
-            # or cause a JIRA ticket to be created.
-            self._resmoke_logger.info(
-                "We failed to flush all log output to logkeeper but all tests passed, so"
-                " ignoring."
-            )
-        else:
-            exit_code = errors.LoggerRuntimeConfigError.EXIT_CODE
-            self._resmoke_logger.info(
-                "Exiting with code %d rather than requested code %d because we failed to flush all"
-                " log output to logkeeper.",
-                exit_code,
-                self._exit_code,
-            )
-            self._exit_code = exit_code
-
-        # Force exit the process without cleaning up or calling the finally block
-        # to avoid threads making system calls from blocking process termination.
-        # This must be the last line of code that is run.
-        # pylint: disable=protected-access
-        os._exit(self._exit_code)
 
     def execute(self):
         """Execute the 'run' subcommand."""
@@ -147,17 +112,16 @@ class TestRunner(Subcommand):
     def list_suites(self):
         """List the suites that are available to execute."""
         suite_names = suitesconfig.get_named_suites()
-        self._resmoke_logger.info("Suites available to execute:\n%s", "\n".join(suite_names))
+        for suite in suite_names:
+            print(suite)
 
     def find_suites(self):
         """List the suites that run the specified tests."""
         suites = self._get_suites()
         suites_by_test = self._find_suites_by_test(suites)
         for test in sorted(suites_by_test):
-            suite_names = suites_by_test[test]
-            self._resmoke_logger.info(
-                "%s will be run by the following suite(s): %s", test, suite_names
-            )
+            for suite_name in suites_by_test[test]:
+                print(suite_name)
 
     def list_tags(self):
         """
@@ -353,7 +317,7 @@ class TestRunner(Subcommand):
         items = ", ".join(format_item(k, v) for k, v in set_parameters.items())
         return f"{{{items}}}"
 
-    def _get_fuzzed_param_log_str(self, binary_name_str, set_parameters):
+    def _get_fuzzed_param_log_str(self, binary_name_str, set_parameters, extra_configs=False):
         """
         Formats a string containing the fuzzed parameter's name, the fuzzed parameter's values, and the fuzzed parameters' min and maxes for logging.
 
@@ -371,9 +335,14 @@ class TestRunner(Subcommand):
         chunkMigrationConcurrency: 4, min: 1, max: 16, options: [1, 4, 16]
         ...
         """
-        from buildscripts.resmokelib.config_fuzzer_limits import config_fuzzer_params
+        from buildscripts.resmokelib.config_fuzzer_limits import (
+            config_fuzzer_extra_configs,
+            config_fuzzer_params,
+        )
 
         param_limits = config_fuzzer_params[binary_name_str]
+        if extra_configs:
+            param_limits = config_fuzzer_extra_configs[binary_name_str]
         local_args = to_local_args()
         local_args = strip_fuzz_config_params(local_args)
         params_str = ""
@@ -495,6 +464,12 @@ class TestRunner(Subcommand):
             params_str = self._get_fuzzed_param_log_str("mongod", config.MONGOD_SET_PARAMETERS)
             self._resmoke_logger.info("Fuzzed mongodSetParameters:\n%s", params_str)
 
+        if config.FUZZ_MONGOD_CONFIGS:
+            params_str = self._get_fuzzed_param_log_str(
+                "mongod", utils.dump_yaml(config.MONGOD_EXTRA_CONFIG), extra_configs=True
+            )
+            self._resmoke_logger.info("Fuzzed mongod extra configs:\n%s", params_str)
+
         if config.FUZZ_MONGOS_CONFIGS:
             params_str = self._get_fuzzed_param_log_str("mongos", config.MONGOS_SET_PARAMETERS)
             self._resmoke_logger.info("Fuzzed mongosSetParameters:\n%s", params_str)
@@ -555,15 +530,6 @@ class TestRunner(Subcommand):
                 if task:
                     break
 
-        if task is None:
-            raise RuntimeError(f"Error: Could not find evergreen task definition for {suite_name}")
-
-        is_multiversion = "multiversion" in task.tags
-        generate_func = task.find_func_command("generate resmoke tasks")
-        is_jstestfuzz = False
-        if generate_func:
-            is_jstestfuzz = get_dict_value(generate_func, ["vars", "is_jstestfuzz"]) == "true"
-
         local_args = to_local_args()
         local_args = strip_fuzz_config_params(local_args)
 
@@ -602,6 +568,11 @@ class TestRunner(Subcommand):
         if config.MONGOD_SET_PARAMETERS:
             local_resmoke_invocation_with_params += f" --mongodSetParameters='{self._get_fuzzed_param_resmoke_invocation(config.MONGOD_SET_PARAMETERS)}'"
 
+        if config.MONGOD_EXTRA_CONFIG:
+            for k, v in config.MONGOD_EXTRA_CONFIG.items():
+                if v:
+                    local_resmoke_invocation_with_params += f" --{k}"
+
         if config.MONGOS_SET_PARAMETERS:
             local_resmoke_invocation_with_params += f" --mongosSetParameters='{self._get_fuzzed_param_resmoke_invocation(config.MONGOS_SET_PARAMETERS)}'"
 
@@ -629,63 +600,85 @@ class TestRunner(Subcommand):
             local_resmoke_invocation_with_params,
         )
 
-        lines = []
+        try:
+            lines = []
 
-        if is_multiversion:
-            lines.append("# DISCLAIMER:")
-            lines.append(
-                "#     The `db-contrib-tool` command downloads the latest last-continuous/lts mongo shell binaries available in CI."
-            )
-            if multiversion_bin_version:
-                lines.append(
-                    "#     The generated `multiversion_exclude_tags.yml` is dependent on the `backports_required_for_multiversion_tests.yml` file of the last-continuous/lts mongo shell binary git commit."
-                )
-            lines.append(
-                "#     If there have been new commits to last-continuous/lts, the excluded tests & binaries may be slightly different on this task vs locally."
-            )
-        if is_jstestfuzz:
-            lines.append(
-                "# This is a jstestfuzz suite and is dependent on the generated tests specific to this task execution."
-            )
-
-        if suite.get_description():
-            lines.append(f"# {suite.get_description()}")
-
-        lines.append(
-            "# Having trouble reproducing your failure with this? Feel free to reach out in #server-testing."
-        )
-        lines.append("")
-        if is_multiversion:
-            if not os.path.exists("local-db-contrib-tool-invocation.txt"):
+            if task is None:
                 raise RuntimeError(
-                    "ERROR: local-db-contrib-tool-invocation.txt does not exist for multiversion task"
+                    f"Error: Could not find evergreen task definition for {suite_name}"
                 )
 
-            with open("local-db-contrib-tool-invocation.txt", "r") as fh:
-                db_contrib_tool_invocation = fh.read().strip() + " && \\"
-                lines.append(db_contrib_tool_invocation)
+            is_multiversion = "multiversion" in task.tags
+            generate_func = task.find_func_command("generate resmoke tasks")
+            is_jstestfuzz = False
+            if generate_func:
+                is_jstestfuzz = get_dict_value(generate_func, ["vars", "is_jstestfuzz"]) == "true"
 
-            if multiversion_bin_version:
-                generate_tag_file_invocation = f"buildscripts/resmoke.py generate-multiversion-exclude-tags --oldBinVersion={multiversion_bin_version} && \\"
-                lines.append(generate_tag_file_invocation)
+            if is_multiversion:
+                lines.append("# DISCLAIMER:")
+                lines.append(
+                    "#     The `db-contrib-tool` command downloads the latest last-continuous/lts mongo shell binaries available in CI."
+                )
+                if multiversion_bin_version:
+                    lines.append(
+                        "#     The generated `multiversion_exclude_tags.yml` is dependent on the `backports_required_for_multiversion_tests.yml` file of the last-continuous/lts mongo shell binary git commit."
+                    )
+                lines.append(
+                    "#     If there have been new commits to last-continuous/lts, the excluded tests & binaries may be slightly different on this task vs locally."
+                )
+            if is_jstestfuzz:
+                lines.append(
+                    "# This is a jstestfuzz suite and is dependent on the generated tests specific to this task execution."
+                )
 
-        if is_jstestfuzz:
-            download_url = f"https://mciuploads.s3.amazonaws.com/{config.EVERGREEN_PROJECT_NAME}/{config.EVERGREEN_VARIANT_NAME}/{config.EVERGREEN_REVISION}/jstestfuzz/{config.EVERGREEN_TASK_ID}-{config.EVERGREEN_EXECUTION}.tgz"
-            jstestfuzz_dir = "jstestfuzz/"
-            jstests_tar = "jstests.tgz"
-            lines.append(f"mkdir -p {jstestfuzz_dir} && \\")
-            lines.append(f"rm -rf {jstestfuzz_dir}* && \\")
-            lines.append(f"wget '{download_url}' -O {jstests_tar} && \\")
-            lines.append(f"tar -xf {jstests_tar} -C {jstestfuzz_dir} && \\")
-            lines.append(f"rm {jstests_tar} && \\")
+            if suite.get_description():
+                lines.append(f"# {suite.get_description()}")
 
-        if config.FUZZ_MONGOD_CONFIGS or config.FUZZ_MONGOS_CONFIGS:
-            lines.append(local_resmoke_invocation)
-            lines.append("\n")
-        lines.append(local_resmoke_invocation_with_params)
+            lines.append(
+                "# Having trouble reproducing your failure with this? Feel free to reach out in #server-testing."
+            )
+            lines.append("")
+            if is_multiversion:
+                if not os.path.exists("local-db-contrib-tool-invocation.txt"):
+                    raise RuntimeError(
+                        "ERROR: local-db-contrib-tool-invocation.txt does not exist for multiversion task"
+                    )
 
-        with open("local-resmoke-invocation.txt", "w") as fh:
-            fh.write("\n".join(lines))
+                with open("local-db-contrib-tool-invocation.txt", "r") as fh:
+                    db_contrib_tool_invocation = fh.read().strip() + " && \\"
+                    lines.append(db_contrib_tool_invocation)
+
+                if multiversion_bin_version:
+                    generate_tag_file_invocation = f"buildscripts/resmoke.py generate-multiversion-exclude-tags --oldBinVersion={multiversion_bin_version} && \\"
+                    lines.append(generate_tag_file_invocation)
+
+            if is_jstestfuzz:
+                download_url = f"https://mciuploads.s3.amazonaws.com/{config.EVERGREEN_PROJECT_NAME}/{config.EVERGREEN_VARIANT_NAME}/{config.EVERGREEN_REVISION}/jstestfuzz/{config.EVERGREEN_TASK_ID}-{config.EVERGREEN_EXECUTION}.tgz"
+                jstestfuzz_dir = "jstestfuzz/"
+                jstests_tar = "jstests.tgz"
+                lines.append(f"mkdir -p {jstestfuzz_dir} && \\")
+                lines.append(f"rm -rf {jstestfuzz_dir}* && \\")
+                lines.append(f"wget '{download_url}' -O {jstests_tar} && \\")
+                lines.append(f"tar -xf {jstests_tar} -C {jstestfuzz_dir} && \\")
+                lines.append(f"rm {jstests_tar} && \\")
+
+            if config.FUZZ_MONGOD_CONFIGS or config.FUZZ_MONGOS_CONFIGS:
+                lines.append(local_resmoke_invocation)
+                lines.append("\n")
+            lines.append(local_resmoke_invocation_with_params)
+
+            with open("local-resmoke-invocation.txt", "w") as fh:
+                fh.write("\n".join(lines))
+
+        except Exception:
+            if config.EVERGREEN_PROJECT_NAME and config.EVERGREEN_PROJECT_NAME.startswith(
+                "mongodb-mongo-"
+            ):
+                raise
+            else:
+                self._resmoke_logger.warning(
+                    "Could not write local-resmoke-invocation.txt file, this evergreen project is likely not configured to support it."
+                )
 
     def _check_for_mongo_processes(self):
         """Check for existing mongo processes as they could interfere with running the tests."""
@@ -810,7 +803,13 @@ class TestRunner(Subcommand):
                 }
             )
             return False
+
         executor_config = suite.get_executor_config()
+        if config.FUZZ_RUNTIME_STRESS in ("cpu", "all"):
+            executor_config.setdefault("hooks", []).append({"class": "FuzzRuntimeStress"})
+        if config.FUZZ_RUNTIME_STRESS in ("signals", "all"):
+            executor_config.setdefault("hooks", []).append({"class": "PeriodicStackTrace"})
+
         try:
             executor = testing.executor.TestSuiteExecutor(
                 self._exec_logger, suite, archive_instance=self._archive, **executor_config
@@ -1080,7 +1079,7 @@ class RunPlugin(PluginInterface):
         RunPlugin._add_list_tags(subparsers)
         RunPlugin._add_generate_multiversion_exclude_tags(subparsers)
 
-    def parse(self, subcommand, parser, parsed_args, **kwargs):
+    def parse(self, subcommand, parser, parsed_args, should_configure_otel=True, **kwargs):
         """
         Return Run Subcommand if command is one we recognize.
 
@@ -1098,10 +1097,15 @@ class RunPlugin(PluginInterface):
             "generate-multiversion-exclude-tags",
             "generate-matrix-suites",
         ):
-            configure_resmoke.validate_and_update_config(parser, parsed_args)
             if config.EVERGREEN_TASK_ID is not None:
+                configure_resmoke.validate_and_update_config(
+                    parser, parsed_args, should_configure_otel
+                )
                 return TestRunnerEvg(subcommand, **kwargs)
             else:
+                configure_resmoke.validate_and_update_config(
+                    parser, parsed_args, should_configure_otel
+                )
                 return TestRunner(subcommand, **kwargs)
         return None
 
@@ -1211,6 +1215,33 @@ class RunPlugin(PluginInterface):
         )
 
         parser.add_argument(
+            "--skipExcludedTests",
+            dest="skip_excluded_tests",
+            action="store_true",
+            help=(
+                "Allows skipping any test passed as positional arg that is excluded by suite config."
+                " Ignored when --force-excluded-tests is also set."
+            ),
+        )
+
+        parser.add_argument(
+            "--skipTestsCoveredByMoreComplexSuites",
+            dest="skip_tests_covered_by_more_complex_suites",
+            action="store_true",
+            help=(
+                "Excludes tests from running on some suite_A if a more complex"
+                " suite_A_B will also run the same tests."
+            ),
+        )
+
+        parser.add_argument(
+            "--skipSymbolization",
+            dest="skip_symbolization",
+            action="store_true",
+            help="Skips symbolizing stacktraces generated by tests.",
+        )
+
+        parser.add_argument(
             "--genny",
             dest="genny_executable",
             metavar="PATH",
@@ -1299,14 +1330,6 @@ class RunPlugin(PluginInterface):
             const="tests",
             dest="dry_run",
             help="Outputs the tests that would be run.",
-        )
-
-        parser.add_argument(
-            "--recordWith",
-            dest="undo_recorder_path",
-            metavar="PATH",
-            help="Record execution of mongo, mongod and mongos processes;"
-            "specify the path to UndoDB's 'live-record' binary",
         )
 
         # TODO: add support for --dryRun=commands
@@ -1592,6 +1615,14 @@ class RunPlugin(PluginInterface):
         )
 
         parser.add_argument(
+            "--disableFeatureFlags",
+            dest="disable_feature_flags",
+            action="append",
+            metavar="featureFlag1, featureFlag2, ...",
+            help="Disable tests with certain feature flags",
+        )
+
+        parser.add_argument(
             "--maxTestQueueSize", type=int, dest="max_test_queue_size", help=argparse.SUPPRESS
         )
 
@@ -1790,9 +1821,11 @@ class RunPlugin(PluginInterface):
         parser.add_argument(
             "--fuzzRuntimeStress",
             dest="fuzz_runtime_stress",
-            choices=["off", "cpu"],
+            choices=["off", "cpu", "signals", "all"],
             default="off",
-            help="Starts a hook that produces stress, the amount of which periodically changes.",
+            help="Starts a hook or hooks that produces stress. Use 'cpu' to start a hook that "
+            "produces stress on the CPU, the amount of which periodically changes. Use 'signals' "
+            "to start a hook which periodically forces servers to handle signals.",
         )
 
         mongodb_server_options.add_argument(
@@ -1945,14 +1978,6 @@ class RunPlugin(PluginInterface):
 
         evergreen_options.add_argument(
             "--buildId", dest="build_id", metavar="BUILD_ID", help="Sets the build ID of the task."
-        )
-
-        evergreen_options.add_argument(
-            "--buildloggerUrl",
-            action="store",
-            dest="buildlogger_url",
-            metavar="URL",
-            help="The root url of the buildlogger server.",
         )
 
         evergreen_options.add_argument(

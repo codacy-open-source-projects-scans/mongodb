@@ -1,0 +1,70 @@
+version: 1.0.0
+options:
+  no_parent_owners: true
+filters:
+  - "aggregation_expression_multiversion_fuzzer*":
+    approvers:
+      - 10gen/query-optimization
+  - "aggregation_mongos_pqs*":
+    approvers:
+      - 10gen/query-execution-query-settings
+  - "aggregation_mongos_query_shape_hash_stability.yml":
+    approvers:
+      - 10gen/query-execution-query-settings
+      - 10gen/query-integration-query-stats
+  - "aggregation_multiversion_fuzzer*":
+    approvers:
+      - 10gen/query-optimization
+  - "aggregation_pqs*":
+    approvers:
+      - 10gen/query-execution-query-settings
+  - "aggregation_query_shape_hash_stability.yml":
+    approvers:
+      - 10gen/query-execution-query-settings
+      - 10gen/query-integration-query-stats
+  - "aggregation_sharded_collections_pqs*":
+    approvers:
+      - 10gen/query-execution-query-settings
+  - "aggregation_sharded_collections_query_shape_hash_stability.yml":
+    approvers:
+      - 10gen/query-execution-query-settings
+      - 10gen/query-integration-query-stats
+  - "bulk_write*":
+    approvers:
+      - 10gen/query-execution-write-exec
+  - "bulk_write_sharded*":
+    approvers:
+      - 10gen/query-execution-router-write-exec
+  - "change_streams*":
+    approvers:
+      - 10gen/query-execution-change-streams
+  - "core_min_batch_repeat_queries_multiplan_single_solutions_ese_gsm.yml":
+    approvers:
+      - 10gen/query-optimization-runtime-planners
+  - "core_repeat_queries.yml":
+    approvers:
+      - 10gen/query-optimization-plan-cache
+  - "replica_sets_jscore_pqs*":
+    approvers:
+      - 10gen/query-execution-query-settings
+  - "replica_sets_jscore_query_shape_hash_stability.yml":
+    approvers:
+      - 10gen/query-execution-query-settings
+      - 10gen/query-integration-query-stats
+  - "sharded_collections_pqs*":
+    approvers:
+      - 10gen/query-execution-query-settings
+  - "sharded_collections_query_shape_hash_stability.yml":
+    approvers:
+      - 10gen/query-execution-query-settings
+      - 10gen/query-integration-query-stats
+  - "sharding_pqs*":
+    approvers:
+      - 10gen/query-execution-query-settings
+  - "sharding_query_shape_hash_stability.yml":
+    approvers:
+      - 10gen/query-execution-query-settings
+      - 10gen/query-integration-query-stats
+  - "update_fuzzer*":
+    approvers:
+      - 10gen/query-execution-write-exec

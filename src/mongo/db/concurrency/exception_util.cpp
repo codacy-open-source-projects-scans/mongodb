@@ -47,6 +47,48 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 namespace mongo {
+namespace {
+auto& temporarilyUnavailableErrors =
+    *MetricBuilder<Counter64>{"operation.temporarilyUnavailableErrors"};
+auto& temporarilyUnavailableErrorsEscaped =
+    *MetricBuilder<Counter64>{"operation.temporarilyUnavailableErrorsEscaped"};
+auto& temporarilyUnavailableErrorsConvertedToWriteConflict =
+    *MetricBuilder<Counter64>{"operation.temporarilyUnavailableErrorsConvertedToWriteConflict"};
+
+auto& transactionTooLargeForCacheErrors =
+    *MetricBuilder<Counter64>{"operation.transactionTooLargeForCacheErrors"};
+auto& transactionTooLargeForCacheErrorsConvertedToWriteConflict = *MetricBuilder<Counter64>{
+    "operation.transactionTooLargeForCacheErrorsConvertedToWriteConflict"};
+
+/** Apply floating point multiply to a Duration. */
+template <typename Dur>
+Dur floatScaleDuration(double scale, Dur dur) {
+    return Dur{static_cast<typename Dur::rep>(scale * durationCount<Dur>(dur))};
+}
+
+void handleTransactionTooLargeForCacheException(OperationContext* opCtx,
+                                                StringData opStr,
+                                                const NamespaceStringOrUUID& nssOrUUID,
+                                                const Status& s,
+                                                size_t writeConflictAttempts) {
+    transactionTooLargeForCacheErrors.increment(1);
+    if (opCtx->writesAreReplicated()) {
+        // Surface error on primaries.
+        throw;
+    }
+    // If an operation succeeds on primary, it should always be retried on secondaries. Secondaries
+    // always retry TemporarilyUnavailableExceptions and WriteConflictExceptions indefinitely, the
+    // only difference being the rate of retry. We prefer retrying faster, by converting to
+    // WriteConflictException, to avoid stalling replication longer than necessary.
+    transactionTooLargeForCacheErrorsConvertedToWriteConflict.increment(1);
+
+    // Handle as write conflict.
+    CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
+    logWriteConflictAndBackoff(
+        writeConflictAttempts, opStr, s.reason(), NamespaceStringOrUUID(nssOrUUID));
+    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+}
+}  // namespace
 
 MONGO_FAIL_POINT_DEFINE(skipWriteConflictRetries);
 
@@ -68,29 +110,12 @@ void logWriteConflictAndBackoff(size_t attempt,
                   "namespace"_attr = toStringForLogging(nssOrUUID));
 }
 
-namespace {
-
-auto& temporarilyUnavailableErrors =
-    *MetricBuilder<Counter64>{"operation.temporarilyUnavailableErrors"};
-auto& temporarilyUnavailableErrorsEscaped =
-    *MetricBuilder<Counter64>{"operation.temporarilyUnavailableErrorsEscaped"};
-auto& temporarilyUnavailableErrorsConvertedToWriteConflict =
-    *MetricBuilder<Counter64>{"operation.temporarilyUnavailableErrorsConvertedToWriteConflict"};
-
-auto& transactionTooLargeForCacheErrors =
-    *MetricBuilder<Counter64>{"operation.transactionTooLargeForCacheErrors"};
-auto& transactionTooLargeForCacheErrorsConvertedToWriteConflict = *MetricBuilder<Counter64>{
-    "operation.transactionTooLargeForCacheErrorsConvertedToWriteConflict"};
-
-}  // namespace
-
-void handleTemporarilyUnavailableException(
-    OperationContext* opCtx,
-    size_t tempUnavailAttempts,
-    StringData opStr,
-    const NamespaceStringOrUUID& nssOrUUID,
-    const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e,
-    size_t& writeConflictAttempts) {
+void handleTemporarilyUnavailableException(OperationContext* opCtx,
+                                           size_t tempUnavailAttempts,
+                                           StringData opStr,
+                                           const NamespaceStringOrUUID& nssOrUUID,
+                                           const Status& s,
+                                           size_t& writeConflictAttempts) {
     CurOp::get(opCtx)->debug().additiveMetrics.incrementTemporarilyUnavailableErrors(1);
 
     shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
@@ -102,7 +127,7 @@ void handleTemporarilyUnavailableException(
         temporarilyUnavailableErrorsConvertedToWriteConflict.increment(1);
         CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
         logWriteConflictAndBackoff(
-            writeConflictAttempts, opStr, e.reason(), NamespaceStringOrUUID(nssOrUUID));
+            writeConflictAttempts, opStr, s.reason(), NamespaceStringOrUUID(nssOrUUID));
         ++writeConflictAttempts;
         return;
     }
@@ -114,12 +139,12 @@ void handleTemporarilyUnavailableException(
         LOGV2_DEBUG(6083901,
                     1,
                     "Too many TemporarilyUnavailableException's, giving up",
-                    "reason"_attr = e.reason(),
+                    "reason"_attr = s.reason(),
                     "attempts"_attr = tempUnavailAttempts,
                     "operation"_attr = opStr,
                     "namespace"_attr = toStringForLogging(nssOrUUID));
         temporarilyUnavailableErrorsEscaped.increment(1);
-        throw e;
+        throw ExceptionFor<ErrorCodes::TemporarilyUnavailable>(s);
     }
 
     // Back off linearly with the retry attempt number.
@@ -128,7 +153,7 @@ void handleTemporarilyUnavailableException(
     LOGV2_DEBUG(6083900,
                 1,
                 "Caught TemporarilyUnavailableException",
-                "reason"_attr = e.reason(),
+                "reason"_attr = s.reason(),
                 "attempts"_attr = tempUnavailAttempts,
                 "operation"_attr = opStr,
                 "sleepFor"_attr = sleepFor,
@@ -148,29 +173,71 @@ void convertToWCEAndRethrow(OperationContext* opCtx,
     throwWriteConflictException(e.reason());
 }
 
-void handleTransactionTooLargeForCacheException(
-    OperationContext* opCtx,
-    StringData opStr,
-    const NamespaceStringOrUUID& nssOrUUID,
-    const ExceptionFor<ErrorCodes::TransactionTooLargeForCache>& e,
-    size_t& writeConflictAttempts) {
-    transactionTooLargeForCacheErrors.increment(1);
-    if (opCtx->writesAreReplicated()) {
-        // Surface error on primaries.
-        throw e;
-    }
-    // If an operation succeeds on primary, it should always be retried on secondaries. Secondaries
-    // always retry TemporarilyUnavailableExceptions and WriteConflictExceptions indefinitely, the
-    // only difference being the rate of retry. We prefer retrying faster, by converting to
-    // WriteConflictException, to avoid stalling replication longer than necessary.
-    transactionTooLargeForCacheErrorsConvertedToWriteConflict.increment(1);
+void WriteConflictRetryAlgorithm::_emitLog(StringData reason) {
+    logv2::detail::doLog(46404,
+                         _logSeverity(),
+                         {logv2::LogComponent::kWrite},
+                         "Caught WriteConflictException",
+                         "operation"_attr = _opStr,
+                         "reason"_attr = reason,
+                         "namespace"_attr = toStringForLogging(_nssOrUUID),
+                         "attempts"_attr = _wceCount);
+}
 
-    // Handle as write conflict.
-    CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
-    logWriteConflictAndBackoff(
-        writeConflictAttempts, opStr, e.reason(), NamespaceStringOrUUID(nssOrUUID));
-    ++writeConflictAttempts;
-    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+void WriteConflictRetryAlgorithm::_assertRetryLimit() const {
+    if (MONGO_unlikely(_retryLimit && _wceCount > *_retryLimit)) {
+        LOGV2_ERROR(7677402, "Got too many write conflicts, the server may run into problems.");
+        fassert(7677401, !getTestCommandsEnabled());
+    }
+}
+
+void WriteConflictRetryAlgorithm::_handleStorageUnavailable(const Status& status) {
+    ++_attemptCount;
+    // To make the happy path faster we don't start timing until after the first error
+    if (_timer)
+        _conflictTime += _timer->elapsed();
+    switch (status.code()) {
+        case ErrorCodes::WriteConflict:
+            _handleWriteConflictException(status);
+            break;
+        case ErrorCodes::TemporarilyUnavailable:
+            ++_tempUnavailableCount;
+            handleTemporarilyUnavailableException(
+                _opCtx, _tempUnavailableCount, _opStr, _nssOrUUID, status, _wceCount);
+            break;
+        case ErrorCodes::TransactionTooLargeForCache:
+            handleTransactionTooLargeForCacheException(
+                _opCtx, _opStr, _nssOrUUID, status, _wceCount);
+            ++_wceCount;
+            break;
+        default:
+            // Currently unreachable, but a reasonable fallback if a new error is added
+            throw;
+    }
+
+    // Either creates the timer or resets it if it already exists, as we only want to measure the
+    // time spent on the operation being retried and not the time spent sleeping.
+    _timer.emplace();
+}
+
+
+/**
+ * Sleeps for (10% of average attempt time) * 1.1^attempt. Experimentally a very gentle
+ * exponential slow appears to work well for many operations; under very heavy load it's
+ * important that we eventually reach significant backoff but under light load sleeping
+ * significantly hurts performance, and "light load" includes scenarios where each write
+ * takes several attempts.
+ */
+void WriteConflictRetryAlgorithm::_handleWriteConflictException(const Status& s) {
+    ++_wceCount;
+    CurOp::get(_opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
+    shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
+    _emitLog(s.reason());
+
+    sleepFor(floatScaleDuration(_backoffFactor / _attemptCount, _conflictTime));
+    _backoffFactor *= backoffGrowth;
+
+    _assertRetryLimit();
 }
 
 }  // namespace mongo

@@ -14,9 +14,9 @@ const getExtendedRangeCount = (db) => {
         .catalogStats.timeseriesExtendedRange;
 };
 
-const rst = new ReplSetTest({name: jsTest.name(), nodes: 2});
+const rst = new ReplSetTest({name: jsTestName(), nodes: 2});
 rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 const primary = rst.getPrimary();
 const secondary = rst.getSecondary();
@@ -47,7 +47,7 @@ assert.eq(1, getExtendedRangeCount(primary));
 assert.eq(1, getExtendedRangeCount(secondary));
 
 rst.restart(primary, {skipValidation: true});
-rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [primary]);
 
 assert.eq(1, primaryDB.standard.count());
 assert.eq(1, primaryDB.extended.count());
@@ -55,8 +55,4 @@ assert.eq(1, primaryDB.extended.count());
 // Make sure the collections get flagged properly again after startup.
 assert.eq(1, getExtendedRangeCount(primary));
 
-// As of SERVER-86451, time-series inconsistencies detected during validation
-// will error in testing, instead of being warnings. In this case,
-// validation on shutdown would fail, where before only a warning would be thrown.
-// TODO SERVER-87065: Look into re-enabling validation on shutdown.
-rst.stopSet(null, false, {skipValidation: true});
+rst.stopSet();

@@ -29,87 +29,42 @@
 
 #pragma once
 
-#include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/query/cost_based_ranker/estimates.h"
+#include "mongo/db/query/index_bounds.h"
 
-namespace mongo::optimizer::ce {
+namespace mongo::ce {
 
-using Cardinality = double;
+using CardinalityEstimate = mongo::cost_based_ranker::CardinalityEstimate;
 
-/**
- * This CE Estimator estimates cardinality of predicates by running a filter/MatchExpression against
- * a generated sample. The sample will be generated either in a random walk fashion or by a
- * chunk-based sampling method. The sample is generated once and is stored in memory for one
- * optimization request for a query
- */
 class SamplingEstimator {
 public:
-    enum class SamplingStyle { kRandom, kChunk };
-
-    /**
-     * 'opCtx' and 'nss' are used to create a new CanonicalQuery for the sampling SBE plan. 'nss' is
-     * is the NamespaceString of the collection accessed by the query being optimized. 'collections'
-     * is needed to create a sampling SBE plan. 'samplingStyle' can specify the sampling method.
-     */
-    SamplingEstimator(OperationContext* opCtx,
-                      const NamespaceString& nss,
-                      const MultipleCollectionAccessor& collections,
-                      SamplingEstimator::SamplingStyle samplingStyle);
-    ~SamplingEstimator();
+    virtual ~SamplingEstimator() {}
 
     /**
      * Estimates the Cardinality of a filter/MatchExpression by running the given ME against the
      * sample.
      */
-    Cardinality estimateCardinality(const MatchExpression* expr);
+    virtual CardinalityEstimate estimateCardinality(const MatchExpression* expr) const = 0;
 
     /**
      * Batch Estimates the Cardinality of a vector of filter/MatchExpression by running the given
      * MEs against the sample.
      */
-    std::vector<Cardinality> estimateCardinality(const std::vector<MatchExpression*>& expr);
+    virtual std::vector<CardinalityEstimate> estimateCardinality(
+        const std::vector<MatchExpression*>& expr) const = 0;
 
-    /*
-     * Generates a sample using a random cursor. The caller can call this function to re-sample.
-     * The old sample will be freed.
+    /**
+     * Estimates the number of keys scanned for the given IndexBounds.
      */
-    void generateRandomSample();
+    virtual CardinalityEstimate estimateKeysScanned(const IndexBounds& bounds) const = 0;
 
-    /*
-     * Generates a sample using a chunk-based sampling method. The sample consists of multiple
-     * random chunks. Similar to the other sampling function, the caller can call this function to
-     * re-sample. The old sample will be freed.
+    /**
+     * Estimates the number of RIDs matched the given IndexBounds. 'expr' can be nullptr to indicate
+     * only estimate the index bounds.
      */
-    void generateChunkSample();
-
-    /*
-     * Returns the sample size calculated by SamplingEstimator.
-     */
-    inline size_t getSampleSize() {
-        return _sampleSize;
-    }
-
-protected:
-    // This CanonicalQuery is for the sampling SBE plan. This is needed to construct and execute the
-    // sampling plan.
-    std::unique_ptr<CanonicalQuery> _cq;
-
-private:
-    /*
-     * The SamplingEstimator calculates the size of a sample based on the confidence level and
-     * margin of error required.
-     */
-    size_t calculateSampleSize();
-
-    OperationContext* _opCtx;
-    // The collection the sampling plan runs against and is the one accessed by the query being
-    // optimized.
-    const MultipleCollectionAccessor& _collections;
-    size_t _sampleSize;
-
-    // The sample is stored in memory for estimating the cardinality of all predicates of one query
-    // request. The sample will be freed on destruction of the SamplingEstimator instance or when a
-    // re-sample is requested. A new sample will replace this.
-    std::vector<BSONObj> _sample;
+    virtual CardinalityEstimate estimateRIDs(const IndexBounds& bounds,
+                                             const MatchExpression* expr) const = 0;
 };
 
-}  // namespace mongo::optimizer::ce
+}  // namespace mongo::ce

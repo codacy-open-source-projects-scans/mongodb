@@ -79,13 +79,14 @@
 #include "mongo/s/catalog/type_collection_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog_cache.h"
-#include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/client/num_hosts_targeted_metrics.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
 #include "mongo/s/config_server_catalog_cache_loader.h"
+#include "mongo/s/config_server_catalog_cache_loader_impl.h"
+#include "mongo/s/config_server_catalog_cache_loader_mock.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/query/exec/cluster_cursor_manager.h"
 #include "mongo/s/sharding_initialization.h"
@@ -115,29 +116,19 @@ std::shared_ptr<executor::ShardingTaskExecutor> makeShardingTestExecutor(
 
 }  // namespace
 
-ShardingTestFixture::ShardingTestFixture()
-    : ShardingTestFixture(false, std::make_unique<ScopedGlobalServiceContextForTest>()) {}
-
-ShardingTestFixture::ShardingTestFixture(bool withMockCatalogCache)
-    : ShardingTestFixture(withMockCatalogCache,
-                          std::make_unique<ScopedGlobalServiceContextForTest>()) {}
+ShardingTestFixture::ShardingTestFixture() : ShardingTestFixture(false) {}
 
 ShardingTestFixture::ShardingTestFixture(
     bool withMockCatalogCache,
     std::unique_ptr<ScopedGlobalServiceContextForTest> scopedServiceContext)
-    : ShardingTestFixtureCommon(std::move(scopedServiceContext)) {
+    : ShardingTestFixtureCommon(
+          scopedServiceContext ? std::move(scopedServiceContext)
+                               : std::make_unique<ScopedGlobalServiceContextForTest>(
+                                     ServiceContext::make(std::make_unique<ClockSourceMock>(),
+                                                          std::make_unique<ClockSourceMock>(),
+                                                          std::make_unique<TickSourceMock<>>()),
+                                     shouldSetupTL)) {
     const auto service = getServiceContext();
-
-    // Configure the service context
-    if (!dynamic_cast<ClockSourceMock*>(service->getFastClockSource())) {
-        service->setFastClockSource(std::make_unique<ClockSourceMock>());
-    }
-    if (!dynamic_cast<ClockSourceMock*>(service->getPreciseClockSource())) {
-        service->setPreciseClockSource(std::make_unique<ClockSourceMock>());
-    }
-    if (!dynamic_cast<TickSourceMock<>*>(service->getTickSource())) {
-        service->setTickSource(std::make_unique<TickSourceMock<>>());
-    }
 
     CollatorFactoryInterface::set(service, std::make_unique<CollatorFactoryMock>());
     ShardingState::create(service);
@@ -195,11 +186,11 @@ ShardingTestFixture::ShardingTestFixture(
 
     auto catalogCache = [&]() -> std::unique_ptr<CatalogCache> {
         if (withMockCatalogCache) {
-            return std::make_unique<CatalogCacheMock>(service,
-                                                      std::make_shared<CatalogCacheLoaderMock>());
+            return std::make_unique<CatalogCacheMock>(
+                service, std::make_shared<ConfigServerCatalogCacheLoaderMock>());
         } else {
             return std::make_unique<CatalogCache>(
-                service, std::make_shared<ConfigServerCatalogCacheLoader>());
+                service, std::make_shared<ConfigServerCatalogCacheLoaderImpl>());
         }
     }();
 

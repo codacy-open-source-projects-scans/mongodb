@@ -260,24 +260,15 @@ public:
     void setUp() override {
         ServiceContextMongoDTest::setUp();
 
-        // Initialize the serviceEntryPoint so that DBDirectClient can function.
-        getService()->setServiceEntryPoint(std::make_unique<ServiceEntryPointShardRole>());
-
         // Setup the repl coordinator in standalone mode so we don't need an oplog etc.
         repl::ReplicationCoordinator::set(getServiceContext(),
                                           std::make_unique<repl::ReplicationCoordinatorMock>(
                                               getServiceContext(), repl::ReplSettings()));
 
         // Set up the auth subsystem to authorize the command.
-        auto globalAuthzManagerFactory = std::make_unique<AuthorizationManagerFactoryMock>();
-        AuthorizationManager::set(getService(),
-                                  globalAuthzManagerFactory->createShard(getService()));
-        auth::AuthorizationBackendInterface::set(
-            getService(), globalAuthzManagerFactory->createBackendInterface(getService()));
         _mockBackend = reinterpret_cast<auth::AuthorizationBackendMock*>(
             auth::AuthorizationBackendInterface::get(getService()));
-
-        AuthorizationManager::get(getService())->setAuthEnabled(true);
+        AuthorizationManager::get(getServiceContext()->getService())->setAuthEnabled(true);
 
         _session = _transportLayer.createSession();
         _client = getServiceContext()->getService()->makeClient("testClient", _session);

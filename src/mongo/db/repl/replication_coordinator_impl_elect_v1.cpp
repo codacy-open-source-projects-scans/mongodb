@@ -29,8 +29,6 @@
 
 
 #include <memory>
-#include <mutex>
-#include <string>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -43,7 +41,6 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/client.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/member_config.h"
 #include "mongo/db/repl/member_id.h"
@@ -56,7 +53,6 @@
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/vote_requester.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -143,7 +139,7 @@ ReplicationCoordinatorImpl::ElectionState::_startVoteRequester(WithLock lk,
                                                                int primaryIndex) {
     _voteRequester.reset(new VoteRequester);
     return _voteRequester->start(_replExecutor,
-                                 _repl->_rsConfig.getConfig(lk),
+                                 _repl->_rsConfig.unsafePeek(),
                                  _repl->_selfIndex,
                                  term,
                                  dryRun,
@@ -207,7 +203,7 @@ void ReplicationCoordinatorImpl::ElectionState::start(WithLock lk, StartElection
     }
     _electionDryRunFinishedEvent = dryRunFinishedEvent;
 
-    invariant(_repl->_rsConfig.getConfig(lk).getMemberAt(_repl->_selfIndex).isElectable());
+    invariant(_repl->_rsConfig.unsafePeek().getMemberAt(_repl->_selfIndex).isElectable());
     const auto lastWrittenOpTime = _repl->_getMyLastWrittenOpTime(lk);
     const auto lastAppliedOpTime = _repl->_getMyLastAppliedOpTime(lk);
 
@@ -300,7 +296,7 @@ void ReplicationCoordinatorImpl::ElectionState::_processDryRunResult(
 void ReplicationCoordinatorImpl::ElectionState::_startRealElection(WithLock lk,
                                                                    long long newTerm,
                                                                    StartElectionReasonEnum reason) {
-    const auto& rsConfig = _repl->_rsConfig.getConfig(lk);
+    const auto& rsConfig = _repl->_rsConfig.unsafePeek();
     const auto selfIndex = _repl->_selfIndex;
 
     const Date_t now = _replExecutor->now();

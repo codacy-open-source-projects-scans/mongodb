@@ -186,9 +186,18 @@ void removeCollAndChunksMetadataFromConfig(
     const std::shared_ptr<executor::TaskExecutor>& executor = nullptr);
 
 /**
- * Delete the query analyzer documents that match the given filter.
+ * Delete the query analyzer document associated to the passed in namespace.
  */
-void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONObj& filter);
+void removeQueryAnalyzerMetadata(OperationContext* opCtx,
+                                 const NamespaceString& nss,
+                                 const OperationSessionInfo& osi);
+
+/**
+ * Delete the query analyzer documents associated to the passed in collection UUIDs
+ * (note: using such a type instead of NamespaceString guarantees replay protection in step down
+ * scenarios).
+ */
+void removeQueryAnalyzerMetadata(OperationContext* opCtx, const std::vector<UUID>& collectionUUIDs);
 
 /**
  * Ensures rename preconditions for collections are met:
@@ -199,6 +208,7 @@ void removeQueryAnalyzerMetadataFromConfig(OperationContext* opCtx, const BSONOb
 void checkRenamePreconditions(OperationContext* opCtx,
                               const NamespaceString& toNss,
                               const boost::optional<CollectionType>& optTargetCollType,
+                              bool isSourceUnsharded,
                               bool dropTarget);
 
 /**
@@ -278,7 +288,8 @@ void sendDropCollectionParticipantCommandToShards(
     const OperationSessionInfo& osi,
     bool fromMigrate,
     bool dropSystemCollections,
-    const boost::optional<UUID>& collectionUUID = boost::none);
+    const boost::optional<UUID>& collectionUUID = boost::none,
+    bool requireCollectionEmpty = false);
 
 BSONObj getCriticalSectionReasonForRename(const NamespaceString& from, const NamespaceString& to);
 
@@ -344,6 +355,12 @@ std::vector<BatchedCommandRequest> getOperationsToCreateUnsplittableCollectionOn
  * that data cannot be migrated to a new shard before all direct shard operations have been blocked.
  */
 void assertDataMovementAllowed();
+
+/*
+ * Throws InvalidNamespace if the namespace length for the collection exceeds the maximum namespace
+ * character limit.
+ */
+void assertNamespaceLengthLimit(const NamespaceString& nss, bool isUnsharded);
 
 }  // namespace sharding_ddl_util
 }  // namespace mongo

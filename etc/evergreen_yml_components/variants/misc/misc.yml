@@ -17,7 +17,6 @@ buildvariants:
       burn_in_tag_include_all_required_and_suggested: true
       burn_in_tag_exclude_build_variants: >-
         macos-debug-suggested
-        enterprise-rhel-8-64-bit-dynamic-embedded-router
       burn_in_tag_include_build_variants: >-
         enterprise-rhel-8-64-bit-inmem
         enterprise-rhel-8-64-bit-multiversion
@@ -40,7 +39,7 @@ buildvariants:
     tasks:
       - name: burn_in_tags_gen
 
-  - name: &copybara-sync-between-repos copybara-sync-between-repos
+  - name: copybara-sync-between-repos
     display_name: "* Copybara Sync Between Repos"
     tags: ["suggested"]
     activate: true
@@ -65,10 +64,10 @@ buildvariants:
     tasks:
       - name: compile_ninja_next_TG
         distros:
-          - windows-2022-xlarge
+          - windows-2022-xxlarge
       - name: compile_ninja_TG
         distros:
-          - windows-2022-xlarge
+          - windows-2022-xxlarge
 
   - name: macos-arm-ninja-build-profiles
     display_name: "Ninja Build Profiles: macOS ARM"
@@ -98,10 +97,10 @@ buildvariants:
     tasks:
       - name: compile_ninja_default_profile_TG
         distros:
-          - windows-2022-xlarge
+          - windows-2022-xxlarge
       - name: compile_ninja_opt_profile_TG
         distros:
-          - windows-2022-xlarge
+          - windows-2022-xxlarge
       - name: compile_ninja_fast_profile_TG
         distros:
           - windows-2022-xxlarge

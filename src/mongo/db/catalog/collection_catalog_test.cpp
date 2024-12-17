@@ -47,7 +47,6 @@
 #include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/collection_yield_restore.h"
-#include "mongo/db/catalog/index_build_block.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/catalog_raii.h"
@@ -57,12 +56,13 @@
 #include "mongo/db/concurrency/resource_catalog.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_build_block.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/resumable_index_builds_gen.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/resumable_index_builds_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
@@ -888,11 +888,30 @@ public:
         wuow.commit();
     }
 
+    void createCollectionWithUUIDAndLeaveUncommitted(OperationContext* opCtx,
+                                                     const NamespaceString& nss,
+                                                     Timestamp timestamp,
+                                                     UUID uuid,
+                                                     boost::optional<WriteUnitOfWork>& wuow) {
+        _setupDDLOperation(opCtx, timestamp);
+        wuow.emplace(opCtx);
+        _createCollection(opCtx, nss, uuid, false);
+    }
+
     void dropCollection(OperationContext* opCtx, const NamespaceString& nss, Timestamp timestamp) {
         _setupDDLOperation(opCtx, timestamp);
         WriteUnitOfWork wuow(opCtx);
         _dropCollection(opCtx, nss, timestamp);
         wuow.commit();
+    }
+
+    void dropCollectionAndLeaveUncommitted(OperationContext* opCtx,
+                                           const NamespaceString& nss,
+                                           Timestamp timestamp,
+                                           boost::optional<WriteUnitOfWork>& wuow) {
+        _setupDDLOperation(opCtx, timestamp);
+        wuow.emplace(opCtx);
+        _dropCollection(opCtx, nss, timestamp);
     }
 
     void renameCollection(OperationContext* opCtx,
@@ -954,7 +973,7 @@ public:
         uassertStatusOK(indexBuildBlock->init(opCtx, writableColl, /*forRecover=*/false));
         uassertStatusOK(indexBuildBlock->getWritableEntry(opCtx, writableColl)
                             ->accessMethod()
-                            ->initializeAsEmpty(opCtx));
+                            ->initializeAsEmpty());
         wuow.commit();
 
         return indexBuildBlock;
@@ -1993,6 +2012,110 @@ TEST_F(CollectionCatalogTimestampTest, OpenExistingCollectionWithReaper) {
                     ->establishConsistentCollection(opCtx.get(), nss, createCollectionTs));
     }
 }
+
+TEST_F(CollectionCatalogTimestampTest, checkIfUUIDExistsAtLatest) {
+    // A "committed on disk" collection UUID can be retrieved from the latest catalog snapshot.
+    {
+        const NamespaceString nssOnCatalog =
+            NamespaceString::createNamespaceString_forTest("a.committed");
+        const Timestamp createCollectionTs = Timestamp(10, 10);
+        const auto collUuidOnCatalog =
+            createCollection(opCtx.get(), nssOnCatalog, createCollectionTs);
+
+        auto catalog = CollectionCatalog::get(opCtx.get());
+        auto match = catalog->checkIfUUIDExistsAtLatest(opCtx.get(), collUuidOnCatalog);
+        ASSERT_TRUE(match);
+    }
+
+    // The UUID of an uncommitted createCollection can be retrieved from the open storage
+    // transaction.
+    {
+        const NamespaceString nssOnCatalog =
+            NamespaceString::createNamespaceString_forTest("a.uncommitted");
+        const Timestamp createCollectionTs = Timestamp(10, 10);
+        const UUID uncommittedCollUUID = UUID::gen();
+        boost::optional<WriteUnitOfWork> wuow;
+        createCollectionWithUUIDAndLeaveUncommitted(
+            opCtx.get(), nssOnCatalog, createCollectionTs, uncommittedCollUUID, wuow);
+
+        auto catalog = CollectionCatalog::get(opCtx.get());
+        auto match = catalog->checkIfUUIDExistsAtLatest(opCtx.get(), uncommittedCollUUID);
+        ASSERT_TRUE(match);
+        wuow->commit();
+    }
+
+    // The UUID of a commit-pending createCollection can be retrieved from the related data
+    // structure.
+    {
+        const NamespaceString commitPendingNss =
+            NamespaceString::createNamespaceString_forTest("a.createWithCommitPending");
+        const UUID commitPendingColluuid = UUID::gen();
+        const Timestamp createCollectionTs = Timestamp(10, 10);
+
+        concurrentCreateAndRunCatalogOperations(
+            opCtx.get(),
+            commitPendingNss,
+            commitPendingColluuid,
+            createCollectionTs,
+            [this, &commitPendingColluuid](OperationContext* opCtx) {
+                auto catalog = CollectionCatalog::get(opCtx);
+                auto match = catalog->checkIfUUIDExistsAtLatest(opCtx, commitPendingColluuid);
+                ASSERT_TRUE(match);
+            });
+    }
+
+    // The UUID of a commit-pending dropped collection can still be retrieved from the latest
+    // catalog snapshot.
+    {
+        const NamespaceString nssOnCatalog =
+            NamespaceString::createNamespaceString_forTest("a.dropWithCommitPending");
+        const Timestamp createCollectionTs = Timestamp(10, 10);
+        const Timestamp dropCollectionTs = Timestamp(20, 20);
+
+        const auto collUuidOnCatalog =
+            createCollection(opCtx.get(), nssOnCatalog, createCollectionTs);
+
+        concurrentDropAndRunCatalogOperations(opCtx.get(),
+                                              nssOnCatalog,
+                                              dropCollectionTs,
+                                              [this, &collUuidOnCatalog](OperationContext* opCtx) {
+                                                  auto catalog = CollectionCatalog::get(opCtx);
+                                                  auto match = catalog->checkIfUUIDExistsAtLatest(
+                                                      opCtx, collUuidOnCatalog);
+                                                  ASSERT_TRUE(match);
+                                              });
+    }
+
+    // A collection being dropped within the currently open storage transaction can still be
+    // retrieved through the latest catalog snapshot.
+    {
+        const NamespaceString nssOnCatalog =
+            NamespaceString::createNamespaceString_forTest("a.toBeDroppedInOpenTxn");
+        const Timestamp createCollectionTs = Timestamp(10, 10);
+        const Timestamp dropCollectionTs = Timestamp(20, 20);
+
+        const auto collUuidOnCatalog =
+            createCollection(opCtx.get(), nssOnCatalog, createCollectionTs);
+
+        boost::optional<WriteUnitOfWork> wuow;
+
+        dropCollectionAndLeaveUncommitted(opCtx.get(), nssOnCatalog, dropCollectionTs, wuow);
+
+        auto catalog = CollectionCatalog::get(opCtx.get());
+        auto match = catalog->checkIfUUIDExistsAtLatest(opCtx.get(), collUuidOnCatalog);
+        ASSERT_TRUE(match);
+        wuow->commit();
+    }
+
+    // A non-existing collection UUID matches no collection.
+    {
+        const UUID nonExistingUuid = UUID::gen();
+        auto catalog = CollectionCatalog::get(opCtx.get());
+        auto match = catalog->checkIfUUIDExistsAtLatest(opCtx.get(), nonExistingUuid);
+        ASSERT_FALSE(match);
+    }
+}
+
 
 TEST_F(CollectionCatalogTimestampTest, OpenNewCollectionWithReaper) {
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
@@ -3670,5 +3793,57 @@ TEST_F(CollectionCatalogTimestampTest, MixedModeWrites) {
         });
     }
 }
+
+TEST(GetConfigDebugDumpTest, NonConfigDatabase) {
+    // Run against a non-config database. It should always return boost::none.
+
+    const auto resultNonConfig = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("nonConfig", "dummy"));
+    ASSERT_FALSE(resultNonConfig);
+
+    const auto resultNonConfigDatabases = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("nonConfig", "databases"));
+    ASSERT_FALSE(resultNonConfigDatabases);
+};
+
+TEST(GetConfigDebugDumpTest, ConfigDatabase) {
+    // Run against the config database. It should always return a result, and it should be true or
+    // false depending on the collection.
+
+    const auto resultNotListed = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("config", "dummy"));
+    ASSERT_TRUE(resultNotListed);
+    ASSERT_FALSE(*resultNotListed);
+
+    const auto resultListed = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("config", "databases"));
+    ASSERT_TRUE(resultListed);
+    ASSERT_TRUE(*resultListed);
+};
+
+// TODO (SERVER-95599): remove once 9.0 becomes last LTS.
+TEST(GetConfigDebugDumpTest, FeatureFlagDisabled) {
+    // With the feature flag disabled, it should always return boost::none.
+
+    RAIIServerParameterControllerForTest featureFlagScope("featureFlagConfigDebugDumpSupported",
+                                                          false);
+
+    const auto resultNonConfig = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("nonConfig", "dummy"));
+    ASSERT_FALSE(resultNonConfig);
+
+    const auto resultNonConfigDatabases = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("nonConfig", "databases"));
+    ASSERT_FALSE(resultNonConfigDatabases);
+
+    const auto resultNotListed = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("config", "dummy"));
+    ASSERT_FALSE(resultNotListed);
+
+    const auto resultListed = catalog::getConfigDebugDump(
+        NamespaceString::createNamespaceString_forTest("config", "databases"));
+    ASSERT_FALSE(resultListed);
+};
+
 }  // namespace
 }  // namespace mongo

@@ -31,13 +31,8 @@ ksdecode = env.Program(
 
 env.CppUnitTest(
     target="key_string_test",
-    source=[
-        "key_string_test.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/db/server_base",
-        "key_string",
-    ],
+    source=[],
+    LIBDEPS=[],
 )
 
 env.CppLibfuzzerTest(

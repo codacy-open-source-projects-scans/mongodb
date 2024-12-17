@@ -31,7 +31,6 @@
 #include <iterator>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <ostream>
 #include <string>
 #include <tuple>
@@ -45,8 +44,6 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
@@ -69,7 +66,6 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -81,7 +77,6 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
@@ -185,11 +180,8 @@ Status makeNoopWriteIfNeeded(OperationContext* opCtx,
     // one that waits for the notification gets the later clusterTime, so when the request finishes
     // it needs to be repeated with the later time.
     while (clusterTime > lastWrittenOpTime) {
-        // Standalone replica set, so there is no need to advance the OpLog on the primary. The only
-        // exception is after a tenant migration because the target time may be from the other
-        // replica set and is not guaranteed to be in the oplog of this node's set.
-        if (serverGlobalParams.clusterRole.has(ClusterRole::None) &&
-            !tenant_migration_access_blocker::hasActiveTenantMigration(opCtx, dbName)) {
+        // Standalone replica set, so there is no need to advance the OpLog on the primary.
+        if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {
             return Status::OK();
         }
 
@@ -603,7 +595,7 @@ Status waitForLinearizableReadConcernImpl(OperationContext* opCtx,
     repl::OpTime lastOpApplied = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
     auto awaitReplResult = replCoord->awaitReplication(opCtx, lastOpApplied, wc);
 
-    if (awaitReplResult.status == ErrorCodes::WriteConcernFailed) {
+    if (awaitReplResult.status == ErrorCodes::WriteConcernTimeout) {
         return Status(ErrorCodes::LinearizableReadConcernError,
                       "Failed to confirm that read was linearizable.");
     }

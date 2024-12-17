@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/unittest/assert.h"
@@ -45,7 +43,7 @@ key_string::Value makeKeyString(key_string::Version version,
     return builder.getValueCopy();
 }
 
-TEST(SortedDataInterface, SortedDataKeyValueViewTest) {
+TEST(SortedDataInterfaceTest, SortedDataKeyValueViewTest) {
     BSONObj key = BSON("a" << 1 << "b" << 2.0);
     const Ordering ALL_ASCENDING = Ordering::make(BSONObj());
 

@@ -54,9 +54,7 @@
 #include "mongo/db/commands/query_cmd/explain_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
@@ -126,8 +124,7 @@ bool requiresOriginalQuery(OperationContext* opCtx,
 
         // We can ignore the collation for this check since we're only checking if the field name in
         // the projection requires extra information from the query.
-        auto expCtx =
-            make_intrusive<ExpressionContext>(opCtx, findCommand, nullptr /* collator */, false);
+        auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx, findCommand).build();
         auto res = MatchExpressionParser::parse(findCommand.getFilter(),
                                                 expCtx,
                                                 ExtensionsCallbackNoop(),
@@ -562,9 +559,7 @@ public:
     }
 };
 
-MONGO_REGISTER_COMMAND(ClusterWriteWithoutShardKeyCmd)
-    .forRouter()
-    .requiresFeatureFlag(&feature_flags::gFeatureFlagUpdateOneWithoutShardKey);
+MONGO_REGISTER_COMMAND(ClusterWriteWithoutShardKeyCmd).forRouter();
 
 }  // namespace
 }  // namespace mongo

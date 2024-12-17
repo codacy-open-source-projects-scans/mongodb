@@ -147,24 +147,27 @@ BSONObj rewriteEncryptedFilterV2(FLETagQueryInterface* queryImpl,
     return filter;
 }
 
+namespace {
+NamespaceString getAndValidateEscNsFromSchema(const EncryptionInformation& encryptInfo,
+                                              const NamespaceString& nss) {
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(nss, encryptInfo);
+    return NamespaceStringUtil::deserialize(nss.dbName(), efc.getEscCollection()->toString());
+}
+}  // namespace
 
 class RewriteBase {
 public:
     RewriteBase(boost::intrusive_ptr<ExpressionContext> expCtx,
                 const NamespaceString& nss,
                 const EncryptionInformation& encryptInfo)
-        : expCtx(expCtx), dbName(nss.dbName()) {
-        auto efc = EncryptionInformationHelpers::getAndValidateSchema(nss, encryptInfo);
-        esc = efc.getEscCollection()->toString();
-    }
-    virtual ~RewriteBase() {}
+        : expCtx(expCtx), nssEsc(getAndValidateEscNsFromSchema(encryptInfo, nss)) {}
 
-    virtual void doRewrite(FLETagQueryInterface* queryImpl, const NamespaceString& nssEsc) {}
+    virtual ~RewriteBase(){};
 
+    virtual void doRewrite(FLETagQueryInterface* queryImpl){};
 
     boost::intrusive_ptr<ExpressionContext> expCtx;
-    std::string esc;
-    DatabaseName dbName;
+    const NamespaceString nssEsc;
 };
 
 // This class handles rewriting of an entire pipeline.
@@ -175,9 +178,9 @@ public:
                     std::unique_ptr<Pipeline, PipelineDeleter> toRewrite)
         : RewriteBase(toRewrite->getContext(), nss, encryptInfo), pipeline(std::move(toRewrite)) {}
 
-    ~PipelineRewrite() override {}
+    ~PipelineRewrite() override{};
 
-    void doRewrite(FLETagQueryInterface* queryImpl, const NamespaceString& nssEsc) final {
+    void doRewrite(FLETagQueryInterface* queryImpl) final {
         auto rewriter = QueryRewriter(expCtx, queryImpl, nssEsc);
         for (auto&& source : pipeline->getSources()) {
             if (stageRewriterMap.find(typeid(*source)) != stageRewriterMap.end()) {
@@ -204,9 +207,9 @@ public:
                   EncryptedCollScanModeAllowed mode)
         : RewriteBase(expCtx, nss, encryptInfo), userFilter(toRewrite), _mode(mode) {}
 
-    ~FilterRewrite() override {}
+    ~FilterRewrite() override{};
 
-    void doRewrite(FLETagQueryInterface* queryImpl, const NamespaceString& nssEsc) final {
+    void doRewrite(FLETagQueryInterface* queryImpl) final {
         rewrittenFilter = rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, userFilter, _mode);
     }
 
@@ -227,11 +230,9 @@ void doFLERewriteInTxn(OperationContext* opCtx,
     // if breaks us off of the current optctx readconcern and other settings
     //
     if (!opCtx->inMultiDocumentTransaction()) {
-        NamespaceString nssEsc(
-            NamespaceStringUtil::deserialize(sharedBlock->dbName, sharedBlock->esc));
         FLETagNoTXNQuery queryInterface(opCtx);
 
-        sharedBlock->doRewrite(&queryInterface, nssEsc);
+        sharedBlock->doRewrite(&queryInterface);
         return;
     }
 
@@ -239,14 +240,11 @@ void doFLERewriteInTxn(OperationContext* opCtx,
     auto service = opCtx->getService();
     auto swCommitResult = txn->runNoThrow(
         opCtx, [service, sharedBlock](const txn_api::TransactionClient& txnClient, auto txnExec) {
-            NamespaceString nssEsc(
-                NamespaceStringUtil::deserialize(sharedBlock->dbName, sharedBlock->esc));
-
             // Construct FLE rewriter from the transaction client and encryptionInformation.
             auto queryInterface = FLEQueryInterfaceImpl(txnClient, service);
 
             // Rewrite the MatchExpression.
-            sharedBlock->doRewrite(&queryInterface, nssEsc);
+            sharedBlock->doRewrite(&queryInterface);
 
             return SemiFuture<void>::makeReady();
         });
@@ -287,13 +285,11 @@ void processFindCommand(OperationContext* opCtx,
                         FindCommandRequest* findCommand,
                         GetTxnCallback getTransaction) {
     invariant(findCommand->getEncryptionInformation());
-
-    auto expCtx =
-        make_intrusive<ExpressionContext>(opCtx,
-                                          collatorFromBSON(opCtx, findCommand->getCollation()),
-                                          nss,
-                                          findCommand->getLegacyRuntimeConstants(),
-                                          findCommand->getLet());
+    auto expCtx = ExpressionContextBuilder{}
+                      .fromRequest(opCtx, *findCommand)
+                      .collator(collatorFromBSON(opCtx, findCommand->getCollation()))
+                      .ns(nss)
+                      .build();
     expCtx->stopExpressionCounters();
     findCommand->setFilter(rewriteQuery(opCtx,
                                         expCtx,
@@ -313,8 +309,13 @@ void processCountCommand(OperationContext* opCtx,
     invariant(countCommand->getEncryptionInformation());
     // Count command does not have legacy runtime constants, and does not support user variables
     // defined in a let expression.
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx, collatorFromBSON(opCtx, countCommand->getCollation().value_or(BSONObj())), nss);
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .opCtx(opCtx)
+            .collator(collatorFromBSON(opCtx, countCommand->getCollation().value_or(BSONObj())))
+            .ns(nss)
+            .build();
+
     expCtx->stopExpressionCounters();
 
     countCommand->setQuery(rewriteQuery(opCtx,
@@ -334,7 +335,6 @@ std::unique_ptr<Pipeline, PipelineDeleter> processPipeline(
     const EncryptionInformation& encryptInfo,
     std::unique_ptr<Pipeline, PipelineDeleter> toRewrite,
     GetTxnCallback txn) {
-
     auto sharedBlock = std::make_shared<PipelineRewrite>(nss, encryptInfo, std::move(toRewrite));
     doFLERewriteInTxn(opCtx, sharedBlock, txn);
 

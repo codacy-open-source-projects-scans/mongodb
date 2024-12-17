@@ -29,6 +29,7 @@
 
 #include "mongo/util/signal_handlers_synchronous.h"
 
+#include "signal_handlers_synchronous.h"
 #include <boost/exception/diagnostic_information.hpp>
 #include <boost/exception/exception.hpp>
 #include <cerrno>
@@ -161,22 +162,14 @@ private:
     char _buffer[maxLogLineSize];
 };
 
-class MallocFreeOStream : public std::ostream {
+class MallocFreeOStream : private MallocFreeStreambuf, public std::ostream {
+public:
+    MallocFreeOStream() : std::ostream{static_cast<MallocFreeStreambuf*>(this)} {}
     MallocFreeOStream(const MallocFreeOStream&) = delete;
     MallocFreeOStream& operator=(const MallocFreeOStream&) = delete;
 
-public:
-    MallocFreeOStream() : std::ostream(&_buf) {}
-
-    StringData str() const {
-        return _buf.str();
-    }
-    void rewind() {
-        _buf.rewind();
-    }
-
-private:
-    MallocFreeStreambuf _buf;
+    using MallocFreeStreambuf::rewind;
+    using MallocFreeStreambuf::str;
 };
 
 MallocFreeOStream mallocFreeOStream;
@@ -203,19 +196,24 @@ public:
      */
     explicit MallocFreeOStreamGuard(int signum) : _lk(_streamMutex, stdx::defer_lock) {
         if (terminateDepth++) {
+            if (_onDeadlock)
+                _onDeadlock(signum);
             endProcessWithSignal(signum);
         }
         _lk.lock();
     }
 
+    static void setGlobalDeadlockCallback_forTest(std::function<void(int)> cb) {
+        _onDeadlock = std::move(cb);
+    }
+
 private:
-    static stdx::mutex _streamMutex;
-    static thread_local int terminateDepth;
+    static inline stdx::mutex _streamMutex;
+    static inline thread_local int terminateDepth = 0;
+    static inline std::function<void(int)> _onDeadlock;
+
     stdx::unique_lock<stdx::mutex> _lk;
 };
-
-stdx::mutex MallocFreeOStreamGuard::_streamMutex;
-thread_local int MallocFreeOStreamGuard::terminateDepth = 0;
 
 void logNoRecursion(StringData message) {
     // If we were within a log call when we hit a signal, don't call back into the logging
@@ -245,10 +243,9 @@ void printStackTraceNoRecursion() {
 }
 
 // must hold MallocFreeOStreamGuard to call
-void printSignalAndBacktrace(int signalNum) {
+void printSignal(int signalNum) {
     mallocFreeOStream << "Got signal: " << signalNum << " (" << strsignal(signalNum) << ").";
     writeMallocFreeStreamToLog();
-    printStackTraceNoRecursion();
 }
 
 void dumpScopedDebugInfo(std::ostream& os) {
@@ -264,6 +261,14 @@ void dumpScopedDebugInfo(std::ostream& os) {
     os << "]\n";
 }
 
+// must hold MallocFreeOStreamGuard to call
+void printErrorBlock() {
+    printStackTraceNoRecursion();
+    writeMallocFreeStreamToLog();
+    dumpScopedDebugInfo(mallocFreeOStream);
+    writeMallocFreeStreamToLog();
+}
+
 // this will be called in certain c++ error cases, for example if there are two active
 // exceptions
 void myTerminate() {
@@ -277,18 +282,15 @@ void myTerminate() {
         mallocFreeOStream << " No exception is active";
     }
     writeMallocFreeStreamToLog();
-    dumpScopedDebugInfo(mallocFreeOStream);
-    writeMallocFreeStreamToLog();
-    printStackTraceNoRecursion();
+    printErrorBlock();
     breakpoint();
     endProcessWithSignal(SIGABRT);
 }
 
 extern "C" void abruptQuit(int signalNum) {
     MallocFreeOStreamGuard lk(signalNum);
-    dumpScopedDebugInfo(mallocFreeOStream);
-    writeMallocFreeStreamToLog();
-    printSignalAndBacktrace(signalNum);
+    printSignal(signalNum);
+    printErrorBlock();
     breakpoint();
     endProcessWithSignal(signalNum);
 }
@@ -346,19 +348,45 @@ extern "C" void abruptQuitWithAddrSignal(int signalNum, siginfo_t* siginfo, void
     writeMallocFreeStreamToLog();
 
     printSigInfo(siginfo);
+    printSignal(signalNum);
+    printErrorBlock();
 
-    printSignalAndBacktrace(signalNum);
     breakpoint();
     endProcessWithSignal(signalNum);
+}
+
+extern "C" void noopSignalHandler(int signalNum, siginfo_t*, void*) {}
+
+extern "C" typedef void(sigAction_t)(int signum, siginfo_t* info, void* context);
+
+void installSignalHandler(int signal, sigAction_t handler) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigemptyset(&sa.sa_mask);
+    if (handler == nullptr) {
+        sa.sa_handler = SIG_IGN;
+    } else {
+        sa.sa_sigaction = handler;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    }
+    if (sigaction(signal, &sa, nullptr) != 0) {
+        int savedErr = errno;
+        LOGV2_FATAL(31334,
+                    "Failed to install sigaction for signal",
+                    "signal"_attr = signal,
+                    "error"_attr = strerror(savedErr));
+    }
+}
+
+void setupSignalTestingHandler() {
+#ifdef __linux__
+    installSignalHandler(interruptResilienceTestingSignal(), noopSignalHandler);
+#endif
 }
 
 #endif
 
 }  // namespace
-
-#if !defined(_WIN32)
-extern "C" typedef void(sigAction_t)(int signum, siginfo_t* info, void* context);
-#endif
 
 void setupSynchronousSignalHandlers() {
     stdx::set_terminate(myTerminate);
@@ -384,24 +412,12 @@ void setupSynchronousSignalHandlers() {
         {SIGILL, &abruptQuitWithAddrSignal},
         {SIGFPE, &abruptQuitWithAddrSignal},
     };
+
     for (const auto& spec : kSignalSpecs) {
-        struct sigaction sa;
-        memset(&sa, 0, sizeof(sa));
-        sigemptyset(&sa.sa_mask);
-        if (spec.function == nullptr) {
-            sa.sa_handler = SIG_IGN;
-        } else {
-            sa.sa_sigaction = spec.function;
-            sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-        }
-        if (sigaction(spec.signal, &sa, nullptr) != 0) {
-            int savedErr = errno;
-            LOGV2_FATAL(31334,
-                        "Failed to install sigaction for signal",
-                        "signal"_attr = spec.signal,
-                        "error"_attr = strerror(savedErr));
-        }
+        installSignalHandler(spec.signal, spec.function);
     }
+
+    setupSignalTestingHandler();
     setupSIGTRAPforDebugger();
 #if defined(MONGO_STACKTRACE_CAN_DUMP_ALL_THREADS)
     setupStackTraceSignalAction(stackTraceSignal());
@@ -431,6 +447,14 @@ int stackTraceSignal() {
     return SIGUSR2;
 }
 #endif
+
+int interruptResilienceTestingSignal() {
+#ifdef __linux__
+    return SIGRTMIN;
+#else
+    return 0;
+#endif
+}
 
 ActiveExceptionWitness::ActiveExceptionWitness() {
     // Later entries in the catch chain will become the innermost catch blocks, so
@@ -472,6 +496,14 @@ std::string describeActiveException() {
     std::ostringstream oss;
     globalActiveExceptionWitness().describe(oss);
     return oss.str();
+}
+
+std::shared_ptr<void> makeMallocFreeOStreamGuard_forTest(int sig) {
+    return std::make_shared<MallocFreeOStreamGuard>(sig);
+}
+
+void setMallocFreeOStreamGuardDeadlockCallback_forTest(std::function<void(int)> cb) {
+    MallocFreeOStreamGuard::setGlobalDeadlockCallback_forTest(std::move(cb));
 }
 
 }  // namespace mongo

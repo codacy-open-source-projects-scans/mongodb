@@ -93,13 +93,14 @@ boost::optional<repl::OplogEntry> forgeNoopImageOplogEntry(
               (oplogEntry.getCommandType() == repl::OplogEntry::CommandType::kApplyOps));
     const auto sessionId = *oplogEntry.getSessionId();
 
-    auto localImageCollInfo = pExpCtx->mongoProcessInterface->getCollectionOptions(
-        pExpCtx->opCtx, NamespaceString::kConfigImagesNamespace);
+    auto localImageCollInfo = pExpCtx->getMongoProcessInterface()->getCollectionOptions(
+        pExpCtx->getOperationContext(), NamespaceString::kConfigImagesNamespace);
 
     // Extract the UUID from the collection information. We should always have a valid uuid here.
     auto imageCollUUID = invariantStatusOK(UUID::parse(localImageCollInfo["uuid"]));
-    const auto& readConcernBson = repl::ReadConcernArgs::get(pExpCtx->opCtx).toBSON();
-    auto imageDoc = pExpCtx->mongoProcessInterface->lookupSingleDocument(
+    const auto& readConcernBson =
+        repl::ReadConcernArgs::get(pExpCtx->getOperationContext()).toBSON();
+    auto imageDoc = pExpCtx->getMongoProcessInterface()->lookupSingleDocument(
         pExpCtx,
         NamespaceString::kConfigImagesNamespace,
         imageCollUUID,
@@ -240,7 +241,7 @@ DocumentSource::GetModPathsReturn DocumentSourceFindAndModifyImageLookup::getMod
 DocumentSource::GetNextResult DocumentSourceFindAndModifyImageLookup::doGetNext() {
     uassert(5806001,
             str::stream() << kStageName << " cannot be executed from router",
-            !pExpCtx->inRouter);
+            !pExpCtx->getInRouter());
     if (_stashedDownconvertedDoc) {
         // Return the stashed downconverted document. This indicates that the previous document
         // returned was a forged noop image document.
@@ -293,9 +294,7 @@ Document DocumentSourceFindAndModifyImageLookup::_downConvertIfNeedsRetryImage(D
     }
 
     if (inputOplogEntry.isCrudOpType() && inputOplogEntry.getNeedsRetryImage()) {
-        // Strip the needsRetryImage field if set, even if we don't forge a noop image oplog entry
-        // to ensure we don't erroneously generate config.image_collection entries on the recipient
-        // for tenant migrations.
+        // Strip the needsRetryImage field if set.
         MutableDocument downConvertedDoc{inputDoc};
         downConvertedDoc.remove(repl::OplogEntryBase::kNeedsRetryImageFieldName);
 
@@ -340,9 +339,7 @@ Document DocumentSourceFindAndModifyImageLookup::_downConvertIfNeedsRetryImage(D
                 forgeNoopImageOplogEntry(pExpCtx, inputOplogEntry, op);
 
             // Downcovert the document for this applyOps oplog entry by downcoverting this
-            // operation. We strip the needsRetryImage field, even if we don't forge a noop image
-            // oplog entry to ensure we don't erroneously generate config.image_collection entries
-            // on the recipient for tenant migrations.
+            // operation.
             op.setNeedsRetryImage(boost::none);
             if (forgedNoopOplogEntry) {
                 if (imageType == repl::RetryImageEnum::kPreImage) {

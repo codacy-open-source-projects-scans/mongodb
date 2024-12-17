@@ -105,9 +105,31 @@ protected:
      *     Execute the given workload operation in the model.
      */
     int
+    do_operation(const operation::breakpoint &op)
+    {
+        return 0;
+    }
+
+    /*
+     * kv_workload_runner::do_operation --
+     *     Execute the given workload operation in the model.
+     */
+    int
     do_operation(const operation::checkpoint &op)
     {
         _database.create_checkpoint(op.name.empty() ? nullptr : op.name.c_str());
+        return 0;
+    }
+
+    /*
+     * kv_workload_runner::do_operation --
+     *     Execute the given workload operation in the model.
+     */
+    int
+    do_operation(const operation::checkpoint_crash &op)
+    {
+        (void)op;
+        restart(true /* crash */);
         return 0;
     }
 

@@ -123,11 +123,11 @@ void logRefineCollectionShardKey(OperationContext* opCtx,
 std::vector<ShardId> getShardsWithDataForCollection(OperationContext* opCtx,
                                                     const NamespaceString& nss) {
     // Do a refresh to get the latest routing information.
-    const auto cri = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx, nss));
+    const auto cm = uassertStatusOK(
+        Grid::get(opCtx)->catalogCache()->getCollectionPlacementInfoWithRefresh(opCtx, nss));
     AutoGetCollection col(opCtx, nss, MODE_IS);
     std::set<ShardId> vecsSet;
-    cri.cm.getAllShardIds(&vecsSet);
+    cm.getAllShardIds(&vecsSet);
     return std::vector<ShardId>(vecsSet.begin(), vecsSet.end());
 }
 }  // namespace
@@ -182,8 +182,9 @@ ExecutorFuture<void> RefineCollectionShardKeyCoordinator::_runImpl(
 
                 // Make sure the latest placement version is recovered as of the time of the
                 // invocation of the command.
-                FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
-                    opCtx, nss(), boost::none);
+                uassertStatusOK(
+                    FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
+                        opCtx, nss(), boost::none));
                 {
                     AutoGetCollection coll{
                         opCtx,

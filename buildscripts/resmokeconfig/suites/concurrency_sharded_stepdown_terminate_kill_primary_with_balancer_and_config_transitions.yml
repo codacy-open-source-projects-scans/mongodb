@@ -105,6 +105,7 @@ executor:
     shell_options:
       eval: >-
         await import("jstests/libs/override_methods/implicitly_retry_on_shard_transition_errors.js");
+        await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
           runningWithConfigStepdowns: true
@@ -113,6 +114,7 @@ executor:
           useActionPermittedFile: [ContinuousStepdown, ContinuousAddRemoveShard]
           runningWithBalancer: true
           shardsAddedRemoved: true
+          implicitlyShardOnCreateCollectionOnly: true
           shardCollectionProbability: 0.5
           fsmPreOverridesLoadedCallback: import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
   hooks:
@@ -148,7 +150,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     configsvr_options:
       num_nodes: 3
       all_nodes_electable: true
@@ -170,10 +171,8 @@ executor:
         enableTestCommands: 1
         enableElectionHandoff: 0
         roleGraphInvalidationIsFatal: 1
-        analyzeShardKeyMaxNumStaleVersionRetries: 2
         queryAnalysisWriterIntervalSecs: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
         skipDroppingHashedShardKeyIndex: true
         reshardingMinimumOperationDurationMillis: 0
         # Manually set the random migration fail point so we can set a threshold for skipping
@@ -188,6 +187,10 @@ executor:
           data:
             comment: *movePrimaryComment
           mode: alwaysOn
+        # Orphan cleanup happening too quickly can cause intermittent test failures due to
+        # inconsistent secondary reads. Choose a setting lower than continuous stepdown interval to
+        # get around SERVER-90242.
+        orphanCleanupDelaySecs: 7
     num_rs_nodes_per_shard: 3
     # Use 3 shards so there's always at least two for workloads with manual migrations, etc.
     num_shards: 3

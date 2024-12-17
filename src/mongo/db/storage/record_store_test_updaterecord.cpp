@@ -37,14 +37,11 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/record_store_test_harness.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 
@@ -56,45 +53,40 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     std::unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(0, rs->numRecords());
 
     std::string data = "my record";
     RecordId loc;
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
                 rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
-            uow.commit();
+            txn.commit();
         }
     }
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(1, rs->numRecords());
 
     data = "updated record-";
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
             Status res = rs->updateRecord(opCtx.get(), loc, data.c_str(), data.size() + 1);
             ASSERT_OK(res);
 
-            uow.commit();
+            txn.commit();
         }
     }
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
         {
             RecordData record = rs->dataFor(opCtx.get(), loc);
             ASSERT_EQUALS(data.size() + 1, static_cast<size_t>(record.size()));
@@ -108,52 +100,47 @@ TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     std::unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(0, rs->numRecords());
 
     const int nToInsert = 10;
     RecordId locs[nToInsert];
     for (int i = 0; i < nToInsert; i++) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
             std::stringstream ss;
             ss << "record " << i;
             std::string data = ss.str();
 
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
                 rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
-            uow.commit();
+            txn.commit();
         }
     }
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(nToInsert, rs->numRecords());
 
     for (int i = 0; i < nToInsert; i++) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
             std::stringstream ss;
             ss << "update record-" << i;
             std::string data = ss.str();
 
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
             Status res = rs->updateRecord(opCtx.get(), locs[i], data.c_str(), data.size() + 1);
             ASSERT_OK(res);
 
-            uow.commit();
+            txn.commit();
         }
     }
 
     for (int i = 0; i < nToInsert; i++) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
         {
             std::stringstream ss;
             ss << "update record-" << i;

@@ -152,9 +152,9 @@ structs:
                 optional: true
                 description: "If true, treats this update operation as an upsert.
                               Used when extracting individual update oplog entries from the oplog
-                              entry of an applyOps command that was executed with alwaysUpsert true
-                              (the default). Originally added for backwards compatibility with
-                              updates from 3.6 and before."
+                              entry of an applyOps command that was executed with alwaysUpsert true.
+                              Originally added for backwards compatibility with updates from 3.6
+                              and before."
             preImageOpTime:
                 type: optime
                 optional: true
@@ -212,24 +212,6 @@ structs:
                 cpp_name: wallClockTime
                 type: date
                 description: "A wallclock time with MS resolution"
-            fromTenantMigration:
-                type: uuid
-                optional: true
-                description: "Contains the UUID of a tenant migration for an operation caused by
-                              one."
-            donorOpTime:
-                type: optime
-                optional: true
-                description: "Used for Serverless shard merge during the oplog catchup phase. The
-                              original opTime of the write on the donor timeline. Will only be set
-                              for writes written during the oplog catchup phase."
-            donorApplyOpsIndex:
-                type: safeInt64
-                optional: true
-                description: "Used for Serverless shard merge during the oplog catchup phase. If the
-                              write was part of a transaction or applyOps entry, this will be the
-                              index of the original applyOps entry. Will be set to 0 for any
-                              non-applyOps writes."
             _id:
                 cpp_name: _id
                 type: Value

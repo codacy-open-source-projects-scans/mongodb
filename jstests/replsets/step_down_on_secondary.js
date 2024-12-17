@@ -21,7 +21,7 @@ const collName = "coll";
 
 const rst = new ReplSetTest({nodes: [{}, {rsConfig: {priority: 0}}]});
 rst.startSet();
-rst.initiate();
+rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 const primary = rst.getPrimary();
 const primaryDB = primary.getDB(dbName);
@@ -65,7 +65,7 @@ rst.stepUp(secondary);
 jsTestLog("Wait for step up to complete");
 // Wait until the primary successfully steps down via heartbeat reconfig.
 rst.waitForState(secondary, ReplSetTest.State.PRIMARY);
-rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [primary]);
 const newPrimary = rst.getPrimary();
 
 jsTestLog("Prepare a transaction on the new primary");

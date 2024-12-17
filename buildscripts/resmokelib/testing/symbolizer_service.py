@@ -35,6 +35,7 @@ class ResmokeSymbolizerConfig(NamedTuple):
     evg_task_id: Optional[str]
     client_id: Optional[str]
     client_secret: Optional[str]
+    skip_symbolization: bool
 
     @classmethod
     def from_resmoke_config(cls) -> ResmokeSymbolizerConfig:
@@ -47,6 +48,7 @@ class ResmokeSymbolizerConfig(NamedTuple):
             evg_task_id=_config.EVERGREEN_TASK_ID,
             client_id=_config.SYMBOLIZER_CLIENT_ID,
             client_secret=_config.SYMBOLIZER_CLIENT_SECRET,
+            skip_symbolization=_config.SKIP_SYMBOLIZATION,
         )
 
     @staticmethod
@@ -114,8 +116,17 @@ class ResmokeSymbolizer:
                 test.logger.info("No failure logs/stacktrace files found, skipping symbolization")
                 return
 
-            test.logger.info("Found stacktrace files. \nBEGIN Symbolization")
-            test.logger.info("Stacktrace files: %s", files)
+            test.logger.info("Found stacktrace files: %s", files)
+            # To avoid performing the same actions on these files again, we mark them as processed
+            self.file_service.add_to_processed_files(files)
+            self.file_service.write_processed_files(PROCESSED_FILES_LIST_FILE_PATH)
+
+            if test.return_code == 0:
+                test.logger.info("Test succeeded, skipping symbolization")
+                return
+
+            test.logger.info("Symbolization process started.")
+            test.logger.info("\nBEGIN Symbolization")
 
             start_time = time.perf_counter()
             for file_path in files:
@@ -130,11 +141,8 @@ class ResmokeSymbolizer:
                 if time.perf_counter() - start_time > symbolize_retry_timeout:
                     break
 
-            # To avoid performing the same actions on these files again, we mark them as processed
-            self.file_service.add_to_processed_files(files)
-            self.file_service.write_processed_files(PROCESSED_FILES_LIST_FILE_PATH)
-
-            test.logger.info("\nEND Symbolization \nSymbolization process completed. ")
+            test.logger.info("\nEND Symbolization")
+            test.logger.info("Symbolization process completed.")
 
     def should_symbolize(self, test: TestCase) -> bool:
         """
@@ -143,6 +151,10 @@ class ResmokeSymbolizer:
         :param test: resmoke test case
         :return: whether we should symbolize
         """
+        if self.config.skip_symbolization:
+            test.logger.info("Configured to skip symbolization, skipping symbolization")
+            return False
+
         if self.config.evg_task_id is None:
             test.logger.info("Not running in Evergreen, skipping symbolization")
             return False

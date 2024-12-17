@@ -9,7 +9,7 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {
     runWithFailpoint,
     setupCollectionAndGetExplainTestCases
-} from "jstests/noPassthrough/explain_and_profile_optimization_stats_util.js";
+} from "jstests/noPassthrough/query/explain/explain_and_profile_optimization_stats_util.js";
 
 const collName = "jstests_explain_optimization_stats";
 function runTest(db) {
@@ -43,7 +43,7 @@ function runTest(db) {
             // Assert the optimizationTimeMillis field is reported in explain as expected.
             const optimizationTimeMillis = collectOptimizationTimeMillis(explain);
             optimizationTimeMillis.forEach(time => assert.gte(time, waitTimeMillis, explain));
-            assert.gte(optimizationTimeMillis.length, 0, explain);
+            assert.gt(optimizationTimeMillis.length, 0, explain);
         });
     }
 }

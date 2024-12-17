@@ -27,9 +27,10 @@
  *    it in the license file.
  */
 
-#include "mongo/db/matcher/expression.h"
-
 #pragma once
+
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_leaf.h"
 
 namespace mongo {
 
@@ -71,6 +72,25 @@ public:
                 return false;
             default:
                 return true;
+        }
+    }
+
+    /**
+     * Some node types, such as MOD, REGEX, TYPE_OPERATOR, or ELEM_MATCH_VALUE, cannot use index if
+     * they are under negation.
+     */
+    static bool nodeCannotUseIndexUnderNot(const MatchExpression* me) {
+        switch (me->matchType()) {
+            case MatchExpression::REGEX:
+            case MatchExpression::MOD:
+            case MatchExpression::TYPE_OPERATOR:
+            case MatchExpression::ELEM_MATCH_VALUE:
+            case MatchExpression::GEO:
+            case MatchExpression::GEO_NEAR:
+            case MatchExpression::INTERNAL_BUCKET_GEO_WITHIN:
+                return true;
+            default:
+                return false;
         }
     }
 
@@ -190,6 +210,35 @@ public:
             default:
                 return false;
         }
+    }
+
+    /**
+     * Check if this match expression is a leaf and is supported by a hashed index.
+     */
+    static bool nodeIsSupportedByHashedIndex(const MatchExpression* queryExpr) {
+        // Hashed fields can answer simple equality predicates.
+        if (ComparisonMatchExpressionBase::isEquality(queryExpr->matchType())) {
+            return true;
+        }
+        if (queryExpr->matchType() == MatchExpression::INTERNAL_EQ_HASHED_KEY) {
+            return true;
+        }
+        // An $in can be answered so long as its operand contains only simple equalities.
+        if (queryExpr->matchType() == MatchExpression::MATCH_IN) {
+            const InMatchExpression* expr = static_cast<const InMatchExpression*>(queryExpr);
+            return expr->getRegexes().empty();
+        }
+        // {$exists:false} produces a single point-interval index bound on [null,null].
+        if (queryExpr->matchType() == MatchExpression::NOT) {
+            return queryExpr->getChild(0)->matchType() == MatchExpression::EXISTS;
+        }
+        // {$exists:true} can be answered using [MinKey, MaxKey] bounds.
+        return (queryExpr->matchType() == MatchExpression::EXISTS);
+    }
+
+    static bool canUseIndexForNin(const InMatchExpression* ime) {
+        return !ime->hasRegex() && ime->getEqualities().size() == 2 && ime->hasNull() &&
+            ime->hasEmptyArray();
     }
 
 private:

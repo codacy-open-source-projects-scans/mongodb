@@ -51,7 +51,6 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/admission/execution_control_feature_flags_gen.h"
 #include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
@@ -80,6 +79,7 @@
 #include "mongo/transport/service_executor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/concurrency/ticketholder_queue_stats.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
@@ -97,7 +97,6 @@
 namespace mongo {
 
 namespace {
-StringMap<std::function<AdmissionContext*(OperationContext*)>> gQueueMetricsRegistry;
 
 auto& oplogGetMoreStats = *MetricBuilder<TimerStats>("repl.network.oplogGetMoresProcessed");
 
@@ -114,15 +113,6 @@ BSONObj serializeDollarDbInOpDescription(boost::optional<TenantId> tenantId,
                                               dbName, SerializationContext::stateCommandReply(sc)))
                                          .firstElement());
     return newCmdObj;
-}
-
-MONGO_INITIALIZER(InitGlobalQueueLookupTable)(InitializerContext*) {
-    gQueueMetricsRegistry["ingress"] = [](OperationContext* opCtx) {
-        return &IngressAdmissionContext::get(opCtx);
-    };
-    gQueueMetricsRegistry["execution"] = [](OperationContext* opCtx) {
-        return &ExecutionAdmissionContext::get(opCtx);
-    };
 }
 }  // namespace
 
@@ -259,9 +249,12 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
 
     // Fill out the rest of the BSONObj with opCtx specific details.
     infoBuilder->appendBool("active", client->hasAnyActiveCurrentOp());
-    infoBuilder->append(
-        "currentOpTime",
-        expCtx->opCtx->getServiceContext()->getPreciseClockSource()->now().toString());
+    infoBuilder->append("currentOpTime",
+                        expCtx->getOperationContext()
+                            ->getServiceContext()
+                            ->getPreciseClockSource()
+                            ->now()
+                            .toString());
 
     auto authSession = AuthorizationSession::get(client);
     // Depending on whether the authenticated user is the same user which ran the command,
@@ -289,7 +282,7 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
 
     infoBuilder->appendBool("isFromUserConnection", client->isFromUserConnection());
 
-    if (const auto seCtx = transport::ServiceExecutorContext::get(client)) {
+    if (transport::ServiceExecutorContext::get(client)) {
         infoBuilder->append("threaded"_sd, true);
     }
 
@@ -311,11 +304,11 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
 
         tassert(7663403,
                 str::stream() << "SerializationContext on the expCtx should not be empty, with ns: "
-                              << expCtx->ns.toStringForErrorMsg(),
-                expCtx->serializationCtxt != SerializationContext::stateDefault());
+                              << expCtx->getNamespaceString().toStringForErrorMsg(),
+                expCtx->getSerializationContext() != SerializationContext::stateDefault());
 
         // reportState is used to generate a command reply
-        auto sc = SerializationContext::stateCommandReply(expCtx->serializationCtxt);
+        auto sc = SerializationContext::stateCommandReply(expCtx->getSerializationContext());
         CurOp::get(clientOpCtx)->reportState(infoBuilder, sc, truncateOps);
 
         if (const auto& queryShapeHash = CurOp::get(clientOpCtx)->getQueryShapeHash()) {
@@ -323,7 +316,7 @@ void CurOp::reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContex
         }
     }
 
-    if (expCtx->opCtx->routedByReplicaSetEndpoint()) {
+    if (expCtx->getOperationContext()->routedByReplicaSetEndpoint()) {
         // On the replica set endpoint, currentOp reports both router and shard operations so it
         // should label each op with its associated role.
         infoBuilder->append("role", toString(client->getService()->role()));
@@ -593,7 +586,7 @@ void CurOp::raiseDbProfileLevel(int dbProfileLevel) {
 
 static constexpr size_t appendMaxElementSize = 50 * 1024;
 
-bool shouldOmitDiagnosticInformation(CurOp* curop) {
+bool CurOp::shouldCurOpStackOmitDiagnosticInformation(CurOp* curop) {
     do {
         if (curop->getShouldOmitDiagnosticInformation()) {
             return true;
@@ -625,7 +618,7 @@ bool CurOp::completeAndLogOperation(const logv2::LogOptions& logOptions,
         durationCount<Milliseconds>(*_debug.additiveMetrics.executionTime);
 
     // Do not log the slow query information if asked to omit it
-    if (shouldOmitDiagnosticInformation(this)) {
+    if (shouldCurOpStackOmitDiagnosticInformation(this)) {
         return false;
     }
 
@@ -824,6 +817,47 @@ void appendObjectTruncatingAsNecessary(StringData fieldName,
     buildTruncatedObject(obj, *maxSize, builder);
     truncatedBuilder.doneFast();
 }
+
+/**
+ * Populates the BSONObjBuilder with the queueing statistics of the current operation. Calculates
+ * overall queue stats and records the current queue if the operation is presently queued.
+ */
+void populateCurrentOpQueueStats(OperationContext* opCtx,
+                                 TickSource* tickSource,
+                                 BSONObjBuilder* currOpStats) {
+    boost::optional<std::tuple<TicketHolderQueueStats::QueueType, Microseconds>> currentQueue;
+    BSONObjBuilder queuesBuilder(currOpStats->subobjStart("queues"));
+
+    for (auto&& [queueType, lookup] : TicketHolderQueueStats::getQueueMetricsRegistry()) {
+        AdmissionContext* admCtx = lookup(opCtx);
+        Microseconds totalTimeQueuedMicros = admCtx->totalTimeQueuedMicros();
+
+        if (auto startQueueingTime = admCtx->startQueueingTime()) {
+            Microseconds currentQueueTimeQueuedMicros = tickSource->ticksTo<Microseconds>(
+                opCtx->getServiceContext()->getTickSource()->getTicks() - *startQueueingTime);
+            totalTimeQueuedMicros += currentQueueTimeQueuedMicros;
+            currentQueue = std::make_tuple(queueType, currentQueueTimeQueuedMicros);
+        }
+        BSONObjBuilder queueMetricsBuilder(
+            queuesBuilder.subobjStart(TicketHolderQueueStats::queueTypeToString(queueType)));
+        queueMetricsBuilder.append("admissions", admCtx->getAdmissions());
+        queueMetricsBuilder.append("totalTimeQueuedMicros",
+                                   durationCount<Microseconds>(totalTimeQueuedMicros));
+        queueMetricsBuilder.append("isHoldingTicket", admCtx->isHoldingTicket());
+        queueMetricsBuilder.done();
+    }
+    queuesBuilder.done();
+    if (currentQueue) {
+        BSONObjBuilder currentQueueBuilder(currOpStats->subobjStart("currentQueue"));
+        currentQueueBuilder.append(
+            "name", TicketHolderQueueStats::queueTypeToString(std::get<0>(*currentQueue)));
+        currentQueueBuilder.append("timeQueuedMicros",
+                                   durationCount<Microseconds>(std::get<1>(*currentQueue)));
+        currentQueueBuilder.done();
+    } else {
+        currOpStats->appendNull("currentQueue");
+    }
+};
 }  // namespace
 
 BSONObj CurOp::truncateAndSerializeGenericCursor(GenericCursor cursor,
@@ -962,17 +996,6 @@ void CurOp::reportState(BSONObjBuilder* builder,
         builder->append("dataThroughputAverage", *_debug.dataThroughputAverage);
     }
 
-    // (Ignore FCV check): This feature flag is used to initialize ticketing during storage
-    // engine initialization and FCV checking is ignored there, so here we also need to ignore
-    // FCV to keep consistent behavior.
-    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
-            .isEnabledAndIgnoreFCVUnsafe()) {
-        auto admissionPriority = ExecutionAdmissionContext::get(opCtx).getPriority();
-        if (admissionPriority < AdmissionContext::Priority::kNormal) {
-            builder->append("admissionPriority", toString(admissionPriority));
-        }
-    }
-
     if (auto start = _waitForWriteConcernStart.load(); start > 0) {
         auto end = _waitForWriteConcernEnd.load();
         auto elapsedTimeTotal = _atomicWaitForWriteConcernDurationMillis.load();
@@ -980,38 +1003,7 @@ void CurOp::reportState(BSONObjBuilder* builder,
         builder->append("waitForWriteConcernDurationMillis",
                         durationCount<Milliseconds>(elapsedTimeTotal));
     }
-
-    boost::optional<std::tuple<std::string, Microseconds>> currentQueue;
-    BSONObjBuilder queuesBuilder(builder->subobjStart("queues"));
-    for (auto&& [queueName, lookup] : gQueueMetricsRegistry) {
-        AdmissionContext* admCtx = lookup(opCtx);
-        Microseconds totalTimeQueuedMicros = admCtx->totalTimeQueuedMicros();
-
-        if (auto startQueueingTime = admCtx->startQueueingTime()) {
-            Microseconds currentQueueTimeQueuedMicros = computeElapsedTimeTotal(
-                *startQueueingTime, opCtx->getServiceContext()->getTickSource()->getTicks());
-            totalTimeQueuedMicros += currentQueueTimeQueuedMicros;
-            currentQueue = std::make_tuple(queueName, currentQueueTimeQueuedMicros);
-        }
-
-        BSONObjBuilder queueMetricsBuilder(queuesBuilder.subobjStart(queueName));
-        queueMetricsBuilder.append("admissions", admCtx->getAdmissions());
-        queueMetricsBuilder.append("totalTimeQueuedMicros",
-                                   durationCount<Microseconds>(totalTimeQueuedMicros));
-        queueMetricsBuilder.append("isHoldingTicket", admCtx->isHoldingTicket());
-        queueMetricsBuilder.done();
-    }
-    queuesBuilder.done();
-
-    if (currentQueue) {
-        BSONObjBuilder currentQueueBuilder(builder->subobjStart("currentQueue"));
-        currentQueueBuilder.append("name", std::get<0>(*currentQueue));
-        currentQueueBuilder.append("timeQueuedMicros",
-                                   durationCount<Microseconds>(std::get<1>(*currentQueue)));
-        currentQueueBuilder.done();
-    } else {
-        builder->appendNull("currentQueue");
-    }
+    populateCurrentOpQueueStats(opCtx, _tickSource, builder);
 }
 
 CurOp::AdditiveResourceStats CurOp::getAdditiveResourceStats(
@@ -1260,17 +1252,6 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("reslen", responseLength);
     }
 
-    // (Ignore FCV check): This feature flag is used to initialize ticketing during storage
-    // engine initialization and FCV checking is ignored there, so here we also need to ignore
-    // FCV to keep consistent behavior.
-    if (feature_flags::gFeatureFlagDeprioritizeLowPriorityOperations
-            .isEnabledAndIgnoreFCVUnsafe()) {
-        auto admissionPriority = ExecutionAdmissionContext::get(opCtx).getPriority();
-        if (admissionPriority < AdmissionContext::Priority::kNormal) {
-            pAttrs->add("admissionPriority", admissionPriority);
-        }
-    }
-
     if (lockStats) {
         BSONObjBuilder locks;
         lockStats->report(&locks);
@@ -1346,21 +1327,9 @@ void OpDebug::report(OperationContext* opCtx,
         pAttrs->add("remoteOpWaitMillis", durationCount<Milliseconds>(*remoteOpWaitTime));
     }
 
-    BSONObjBuilder queuesBuilder;
-    for (auto&& [queueName, lookup] : gQueueMetricsRegistry) {
-        AdmissionContext* admCtx = lookup(opCtx);
-        BSONObjBuilder bb;
-        if (auto admissions = admCtx->getAdmissions(); admissions > 0) {
-            bb.append("admissions", admissions);
-        }
-        if (auto queued = durationCount<Microseconds>(admCtx->totalTimeQueuedMicros());
-            queued > 0) {
-            bb.append("totalTimeQueuedMicros", queued);
-        }
-        queuesBuilder.append(queueName, bb.obj());
-    }
-
-    pAttrs->add("queues", queuesBuilder.obj());
+    // Extract admisson and execution control queueing stats from AdmissionContext stored on opCtx
+    TicketHolderQueueStats queueingStats(opCtx);
+    pAttrs->add("queues", queueingStats.toBson());
 
     // workingMillis should always be present for any operation
     pAttrs->add("workingMillis", workingTimeMillis.count());

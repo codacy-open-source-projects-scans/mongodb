@@ -5,7 +5,7 @@
  *
  * @tags: [
  *   requires_persistence,
- *    # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  *
@@ -132,7 +132,7 @@ withRetryOnTransientTxnError(
 
         session = staleMongoS.startSession();
         session.startTransaction();
-        session.getDatabase(kDatabaseName).TestTransactionColl.insert({Key: 1});
+        session.getDatabase(kDatabaseName).TestTransactionColl.insertOne({Key: 1});
         session.commitTransaction();
     },
     () => {
@@ -229,14 +229,6 @@ withRetryOnTransientTxnError(
     // All updates must succeed on all documents.
     assert.eq(kNumThreadsForConvoyTest,
               freshMongoS.getDB(kDatabaseName).TestConvoyColl.countDocuments({a: 1}));
-
-    // There must be two refreshes: one for convoy and another for the logical session.
-    const catalogCacheStatistics =
-        st.shard0.adminCommand({serverStatus: 1}).shardingStatistics.catalogCache;
-    assert.eq(2,
-              catalogCacheStatistics.countFullRefreshesStarted +
-                  catalogCacheStatistics.countIncrementalRefreshesStarted -
-                  catalogCacheStatistics.countFailedRefreshes);
 }
 
 st.stop();

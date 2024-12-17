@@ -16,6 +16,9 @@ import {ReplSetTest} from "jstests/libs/replsettest.js";
 // into an insert, we play forward to have more documents than expected (or the reverse observation
 // for adding a delete oplog entry).
 TestData.skipEnforceFastCountOnValidate = true;
+// Because this test intentionally crashes the server, we instruct the
+// the shell to clean up after us and remove the core dump.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
 
 const ops = ["Update", "Delete", "Insert"];
 const oplogApplicationResults = ["Success", "CrudError", "NamespaceNotFound"];
@@ -24,7 +27,7 @@ function runTest(op, result) {
     jsTestLog(`Testing "${op}" oplog application during recovery that finishes with "${result}".`);
     const rst = new ReplSetTest({nodes: 1});
     rst.startSet();
-    rst.initiateWithHighElectionTimeout();
+    rst.initiate();
     let conn = rst.getPrimary();
 
     // Construct a valid oplog entry.
@@ -108,7 +111,7 @@ function runTest(op, result) {
         assert.eq(exitCode, MongoRunner.EXIT_ABORT);
         assert.soon(
             function() {
-                return rawMongoProgramOutput().search(/Fatal assertion.*5415000/) >= 0;
+                return rawMongoProgramOutput("Fatal assertion").search(/5415000/) >= 0;
             },
             "Node should have fasserted upon encountering a fatal error during startup",
             ReplSetTest.kDefaultTimeoutMS);

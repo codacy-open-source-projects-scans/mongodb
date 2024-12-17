@@ -35,11 +35,11 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/api_parameters.h"
+#include "mongo/db/exec/expression/evaluate.h"
 #include "mongo/db/pipeline/expression_test_api_version.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -73,25 +73,25 @@ boost::intrusive_ptr<Expression> ExpressionTestApiVersion::parse(ExpressionConte
     if (field == kUnstableField) {
         uassert(5161702, "unstable must be a boolean", params.firstElement().isBoolean());
         unstableField = params.firstElement().boolean();
-        expCtx->exprUnstableForApiV1 = expCtx->exprUnstableForApiV1 || unstableField;
+        expCtx->setExprUnstableForApiV1(expCtx->getExprUnstableForApiV1() || unstableField);
     } else if (field == kDeprecatedField) {
         uassert(5161703, "deprecated must be a boolean", params.firstElement().isBoolean());
         deprecatedField = params.firstElement().boolean();
-        expCtx->exprDeprectedForApiV1 = expCtx->exprDeprectedForApiV1 || deprecatedField;
+        expCtx->setExprDeprecatedForApiV1(expCtx->getExprDeprecatedForApiV1() || deprecatedField);
     } else {
         uasserted(5161704,
                   str::stream() << field << " is not a valid argument for $_testApiVersion");
     }
 
-    const auto apiStrict =
-        expCtx->opCtx && APIParameters::get(expCtx->opCtx).getAPIStrict().value_or(false);
+    const auto apiStrict = expCtx->getOperationContext() &&
+        APIParameters::get(expCtx->getOperationContext()).getAPIStrict().value_or(false);
     if (apiStrict && unstableField) {
         uasserted(ErrorCodes::APIStrictError,
                   "Provided apiStrict is true with an unstable parameter.");
     }
 
-    const auto apiDeprecated = expCtx->opCtx &&
-        APIParameters::get(expCtx->opCtx).getAPIDeprecationErrors().value_or(false);
+    const auto apiDeprecated = expCtx->getOperationContext() &&
+        APIParameters::get(expCtx->getOperationContext()).getAPIDeprecationErrors().value_or(false);
     if (apiDeprecated && deprecatedField) {
         uasserted(ErrorCodes::APIDeprecationError,
                   "Provided apiDeprecatedErrors is true with a deprecated parameter.");
@@ -107,7 +107,7 @@ Value ExpressionTestApiVersion::serialize(const SerializationOptions& options) c
 }
 
 Value ExpressionTestApiVersion::evaluate(const Document& root, Variables* variables) const {
-    return Value(1);
+    return exec::expression::evaluate(*this, root, variables);
 }
 
 }  // namespace mongo

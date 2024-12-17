@@ -67,7 +67,7 @@
 #include "mongo/db/exec/update_stage.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
@@ -108,7 +108,6 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
@@ -1309,7 +1308,8 @@ StorageInterfaceImpl::findOplogOpTimeLessThanOrEqualToTimestampRetryOnWCE(
 Timestamp StorageInterfaceImpl::getEarliestOplogTimestamp(OperationContext* opCtx) {
     auto statusWithTimestamp = [&]() {
         AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
-        return oplogRead.getCollection()->getRecordStore()->getEarliestOplogTimestamp(opCtx);
+        return oplogRead.getCollection()->getRecordStore()->oplog()->getEarliestTimestamp(
+            *shard_role_details::getRecoveryUnit(opCtx));
     }();
 
     // If the storage engine does not support getEarliestOplogTimestamp(), then fall back to higher
@@ -1347,7 +1347,8 @@ Timestamp StorageInterfaceImpl::getEarliestOplogTimestamp(OperationContext* opCt
 Timestamp StorageInterfaceImpl::getLatestOplogTimestamp(OperationContext* opCtx) {
     auto statusWithTimestamp = [&]() {
         AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
-        return oplogRead.getCollection()->getRecordStore()->getLatestOplogTimestamp(opCtx);
+        return oplogRead.getCollection()->getRecordStore()->oplog()->getLatestTimestamp(
+            *shard_role_details::getRecoveryUnit(opCtx));
     }();
 
     // If the storage engine does not support getLatestOplogTimestamp, then fall back to higher
@@ -1418,8 +1419,8 @@ Status StorageInterfaceImpl::setCollectionCount(OperationContext* opCtx,
     auto rs = collection->getRecordStore();
     // We cannot fix the data size correctly, so we just get the current cached value and keep it
     // the same.
-    long long dataSize = rs->dataSize(opCtx);
-    rs->updateStatsAfterRepair(opCtx, newCount, dataSize);
+    long long dataSize = rs->dataSize();
+    rs->updateStatsAfterRepair(newCount, dataSize);
     return Status::OK();
 }
 

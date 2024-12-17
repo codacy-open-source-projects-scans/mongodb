@@ -45,7 +45,6 @@
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/optimizer/explain_interface.h"
 #include "mongo/db/query/plan_cache/plan_cache_debug_info.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
@@ -106,31 +105,6 @@ protected:
     const std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> _debugInfo;
     const RemoteExplainVector* _remoteExplains;
 };
-
-/**
- * A PlanExplainer implementation for SBE execution plans that were selected using the SBE
- * multi-planner.
- */
-class PlanExplainerSBE final : public PlanExplainerSBEBase {
-public:
-    PlanExplainerSBE(const sbe::PlanStage* root,
-                     const stage_builder::PlanStageData* data,
-                     const QuerySolution* solution,
-                     std::vector<sbe::plan_ranker::CandidatePlan> rejectedCandidates,
-                     bool isMultiPlan,
-                     bool isCachedPlan,
-                     boost::optional<size_t> cachedPlanHash,
-                     std::shared_ptr<const plan_cache_debug_info::DebugInfoSBE> debugInfo,
-                     RemoteExplainVector* remoteExplains = nullptr);
-
-    PlanStatsDetails getWinningPlanTrialStats() const final;
-    std::vector<PlanStatsDetails> getRejectedPlansStats(
-        ExplainOptions::Verbosity verbosity) const final;
-
-private:
-    const std::vector<sbe::plan_ranker::CandidatePlan> _rejectedCandidates;
-};
-
 class PlanExplainerClassicRuntimePlannerForSBE final : public PlanExplainerSBEBase {
 public:
     PlanExplainerClassicRuntimePlannerForSBE(

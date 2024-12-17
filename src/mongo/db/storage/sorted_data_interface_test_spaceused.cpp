@@ -33,14 +33,10 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/sorted_data_interface_test_assert.h"
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 
@@ -48,46 +44,31 @@ namespace mongo {
 namespace {
 
 // Verify that an empty index takes up no space.
-TEST(SortedDataInterface, GetSpaceUsedBytesEmpty) {
-    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(
-        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
+TEST_F(SortedDataInterfaceTest, GetSpaceUsedBytesEmpty) {
+    const auto sorted(
+        harnessHelper()->newSortedDataInterface(opCtx(), /*unique=*/false, /*partial=*/false));
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT(sorted->isEmpty(opCtx.get()));
-    }
+    ASSERT(sorted->isEmpty(opCtx()));
 }
 
 // Verify that a nonempty index takes up some space.
-TEST(SortedDataInterface, GetSpaceUsedBytesNonEmpty) {
-    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(
-        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
+TEST_F(SortedDataInterfaceTest, GetSpaceUsedBytesNonEmpty) {
+    const auto sorted(
+        harnessHelper()->newSortedDataInterface(opCtx(), /*unique=*/false, /*partial=*/false));
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT(sorted->isEmpty(opCtx.get()));
-    }
+    ASSERT(sorted->isEmpty(opCtx()));
 
     int nToInsert = 10;
     for (int i = 0; i < nToInsert; i++) {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_X);
-        {
-            WriteUnitOfWork uow(opCtx.get());
-            BSONObj key = BSON("" << i);
-            RecordId loc(42, i * 2);
-            ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key, loc), true));
-            uow.commit();
-        }
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx());
+        StorageWriteTransaction txn(ru);
+        BSONObj key = BSON("" << i);
+        RecordId loc(42, i * 2);
+        ASSERT_SDI_INSERT_OK(sorted->insert(opCtx(), makeKeyString(sorted.get(), key, loc), true));
+        txn.commit();
     }
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
-        ASSERT_EQUALS(nToInsert, sorted->numEntries(opCtx.get()));
-    }
+    ASSERT_EQUALS(nToInsert, sorted->numEntries(opCtx()));
 }
 
 }  // namespace

@@ -111,7 +111,7 @@ public:
           _userPipeline(original._userPipeline),
           _variables(original._variables),
           _variablesParseState(original._variablesParseState) {
-        _pipeline->getContext()->inUnionWith = true;
+        _pipeline->getContext()->setInUnionWith(true);
     }
 
     ~DocumentSourceUnionWith() override;
@@ -143,6 +143,9 @@ public:
             // outside of the constraints as long as the involved namespaces are reported correctly.
             LookupRequirement::kAllowed,
             UnionRequirement::kAllowed);
+        // By default, a $unionWith pipeline sets noFieldModifications = true unless any stage in
+        // it's sub-pipeline has it set to false.
+        unionConstraints.noFieldModifications = true;
 
         if (_pipeline) {
             // The constraints of the sub-pipeline determine the constraints of the $unionWith

@@ -69,14 +69,14 @@ public:
         auto server = connectionString.getServers().front();
 
         auto sc = getGlobalServiceContext();
-        auto tl = sc->getTransportLayerManager()->getEgressLayer();
+        auto tl = sc->getTransportLayerManager()->getDefaultEgressLayer();
         _reactor = tl->getReactor(transport::TransportLayer::kNewReactor);
         _reactorThread = stdx::thread([&] { _reactor->run(); });
 
         ConnectionPool::Options connPoolOptions;
         connPoolOptions.minConnections = 0;
         auto typeFactory = std::make_unique<connection_pool_tl::TLTypeFactory>(
-            _reactor, sc->getTransportLayerManager(), nullptr, connPoolOptions, nullptr);
+            _reactor, tl, nullptr, connPoolOptions, nullptr);
         _pool = std::make_shared<ConnectionPool>(
             std::move(typeFactory), "ExhaustResponseReader", connPoolOptions);
     }

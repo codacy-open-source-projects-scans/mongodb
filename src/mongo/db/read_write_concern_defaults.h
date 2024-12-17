@@ -29,11 +29,8 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <map>
 #include <memory>
 #include <utility>
 
@@ -48,12 +45,9 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/concurrency/thread_pool_interface.h"
-#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/functional.h"
-#include "mongo/util/invalidating_lru_cache.h"
 #include "mongo/util/read_through_cache.h"
 #include "mongo/util/time_support.h"
 
@@ -78,11 +72,11 @@ public:
     // The _id of the persisted default read/write concern document.
     static constexpr StringData kPersistedDocumentId = "ReadWriteConcernDefaults"_sd;
 
-    static ReadWriteConcernDefaults& get(ServiceContext* service);
+    static ReadWriteConcernDefaults& get(Service* service);
     static ReadWriteConcernDefaults& get(OperationContext* opCtx);
-    static void create(ServiceContext* service, FetchDefaultsFn fetchDefaultsFn);
+    static void create(Service* service, FetchDefaultsFn fetchDefaultsFn);
 
-    ReadWriteConcernDefaults(ServiceContext* service, FetchDefaultsFn fetchDefaultsFn);
+    ReadWriteConcernDefaults(Service* service, FetchDefaultsFn fetchDefaultsFn);
     ~ReadWriteConcernDefaults();
 
     /**
@@ -207,9 +201,7 @@ private:
         Cache& operator=(const Cache&) = delete;
 
     public:
-        Cache(ServiceContext* service,
-              ThreadPoolInterface& threadPool,
-              FetchDefaultsFn fetchDefaultsFn);
+        Cache(Service* service, ThreadPoolInterface& threadPool, FetchDefaultsFn fetchDefaultsFn);
         ~Cache() override = default;
 
         boost::optional<RWConcernDefault> lookup(OperationContext* opCtx);

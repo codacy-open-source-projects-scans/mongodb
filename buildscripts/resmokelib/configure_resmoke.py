@@ -7,10 +7,8 @@ import datetime
 import glob
 import os
 import os.path
-import platform
 import random
 import shlex
-import shutil
 import subprocess
 import sys
 import textwrap
@@ -35,10 +33,11 @@ from buildscripts.util.read_config import read_config_file
 BASE_16_TO_INT = 16
 
 
-def validate_and_update_config(parser, args):
+def validate_and_update_config(parser, args, should_configure_otel=True):
     """Validate inputs and update config module."""
+
     _validate_options(parser, args)
-    _update_config_vars(parser, args)
+    _update_config_vars(parser, args, should_configure_otel)
     _update_symbolizer_secrets()
     _validate_config(parser)
     _set_logging_config()
@@ -137,25 +136,6 @@ def _validate_config(parser):
                     "Must specify binary versions as 'old' or 'new' in format"
                     " 'version1-version2'"
                 )
-
-    if _config.UNDO_RECORDER_PATH is not None:
-        if not sys.platform.startswith("linux") or platform.machine() not in [
-            "i386",
-            "i686",
-            "x86_64",
-        ]:
-            parser.error("--recordWith is only supported on x86 and x86_64 Linux distributions")
-            return
-
-        resolved_path = shutil.which(_config.UNDO_RECORDER_PATH)
-        if resolved_path is None:
-            parser.error(
-                f"Cannot find the UndoDB live-record binary '{_config.UNDO_RECORDER_PATH}'. Check that it exists and is executable"
-            )
-            return
-
-        if not os.access(resolved_path, os.X_OK):
-            parser.error(f"Found '{resolved_path}', but it is not an executable file")
 
     if not _config.TLS_MODE or _config.TLS_MODE == "disabled":
         if _config.SHELL_TLS_ENABLED:
@@ -265,7 +245,7 @@ def _set_up_tracing(
     return success
 
 
-def _update_config_vars(parser, values):
+def _update_config_vars(parser, values, should_configure_otel=True):
     """Update the variables of the config module."""
 
     config = _config.DEFAULTS.copy()
@@ -308,6 +288,7 @@ be invoked as either:
         _config.RUN_ALL_FEATURE_FLAG_TESTS = config.pop("run_all_feature_flag_tests")
         _config.RUN_NO_FEATURE_FLAG_TESTS = config.pop("run_no_feature_flag_tests")
         _config.ADDITIONAL_FEATURE_FLAGS_FILE = config.pop("additional_feature_flags_file")
+        _config.DISABLE_FEATURE_FLAGS = config.pop("disable_feature_flags")
 
         if values.command == "run":
             # These logging messages start with # becuase the output of this file must produce
@@ -333,6 +314,13 @@ be invoked as either:
         if additional_feature_flags is not None:
             enabled_feature_flags.extend(additional_feature_flags)
 
+        # Remove feature flags which enabled with other feature flags arguments
+        if _config.DISABLE_FEATURE_FLAGS:
+            disable_feature_flags = _tags_from_list(_config.DISABLE_FEATURE_FLAGS)
+            for flag in disable_feature_flags:
+                if flag in enabled_feature_flags:
+                    enabled_feature_flags.remove(flag)
+
         return enabled_feature_flags, all_ff
 
     _config.ENABLED_FEATURE_FLAGS, all_feature_flags = setup_feature_flags()
@@ -344,7 +332,6 @@ be invoked as either:
     _config.ALWAYS_USE_LOG_FILES = config.pop("always_use_log_files")
     _config.BASE_PORT = int(config.pop("base_port"))
     _config.BACKUP_ON_RESTART_DIR = config.pop("backup_on_restart_dir")
-    _config.BUILDLOGGER_URL = config.pop("buildlogger_url")
     _config.DBPATH_PREFIX = _expand_user(config.pop("dbpath_prefix"))
     _config.DRY_RUN = config.pop("dry_run")
 
@@ -455,6 +442,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
             _config.CONFIG_FUZZ_SEED = int(_config.CONFIG_FUZZ_SEED)
         (
             _config.MONGOD_SET_PARAMETERS,
+            _config.MONGOD_EXTRA_CONFIG,
             _config.WT_ENGINE_CONFIG,
             _config.WT_COLL_CONFIG,
             _config.WT_INDEX_CONFIG,
@@ -578,36 +566,51 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.OTEL_PARENT_ID = config.pop("otel_parent_id")
     _config.OTEL_COLLECTOR_DIR = config.pop("otel_collector_dir")
 
-    try:
-        setup_success = _set_up_tracing(
-            _config.OTEL_COLLECTOR_DIR,
-            _config.OTEL_TRACE_ID,
-            _config.OTEL_PARENT_ID,
-            extra_context={
-                "evergreen.build.id": _config.EVERGREEN_BUILD_ID,
-                "evergreen.distro.id": _config.EVERGREEN_DISTRO_ID,
-                "evergreen.project.identifier": _config.EVERGREEN_PROJECT_NAME,
-                "evergreen.task.execution": _config.EVERGREEN_EXECUTION,
-                "evergreen.task.id": _config.EVERGREEN_TASK_ID,
-                "evergreen.task.name": _config.EVERGREEN_TASK_NAME,
-                "evergreen.variant.name": _config.EVERGREEN_VARIANT_NAME,
-                "evergreen.revision": _config.EVERGREEN_REVISION,
-                "evergreen.patch_build": _config.EVERGREEN_PATCH_BUILD,
-            },
-        )
-        if not setup_success:
-            print("Failed to create file to send otel metrics to. Continuing.")
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except:
-        # We want this as a catch all exception
-        # If there is some problem setting up metrics we don't want resmoke to fail
-        # We would rather just swallow the error
-        traceback.print_exc()
-        print("Failed to set up otel metrics. Continuing.")
+    # flag for testing purposes only, should_configure_otel should always be true outside tests
+    # remove flag when reset_for_test() is available for opentelemetry python
+    if should_configure_otel:
+        # if this assertion failed, it is likely because validate_and_update_config
+        # has been called >1 times
+        assert trace._TRACER_PROVIDER is None
+
+        try:
+            setup_success = _set_up_tracing(
+                _config.OTEL_COLLECTOR_DIR,
+                _config.OTEL_TRACE_ID,
+                _config.OTEL_PARENT_ID,
+                extra_context={
+                    "evergreen.build.id": _config.EVERGREEN_BUILD_ID,
+                    "evergreen.distro.id": _config.EVERGREEN_DISTRO_ID,
+                    "evergreen.project.identifier": _config.EVERGREEN_PROJECT_NAME,
+                    "evergreen.task.execution": _config.EVERGREEN_EXECUTION,
+                    "evergreen.task.id": _config.EVERGREEN_TASK_ID,
+                    "evergreen.task.name": _config.EVERGREEN_TASK_NAME,
+                    "evergreen.variant.name": _config.EVERGREEN_VARIANT_NAME,
+                    "evergreen.revision": _config.EVERGREEN_REVISION,
+                    "evergreen.patch_build": _config.EVERGREEN_PATCH_BUILD,
+                },
+            )
+            if not setup_success:
+                print("Failed to create file to send otel metrics to. Continuing.")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except:
+            # We want this as a catch all exception
+            # If there is some problem setting up metrics we don't want resmoke to fail
+            # We would rather just swallow the error
+            traceback.print_exc()
+            print("Failed to set up otel metrics. Continuing.")
 
     # Force invalid suite config
     _config.FORCE_EXCLUDED_TESTS = config.pop("force_excluded_tests")
+
+    _config.SKIP_EXCLUDED_TESTS = config.pop("skip_excluded_tests")
+
+    _config.SKIP_TESTS_COVERED_BY_MORE_COMPLEX_SUITES = config.pop(
+        "skip_tests_covered_by_more_complex_suites"
+    )
+
+    _config.SKIP_SYMBOLIZATION = config.pop("skip_symbolization")
 
     # Archival options. Archival is enabled only when running on evergreen.
     if not _config.EVERGREEN_TASK_ID:
@@ -655,8 +658,6 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
             evg_task_doc = utils.load_yaml_file(evg_task_doc_file)
             if task_name in evg_task_doc:
                 _config.EVERGREEN_TASK_DOC = evg_task_doc[task_name]
-
-    _config.UNDO_RECORDER_PATH = config.pop("undo_recorder_path")
 
     _config.EXCLUDE_TAGS_FILE_PATH = config.pop("exclude_tags_file_path")
 

@@ -7,6 +7,10 @@ const anyLineMatches = function(lines, rex) {
     return false;
 };
 
+// Because this test intentionally crashes the server, we instruct the
+// the shell to clean up after us and remove the core dump.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
+
 (function() {
 
 /*
@@ -28,7 +32,7 @@ if (TestData && TestData.inEvergreen) {
         return !checkProgram(child.pid).alive;
     }, undefined, undefined, undefined, {runHangAnalyzer: false});
 
-    const lines = rawMongoProgramOutput().split('\n');
+    const lines = rawMongoProgramOutput(".*").split('\n');
     const buildInfo = globalThis.db.getServerBuildInfo();
     if (buildInfo.isAddressSanitizerActive() || buildInfo.isThreadSanitizerActive()) {
         assert.soon(() => {
@@ -70,7 +74,7 @@ clearRawMongoProgramOutput();
 MongoRunner.runHangAnalyzer.disable();
 assert.eq(undefined, MongoRunner.runHangAnalyzer([20200125]));
 
-const lines = rawMongoProgramOutput().split('\n');
+const lines = rawMongoProgramOutput(".*").split('\n');
 // Nothing should be executed, so there's no output.
 assert.eq(lines, ['']);
 })();
@@ -91,7 +95,7 @@ try {
     TestData.inEvergreen = origInEvg;
 }
 
-const lines = rawMongoProgramOutput().split('\n');
+const lines = rawMongoProgramOutput(".*").split('\n');
 // Nothing should be executed, so there's no output.
 assert.eq(lines, ['']);
 })();

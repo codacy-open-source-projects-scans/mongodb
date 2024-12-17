@@ -3,6 +3,9 @@
  * collections and indexes before shutting down a mongod while running JS tests.
  */
 import {validateCollections} from "jstests/hooks/validate_collections.js";
+import {
+    assertCatalogListOperationsConsistencyForDb
+} from "jstests/libs/catalog_list_operations_consistency_validator.js";
 import {CommandSequenceWithRetries} from "jstests/libs/command_sequence_with_retries.js";
 
 MongoRunner.validateCollectionsCallback = function(port, options) {
@@ -66,13 +69,16 @@ MongoRunner.validateCollectionsCallback = function(port, options) {
                                           ErrorCodes.NotWritablePrimary,
                                           ErrorCodes.NotYetInitialized,
                                           ErrorCodes.Unauthorized,
-                                          ErrorCodes.ConflictingOperationInProgress
+                                          ErrorCodes.ConflictingOperationInProgress,
+                                          ErrorCodes.InterruptedDueToReplStateChange,
+                                          ErrorCodes.PrimarySteppedDown
                                       ]);
                                   const res = conn.adminCommand({replSetFreeze: kFreezeTimeSecs});
                                   assert.commandWorkedOrFailedWithCode(res, [
                                       ErrorCodes.NotYetInitialized,
                                       ErrorCodes.Unauthorized,
-                                      ErrorCodes.NotSecondary
+                                      ErrorCodes.NotSecondary,
+                                      ErrorCodes.InterruptedDueToReplStateChange
                                   ]);
 
                                   // If 'replSetFreeze' succeeds or fails with NotYetInitialized or
@@ -84,10 +90,10 @@ MongoRunner.validateCollectionsCallback = function(port, options) {
                                       return true;
                                   }
 
-                                  // We only retry on NotSecondary error because 'replSetFreeze'
-                                  // could fail with NotSecondary if the node is currently primary
-                                  // or running for election. This could happen if there is a
-                                  // concurrent election running in parallel with the
+                                  // We only retry on NotSecondary or
+                                  // InterruptedDueToReplStateChange error because 'replSetFreeze'
+                                  // could fail with NotSecondary or InterruptedDueToReplStateChange
+                                  // if there is a concurrent election running in parallel with the
                                   // 'replSetStepDown' sent above.
                                   jsTestLog(
                                       "Retrying 'replSetStepDown' and 'replSetFreeze' in port " +
@@ -132,16 +138,11 @@ MongoRunner.validateCollectionsCallback = function(port, options) {
             const validateOptions = {
                 full: true,
                 enforceFastCount: true,
-                enforceTimeseriesBucketsAreAlwaysCompressed: true,
             };
             // TODO (SERVER-24266): Once fast counts are tolerant to unclean shutdowns, remove the
             // check for TestData.allowUncleanShutdowns.
             if (TestData.skipEnforceFastCountOnValidate || TestData.allowUncleanShutdowns) {
                 validateOptions.enforceFastCount = false;
-            }
-
-            if (TestData.skipEnforceTimeseriesBucketsAreAlwaysCompressedOnValidate) {
-                validateOptions.enforceTimeseriesBucketsAreAlwaysCompressed = false;
             }
 
             try {
@@ -152,6 +153,15 @@ MongoRunner.validateCollectionsCallback = function(port, options) {
                     return {
                         shouldStop: true,
                         reason: "collection validation failed " + tojson(validate_res)
+                    };
+                }
+
+                try {
+                    assertCatalogListOperationsConsistencyForDb(conn.getDB(dbName), tenant);
+                } catch (e) {
+                    return {
+                        shouldStop: true,
+                        reason: "catalog list operations consistency check failed " + tojson(e)
                     };
                 }
             } finally {

@@ -49,6 +49,7 @@
 #include "mongo/db/catalog/catalog_helper.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
+#include "mongo/db/catalog/snapshot_helper.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -65,7 +66,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/capped_snapshots.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/snapshot_helper.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/transaction_resources.h"
@@ -1770,7 +1770,7 @@ void shard_role_details::checkLocalCatalogIsValidForUnshardedShardVersion(
             // The transaction sees a collection exists.
             uassert(ErrorCodes::SnapshotUnavailable,
                     makeErrorMessage(),
-                    latestCatalog->isLatestCollection(opCtx, collectionPtr.get()));
+                    latestCatalog->checkIfUUIDExistsAtLatest(opCtx, collectionPtr->uuid()));
         } else if (const auto currentView = stashedCatalog.lookupView(opCtx, nss)) {
             // The transaction sees a view exists.
             uassert(ErrorCodes::SnapshotUnavailable,

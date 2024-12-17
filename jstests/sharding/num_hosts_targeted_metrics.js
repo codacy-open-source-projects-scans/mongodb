@@ -1,13 +1,16 @@
 /**
  * @tags: [
  *   multiversion_incompatible,
- *    # TODO (SERVER-88127): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  *   uses_multi_shard_transaction,
  *   uses_transactions,
  * ]
  */
 
+import {
+    withAbortAndRetryOnTransientTxnError
+} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const st = new ShardingTest({shards: 3});
@@ -108,10 +111,12 @@ assertShardingStats(serverStatusInitial.shardingStatistics.numHostsTargeted,
 // transaction
 let session = mongos.startSession();
 let sessionDB = session.getDatabase("test");
-session.startTransaction();
-serverStatusInitial = testDb.serverStatus();
-assert.commandWorked(sessionDB.coll0.remove({x: {$lt: 9}}));
-session.commitTransaction();
+withAbortAndRetryOnTransientTxnError(session, () => {
+    session.startTransaction();
+    serverStatusInitial = testDb.serverStatus();
+    assert.commandWorked(sessionDB.coll0.remove({x: {$lt: 9}}));
+    session.commitTransaction();
+});
 assertShardingStats(serverStatusInitial.shardingStatistics.numHostsTargeted,
                     testDb.serverStatus().shardingStatistics.numHostsTargeted,
                     {"delete": {"manyShards": 1}});

@@ -92,11 +92,16 @@ using PipelineValidatorCallback = std::function<void(const Pipeline&)>;
 
 struct MakePipelineOptions {
     bool optimize = true;
+
     // It is assumed that the pipeline has already been optimized when we create the
     // MakePipelineOptions. If this is not the case, the caller is responsible for setting
     // alreadyOptimized to false.
     bool alreadyOptimized = true;
     bool attachCursorSource = true;
+
+    // When set to true, ensures that default collection collator will be attached to the pipeline.
+    // Needs 'attachCursorSource' set to true, in order to be applied.
+    bool useCollectionDefaultCollator = false;
     ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed;
     PipelineValidatorCallback validator = nullptr;
     boost::optional<BSONObj> readConcern;
@@ -219,11 +224,19 @@ public:
     static Pipeline::SourceContainer::iterator optimizeEndOfPipeline(
         Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
 
+    static std::unique_ptr<Pipeline, PipelineDeleter> viewPipelineHelperForSearch(
+        const boost::intrusive_ptr<ExpressionContext>& subPipelineExpCtx,
+        ResolvedNamespace resolvedNs,
+        std::vector<BSONObj> currentPipeline,
+        MakePipelineOptions opts,
+        NamespaceString originalNs);
+
     static std::unique_ptr<Pipeline, PipelineDeleter> makePipelineFromViewDefinition(
         const boost::intrusive_ptr<ExpressionContext>& subPipelineExpCtx,
-        ExpressionContext::ResolvedNamespace resolvedNs,
+        ResolvedNamespace resolvedNs,
         std::vector<BSONObj> currentPipeline,
-        MakePipelineOptions opts);
+        MakePipelineOptions opts,
+        NamespaceString originalNs = NamespaceString());
 
     /**
      * Callers can optionally specify 'newExpCtx' to construct the deep clone with it. This will be
@@ -321,9 +334,9 @@ public:
     boost::optional<ShardId> needsSpecificShardMerger() const;
 
     /**
-     * Returns 'true' if the pipeline must merge on mongoS.
+     * Returns 'true' if the pipeline must merge on router.
      */
-    bool needsMongosMerger() const;
+    bool needsRouterMerger() const;
 
     /**
      * Returns 'true' if any stage in the pipeline must run on a shard.
@@ -337,16 +350,16 @@ public:
     bool needsAllShardHosts() const;
 
     /**
-     * Returns Status::OK() if the pipeline can run on mongoS, but is not obliged to; that is, it
+     * Returns Status::OK() if the pipeline can run on router, but is not obliged to; that is, it
      * can run either on mongoS or on a shard.
      */
-    Status canRunOnMongos() const;
+    Status canRunOnRouter() const;
 
     /**
-     * Returns true if this pipeline must only run on mongoS. Can be called on unsplit or merge
+     * Returns true if this pipeline must only run on router. Can be called on unsplit or merge
      * pipelines, but not on the shards part of a split pipeline.
      */
-    bool requiredToRunOnMongos() const;
+    bool requiredToRunOnRouter() const;
 
     /**
      * Modifies the pipeline, optimizing it by combining and swapping stages.

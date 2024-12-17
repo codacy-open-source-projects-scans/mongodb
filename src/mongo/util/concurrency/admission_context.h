@@ -35,6 +35,8 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/tick_source.h"
 
+#include <cstdint>
+
 namespace mongo {
 
 class OperationContext;
@@ -52,14 +54,10 @@ public:
      * load (operations are throttled waiting for a ticket). Only applicable when there are no
      * available tickets.
      *
-     * 'kLow': It's of low importance that the operation acquires a ticket. These low-priority
-     * operations are reserved for background tasks that have no other operations dependent on them.
-     * These operations may be throttled under load and make significantly less progress as compared
-     * to operations of a higher priority.
      *
      * 'kNormal': It's important that the operation be throttled under load. If this operation is
      * throttled, it will not affect system availability or observability. Most operations, both
-     * user and internal, should use this priority unless they qualify as 'kLow' or 'kExempt'
+     * user and internal, should use this priority unless they qualify as 'kExempt'
      * priority.
      *
      * 'kExempt': It's crucial that the operation makes forward progress - bypasses the ticketing
@@ -69,7 +67,7 @@ public:
      * (e.g. FTDC), and any operation that is releasing resources (e.g. committing or aborting
      * prepared transactions). Should be used sparingly.
      */
-    enum class Priority { kExempt = 0, kLow, kNormal };
+    enum class Priority { kExempt = 0, kNormal };
 
     /**
      * Returns the total time this admission context has ever waited in a queue.
@@ -85,7 +83,12 @@ public:
     /**
      * Returns the number of times this context has taken a ticket.
      */
-    int getAdmissions() const;
+    std::int32_t getAdmissions() const;
+
+    /**
+     * Returns the number of times this context has taken an exempt ticket.
+     */
+    std::int32_t getExemptedAdmissions() const;
 
     /**
      * Returns true if the operation is already holding a ticket.
@@ -96,6 +99,13 @@ public:
 
     Priority getPriority() const;
 
+    /**
+     * Setters for queue statistics to be used in unit tests only
+     */
+    void setAdmission_forTest(int32_t admissions);
+
+    void setTotalTimeQueuedMicros_forTest(int64_t micros);
+
 protected:
     friend class ScopedAdmissionPriorityBase;
     friend class Ticket;
@@ -105,6 +115,8 @@ protected:
     AdmissionContext() = default;
 
     void recordAdmission();
+
+    void recordExemptedAdmission();
 
     void markTicketHeld() {
         tassert(
@@ -120,9 +132,10 @@ protected:
 
     constexpr static TickSource::Tick kNotQueueing = -1;
 
-    Atomic<int32_t> _admissions{0};
+    Atomic<std::int32_t> _exemptedAdmissions{0};
+    Atomic<std::int32_t> _admissions{0};
     Atomic<Priority> _priority{Priority::kNormal};
-    Atomic<int64_t> _totalTimeQueuedMicros;
+    Atomic<std::int64_t> _totalTimeQueuedMicros;
     WaitableAtomic<TickSource::Tick> _startQueueingTime{kNotQueueing};
     Atomic<bool> _holdingTicket;
 };

@@ -12,7 +12,6 @@ selector:
     - jstests/core/query/json_schema/**/*.js
     - jstests/core/query/doc_validation/**/*.js
     - jstests/core/query/api/**/*.js
-    - jstests/core/query/collstats/**/*.js
     - jstests/core/query/queryable_encryption/**/*.js
     - jstests/core/query/sbe/**/*.js
 
@@ -33,13 +32,12 @@ selector:
     - jstests/core/query/collection_uuid_find.js
     - jstests/core/write/collection_uuid_write_commands.js
     # Time-series is not allowed with an explicit validator.
-    - jstests/core/query/doc_validation/doc_validation_with_now_variable.js
     - jstests/core/list_namespaces_invalidation.js
     - jstests/core/write/bulk/bulk_write.js
     - jstests/core/write/bulk/bulk_write_non_transaction.js
     # Sparse indexes.
     - jstests/core/query/distinct/distinct_hint.js
-    - jstests/core/query/query_hash_stability.js
+    - jstests/core/query/plan_cache_stability.js
     - jstests/core/query/sparse_index_supports_ne_null.js
     # Text indexes.
     - jstests/core/query/internal_strip_invalid_assignment.js
@@ -52,6 +50,7 @@ selector:
     - jstests/core/query/single_field_hashed_index.js
     # Indexed measurement field contains an array value
     - jstests/core/query/project/projection_semantics.js
+    - jstests/core/query/array/array_index_and_nonIndex_consistent.js
     # findAndModify sort.
     - jstests/core/query/natural_validation.js
     - jstests/core/write/crud_api.js
@@ -80,6 +79,7 @@ selector:
     - jstests/core/query/distinct/distinct_compound_index.js
     - jstests/core/query/distinct/distinct_index1.js
     - jstests/core/query/distinct/distinct_multikey_dotted_path.js
+    - jstests/core/query/distinct/distinct_sbe_compatibility.js
     - jstests/core/query/exists/existsa.js
     - jstests/core/query/explain/**/*.js
     - jstests/core/query/expr/expr_index_use.js
@@ -91,7 +91,15 @@ selector:
     - jstests/core/query/or/orf.js
     - jstests/core/query/plan_cache/plan_cache_clear.js
     - jstests/core/query/plan_cache/plan_cache_list_plans.js
-    - jstests/core/query/query_settings/**/*.js
+
+    # Ignore because index filters are applied directly to collections, not views (or TS).
+    - jstests/core/query/query_settings/query_settings_and_index_filters.js
+    # Ignore because the rewrite of the query for TS leads to other stages preceding
+    # $planCacheStats, which is not allowed.
+    - jstests/core/query/query_settings/query_settings_reject_application_bypass.js
+    - jstests/core/query/query_settings/query_settings_plan_cache.js
+    # Ignore because the find command is rewritten for TS collections before reaching the failpoint.
+    - jstests/core/query/query_settings/query_shape_hash_in_current_op.js
     - jstests/core/query/regex/regex.js
     - jstests/core/query/regex/regex3.js
     - jstests/core/query/regex/regex4.js
@@ -143,7 +151,6 @@ selector:
     - jstests/core/query/top/top_drop.js
     # Buckets collection creates compounded secondary indexes, which is not compatible with wildcard indexes.
     - jstests/core/compound_index_max_fields.js
-    - jstests/core/compound_wildcard_index_validation.js
     - jstests/core/write/update/update_with_pipeline.js
     # Operations not allowed on views.
     - jstests/core/datasize2.js # locking
@@ -160,7 +167,7 @@ selector:
     - jstests/core/write/find_and_modify/find_and_modify_server6865.js # $elemMatch
     # Time-series collections are views which don't support map-reduce
     - jstests/core/commands_namespace_parsing.js
-    - jstests/core/constructors.js
+    - jstests/core/query/map_reduce/constructors.js
     - jstests/core/query/function_string_representations.js
     - jstests/core/query/map_reduce/map_reduce_validation.js
     - jstests/core/query/map_reduce/mr_single_reduce.js
@@ -256,7 +263,7 @@ selector:
     # TODO(SERVER-85322): Try to include this test(s).
     - jstests/core/query/resume_query.js
     - jstests/core/query/resume_query_from_non_existent_record.js
-    # TODO(SERVER-82059): Try to include this test(s).
+    # Inserting into a time-series collection does not replace top-level empty timestamps.
     - jstests/core/ts1.js
     # Cursor manipulation incompatible with count 'applySkipLimit' option.
     - jstests/core/query/count/count2.js
@@ -270,9 +277,6 @@ selector:
     - jstests/core/fsync.js
     # Time-series buckets processing may have different cursor behavior.
     - jstests/core/query/cursor/getmore_invalidated_cursors.js
-    # TODO SERVER-87065: Add this back in once we prevent it from erroring
-    # when validation hook is run.
-    - jstests/core/write/update/update_blank1.js
     # For inserts on time-series collections, mongod does _not_ replace empty timestamp values
     # with the current time.
     - jstests/core/write/empty_ts.js
@@ -298,6 +302,9 @@ executor:
   config:
     shell_options:
       eval: globalThis.testingReplication = true;; await import("jstests/libs/override_methods/implicit_timeseries_collections.js");
+      global_vars:
+        TestData:
+          isTimeseriesTestSuite: true
   hooks:
     - class: ValidateCollections
     - class: CleanEveryN

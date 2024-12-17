@@ -93,7 +93,6 @@ public:
                            const std::vector<BSONObj>& indexes,
                            bool fromMigrate) final;
     void onStartIndexBuildSinglePhase(OperationContext* opCtx, const NamespaceString& nss) final;
-    void onAbortIndexBuildSinglePhase(OperationContext* opCtx, const NamespaceString& nss) final;
 
     void onCommitIndexBuild(OperationContext* opCtx,
                             const NamespaceString& nss,
@@ -158,7 +157,6 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  CollectionDropType dropType,
                                   bool markFromMigrate) final;
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,

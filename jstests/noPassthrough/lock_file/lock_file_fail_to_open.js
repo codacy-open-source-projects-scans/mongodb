@@ -1,6 +1,6 @@
 // Tests that MongoD fails to start with the correct error message if mongod.lock exists in the
 // dbpath.
-var baseName = "jstests_lock_file_fail_to_open";
+var baseName = jsTestName();
 
 var dbPath = MongoRunner.dataPath + baseName + "/";
 
@@ -12,7 +12,7 @@ clearRawMongoProgramOutput();
 // dbpath.
 assert.throws(() => MongoRunner.runMongod({dbpath: dbPath, noCleanData: true}));
 
-var logContents = rawMongoProgramOutput();
+var logContents = rawMongoProgramOutput(".*");
 assert(logContents.indexOf("Unable to lock the lock file") > 0 ||
        // Windows error message is different.
        logContents.indexOf("Unable to create/open the lock file") > 0);

@@ -29,7 +29,6 @@
 
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
 
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 
@@ -120,11 +119,6 @@ void ExecutionStatsController::incNumCommits(long long increment) {
     _globalStats->numCommits.fetchAndAddRelaxed(increment);
 }
 
-void ExecutionStatsController::incNumMeasurementsGroupCommitted(long long increment) {
-    _collectionStats->numMeasurementsGroupCommitted.fetchAndAddRelaxed(increment);
-    _globalStats->numMeasurementsGroupCommitted.fetchAndAddRelaxed(increment);
-}
-
 void ExecutionStatsController::incNumWaits(long long increment) {
     _collectionStats->numWaits.fetchAndAddRelaxed(increment);
     _globalStats->numWaits.fetchAndAddRelaxed(increment);
@@ -175,36 +169,6 @@ void ExecutionStatsController::incNumDuplicateBucketsReopened(long long incremen
     _globalStats->numDuplicateBucketsReopened.fetchAndAddRelaxed(increment);
 }
 
-void ExecutionStatsController::incNumBytesUncompressed(long long increment) {
-    _collectionStats->numBytesUncompressed.fetchAndAddRelaxed(increment);
-    _globalStats->numBytesUncompressed.fetchAndAddRelaxed(increment);
-}
-
-void ExecutionStatsController::incNumBytesCompressed(long long increment) {
-    _collectionStats->numBytesCompressed.fetchAndAddRelaxed(increment);
-    _globalStats->numBytesCompressed.fetchAndAddRelaxed(increment);
-}
-
-void ExecutionStatsController::incNumSubObjCompressionRestart(long long increment) {
-    _collectionStats->numSubObjCompressionRestart.fetchAndAddRelaxed(increment);
-    _globalStats->numSubObjCompressionRestart.fetchAndAddRelaxed(increment);
-}
-
-void ExecutionStatsController::incNumCompressedBuckets(long long increment) {
-    _collectionStats->numCompressedBuckets.fetchAndAddRelaxed(increment);
-    _globalStats->numCompressedBuckets.fetchAndAddRelaxed(increment);
-}
-
-void ExecutionStatsController::incNumUncompressedBuckets(long long increment) {
-    _collectionStats->numUncompressedBuckets.fetchAndAddRelaxed(increment);
-    _globalStats->numUncompressedBuckets.fetchAndAddRelaxed(increment);
-}
-
-void ExecutionStatsController::incNumFailedDecompressBuckets(long long increment) {
-    _collectionStats->numFailedDecompressBuckets.fetchAndAddRelaxed(increment);
-    _globalStats->numFailedDecompressBuckets.fetchAndAddRelaxed(increment);
-}
-
 void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& builder) {
     builder.appendNumber("numActiveBuckets", stats.numActiveBuckets.load());
     builder.appendNumber("numBucketInserts", stats.numBucketInserts.load());
@@ -222,8 +186,6 @@ void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& 
 
     auto commits = stats.numCommits.load();
     builder.appendNumber("numCommits", commits);
-    builder.appendNumber("numMeasurementsGroupCommitted",
-                         stats.numMeasurementsGroupCommitted.load());
     builder.appendNumber("numWaits", stats.numWaits.load());
     auto measurementsCommitted = stats.numMeasurementsCommitted.load();
     builder.appendNumber("numMeasurementsCommitted", measurementsCommitted);
@@ -251,19 +213,6 @@ void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& 
     builder.appendNumber("numBucketQueriesFailed", stats.numBucketQueriesFailed.load());
     builder.appendNumber("numBucketReopeningsFailed", stats.numBucketReopeningsFailed.load());
     builder.appendNumber("numDuplicateBucketsReopened", stats.numDuplicateBucketsReopened.load());
-
-    if (feature_flags::gTimeseriesAlwaysUseCompressedBuckets.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        return;
-    }
-
-    // TODO(SERVER-70605): Remove these.
-    builder.appendNumber("numBytesUncompressed", stats.numBytesUncompressed.load());
-    builder.appendNumber("numBytesCompressed", stats.numBytesCompressed.load());
-    builder.appendNumber("numSubObjCompressionRestart", stats.numSubObjCompressionRestart.load());
-    builder.appendNumber("numCompressedBuckets", stats.numCompressedBuckets.load());
-    builder.appendNumber("numUncompressedBuckets", stats.numUncompressedBuckets.load());
-    builder.appendNumber("numFailedDecompressBuckets", stats.numFailedDecompressBuckets.load());
 }
 
 void addCollectionExecutionCounters(ExecutionStatsController& stats,
@@ -288,7 +237,6 @@ void addCollectionExecutionCounters(ExecutionStatsController& stats,
     stats.incNumCompressedBucketsConvertedToUnsorted(
         collStats.numCompressedBucketsConvertedToUnsorted.load());
     stats.incNumCommits(collStats.numCommits.load());
-    stats.incNumMeasurementsGroupCommitted(collStats.numMeasurementsGroupCommitted.load());
     stats.incNumWaits(collStats.numWaits.load());
     stats.incNumMeasurementsCommitted(collStats.numMeasurementsCommitted.load());
     stats.incNumBucketsReopened(collStats.numBucketsReopened.load());
@@ -300,14 +248,6 @@ void addCollectionExecutionCounters(ExecutionStatsController& stats,
     stats.incNumBucketQueriesFailed(collStats.numBucketQueriesFailed.load());
     stats.incNumBucketReopeningsFailed(collStats.numBucketReopeningsFailed.load());
     stats.incNumDuplicateBucketsReopened(collStats.numDuplicateBucketsReopened.load());
-
-    // TODO(SERVER-70605): Remove these.
-    stats.incNumBytesUncompressed(collStats.numBytesUncompressed.load());
-    stats.incNumBytesCompressed(collStats.numBytesCompressed.load());
-    stats.incNumSubObjCompressionRestart(collStats.numSubObjCompressionRestart.load());
-    stats.incNumCompressedBuckets(collStats.numCompressedBuckets.load());
-    stats.incNumUncompressedBuckets(collStats.numUncompressedBuckets.load());
-    stats.incNumFailedDecompressBuckets(collStats.numFailedDecompressBuckets.load());
 }
 
 void addCollectionExecutionGauges(ExecutionStats& stats, const ExecutionStats& collStats) {

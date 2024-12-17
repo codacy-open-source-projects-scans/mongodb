@@ -96,6 +96,7 @@ extern "C" {
 #include "mongo/crypto/fle_fields_util.h"
 #include "mongo/crypto/fle_numeric.h"
 #include "mongo/crypto/fle_tokens_gen.h"
+#include "mongo/crypto/mongocryptbuffer.h"
 #include "mongo/crypto/mongocryptstatus.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/basic_types.h"
@@ -142,15 +143,12 @@ constexpr uint64_t kLevelServerDataEncryption = 3;
 
 constexpr uint64_t kEDC = 1;
 constexpr uint64_t kESC = 2;
-constexpr uint64_t kECC = 3;
 constexpr uint64_t kECOC = 4;
 
 
 constexpr uint64_t kTwiceDerivedTokenFromEDC = 1;
 constexpr uint64_t kTwiceDerivedTokenFromESCTag = 1;
 constexpr uint64_t kTwiceDerivedTokenFromESCValue = 2;
-constexpr uint64_t kTwiceDerivedTokenFromECCTag = 1;
-constexpr uint64_t kTwiceDerivedTokenFromECCValue = 2;
 
 constexpr uint64_t kServerCountAndContentionFactorEncryption = 1;
 constexpr uint64_t kServerZerosEncryption = 2;
@@ -163,10 +161,6 @@ constexpr uint64_t kAnchorPaddingKeyToken = 1;
 constexpr uint64_t kAnchorPaddingValueToken = 2;
 
 constexpr int32_t kEncryptionInformationSchemaVersion = 1;
-
-constexpr auto kECCNullId = 0;
-constexpr auto kECCNonNullId = 1;
-constexpr uint64_t kECCompactionRecordValue = std::numeric_limits<uint64_t>::max();
 
 constexpr uint64_t kESCNullId = 0;
 constexpr uint64_t kESCNonNullId = 1;
@@ -286,52 +280,6 @@ private:
     mongocrypt_binary_t* _binary;
 };
 
-/**
- * C++ friendly wrapper around libmongocrypt's private _mongocrypt_buffer_t and its associated
- * functions.
- *
- * This class may or may not own data.
- */
-class MongoCryptBuffer {
-public:
-    MongoCryptBuffer() {
-        _mongocrypt_buffer_init(&_buffer);
-    }
-
-    MongoCryptBuffer(ConstDataRange cdr) {
-        _mongocrypt_buffer_init(&_buffer);
-
-        _buffer.data = const_cast<uint8_t*>(cdr.data<uint8_t>());
-        _buffer.len = cdr.length();
-    }
-
-    ~MongoCryptBuffer() {
-        _mongocrypt_buffer_cleanup(&_buffer);
-    }
-
-    MongoCryptBuffer(MongoCryptBuffer&) = delete;
-    MongoCryptBuffer(MongoCryptBuffer&&) = delete;
-
-    uint32_t length() {
-        return _buffer.len;
-    }
-
-    uint8_t* data() {
-        return _buffer.data;
-    }
-
-    bool empty() {
-        return _mongocrypt_buffer_empty(&_buffer);
-    }
-
-    ConstDataRange toCDR() {
-        return ConstDataRange(data(), length());
-    }
-
-private:
-    _mongocrypt_buffer_t _buffer;
-};
-
 using UUIDBuf = std::array<uint8_t, UUID::kNumBytes>;
 
 static_assert(sizeof(PrfBlock) == SHA256Block::kHashLength);
@@ -439,12 +387,6 @@ std::pair<EncryptedBinDataType, ConstDataRange> fromEncryptedBinData(const BSONE
     return fromEncryptedConstDataRange(binDataToCDR(element));
 }
 
-template <FLETokenType TokenT>
-FLEToken<TokenT> FLETokenFromCDR(ConstDataRange cdr) {
-    auto block = PrfBlockfromCDR(cdr);
-    return FLEToken<TokenT>(block);
-}
-
 /**
  * AEAD AES + SHA256
  * Block size = 16 bytes
@@ -532,8 +474,8 @@ struct FLEStoragePackType {
         typename FLEStoragePackTypeHelper<std::remove_const_t<std::remove_reference_t<T>>>::Type;
 };
 
-template <typename T1, typename T2, FLETokenType TokenT>
-StatusWith<std::vector<uint8_t>> packAndEncrypt(std::tuple<T1, T2> tuple, FLEToken<TokenT> token) {
+template <typename T1, typename T2>
+StatusWith<std::vector<uint8_t>> packAndEncrypt(std::tuple<T1, T2> tuple, const FLEToken& token) {
     DataBuilder builder(sizeof(T1) + sizeof(T2));
     Status s = builder.writeAndAdvance<typename FLEStoragePackType<T1>::Type>(std::get<0>(tuple));
     if (!s.isOK()) {
@@ -550,8 +492,8 @@ StatusWith<std::vector<uint8_t>> packAndEncrypt(std::tuple<T1, T2> tuple, FLETok
 }
 
 
-template <typename T1, typename T2, FLETokenType TokenT>
-StatusWith<std::tuple<T1, T2>> decryptAndUnpack(ConstDataRange cdr, FLEToken<TokenT> token) {
+template <typename T1, typename T2>
+StatusWith<std::tuple<T1, T2>> decryptAndUnpack(ConstDataRange cdr, const FLEToken& token) {
     auto swVec = FLEUtil::decryptData(token.toCDR(), cdr);
     if (!swVec.isOK()) {
         return swVec.getStatus();
@@ -827,15 +769,13 @@ FLE2InsertUpdatePayloadV2 EDCClientPayload::serializeInsertUpdatePayloadV2(
 
     FLE2InsertUpdatePayloadV2 iupayload;
 
-    iupayload.setEdcDerivedToken(edcDataCounterToken.toCDR());
-    iupayload.setEscDerivedToken(escDataCounterToken.toCDR());
-    iupayload.setServerEncryptionToken(serverEncryptToken.toCDR());
-    iupayload.setServerDerivedFromDataToken(serverDerivedFromDataToken.toCDR());
+    iupayload.setEncryptedTokens(
+        StateCollectionTokensV2(escDataCounterToken, boost::none).encrypt(ecocToken));
 
-    auto swEncryptedTokens =
-        EncryptedStateCollectionTokensV2(escDataCounterToken, boost::none).serialize(ecocToken);
-    uassertStatusOK(swEncryptedTokens);
-    iupayload.setEncryptedTokens(swEncryptedTokens.getValue());
+    iupayload.setEdcDerivedToken(std::move(edcDataCounterToken));
+    iupayload.setEscDerivedToken(std::move(escDataCounterToken));
+    iupayload.setServerEncryptionToken(std::move(serverEncryptToken));
+    iupayload.setServerDerivedFromDataToken(std::move(serverDerivedFromDataToken));
 
     auto swCipherText = KeyIdAndValue::serialize(userKey, value);
     uassertStatusOK(swCipherText);
@@ -963,15 +903,13 @@ std::vector<EdgeTokenSetV2> getEdgeTokenSet(
 
         EdgeTokenSetV2 ets;
 
-        ets.setEdcDerivedToken(edcDataCounterkey.toCDR());
-        ets.setEscDerivedToken(escDataCounterkey.toCDR());
-        ets.setServerDerivedFromDataToken(serverDatakey.toCDR());
-
         const bool isLeaf = edge == edges->getLeaf();
-        auto swEncryptedTokens =
-            EncryptedStateCollectionTokensV2(escDataCounterkey, isLeaf).serialize(ecocToken);
-        uassertStatusOK(swEncryptedTokens);
-        ets.setEncryptedTokens(swEncryptedTokens.getValue());
+        ets.setEncryptedTokens(
+            StateCollectionTokensV2(escDataCounterkey, isLeaf).encrypt(ecocToken));
+
+        ets.setEdcDerivedToken(std::move(edcDataCounterkey));
+        ets.setEscDerivedToken(std::move(escDataCounterkey));
+        ets.setServerDerivedFromDataToken(std::move(serverDatakey));
 
         tokens.push_back(ets);
     }
@@ -1016,15 +954,13 @@ FLE2InsertUpdatePayloadV2 EDCClientPayload::serializeInsertUpdatePayloadV2ForRan
 
     FLE2InsertUpdatePayloadV2 iupayload;
 
-    iupayload.setEdcDerivedToken(edcDataCounterkey.toCDR());
-    iupayload.setEscDerivedToken(escDataCounterkey.toCDR());
-    iupayload.setServerEncryptionToken(serverEncryptToken.toCDR());
-    iupayload.setServerDerivedFromDataToken(serverDerivedFromDataToken.toCDR());
+    iupayload.setEncryptedTokens(
+        StateCollectionTokensV2(escDataCounterkey, false /* isLeaf */).encrypt(ecocToken));
 
-    auto swEncryptedTokens = EncryptedStateCollectionTokensV2(escDataCounterkey, false /* isLeaf */)
-                                 .serialize(ecocToken);
-    uassertStatusOK(swEncryptedTokens);
-    iupayload.setEncryptedTokens(swEncryptedTokens.getValue());
+    iupayload.setEdcDerivedToken(std::move(edcDataCounterkey));
+    iupayload.setEscDerivedToken(std::move(escDataCounterkey));
+    iupayload.setServerEncryptionToken(std::move(serverEncryptToken));
+    iupayload.setServerDerivedFromDataToken(std::move(serverDerivedFromDataToken));
 
     auto swCipherText = KeyIdAndValue::serialize(userKey, value);
     uassertStatusOK(swCipherText);
@@ -1457,15 +1393,12 @@ void convertServerPayload(ConstDataRange cdr,
                     isFLE2RangeIndexedSupportedType(sp.bsonType));
 
             std::vector<ServerDerivedFromDataToken> edgeDerivedTokens;
-            auto serverToken = FLETokenFromCDR<FLETokenType::ServerDataEncryptionLevel1Token>(
-                v2Payload.getServerEncryptionToken());
             for (auto& ets : v2Payload.getEdgeTokenSet().value()) {
-                edgeDerivedTokens.push_back(
-                    FLETokenFromCDR<FLETokenType::ServerDerivedFromDataToken>(
-                        ets.getServerDerivedFromDataToken()));
+                edgeDerivedTokens.push_back(ets.getServerDerivedFromDataToken());
             }
 
-            auto swEncrypted = sp.serialize(serverToken, edgeDerivedTokens);
+            auto swEncrypted =
+                sp.serialize(v2Payload.getServerEncryptionToken(), edgeDerivedTokens);
             uassertStatusOK(swEncrypted);
             toEncryptedBinData(fieldPath,
                                EncryptedBinDataType::kFLE2RangeIndexedValueV2,
@@ -1488,11 +1421,8 @@ void convertServerPayload(ConstDataRange cdr,
                                   << "' is not a valid type for Queryable Encryption Equality",
                     isFLE2EqualityIndexedSupportedType(sp.bsonType));
 
-            auto swEncrypted =
-                sp.serialize(FLETokenFromCDR<FLETokenType::ServerDataEncryptionLevel1Token>(
-                                 v2Payload.getServerEncryptionToken()),
-                             FLETokenFromCDR<FLETokenType::ServerDerivedFromDataToken>(
-                                 v2Payload.getServerDerivedFromDataToken()));
+            auto swEncrypted = sp.serialize(v2Payload.getServerEncryptionToken(),
+                                            v2Payload.getServerDerivedFromDataToken());
             uassertStatusOK(swEncrypted);
             toEncryptedBinData(fieldPath,
                                EncryptedBinDataType::kFLE2EqualityIndexedValueV2,
@@ -1720,7 +1650,7 @@ BSONObj runStateMachineForDecryption(mongocrypt_ctx_t* ctx, FLEKeyVault* keyVaul
 
 FLEEdgeCountInfo getEdgeCountInfoForPadding(const FLEStateCollectionReader& reader,
                                             ConstDataRange tag) {
-    auto anchorPaddingRootToken = FLETokenFromCDR<FLETokenType::AnchorPaddingRootToken>(tag);
+    auto anchorPaddingRootToken = AnchorPaddingRootToken::parse(tag);
     auto tagToken =
         FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingKeyToken(anchorPaddingRootToken);
     auto valueToken =
@@ -1773,7 +1703,7 @@ FLEEdgeCountInfo getEdgeCountInfoForCompact(const FLEStateCollectionReader& read
         // the anchor with the latest cpos already exists so no more work needed
 
         return FLEEdgeCountInfo(
-            0, tagToken.data, positions, boost::none, reader.getStats(), boost::none);
+            0, tagToken.asPrfBlock(), positions, boost::none, reader.getStats(), boost::none);
     }
 
     uint64_t nextAnchorPos = 0;
@@ -1789,8 +1719,12 @@ FLEEdgeCountInfo getEdgeCountInfoForCompact(const FLEStateCollectionReader& read
         nextAnchorPos = positions.apos.value() + 1;
     }
 
-    return FLEEdgeCountInfo(
-        nextAnchorPos, tagToken.data, positions, boost::none, reader.getStats(), boost::none);
+    return FLEEdgeCountInfo(nextAnchorPos,
+                            tagToken.asPrfBlock(),
+                            positions,
+                            boost::none,
+                            reader.getStats(),
+                            boost::none);
 }
 
 FLEEdgeCountInfo getEdgeCountInfo(const FLEStateCollectionReader& reader,
@@ -1836,8 +1770,8 @@ FLEEdgeCountInfo getEdgeCountInfo(const FLEStateCollectionReader& reader,
         count -= 1;
     }
 
-    return FLEEdgeCountInfo(count, tagToken.data, edc.map([](const PrfBlock& prf) {
-        return FLETokenFromCDR<FLETokenType::EDCDerivedFromDataTokenAndContentionFactorToken>(prf);
+    return FLEEdgeCountInfo(count, tagToken.asPrfBlock(), edc.map([](const PrfBlock& prf) {
+        return EDCDerivedFromDataTokenAndContentionFactorToken::parse(prf);
     }));
 }
 
@@ -1993,128 +1927,103 @@ std::vector<uint8_t> FLEUtil::vectorFromCDR(ConstDataRange cdr) {
 
 CollectionsLevel1Token FLELevel1TokenGenerator::generateCollectionsLevel1Token(
     FLEIndexKey indexKey) {
-    return FLEUtil::prf(hmacKey(indexKey.data), kLevel1Collection);
+    return CollectionsLevel1Token(FLEUtil::prf(hmacKey(indexKey.data), kLevel1Collection));
 }
 
 ServerTokenDerivationLevel1Token FLELevel1TokenGenerator::generateServerTokenDerivationLevel1Token(
     FLEIndexKey indexKey) {
-    return FLEUtil::prf(hmacKey(indexKey.data), kLevel1ServerTokenDerivation);
+    return ServerTokenDerivationLevel1Token(
+        FLEUtil::prf(hmacKey(indexKey.data), kLevel1ServerTokenDerivation));
 }
 
 ServerDataEncryptionLevel1Token FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(
     FLEIndexKey indexKey) {
-    return FLEUtil::prf(hmacKey(indexKey.data), kLevelServerDataEncryption);
+    return ServerDataEncryptionLevel1Token(
+        FLEUtil::prf(hmacKey(indexKey.data), kLevelServerDataEncryption));
 }
 
 
 EDCToken FLECollectionTokenGenerator::generateEDCToken(CollectionsLevel1Token token) {
-    return FLEUtil::prf(token.data, kEDC);
+    return EDCToken::deriveFrom(token);
 }
 
 ESCToken FLECollectionTokenGenerator::generateESCToken(CollectionsLevel1Token token) {
-    return FLEUtil::prf(token.data, kESC);
-}
-
-ECCToken FLECollectionTokenGenerator::generateECCToken(CollectionsLevel1Token token) {
-    return FLEUtil::prf(token.data, kECC);
+    return ESCToken::deriveFrom(token);
 }
 
 ECOCToken FLECollectionTokenGenerator::generateECOCToken(CollectionsLevel1Token token) {
-    return FLEUtil::prf(token.data, kECOC);
+    return ECOCToken::deriveFrom(token);
 }
 
 
 EDCDerivedFromDataToken FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(
     EDCToken token, ConstDataRange value) {
-    return FLEUtil::prf(token.data, value);
+    return EDCDerivedFromDataToken::deriveFrom(token, value);
 }
 
 ESCDerivedFromDataToken FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(
     ESCToken token, ConstDataRange value) {
-    return FLEUtil::prf(token.data, value);
-}
-
-ECCDerivedFromDataToken FLEDerivedFromDataTokenGenerator::generateECCDerivedFromDataToken(
-    ECCToken token, ConstDataRange value) {
-    return FLEUtil::prf(token.data, value);
+    return ESCDerivedFromDataToken::deriveFrom(token, value);
 }
 
 ServerDerivedFromDataToken FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(
     ServerTokenDerivationLevel1Token token, ConstDataRange value) {
-    return FLEUtil::prf(token.data, value);
+    return ServerDerivedFromDataToken::deriveFrom(token, value);
 }
 
 EDCDerivedFromDataTokenAndContentionFactorToken
 FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
     generateEDCDerivedFromDataTokenAndContentionFactorToken(EDCDerivedFromDataToken token,
                                                             FLECounter counter) {
-    return FLEUtil::prf(token.data, counter);
+    return EDCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(token, counter);
 }
 
 ESCDerivedFromDataTokenAndContentionFactorToken
 FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
     generateESCDerivedFromDataTokenAndContentionFactorToken(ESCDerivedFromDataToken token,
                                                             FLECounter counter) {
-    return FLEUtil::prf(token.data, counter);
+    return ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(token, counter);
 }
-
-ECCDerivedFromDataTokenAndContentionFactorToken
-FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-    generateECCDerivedFromDataTokenAndContentionFactorToken(ECCDerivedFromDataToken token,
-                                                            FLECounter counter) {
-    return FLEUtil::prf(token.data, counter);
-}
-
 
 EDCTwiceDerivedToken FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(
     EDCDerivedFromDataTokenAndContentionFactorToken token) {
-    return FLEUtil::prf(token.data, kTwiceDerivedTokenFromEDC);
+    return EDCTwiceDerivedToken::deriveFrom(token);
 }
 
 ESCTwiceDerivedTagToken FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(
     ESCDerivedFromDataTokenAndContentionFactorToken token) {
-    return FLEUtil::prf(token.data, kTwiceDerivedTokenFromESCTag);
+    return ESCTwiceDerivedTagToken::deriveFrom(token);
 }
 
 ESCTwiceDerivedValueToken FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(
     ESCDerivedFromDataTokenAndContentionFactorToken token) {
-    return FLEUtil::prf(token.data, kTwiceDerivedTokenFromESCValue);
-}
-
-ECCTwiceDerivedTagToken FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedTagToken(
-    ECCDerivedFromDataTokenAndContentionFactorToken token) {
-    return FLEUtil::prf(token.data, kTwiceDerivedTokenFromECCTag);
-}
-
-ECCTwiceDerivedValueToken FLETwiceDerivedTokenGenerator::generateECCTwiceDerivedValueToken(
-    ECCDerivedFromDataTokenAndContentionFactorToken token) {
-    return FLEUtil::prf(token.data, kTwiceDerivedTokenFromECCValue);
+    return ESCTwiceDerivedValueToken::deriveFrom(token);
 }
 
 ServerCountAndContentionFactorEncryptionToken
 FLEServerMetadataEncryptionTokenGenerator::generateServerCountAndContentionFactorEncryptionToken(
     ServerDerivedFromDataToken token) {
-    return FLEUtil::prf(token.data, kServerCountAndContentionFactorEncryption);
+    return ServerCountAndContentionFactorEncryptionToken::deriveFrom(token);
 }
 
 ServerZerosEncryptionToken
 FLEServerMetadataEncryptionTokenGenerator::generateServerZerosEncryptionToken(
     ServerDerivedFromDataToken token) {
-    return FLEUtil::prf(token.data, kServerZerosEncryption);
+    return ServerZerosEncryptionToken::deriveFrom(token);
 }
 
 AnchorPaddingRootToken FLEAnchorPaddingGenerator::generateAnchorPaddingRootToken(ESCToken token) {
-    return FLEUtil::prf(token.data, ConstDataRange(kAnchorPaddingTokenDVal));
+    return AnchorPaddingRootToken::deriveFrom(token);
 }
 
 AnchorPaddingKeyToken FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingKeyToken(
     AnchorPaddingRootToken token) {
-    return FLEUtil::prf(token.data, kAnchorPaddingKeyToken);
+    return AnchorPaddingKeyToken::deriveFrom(token);
 }
 
 AnchorPaddingValueToken FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingValueToken(
     AnchorPaddingRootToken token) {
-    return FLEUtil::prf(token.data, kAnchorPaddingValueToken);
+    return AnchorPaddingValueToken::deriveFrom(token);
 }
 
 StatusWith<EncryptedStateCollectionTokens> EncryptedStateCollectionTokens::decryptAndParse(
@@ -2128,73 +2037,67 @@ StatusWith<EncryptedStateCollectionTokens> EncryptedStateCollectionTokens::decry
     auto value = swUnpack.getValue();
 
     return EncryptedStateCollectionTokens{
-        ESCDerivedFromDataTokenAndContentionFactorToken(std::get<0>(value)),
-        ECCDerivedFromDataTokenAndContentionFactorToken(std::get<1>(value))};
+        ESCDerivedFromDataTokenAndContentionFactorToken(std::get<0>(value))};
 }
 
 StatusWith<std::vector<uint8_t>> EncryptedStateCollectionTokens::serialize(ECOCToken token) {
-    return packAndEncrypt(std::tie(esc.data, ecc.data), token);
+    constexpr uint64_t dummy{0};
+    return packAndEncrypt(std::make_tuple(esc.asPrfBlock(), dummy), token);
 }
 
-StatusWith<EncryptedStateCollectionTokensV2> EncryptedStateCollectionTokensV2::decryptAndParse(
-    ECOCToken token, ConstDataRange cdr) {
+StateCollectionTokensV2 StateCollectionTokensV2::Encrypted::decrypt(const ECOCToken& token) const
+    try {
+    assertLength(_encryptedTokens.size());
+    const bool expectLeaf = _encryptedTokens.size() == kCipherLengthESCAndLeafFlag;
 
-    // Ciphertext encodes precisely one PrfBlock (ESC) plus an optional octet for isLeaf.
-    constexpr std::size_t kCipherLengthESCOnly = crypto::aesCTRIVSize + sizeof(PrfBlock);
-    constexpr std::size_t kCipherLengthESCAndLeafFlag = kCipherLengthESCOnly + 1;
-    const bool expectLeaf = cdr.length() == kCipherLengthESCAndLeafFlag;
-    if (!expectLeaf && (cdr.length() != kCipherLengthESCOnly)) {
-        return Status(
-            ErrorCodes::BadValue,
-            "Invalid ciphertext for ESCTokensV2, length should be {} or {}, got {}"_format(
-                kCipherLengthESCOnly, kCipherLengthESCAndLeafFlag, cdr.length()));
-    }
-
-    auto swVec = FLEUtil::decryptData(token.toCDR(), cdr);
-    if (!swVec.isOK()) {
-        return swVec.getStatus();
-    }
-
-    auto& data = swVec.getValue();
+    auto data = uassertStatusOK(FLEUtil::decryptData(token.toCDR(), toCDR()));
     ConstDataRangeCursor cdrc(data);
-
-    auto swToken = cdrc.readAndAdvanceNoThrow<PrfBlock>();
-    if (!swToken.isOK()) {
-        return swToken.getStatus();
-    }
-    auto escToken = ESCDerivedFromDataTokenAndContentionFactorToken(swToken.getValue());
+    auto rawESCToken = cdrc.readAndAdvance<PrfBlock>();
+    auto escToken = ESCDerivedFromDataTokenAndContentionFactorToken(std::move(rawESCToken));
 
     boost::optional<bool> isLeaf;
     if (expectLeaf) {
-        auto swLeaf = cdrc.readAndAdvanceNoThrow<uint8_t>();
-        if (!swLeaf.isOK()) {
-            // Should be impossible given expectLeaf length check above.
-            return swLeaf.getStatus().withContext("Unable to read ESCTokensV2::isLeaf");
-        }
-        auto leafVal = std::move(swLeaf.getValue());
-        if ((leafVal != 0) && (leafVal != 1)) {
-            return Status(ErrorCodes::BadValue,
-                          "Invalid value for ESCTokensV2 leaf tag {}"_format(leafVal));
-        }
+        auto leaf = cdrc.readAndAdvance<uint8_t>();
+        uassert(ErrorCodes::BadValue,
+                "Invalid value for ESCTokensV2 leaf tag {}"_format(leaf),
+                (leaf == 0) || (leaf == 1));
 
-        isLeaf = !!leafVal;
+        isLeaf = !!leaf;
     }
 
-    return EncryptedStateCollectionTokensV2(std::move(escToken), isLeaf);
+    return StateCollectionTokensV2(std::move(escToken), std::move(isLeaf));
+
+} catch (const DBException& ex) {
+    uassertStatusOK(ex.toStatus().withContext("Failed decrypting StateCollectionTokensV2"));
+    MONGO_UNREACHABLE;
 }
 
-StatusWith<std::vector<uint8_t>> EncryptedStateCollectionTokensV2::serialize(ECOCToken token) {
-    if (isLeaf) {
-        // Range
-        auto escCDR = esc.toCDR();
-        DataBuilder builder(escCDR.length() + 1);
-        uassertStatusOK(builder.writeAndAdvance(escCDR));
-        uassertStatusOK(builder.writeAndAdvance(*isLeaf));
-        return encryptData(token.toCDR(), builder.getCursor());
+StateCollectionTokensV2::Encrypted StateCollectionTokensV2::encrypt(const ECOCToken& token) const
+    try {
+    std::vector<std::uint8_t> encryptedTokens;
+    if (isRange()) {
+        DataBuilder builder(sizeof(PrfBlock) + 1);
+        uassertStatusOK(builder.writeAndAdvance(_esc.toCDR()));
+        uassertStatusOK(builder.writeAndAdvance(*_isLeaf));
+        encryptedTokens = uassertStatusOK(encryptData(token.toCDR(), builder.getCursor()));
     } else {
         // Equality
-        return encryptData(token.toCDR(), esc.toCDR());
+        encryptedTokens = uassertStatusOK(encryptData(token.toCDR(), _esc.toCDR()));
     }
+
+    return StateCollectionTokensV2::Encrypted(std::move(encryptedTokens));
+} catch (const DBException& ex) {
+    uassertStatusOK(ex.toStatus().withContext("Failed encrypting StateCollectionTokensV2"));
+    MONGO_UNREACHABLE;
+}
+
+BSONObj StateCollectionTokensV2::Encrypted::generateDocument(StringData fieldName) const {
+    assertLength(_encryptedTokens.size());
+    BSONObjBuilder builder;
+    builder.append(kId, OID::gen());
+    builder.append(kFieldName, fieldName);
+    toBinData(kValue, toCDR(), &builder);
+    return builder.obj();
 }
 
 FLEKeyVault::~FLEKeyVault() {}
@@ -2285,21 +2188,21 @@ void FLEClientCrypto::validateTagsArray(const BSONObj& doc) {
 PrfBlock ESCCollection::generateId(const ESCTwiceDerivedTagToken& tagToken,
                                    boost::optional<uint64_t> index) {
     if (index.has_value()) {
-        return prf(tagToken.data, kESCNonNullId, index.value());
+        return prf(tagToken.toCDR(), kESCNonNullId, index.value());
     } else {
-        return prf(tagToken.data, kESCNullId, 0);
+        return prf(tagToken.toCDR(), kESCNullId, 0);
     }
 }
 
 PrfBlock ESCCollection::generateNonAnchorId(const ESCTwiceDerivedTagToken& tagToken,
                                             uint64_t cpos) {
-    return FLEUtil::prf(tagToken.data, cpos);
+    return FLEUtil::prf(tagToken.toCDR(), cpos);
 }
 
 template <class TagToken, class ValueToken>
 PrfBlock ESCCollectionCommon<TagToken, ValueToken>::generateAnchorId(const TagToken& tagToken,
                                                                      uint64_t apos) {
-    return prf(tagToken.data, kESCAnchorId, apos);
+    return prf(tagToken.toCDR(), kESCAnchorId, apos);
 }
 
 template <class TagToken, class ValueToken>
@@ -2380,8 +2283,12 @@ FLEEdgeCountInfo ESCCollectionCommon<TagToken, ValueToken>::getEdgeCountInfoForP
         });
     }
 
-    return FLEEdgeCountInfo(
-        latestCpos, tagToken.data, positions, nullAnchorPositions, reader.getStats(), boost::none);
+    return FLEEdgeCountInfo(latestCpos,
+                            tagToken.asPrfBlock(),
+                            positions,
+                            nullAnchorPositions,
+                            reader.getStats(),
+                            boost::none);
 }
 
 BSONObj ESCCollection::generateNullDocument(const ESCTwiceDerivedTagToken& tagToken,
@@ -2407,7 +2314,7 @@ BSONObj ESCCollection::generateNullDocument(const ESCTwiceDerivedTagToken& tagTo
 
 PrfBlock ESCCollectionAnchorPadding::generateAnchorId(const AnchorPaddingKeyToken& keyToken,
                                                       uint64_t apos) {
-    return prf(keyToken.data, kESCPaddingId, apos);
+    return prf(keyToken.toCDR(), kESCPaddingId, apos);
 }
 
 BSONObj ESCCollectionAnchorPadding::generatePaddingDocument(
@@ -2505,7 +2412,7 @@ BSONObj ESCCollection::generateNullAnchorDocument(const ESCTwiceDerivedTagToken&
 }
 
 PrfBlock ESCCollectionAnchorPadding::generateNullAnchorId(const AnchorPaddingKeyToken& keyToken) {
-    return prf(keyToken.data, kESCPaddingId, 0);
+    return prf(keyToken.toCDR(), kESCPaddingId, 0);
 }
 
 BSONObj ESCCollectionAnchorPadding::generateNullAnchorDocument(
@@ -2787,104 +2694,6 @@ std::vector<std::vector<FLEEdgeCountInfo>> ESCCollection::getTags(
     return countInfoSets;
 }
 
-PrfBlock ECCCollection::generateId(ECCTwiceDerivedTagToken tagToken,
-                                   boost::optional<uint64_t> index) {
-    if (index.has_value()) {
-        return prf(tagToken.data, kECCNonNullId, index.value());
-    } else {
-        return prf(tagToken.data, kECCNullId, 0);
-    }
-}
-
-BSONObj ECCCollection::generateNullDocument(ECCTwiceDerivedTagToken tagToken,
-                                            ECCTwiceDerivedValueToken valueToken,
-                                            uint64_t count) {
-    auto block = ECCCollection::generateId(tagToken, boost::none);
-
-    auto swCipherText = packAndEncrypt(std::tie(count, count), valueToken);
-    uassertStatusOK(swCipherText);
-
-    BSONObjBuilder builder;
-    toBinData(kId, block, &builder);
-    toBinData(kValue, swCipherText.getValue(), &builder);
-#ifdef FLE2_DEBUG_STATE_COLLECTIONS
-    builder.append(kDebugId, "NULL DOC");
-    builder.append(kDebugValueCount, static_cast<int64_t>(count));
-#endif
-
-    return builder.obj();
-}
-
-BSONObj ECCCollection::generateDocument(ECCTwiceDerivedTagToken tagToken,
-                                        ECCTwiceDerivedValueToken valueToken,
-                                        uint64_t index,
-                                        uint64_t start,
-                                        uint64_t end) {
-    auto block = ECCCollection::generateId(tagToken, index);
-
-    auto swCipherText = packAndEncrypt(std::tie(start, end), valueToken);
-    uassertStatusOK(swCipherText);
-
-    BSONObjBuilder builder;
-    toBinData(kId, block, &builder);
-    toBinData(kValue, swCipherText.getValue(), &builder);
-#ifdef FLE2_DEBUG_STATE_COLLECTIONS
-    builder.append(kDebugId, static_cast<int64_t>(index));
-    builder.append(kDebugValueStart, static_cast<int64_t>(start));
-    builder.append(kDebugValueEnd, static_cast<int64_t>(end));
-#endif
-
-    return builder.obj();
-}
-
-BSONObj ECCCollection::generateDocument(ECCTwiceDerivedTagToken tagToken,
-                                        ECCTwiceDerivedValueToken valueToken,
-                                        uint64_t index,
-                                        uint64_t count) {
-    return generateDocument(tagToken, valueToken, index, count, count);
-}
-
-BSONObj ECCCollection::generateCompactionDocument(ECCTwiceDerivedTagToken tagToken,
-                                                  ECCTwiceDerivedValueToken valueToken,
-                                                  uint64_t index) {
-    auto block = ECCCollection::generateId(tagToken, index);
-
-    auto swCipherText =
-        packAndEncrypt(std::tie(kECCompactionRecordValue, kECCompactionRecordValue), valueToken);
-    uassertStatusOK(swCipherText);
-
-    BSONObjBuilder builder;
-    toBinData(kId, block, &builder);
-    toBinData(kValue, swCipherText.getValue(), &builder);
-#ifdef FLE2_DEBUG_STATE_COLLECTIONS
-    builder.append(kDebugId, static_cast<int64_t>(index));
-    builder.append(kDebugValueStart, static_cast<int64_t>(kECCompactionRecordValue));
-    builder.append(kDebugValueEnd, static_cast<int64_t>(kECCompactionRecordValue));
-#endif
-
-    return builder.obj();
-}
-
-
-StatusWith<ECCNullDocument> ECCCollection::decryptNullDocument(ECCTwiceDerivedValueToken valueToken,
-                                                               const BSONObj& doc) {
-    BSONElement encryptedValue;
-    auto status = bsonExtractTypedField(doc, kValue, BinData, &encryptedValue);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    auto swUnpack = decryptAndUnpack<uint64_t, uint64_t>(binDataToCDR(encryptedValue), valueToken);
-
-    if (!swUnpack.isOK()) {
-        return swUnpack.getStatus();
-    }
-
-    auto& value = swUnpack.getValue();
-
-    return ECCNullDocument{std::get<0>(value)};
-}
-
 
 FLE2FindEqualityPayloadV2 FLEClientCrypto::serializeFindPayloadV2(FLEIndexKeyAndId indexKey,
                                                                   FLEUserKeyAndId userKey,
@@ -2908,10 +2717,10 @@ FLE2FindEqualityPayloadV2 FLEClientCrypto::serializeFindPayloadV2(FLEIndexKeyAnd
 
     FLE2FindEqualityPayloadV2 payload;
 
-    payload.setEdcDerivedToken(edcDatakey.toCDR());
-    payload.setEscDerivedToken(escDatakey.toCDR());
+    payload.setEdcDerivedToken(std::move(edcDatakey));
+    payload.setEscDerivedToken(std::move(escDatakey));
     payload.setMaxCounter(maxContentionFactor);
-    payload.setServerDerivedFromDataToken(serverDataDerivedToken.toCDR());
+    payload.setServerDerivedFromDataToken(std::move(serverDataDerivedToken));
 
     return payload;
 }
@@ -2938,15 +2747,13 @@ FLE2FindRangePayloadV2 FLEClientCrypto::serializeFindRangePayloadV2(
 
         EdgeFindTokenSetV2 tokenSet;
         tokenSet.setEdcDerivedToken(
-            FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value)
-                .toCDR());
+            FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value));
 
         tokenSet.setEscDerivedToken(
-            FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value)
-                .toCDR());
+            FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value));
         tokenSet.setServerDerivedFromDataToken(
-            FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(serverToken, value)
-                .toCDR());
+            FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(serverToken,
+                                                                                 value));
         tokens.push_back(std::move(tokenSet));
     }
 
@@ -2983,56 +2790,20 @@ FLE2FindRangePayloadV2 FLEClientCrypto::serializeFindRangeStubV2(const FLE2Range
     return payload;
 }
 
-StatusWith<ECCDocument> ECCCollection::decryptDocument(ECCTwiceDerivedValueToken valueToken,
-                                                       const BSONObj& doc) {
-    BSONElement encryptedValue;
-    auto status = bsonExtractTypedField(doc, kValue, BinData, &encryptedValue);
-    if (!status.isOK()) {
-        return status;
-    }
-
-    auto swUnpack = decryptAndUnpack<uint64_t, uint64_t>(binDataToCDR(encryptedValue), valueToken);
-
-    if (!swUnpack.isOK()) {
-        return swUnpack.getStatus();
-    }
-
-    auto& value = swUnpack.getValue();
-
-    return ECCDocument{std::get<0>(value) != kECCompactionRecordValue
-                           ? ECCValueType::kNormal
-                           : ECCValueType::kCompactionPlaceholder,
-                       std::get<0>(value),
-                       std::get<1>(value)};
-}
-
-boost::optional<uint64_t> ECCCollection::emuBinary(const FLEStateCollectionReader& reader,
-                                                   ECCTwiceDerivedTagToken tagToken,
-                                                   ECCTwiceDerivedValueToken valueToken) {
-    return emuBinaryCommon<ECCCollection, ECCTwiceDerivedTagToken, ECCTwiceDerivedValueToken>(
-        reader, tagToken, valueToken);
-}
-
-BSONObj ECOCCollection::generateDocument(StringData fieldName, ConstDataRange payload) {
-    BSONObjBuilder builder;
-    builder.append(kId, OID::gen());
-    builder.append(kFieldName, fieldName);
-    toBinData(kValue, payload, &builder);
-    return builder.obj();
-}
-
-ECOCCompactionDocumentV2 ECOCCollection::parseAndDecryptV2(const BSONObj& doc, ECOCToken token) {
+ECOCCompactionDocumentV2 ECOCCompactionDocumentV2::parseAndDecrypt(const BSONObj& doc,
+                                                                   const ECOCToken& token) {
     IDLParserContext ctx("root");
     auto ecocDoc = EcocDocument::parse(ctx, doc);
 
-    auto swTokens = EncryptedStateCollectionTokensV2::decryptAndParse(token, ecocDoc.getValue());
-    uassertStatusOK(swTokens);
-    auto& keys = swTokens.getValue();
+    // The ecocDoc from EcocDocument::parse is const, so make a copy when decrypting.
+    auto keys = StateCollectionTokensV2::Encrypted(ecocDoc.getValue()).decrypt(token);
 
     ECOCCompactionDocumentV2 ret;
     ret.fieldName = ecocDoc.getFieldName().toString();
-    ret.esc = keys.esc;
-    ret.isLeaf = keys.isLeaf;
+    // Copy the ESC key over to prevent a segfault when the keys object gets deleted.
+    ret.esc = ESCDerivedFromDataTokenAndContentionFactorToken(
+        keys.getESCDerivedFromDataTokenAndContentionFactorToken());
+    ret.isLeaf = keys.getIsLeaf();
     return ret;
 }
 
@@ -3624,7 +3395,7 @@ StatusWith<std::vector<uint8_t>> FLE2IndexedRangeEncryptedValueV2::serialize(
 
 ESCDerivedFromDataTokenAndContentionFactorToken EDCServerPayloadInfo::getESCToken(
     ConstDataRange cdr) {
-    return FLETokenFromCDR<FLETokenType::ESCDerivedFromDataTokenAndContentionFactorToken>(cdr);
+    return ESCDerivedFromDataTokenAndContentionFactorToken::parse(cdr);
 }
 
 void EDCServerCollection::validateEncryptedFieldInfo(BSONObj& obj,
@@ -3697,9 +3468,8 @@ PrfBlock EDCServerCollection::generateTag(EDCTwiceDerivedToken edcTwiceDerived, 
 }
 
 PrfBlock EDCServerCollection::generateTag(const EDCServerPayloadInfo& payload) {
-    auto token = FLETokenFromCDR<FLETokenType::EDCDerivedFromDataTokenAndContentionFactorToken>(
+    auto edcTwiceDerived = FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(
         payload.payload.getEdcDerivedToken());
-    auto edcTwiceDerived = FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(token);
     dassert(payload.isRangePayload() == false);
     dassert(payload.counts.size() == 1);
     return generateTag(edcTwiceDerived, payload.counts[0]);
@@ -3722,8 +3492,7 @@ std::vector<PrfBlock> EDCServerCollection::generateTags(const EDCServerPayloadIn
 
     for (size_t i = 0; i < edgeTokenSets.size(); i++) {
         auto edcTwiceDerived = FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(
-            FLETokenFromCDR<FLETokenType::EDCDerivedFromDataTokenAndContentionFactorToken>(
-                edgeTokenSets[i].getEdcDerivedToken()));
+            edgeTokenSets[i].getEdcDerivedToken());
         tags.push_back(EDCServerCollection::generateTag(edcTwiceDerived, rangePayload.counts[i]));
     }
     return tags;
@@ -3744,7 +3513,7 @@ std::vector<EDCDerivedFromDataTokenAndContentionFactorToken> EDCServerCollection
 
 std::vector<EDCDerivedFromDataTokenAndContentionFactorToken> EDCServerCollection::generateEDCTokens(
     ConstDataRange rawToken, uint64_t maxContentionFactor) {
-    auto token = FLETokenFromCDR<FLETokenType::EDCDerivedFromDataToken>(rawToken);
+    auto token = EDCDerivedFromDataToken::parse(rawToken);
 
     return generateEDCTokens(token, maxContentionFactor);
 }
@@ -4014,10 +3783,10 @@ ParsedFindEqualityPayload::ParsedFindEqualityPayload(ConstDataRange cdr) {
 
     auto payload = parseFromCDR<FLE2FindEqualityPayloadV2>(subCdr);
 
-    escToken = FLETokenFromCDR<FLETokenType::ESCDerivedFromDataToken>(payload.getEscDerivedToken());
-    edcToken = FLETokenFromCDR<FLETokenType::EDCDerivedFromDataToken>(payload.getEdcDerivedToken());
-    serverDataDerivedToken = FLETokenFromCDR<FLETokenType::ServerDerivedFromDataToken>(
-        payload.getServerDerivedFromDataToken());
+    escToken = payload.getEscDerivedToken();
+    edcToken = payload.getEdcDerivedToken();
+    serverDataDerivedToken = payload.getServerDerivedFromDataToken();
+
     maxCounter = payload.getMaxCounter();
 }
 
@@ -4055,13 +3824,9 @@ ParsedFindRangePayload::ParsedFindRangePayload(ConstDataRange cdr) {
     auto& info = payload.getPayload().value();
 
     for (auto const& edge : info.getEdges()) {
-        auto escToken =
-            FLETokenFromCDR<FLETokenType::ESCDerivedFromDataToken>(edge.getEscDerivedToken());
-        auto edcToken =
-            FLETokenFromCDR<FLETokenType::EDCDerivedFromDataToken>(edge.getEdcDerivedToken());
-        auto serverDataDerivedToken = FLETokenFromCDR<FLETokenType::ServerDerivedFromDataToken>(
-            edge.getServerDerivedFromDataToken());
-        edgesRef.push_back({edcToken, escToken, serverDataDerivedToken});
+        edgesRef.push_back({edge.getEdcDerivedToken(),
+                            edge.getEscDerivedToken(),
+                            edge.getServerDerivedFromDataToken()});
     }
 
     maxCounter = info.getMaxCounter();
@@ -4078,7 +3843,7 @@ std::vector<CompactionToken> CompactionHelpers::parseCompactionTokens(BSONObj co
             auto fieldName = token.fieldNameStringData().toString();
 
             if (token.isBinData(BinDataType::BinDataGeneral)) {
-                auto ecoc = FLETokenFromCDR<ECOCToken>(token._binDataVector());
+                auto ecoc = ECOCToken::parse(token._binDataVector());
                 return CompactionToken{std::move(fieldName), std::move(ecoc), boost::none};
             }
 
@@ -4610,14 +4375,6 @@ PrfBlock FLEUtil::prf(ConstDataRange key, uint64_t value) {
     DataView(bufValue.data()).write<LittleEndian<uint64_t>>(value);
 
     return prf(key, bufValue);
-}
-
-void FLEUtil::checkEFCForECC(const EncryptedFieldConfig& efc) {
-    uassert(7568300,
-            str::stream()
-                << "Queryable Encryption version 2 collections must not contain the eccCollection"
-                << " in EncryptedFieldConfig",
-            !efc.getEccCollection());
 }
 
 StatusWith<std::vector<uint8_t>> FLEUtil::decryptData(ConstDataRange key,

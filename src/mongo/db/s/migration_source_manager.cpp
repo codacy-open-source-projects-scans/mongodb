@@ -145,25 +145,6 @@ BSONObj computeOtherBound(OperationContext* opCtx,
     return needMaxBound ? max : min;
 }
 
-/**
- * If `max` is the max bound of some chunk, returns that chunk. Otherwise, returns the chunk that
- * contains the key `max`.
- */
-Chunk getChunkForMaxBound(const ChunkManager& cm, const BSONObj& max) {
-    boost::optional<Chunk> chunkWithMaxBound;
-    cm.forEachChunk([&](const auto& chunk) {
-        if (chunk.getMax().woCompare(max) == 0) {
-            chunkWithMaxBound.emplace(chunk);
-            return false;
-        }
-        return true;
-    });
-    if (chunkWithMaxBound) {
-        return *chunkWithMaxBound;
-    }
-    return cm.findIntersectingChunkWithSimpleCollation(max);
-}
-
 MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep1);
 MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep2);
 MONGO_FAIL_POINT_DEFINE(moveChunkHangAtStep3);
@@ -231,8 +212,8 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
 
     // Make sure the latest placement version is recovered as of the time of the invocation of the
     // command.
-    FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
-        _opCtx, nss(), boost::none);
+    uassertStatusOK(FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
+        _opCtx, nss(), boost::none));
 
     const auto shardId = ShardingState::get(opCtx)->shardId();
 
@@ -673,7 +654,8 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
                             "migrationId"_attr = _coordinator->getMigrationId(),
                             logAttrs(nss()));
 
-        FilteringMetadataCache::get(_opCtx)->forceShardFilteringMetadataRefresh(_opCtx, nss());
+        FilteringMetadataCache::get(_opCtx)->forceCollectionPlacementRefresh(_opCtx, nss());
+        FilteringMetadataCache::get(_opCtx)->waitForCollectionFlush(_opCtx, nss());
 
         LOGV2_DEBUG_OPTIONS(4817405,
                             2,
@@ -698,10 +680,6 @@ void MigrationSourceManager::commitChunkMetadataOnConfig() {
         }
         scopedGuard.dismiss();
         _cleanup(false);
-        // Best-effort recover of the chunk version.
-        FilteringMetadataCache::get(_opCtx)
-            ->onCollectionPlacementVersionMismatchNoExcept(_opCtx, nss(), boost::none)
-            .ignore();
         throw;
     }
 
@@ -904,16 +882,6 @@ void MigrationSourceManager::_cleanup(bool completeMigration) noexcept {
 
             if (_state >= kCriticalSection && _state <= kCommittingOnConfig) {
                 _stats.totalCriticalSectionTimeMillis.addAndFetch(_cloneAndCommitTimer.millis());
-
-                // Wait for the updates to the cache of the routing table to be fully written to
-                // disk. This way, we ensure that all nodes from a shard which donated a chunk will
-                // always be at the placement version of the last migration it performed.
-                //
-                // If the metadata is not persisted before clearing the 'inMigration' flag below, it
-                // is possible that the persisted metadata is rolled back after step down, but the
-                // write which cleared the 'inMigration' flag is not, a secondary node will report
-                // itself at an older placement version.
-                FilteringMetadataCache::get(newOpCtx)->waitForCollectionFlush(newOpCtx, nss());
             }
             if (completeMigration) {
                 // This can be called on an exception path after the OperationContext has been

@@ -82,7 +82,7 @@ std::unique_ptr<mongo::Pipeline, mongo::PipelineDeleter> parsePipeline(
         new ExpressionContextForTest(opCtx, request));
 
     static unittest::TempDir tempDir("ABTPipelineTest");
-    ctx->tempDir = tempDir.path();
+    ctx->setTempDir(tempDir.path());
 
     return Pipeline::parse(request.getPipeline(), ctx);
 }
@@ -113,9 +113,7 @@ std::vector<BSONObj> runPipeline(OperationContext* opCtx,
 
     pipeline->addInitialSource(queueStage);
 
-    boost::intrusive_ptr<ExpressionContext> expCtx;
-    expCtx.reset(new ExpressionContext(opCtx, nullptr, nss));
-
+    auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).ns(nss).build();
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> planExec =
         plan_executor_factory::make(expCtx, std::move(pipeline));
 

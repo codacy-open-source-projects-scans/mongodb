@@ -98,10 +98,6 @@ config_fuzzer_params = {
             "period": 5,
             "fuzz_at": ["startup", "runtime"],
         },
-        "initialServiceExecutorUseDedicatedThread": {
-            "choices": [True, False],
-            "fuzz_at": ["startup"],
-        },
         "initialSyncMethod": {"choices": ["fileCopyBased", "logical"], "fuzz_at": ["startup"]},
         # For `initialSyncSourceReadPreference`, the option `secondary` is excluded from the fuzzer
         # because the generated mongod parameters are used for every node in the replica set, so the
@@ -232,6 +228,11 @@ config_fuzzer_params = {
             "max": 60_000,
             "fuzz_at": ["startup"],
         },
+        "wiredTigerCheckpointCleanupPeriodSeconds": {
+            "min": 60,
+            "max": 600,  # This can be as high as 100k but we fuzz it to be small because we mostly perform 0 cleanups in testing.
+            "fuzz_at": ["startup"],
+        },
         "queryAnalysisWriterMaxMemoryUsageBytes": {
             "min": 1024 * 1024,
             "max": 1024 * 1024 * 100,
@@ -357,16 +358,37 @@ config_fuzzer_params = {
             "fuzz_at": ["startup"],
         },
         # Choose whether to shuffle the list command results or not.
-        # TODO SERVER-95058: Uncomment this once the config fuzzer can run the shuffling again.
-        # "failpoint.shuffleListCommandResults": {"choices": [{"mode": "off"}, {"mode": "alwaysOn"}]},
+        "failpoint.shuffleListCommandResults": {
+            "choices": [{"mode": "off"}, {"mode": "alwaysOn"}],
+            "fuzz_at": ["startup"],
+        },
+        "failpoint.enableSignalTesting": {
+            "choices": [{"mode": "off"}, {"mode": "alwaysOn"}],
+            "fuzz_at": ["startup"],
+        },
+        "enableDetailedConnectionHealthMetricLogLines": {
+            "choices": [True, False],
+            "period": 5,
+            "fuzz_at": ["startup", "runtime"],
+        },
+        "diagnosticDataCollectionEnabled": {
+            "choices": [True, False],
+            "fuzz_at": ["startup"],
+        },
+        "diagnosticDataCollectionVerboseTCMalloc": {
+            "choices": [True, False],
+            "period": 10,
+            "fuzz_at": ["startup", "runtime"],
+        },
+        "diagnosticDataCollectionEnableLatencyHistograms": {
+            "choices": [True, False],
+            "period": 10,
+            "fuzz_at": ["startup", "runtime"],
+        },
     },
     "mongos": {
         # We need a higher timeout to account for test slowness
         "defaultConfigCommandTimeoutMS": {"default": 90_000, "fuzz_at": ["startup"]},
-        "initialServiceExecutorUseDedicatedThread": {
-            "choices": [True, False],
-            "fuzz_at": ["startup"],
-        },
         "internalQueryFindCommandBatchSize": {"min": 1, "max": 500, "fuzz_at": ["startup"]},
         "opportunisticSecondaryTargeting": {"choices": [True, False], "fuzz_at": ["startup"]},
         "ShardingTaskExecutorPoolReplicaSetMatching": {
@@ -379,5 +401,40 @@ config_fuzzer_params = {
             "period": 5,
             "fuzz_at": ["runtime"],
         },
+        "enableDetailedConnectionHealthMetricLogLines": {
+            "choices": [True, False],
+            "period": 5,
+            "fuzz_at": ["startup", "runtime"],
+        },
+        "warmMinConnectionsInShardingTaskExecutorPoolOnStartup": {
+            "choices": [True, False],
+            "fuzz_at": ["startup"],
+        },
+        "diagnosticDataCollectionEnabled": {
+            "choices": [True, False],
+            "fuzz_at": ["startup"],
+        },
+        "diagnosticDataCollectionVerboseTCMalloc": {
+            "choices": [True, False],
+            "period": 10,
+            "fuzz_at": ["startup", "runtime"],
+        },
+        "diagnosticDataCollectionEnableLatencyHistograms": {
+            "choices": [True, False],
+            "period": 10,
+            "fuzz_at": ["startup", "runtime"],
+        },
+        "failpoint.enableSignalTesting": {
+            "choices": [{"mode": "off"}, {"mode": "alwaysOn"}],
+            "fuzz_at": ["startup"],
+        },
     },
+}
+
+config_fuzzer_extra_configs = {
+    "mongod": {
+        "directoryperdb": {"choices": [True, False]},
+        "wiredTigerDirectoryForIndexes": {"choices": [True, False]},
+    },
+    "mongos": {},
 }

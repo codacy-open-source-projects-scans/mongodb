@@ -45,8 +45,8 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -192,15 +192,6 @@ public:
         NamespaceFilter deleteFilter;  // onDelete
     };
 
-    enum class CollectionDropType {
-        // The collection is being dropped immediately, in one step.
-        kOnePhase,
-
-        // The collection is being dropped in two phases, by renaming to a drop pending collection
-        // which is registered to be reaped later.
-        kTwoPhase,
-    };
-
     virtual ~OpObserver() = default;
 
     // Used by the OpObserverRegistry to filter out CRUD operations.
@@ -228,13 +219,6 @@ public:
                                    bool fromMigrate) = 0;
 
     virtual void onStartIndexBuildSinglePhase(OperationContext* opCtx,
-                                              const NamespaceString& nss) = 0;
-
-    /**
-     * Generates a timestamp by writing a no-op oplog entry. This is only necessary for tenant
-     * migrations that are aborting single-phase index builds.
-     */
-    virtual void onAbortIndexBuildSinglePhase(OperationContext* opCtx,
                                               const NamespaceString& nss) = 0;
 
     virtual void onCommitIndexBuild(OperationContext* opCtx,
@@ -388,7 +372,6 @@ public:
                                           const NamespaceString& collectionName,
                                           const UUID& uuid,
                                           std::uint64_t numRecords,
-                                          CollectionDropType dropType,
                                           bool markFromMigrate) = 0;
 
 

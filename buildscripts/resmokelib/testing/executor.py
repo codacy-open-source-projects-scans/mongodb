@@ -1,7 +1,6 @@
 """Driver of the test execution framework."""
 
 import threading
-import time
 from logging import Logger
 from typing import Generic, List, Optional, TypeVar, Union
 
@@ -59,11 +58,6 @@ class TestSuiteExecutor(object):
             self.fixture_config = fixture
 
         self.hooks_config = utils.default_if_none(hooks, [])
-        if _config.FUZZ_RUNTIME_STRESS and _config.FUZZ_RUNTIME_STRESS != "off":
-            self.hooks_config.append(
-                {"class": "FuzzRuntimeStress", "option": _config.FUZZ_RUNTIME_STRESS}
-            )
-
         self.test_config = utils.default_if_none(config, {})
 
         self.archival = None
@@ -75,7 +69,6 @@ class TestSuiteExecutor(object):
         self._suite = suite
         self.test_queue_logger = logging.loggers.new_testqueue_logger(suite.test_kind)
 
-        # Must be done after getting buildlogger configuration.
         self._jobs = self._create_jobs(suite.get_num_jobs_to_start())
 
     def _create_jobs(self, num_jobs: int) -> List[_job.Job]:
@@ -211,7 +204,10 @@ class TestSuiteExecutor(object):
                 # are many of them.  Both the 5 and the 10 are arbitrary.
                 # Currently only enabled on Evergreen.
                 if _config.STAGGER_JOBS and len(threads) >= 5:
-                    time.sleep(10)
+                    # If there are no more tests to be executed, we should stop creating new
+                    # jobs. Otherwise, wait 10 seconds before creating the next job.
+                    if test_queue.join(10):
+                        break
 
             joined = False
             while not joined:

@@ -25,7 +25,7 @@ var rst = new ReplSetTest({
 
 rst.startSet();
 var nodes = rst.nodes;
-rst.initiate();
+rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 /**
  * Waits for the given node to be in state primary *and* have finished drain mode and thus
@@ -57,7 +57,7 @@ rst.awaitReplication();
 assert.eq(nodes[0], primary);
 // Wait for all data bearing nodes to get up to date.
 assert.commandWorked(nodes[0].getDB(dbName).getCollection(collName).insert(
-    {a: 1}, {writeConcern: {w: 3, wtimeout: rst.kDefaultTimeoutMS}}));
+    {a: 1}, {writeConcern: {w: 3, wtimeout: rst.timeoutMS}}));
 
 // Stop the secondaries from replicating.
 stopServerReplication(secondaries);
@@ -88,7 +88,7 @@ waitForPrimary(nodes[1]);
 
 jsTest.log("Do a write to the new primary");
 assert.commandWorked(nodes[1].getDB(dbName).getCollection(collName).insert(
-    {a: 3}, {writeConcern: {w: 2, wtimeout: rst.kDefaultTimeoutMS}}));
+    {a: 3}, {writeConcern: {w: 2, wtimeout: rst.timeoutMS}}));
 
 // Ensure the new primary still cannot see the write from the old primary.
 assert.eq(null, nodes[1].getDB(dbName).getCollection(collName).findOne({a: 2}));
@@ -115,7 +115,7 @@ try {
 if (res) {
     assert.commandWorked(res);
 }
-rst.waitForState(nodes[0], ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [nodes[0]]);
 reconnect(nodes[0]);
 
 // At this point the former primary will attempt to go into rollback, but the

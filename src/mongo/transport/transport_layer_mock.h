@@ -97,6 +97,10 @@ public:
         return "mock"_sd;
     }
 
+    TransportProtocol getTransportProtocol() const override {
+        MONGO_UNIMPLEMENTED;
+    }
+
     ReactorHandle getReactor(WhichReactor which) override;
 
     // Set to a factory function to use your own session type.
@@ -118,6 +122,14 @@ public:
 
     std::shared_ptr<SessionManager> getSharedSessionManager() const override {
         return _sessionManager;
+    }
+
+    bool isIngress() const override {
+        return false;
+    }
+
+    bool isEgress() const override {
+        return false;
     }
 
 private:

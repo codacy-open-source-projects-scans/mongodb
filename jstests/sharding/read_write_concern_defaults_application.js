@@ -193,6 +193,7 @@ let testCases = {
     _shardsvrRenameIndexMetadata: {skip: "internal command"},
     _shardsvrReshardCollection: {skip: "internal command"},
     _shardsvrReshardingOperationTime: {skip: "internal command"},
+    _shardsvrRunSearchIndexCommand: {skip: "internal command"},
     _shardsvrSetAllowMigrations: {skip: "internal command"},
     _shardsvrSetClusterParameter: {skip: "internal command"},
     _shardsvrSetUserWriteBlockMode: {skip: "internal command"},
@@ -787,6 +788,7 @@ let testCases = {
     transitionToDedicatedConfigServer: {skip: "does not accept read or write concern"},
     transitionToShardedCluster: {skip: "accepts only majority"},
     unshardCollection: {skip: "does not accept read or write concern"},
+    untrackUnshardedCollection: {skip: "does not accept read or write concern"},
     update: {
         setUp: function(conn) {
             assert.commandWorked(conn.getCollection(nss).insert({x: 1}, {writeConcern: {w: 1}}));

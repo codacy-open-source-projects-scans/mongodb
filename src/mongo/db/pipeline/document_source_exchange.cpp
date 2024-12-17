@@ -122,7 +122,7 @@ DocumentSourceExchange::DocumentSourceExchange(
       _resourceYielder(std::move(yielder)) {}
 
 DocumentSource::GetNextResult DocumentSourceExchange::doGetNext() {
-    return _exchange->getNext(pExpCtx->opCtx, _consumerId, _resourceYielder.get());
+    return _exchange->getNext(pExpCtx->getOperationContext(), _consumerId, _resourceYielder.get());
 }
 
 Exchange::Exchange(ExchangeSpec spec, std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
@@ -280,7 +280,7 @@ Ordering Exchange::extractOrdering(const BSONObj& keyPattern) {
 std::vector<FieldPath> Exchange::extractKeyPaths(const BSONObj& keyPattern) {
     std::vector<FieldPath> paths;
     for (auto& elem : keyPattern) {
-        paths.emplace_back(FieldPath{elem.fieldNameStringData()});
+        paths.emplace_back(elem.fieldNameStringData());
     }
     return paths;
 }

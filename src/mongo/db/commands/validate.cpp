@@ -27,11 +27,8 @@
  *    it in the license file.
  */
 
-
-#include <mutex>
 #include <set>
 #include <string>
-
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -43,8 +40,8 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection_validation.h"
-#include "mongo/db/catalog/validate_results.h"
+#include "mongo/db/catalog/validate/collection_validation.h"
+#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
@@ -165,6 +162,28 @@ void logCollStats(OperationContext* opCtx, const NamespaceString& nss) {
                       logAttrs(nss),
                       "error"_attr = ex.toStatus());
     }
+}
+
+boost::optional<std::string> getConfigOverrideOrThrow(const BSONElement& raw) {
+    if (!raw) {
+        return boost::none;
+    }
+    StringData chosenConfig = raw.valueStringDataSafe();
+    // Only a specific subset of valid configurations are allowlisted here. This is mostly to avoid
+    // having complex logic to parse/sanitize the user-chosen configuration string.
+    static const char* allowed[] = {
+        "",
+        "dump_address",
+        "dump_blocks",
+        "dump_layout",
+        "dump_pages",
+        "dump_tree_shape",
+    };
+    static const char** allowedEnd = allowed + std::size(allowed);
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "Unrecognized configuration string " << chosenConfig,
+            std::find(allowed, allowedEnd, chosenConfig) != allowedEnd);
+    return {raw.str()};
 }
 
 }  // namespace
@@ -326,6 +345,13 @@ public:
                                     << " supported with any other options");
         }
 
+        const auto rawConfigOverride = cmdObj["wiredtigerVerifyConfigurationOverride"];
+        if (rawConfigOverride && !(fullValidate || enforceFastCount)) {
+            uasserted(ErrorCodes::InvalidOptions,
+                      str::stream() << "Overriding the verify configuration is only supported with "
+                                       "full validation set.");
+        }
+
         // Background validation uses point-in-time catalog lookups. This requires an instance of
         // the collection at the checkpoint timestamp. Because timestamps aren't used in standalone
         // mode, this prevents the CollectionCatalog from being able to establish the correct
@@ -397,9 +423,9 @@ public:
             validateMode,
             repairMode,
             logDiagnostics,
-            cmdObj["enforceTimeseriesBucketsAreAlwaysCompressed"].trueValue(),
             getTestCommandsEnabled() ? (ValidationVersion)bsonTestValidationVersion
-                                     : currentValidationVersion);
+                                     : currentValidationVersion,
+            getConfigOverrideOrThrow(rawConfigOverride));
 
         if (!serverGlobalParams.quiet.load()) {
             LOGV2(20514,
@@ -410,7 +436,9 @@ public:
                   "enforceFastCount"_attr = options.enforceFastCountRequested(),
                   "checkBSONConformance"_attr = options.isBSONConformanceValidation(),
                   "fixMultiKey"_attr = options.adjustMultikey(),
-                  "repair"_attr = options.fixErrors());
+                  "repair"_attr = options.fixErrors(),
+                  "wiredtigerVerifyConfigurationOverride"_attr =
+                      options.verifyConfigurationOverride());
         }
 
         // Only one validation per collection can be in progress, the rest wait.
@@ -458,6 +486,19 @@ public:
             result.append("advice",
                           "A corrupt namespace has been detected. See "
                           "http://dochub.mongodb.org/core/data-recovery for recovery steps.");
+            // Errors stemming from structural damage of the index or record store make it unsafe to
+            // open a cursor.
+            bool indexHasStructuralDamage =
+                std::any_of(validateResults.getIndexResultsMap().begin(),
+                            validateResults.getIndexResultsMap().end(),
+                            [](auto& indexPair) { return indexPair.second.hasStructuralDamage(); });
+
+            if (validateResults.hasStructuralDamage() || indexHasStructuralDamage) {
+                LOGV2_WARNING(
+                    9635600,
+                    "Skipping logCollStats due to structural damage detected in collection");
+                return true;
+            }
             logCollStats(opCtx, nss);
         }
 

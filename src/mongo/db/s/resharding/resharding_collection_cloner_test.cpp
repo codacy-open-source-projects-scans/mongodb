@@ -104,7 +104,7 @@ public:
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) final {
         std::unique_ptr<Pipeline, PipelineDeleter> pipeline(
-            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->opCtx));
+            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->getOperationContext()));
 
         pipeline->addInitialSource(
             DocumentSourceMock::createForTest(_mockResults, pipeline->getContext()));
@@ -112,12 +112,13 @@ public:
     }
 
     std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
         Pipeline* pipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
-        boost::optional<BSONObj> readConcern = boost::none) final {
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) final {
         return preparePipelineForExecution(pipeline, shardTargetingPolicy, std::move(readConcern));
     }
 

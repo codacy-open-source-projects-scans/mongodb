@@ -14,7 +14,7 @@ const collName = "testcoll";
 const rst = new ReplSetTest(
     {nodes: [{}, {rsConfig: {priority: 0}}, {arbiter: true}], settings: {chainingAllowed: false}});
 rst.startSet();
-rst.initiate();
+rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 var primary = rst.getPrimary();
 var primaryDB = primary.getDB(dbName);
@@ -77,11 +77,11 @@ function finishTest(
     configureFailPoint(primaryAdmin, failPoint, {}, "off");
 
     jsTestLog("Waiting for initial sync to complete.");
-    rst.waitForState(secondary, ReplSetTest.State.SECONDARY);
+    rst.awaitSecondaryNodes(null, [secondary]);
 
     // Wait until the primary transitioned to SECONDARY state.
     joinStepDownThread();
-    rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+    rst.awaitSecondaryNodes(null, [primary]);
 
     jsTestLog("Validating initial sync data.");
     let res = assert.commandWorked(secondary.adminCommand({replSetGetStatus: 1}));

@@ -111,11 +111,6 @@ public:
     static ESCToken generateESCToken(CollectionsLevel1Token token);
 
     /**
-     * ECCToken = HMAC(CollectionsLevel1Token, 3) = K^{ecc}_f
-     */
-    static ECCToken generateECCToken(CollectionsLevel1Token token);
-
-    /**
      * ECOCToken = HMAC(CollectionsLevel1Token, 4) = K^{ecoc}_f
      */
     static ECOCToken generateECOCToken(CollectionsLevel1Token token);
@@ -137,12 +132,6 @@ public:
      * ESCDerivedFromDataToken = HMAC(ESCToken, v) = K^{esc}_{f,v}
      */
     static ESCDerivedFromDataToken generateESCDerivedFromDataToken(ESCToken token,
-                                                                   ConstDataRange value);
-
-    /**
-     * ECCDerivedFromDataToken = HMAC(ECCToken, v) = K^{ecc}_{f,v}
-     */
-    static ECCDerivedFromDataToken generateECCDerivedFromDataToken(ECCToken token,
                                                                    ConstDataRange value);
 
     /**
@@ -170,13 +159,6 @@ public:
     static ESCDerivedFromDataTokenAndContentionFactorToken
     generateESCDerivedFromDataTokenAndContentionFactorToken(ESCDerivedFromDataToken token,
                                                             FLECounter counter);
-
-    /**
-     * ECCDerivedFromDataTokenAndContentionFactorToken = HMAC(ECCDerivedFromDataToken, u)
-     */
-    static ECCDerivedFromDataTokenAndContentionFactorToken
-    generateECCDerivedFromDataTokenAndContentionFactorToken(ECCDerivedFromDataToken token,
-                                                            FLECounter counter);
 };
 
 /**
@@ -201,18 +183,6 @@ public:
      */
     static ESCTwiceDerivedValueToken generateESCTwiceDerivedValueToken(
         ESCDerivedFromDataTokenAndContentionFactorToken token);
-
-    /**
-     * ECCTwiceDerivedTagToken = HMAC(ECCDerivedFromDataTokenAndContentionFactorToken, 1)
-     */
-    static ECCTwiceDerivedTagToken generateECCTwiceDerivedTagToken(
-        ECCDerivedFromDataTokenAndContentionFactorToken token);
-
-    /**
-     * ECCTwiceDerivedValueToken = HMAC(ECCDerivedFromDataTokenAndContentionFactorToken, 2)
-     */
-    static ECCTwiceDerivedValueToken generateECCTwiceDerivedValueToken(
-        ECCDerivedFromDataTokenAndContentionFactorToken token);
 };
 
 /**
@@ -637,169 +607,6 @@ public:
 };
 
 /**
- * ECC Collection
- * - a record of deleted documents
- *
- * {
- *    _id : HMAC(ECCTwiceDerivedTagToken, type || pos )
- *    value : Encrypt(ECCTwiceDerivedValueToken,  (count || count) OR (start || end))
- * }
- *
- * where
- *  type = uint64_t
- *  pos = uint64_t
- *  value is either:
- *       count, count = uint64_t  // Null records
- *    OR
- *       start = uint64_t  // Other records
- *       end = uint64_t
- *
- * where type:
- *   0 - null record
- *   1 - regular record or compaction record
- *
- * where start and end:
- *   [1..UINT_64_MAX) - regular start and end
- *   UINT64_MAX - compaction placeholder
- *
- * Record types:
- *
- * Document Counts
- * Null: 0 or 1
- * Regular: 0 or more
- * Compaction: 0 or 1
- *
- * Null record:
- * {
- *    _id : HMAC(ECCTwiceDerivedTagToken, null )
- *    value : Encrypt(ECCTwiceDerivedValueToken,  count || count)
- * }
- *
- * Regular record:
- * {
- *    _id : HMAC(ECCTwiceDerivedTagToken, pos )
- *    value : Encrypt(ECCTwiceDerivedValueToken,  start || end)
- * }
- *
- * Compaction placeholder record:
- * {
- *    _id : HMAC(ECCTwiceDerivedTagToken, pos )
- *    value : Encrypt(ECCTwiceDerivedValueToken,  UINT64_MAX || UINT64_MAX)
- * }
- *
- * PlainText of tag
- * struct {
- *    uint64_t type;
- *    uint64_t pos;
- * }
- *
- * PlainText of value for null records
- * struct {
- *    uint64_t count;
- *    uint64_t ignored;
- * }
- *
- * PlainText of value for non-null records
- * struct {
- *    uint64_t start;
- *    uint64_t end;
- * }
- */
-enum class ECCValueType : uint64_t {
-    kNormal = 0,
-    kCompactionPlaceholder = 1,
-};
-
-
-struct ECCNullDocument {
-    // Id is not included as it HMAC generated and cannot be reversed
-    uint64_t position;
-};
-
-
-struct ECCDocument {
-    // Id is not included as it HMAC generated and cannot be reversed
-    ECCValueType valueType;
-    uint64_t start;
-    uint64_t end;
-};
-
-inline bool operator==(const ECCDocument& left, const ECCDocument& right) {
-    return (left.valueType == right.valueType && left.start == right.start &&
-            left.end == right.end);
-}
-
-inline bool operator<(const ECCDocument& left, const ECCDocument& right) {
-    if (left.start == right.start) {
-        if (left.end == right.end) {
-            return left.valueType < right.valueType;
-        }
-        return left.end < right.end;
-    }
-    return left.start < right.start;
-}
-
-class ECCCollection {
-public:
-    /**
-     * Generate the _id value
-     */
-    static PrfBlock generateId(ECCTwiceDerivedTagToken tagToken, boost::optional<uint64_t> index);
-
-    /**
-     * Generate a null document which will be the "first" document for a given field.
-     */
-    static BSONObj generateNullDocument(ECCTwiceDerivedTagToken tagToken,
-                                        ECCTwiceDerivedValueToken valueToken,
-                                        uint64_t count);
-
-    /**
-     * Generate a regular ECC document for (count).
-     *
-     * Note: it is stored as (count, count)
-     */
-    static BSONObj generateDocument(ECCTwiceDerivedTagToken tagToken,
-                                    ECCTwiceDerivedValueToken valueToken,
-                                    uint64_t index,
-                                    uint64_t count);
-
-    /**
-     * Generate a regular ECC document for (start, end)
-     */
-    static BSONObj generateDocument(ECCTwiceDerivedTagToken tagToken,
-                                    ECCTwiceDerivedValueToken valueToken,
-                                    uint64_t index,
-                                    uint64_t start,
-                                    uint64_t end);
-
-    /**
-     * Generate a compaction ECC document.
-     */
-    static BSONObj generateCompactionDocument(ECCTwiceDerivedTagToken tagToken,
-                                              ECCTwiceDerivedValueToken valueToken,
-                                              uint64_t index);
-
-    /**
-     * Decrypt the null document.
-     */
-    static StatusWith<ECCNullDocument> decryptNullDocument(ECCTwiceDerivedValueToken valueToken,
-                                                           const BSONObj& doc);
-
-    /**
-     * Decrypt a regular document.
-     */
-    static StatusWith<ECCDocument> decryptDocument(ECCTwiceDerivedValueToken valueToken,
-                                                   const BSONObj& doc);
-
-    /**
-     * Search for the highest document id for a given field/value pair based on the token.
-     */
-    static boost::optional<uint64_t> emuBinary(const FLEStateCollectionReader& reader,
-                                               ECCTwiceDerivedTagToken tagToken,
-                                               ECCTwiceDerivedValueToken valueToken);
-};
-
-/**
  * Type safe abstraction over the key vault to support unit testing. Used by the various decryption
  * routines to retrieve the correct keys.
  *
@@ -866,10 +673,8 @@ public:
      * {
      *   d : EDCDerivedFromDataTokenAndContentionFactorToken
      *   s : ESCDerivedFromDataTokenAndContentionFactorToken
-     *   c : ECCDerivedFromDataTokenAndContentionFactorToken
-     *   p : Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken ||
-     * ECCDerivedFromDataTokenAndContentionFactorToken) v : Encrypt(K_KeyId, value),
-     *   e : ServerDataEncryptionLevel1Token,
+     *   p : Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken) v :
+     * Encrypt(K_KeyId, value), e : ServerDataEncryptionLevel1Token,
      * }
      */
     static BSONObj transformPlaceholders(const BSONObj& obj, FLEKeyVault* keyVault);
@@ -907,60 +712,28 @@ public:
 /*
  * Values of ECOC documents
  *
- * Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken ||
- * ECCDerivedFromDataTokenAndContentionFactorToken)
+ * Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken)
  *
  * struct {
  *    uint8_t[32] esc;
- *    uint8_t[32] ecc;
  * }
  */
 struct EncryptedStateCollectionTokens {
 public:
-    EncryptedStateCollectionTokens(ESCDerivedFromDataTokenAndContentionFactorToken s,
-                                   ECCDerivedFromDataTokenAndContentionFactorToken c)
-        : esc(s), ecc(c) {}
+    EncryptedStateCollectionTokens(ESCDerivedFromDataTokenAndContentionFactorToken s) : esc(s) {}
 
     static StatusWith<EncryptedStateCollectionTokens> decryptAndParse(ECOCToken token,
                                                                       ConstDataRange cdr);
     StatusWith<std::vector<uint8_t>> serialize(ECOCToken token);
 
     ESCDerivedFromDataTokenAndContentionFactorToken esc;
-    ECCDerivedFromDataTokenAndContentionFactorToken ecc;
-};
-
-/*
- * Values of ECOC documents in Queryable Encryption protocol version 2
- *
- * Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken)
- *
- * struct {
- *    uint8_t[32] esc;
- *    uint8_t isLeaf; // Optional: 0 or 1 for range operations, absent for equality.
- * }
- */
-struct EncryptedStateCollectionTokensV2 {
-public:
-    EncryptedStateCollectionTokensV2(ESCDerivedFromDataTokenAndContentionFactorToken s,
-                                     boost::optional<bool> leaf)
-        : esc(s), isLeaf(std::move(leaf)) {}
-    static StatusWith<EncryptedStateCollectionTokensV2> decryptAndParse(ECOCToken token,
-                                                                        ConstDataRange cdr);
-    StatusWith<std::vector<uint8_t>> serialize(ECOCToken token);
-
-    bool isEquality() const {
-        return isLeaf == boost::none;
-    }
-
-    bool isRange() const {
-        return isLeaf != boost::none;
-    }
-
-    ESCDerivedFromDataTokenAndContentionFactorToken esc;
-    boost::optional<bool> isLeaf;
 };
 
 struct ECOCCompactionDocumentV2 {
+
+    static ECOCCompactionDocumentV2 parseAndDecrypt(const BSONObj& document,
+                                                    const ECOCToken& token);
+
     bool operator==(const ECOCCompactionDocumentV2& other) const {
         return (fieldName == other.fieldName) && (esc == other.esc);
     }
@@ -983,28 +756,6 @@ struct ECOCCompactionDocumentV2 {
     ESCDerivedFromDataTokenAndContentionFactorToken esc;
     boost::optional<bool> isLeaf;
     boost::optional<AnchorPaddingRootToken> anchorPaddingRootToken;
-};
-
-/**
- * ECOC Collection schema
- * {
- *    _id : ObjectId() -- omitted so MongoDB can auto choose it
- *    fieldName : String,S
- *    value : Encrypt(ECOCToken, ESCDerivedFromDataTokenAndContentionFactorToken)
- * }
- *
- * where
- *  value comes from client, see EncryptedStateCollectionTokens or
- * FLE2InsertUpdatePayload.getEncryptedTokens()
- *
- * Note:
- * - ECOC is a set of documents, they are unordered
- */
-class ECOCCollection {
-public:
-    static BSONObj generateDocument(StringData fieldName, ConstDataRange payload);
-
-    static ECOCCompactionDocumentV2 parseAndDecryptV2(const BSONObj& doc, ECOCToken token);
 };
 
 /**
@@ -1173,7 +924,6 @@ struct FLE2UnindexedEncryptedValueV2 {
 struct FLEEdgeToken {
     EDCDerivedFromDataTokenAndContentionFactorToken edc;
     ESCDerivedFromDataTokenAndContentionFactorToken esc;
-    ECCDerivedFromDataTokenAndContentionFactorToken ecc;
 };
 
 /**
@@ -1402,7 +1152,7 @@ public:
                                                   const BSONObj& encryptedFields);
 
     /**
-     * Get a schema from EncryptionInformation and ensure the esc/ecc/ecoc are setup correctly.
+     * Get a schema from EncryptionInformation and ensure the esc/ecoc are setup correctly.
      */
     static EncryptedFieldConfig getAndValidateSchema(const NamespaceString& nss,
                                                      const EncryptionInformation& ei);
@@ -1606,8 +1356,6 @@ public:
 
     static PrfBlock prf(ConstDataRange key, uint64_t value);
 
-    static void checkEFCForECC(const EncryptedFieldConfig& efc);
-
     /**
      * Decrypt AES-256-CTR encrypted data. Exposed for benchmarking purposes.
      */
@@ -1619,11 +1367,6 @@ public:
  * Utility functions manipulating buffers.
  */
 PrfBlock PrfBlockfromCDR(const ConstDataRange& block);
-
-template <typename TokenT>
-TokenT FLETokenFromCDR(const ConstDataRange& block) {
-    return TokenT(PrfBlockfromCDR(block));
-}
 
 ConstDataRange binDataToCDR(BSONElement element);
 

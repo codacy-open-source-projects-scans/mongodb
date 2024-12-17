@@ -56,10 +56,13 @@ executor:
     tests: true
   config:
     shell_options:
+      eval: >-
+        await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
           runningWithCausalConsistency: true
           runningWithBalancer: true
+          implicitlyShardOnCreateCollectionOnly: true
           fsmPreOverridesLoadedCallback: import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
 
   hooks:
@@ -77,7 +80,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     shard_options:
       mongod_options:
         oplogSize: 1024
@@ -85,10 +87,8 @@ executor:
       set_parameters:
         enableTestCommands: 1
         roleGraphInvalidationIsFatal: 1
-        analyzeShardKeyMaxNumStaleVersionRetries: 2
         queryAnalysisWriterIntervalSecs: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
         # Orphan cleanup happening too quickly can cause intermittent test failures due to
         # inconsistent secondary reads.
         orphanCleanupDelaySecs: 10

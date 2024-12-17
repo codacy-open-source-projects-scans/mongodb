@@ -36,21 +36,19 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/timeseries/metadata.h"
-#include "mongo/util/overloaded_visitor.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
-BucketMetadata::BucketMetadata(TrackingContext& trackingContext,
+BucketMetadata::BucketMetadata(tracking::Context& trackingContext,
                                BSONElement elem,
-                               const StringDataComparator* comparator,
                                boost::optional<StringData> trueMetaFieldName)
     : _metadata([&] {
           if (!elem) {
-              return allocator_aware::SharedBuffer<TrackingAllocator<void>>{
+              return allocator_aware::SharedBuffer<tracking::Allocator<void>>{
                   trackingContext.makeAllocator<void>()};
           }
 
-          allocator_aware::BSONObjBuilder<TrackingAllocator<void>> builder{
+          allocator_aware::BSONObjBuilder<tracking::Allocator<void>> builder{
               trackingContext.makeAllocator<void>()};
           // We will get an object of equal size, just with reordered fields.
           builder.bb().reserveBytes(elem.size());
@@ -58,8 +56,7 @@ BucketMetadata::BucketMetadata(TrackingContext& trackingContext,
           builder.doneFast();
           return builder.bb().release();
       }()),
-      _metadataElement(toBSON().firstElement()),
-      _comparator(comparator) {}
+      _metadataElement(toBSON().firstElement()) {}
 
 bool BucketMetadata::operator==(const BucketMetadata& other) const {
     return _metadataElement.binaryEqualValues(other._metadataElement);
@@ -76,10 +73,6 @@ BSONElement BucketMetadata::element() const {
 boost::optional<StringData> BucketMetadata::getMetaField() const {
     return _metadataElement ? boost::make_optional(_metadataElement.fieldNameStringData())
                             : boost::none;
-}
-
-const StringDataComparator* BucketMetadata::getComparator() const {
-    return _comparator;
 }
 
 }  // namespace mongo::timeseries::bucket_catalog

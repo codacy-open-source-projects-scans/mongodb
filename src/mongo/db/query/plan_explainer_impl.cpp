@@ -58,6 +58,7 @@
 #include "mongo/db/exec/text_match.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/query/cost_based_ranker/estimates_storage.h"
 #include "mongo/db/query/plan_explainer_impl.h"
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
@@ -191,6 +192,11 @@ size_t getDocsExamined(StageType type, const SpecificStats* specific) {
     } else if (STAGE_TEXT_OR == type) {
         const TextOrStats* spec = static_cast<const TextOrStats*>(specific);
         return spec->fetches;
+    } else if (STAGE_DISTINCT_SCAN == type) {
+        // If a FETCH stage is embedded within a covered DISTINCT_SCAN, the DISTINCT_SCAN will hold
+        // the 'docsExamined' value.
+        const DistinctScanStats* spec = static_cast<const DistinctScanStats*>(specific);
+        return spec->docsExamined;
     }
 
     return 0;
@@ -251,8 +257,25 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
     // Cost and cardinality of the stage.
     if (querySolutionNode && estimates.contains(querySolutionNode)) {
         const auto& est = estimates.at(querySolutionNode);
-        bob->append("cardinalityEstimate", est.cardinalty.toDouble());
         bob->append("costEstimate", est.cost.toDouble());
+        bob->append("cardinalityEstimate", est.outCE.toDouble());
+        // 'filterCE' is only distinct from 'outCE' for index scans, so we should only print in that
+        // case to avoid showing redundant information and confusing explain readers.
+        if (est.filterCE.has_value() && querySolutionNode->getType() == STAGE_IXSCAN) {
+            bob->append("filterNumKeysEstimate", est.filterCE->toDouble());
+        }
+        // Display 'inCE' as 'numKeys' for index scan and 'numDocs' for collection scan.
+        if (est.inCE.has_value()) {
+            double ce = est.inCE->toDouble();
+            if (querySolutionNode->getType() == STAGE_IXSCAN) {
+                bob->append("numKeysEstimate", ce);
+            } else {
+                bob->append("numDocsEstimate", ce);
+            }
+        }
+        BSONObjBuilder metadataBob(bob->subobjStart("estimatesMetadata"));
+        metadataBob.append("ceSource", toStringData(est.outCE.source()));
+        metadataBob.done();
     }
 
     // Display the BSON representation of the filter, if there is one.
@@ -379,8 +402,10 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
         bob->appendBool("isUnique", spec->isUnique);
         bob->appendBool("isSparse", spec->isSparse);
         bob->appendBool("isPartial", spec->isPartial);
-        bob->appendBool("isShardFiltering", spec->isShardFiltering);
-        bob->appendBool("isFetching", spec->isFetching);
+        if (spec->isShardFilteringDistinctScanEnabled) {
+            bob->appendBool("isShardFiltering", spec->isShardFiltering);
+            bob->appendBool("isFetching", spec->isFetching);
+        }
         bob->append("indexVersion", spec->indexVersion);
         bob->append("direction", spec->direction > 0 ? "forward" : "backward");
 
@@ -393,6 +418,13 @@ void statsToBSON(const stage_builder::PlanStageToQsnMap& planStageQsnMap,
 
         if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
             bob->appendNumber("keysExamined", static_cast<long long>(spec->keysExamined));
+            if (spec->isShardFilteringDistinctScanEnabled) {
+                // Because we push FETCH and SHARD_FILTERING stages into the DISTINCT_SCAN stage
+                // when applicable, we don't see FETCH's docsExamined or SHARD_FILTERING's
+                // chunkSkips in the explain output. We add them to DISTINCT_SCAN's explain here.
+                bob->appendNumber("docsExamined", static_cast<long long>(spec->docsExamined));
+                bob->appendNumber("chunkSkips", static_cast<long long>(spec->chunkSkips));
+            }
         }
     } else if (STAGE_FETCH == stats.stageType) {
         FetchStats* spec = static_cast<FetchStats*>(stats.specific.get());

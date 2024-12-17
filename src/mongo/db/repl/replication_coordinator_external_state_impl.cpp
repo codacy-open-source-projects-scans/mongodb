@@ -53,7 +53,6 @@
 #include "mongo/db/catalog/drop_collection.h"
 #include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/catalog_shard_feature_flag_gen.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
@@ -66,7 +65,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/namespace_string.h"
@@ -74,7 +73,6 @@
 #include "mongo/db/read_write_concern_defaults_gen.h"
 #include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/bgsync.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/isself.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/noop_writer.h"
@@ -136,7 +134,6 @@
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_identity_loader.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
@@ -192,13 +189,10 @@ auto makeThreadPool(const std::string& poolName, const std::string& threadName) 
     threadPoolOptions.threadNamePrefix = threadName + "-";
     threadPoolOptions.poolName = poolName;
     threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-        Client::initThread(threadName.c_str(),
-                           getGlobalServiceContext()->getService(ClusterRole::ShardServer));
-
-        {
-            stdx::lock_guard<Client> lk(cc());
-            cc().setSystemOperationUnkillableByStepdown(lk);
-        }
+        Client::initThread(threadName,
+                           getGlobalServiceContext()->getService(ClusterRole::ShardServer),
+                           Client::noSession(),
+                           ClientOperationKillableByStepdown{false});
 
         AuthorizationSession::get(cc())->grantInternalAuthorization();
     };
@@ -240,11 +234,9 @@ void scheduleWork(executor::TaskExecutor* executor, executor::TaskExecutor::Call
 
 ReplicationCoordinatorExternalStateImpl::ReplicationCoordinatorExternalStateImpl(
     ServiceContext* service,
-    DropPendingCollectionReaper* dropPendingCollectionReaper,
     StorageInterface* storageInterface,
     ReplicationProcess* replicationProcess)
     : _service(service),
-      _dropPendingCollectionReaper(dropPendingCollectionReaper),
       _storageInterface(storageInterface),
       _replicationProcess(replicationProcess) {
     uassert(ErrorCodes::BadValue, "A StorageInterface is required.", _storageInterface);
@@ -692,7 +684,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     // Enable write blocking bypass to allow dropping tmp collections when user writes are blocked.
     WriteBlockBypass::get(opCtx).set(true);
 
-    _shardingOnTransitionToPrimaryHook(opCtx);
+    _shardingOnTransitionToPrimaryHook(opCtx, replCoord->getTerm());
 
     _dropAllTempCollections(opCtx);
 
@@ -1007,12 +999,12 @@ void ReplicationCoordinatorExternalStateImpl::onStepDownHook() {
 void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
     if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepDown();
-        TransactionCoordinatorService::get(_service)->onStepDown();
+        TransactionCoordinatorService::get(_service)->interrupt();
     }
     if (ShardingState::get(_service)->enabled()) {
         if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
             // Called earlier for config servers.
-            TransactionCoordinatorService::get(_service)->onStepDown();
+            TransactionCoordinatorService::get(_service)->interrupt();
         }
 
         // TODO SERVER-84243: replace with cache for filtering metadata
@@ -1070,7 +1062,7 @@ void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTr
 }
 
 void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook(
-    OperationContext* opCtx) {
+    OperationContext* opCtx, long long term) {
     if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         Status status = ShardingCatalogManager::get(opCtx)->initializeConfigDatabaseIfNeeded(opCtx);
         if (!status.isOK() && status != ErrorCodes::AlreadyInitialized) {
@@ -1113,7 +1105,7 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         }
 
         PeriodicShardedIndexConsistencyChecker::get(_service).onStepUp(_service);
-        TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
+        TransactionCoordinatorService::get(_service)->initializeIfNeeded(opCtx, term);
 
         // TODO SERVER-84243: replace with cache for filtering metadata
         FilteringMetadataCache::get(_service)->onStepUp();
@@ -1126,7 +1118,7 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
 
             if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
                 // Called earlier for config servers.
-                TransactionCoordinatorService::get(_service)->onStepUp(opCtx);
+                TransactionCoordinatorService::get(_service)->initializeIfNeeded(opCtx, term);
                 FilteringMetadataCache::get(opCtx)->onStepUp();
             }
 
@@ -1152,8 +1144,10 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         // The code above will only be executed after a stepdown happens, however the code below
         // needs to be executed also on startup, and the enabled check might fail in shards during
         // startup. Create uuid index on config.rangeDeletions if needed
-        auto minKeyFieldName = RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinKey;
-        auto maxKeyFieldName = RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxKey;
+        const auto minKeyFieldName =
+            RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinFieldName;
+        const auto maxKeyFieldName =
+            RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxFieldName;
         Status indexStatus = createIndexOnConfigCollection(
             opCtx,
             NamespaceString::kRangeDeletionNamespace,
@@ -1353,32 +1347,6 @@ bool ReplicationCoordinatorExternalStateImpl::snapshotsEnabled() const {
 void ReplicationCoordinatorExternalStateImpl::notifyOplogMetadataWaiters(
     const OpTime& committedOpTime) {
     signalOplogWaiters();
-
-    // Notify the DropPendingCollectionReaper if there are any drop-pending collections with
-    // drop optimes before or at the committed optime.
-    if (auto earliestDropOpTime = _dropPendingCollectionReaper->getEarliestDropOpTime()) {
-        if (committedOpTime >= *earliestDropOpTime) {
-            auto reaper = _dropPendingCollectionReaper;
-            scheduleWork(
-                _taskExecutor.get(),
-                [committedOpTime, reaper](const executor::TaskExecutor::CallbackArgs& args) {
-                    if (MONGO_unlikely(dropPendingCollectionReaperHang.shouldFail())) {
-                        LOGV2(21310,
-                              "fail point dropPendingCollectionReaperHang enabled. "
-                              "Blocking until fail point is disabled",
-                              "committedOpTime"_attr = committedOpTime);
-                        dropPendingCollectionReaperHang.pauseWhileSet();
-                    }
-                    auto opCtx = cc().makeOperationContext();
-                    reaper->dropCollectionsOlderThan(opCtx.get(), committedOpTime);
-                });
-        }
-    }
-}
-
-boost::optional<OpTime> ReplicationCoordinatorExternalStateImpl::getEarliestDropPendingOpTime()
-    const {
-    return _dropPendingCollectionReaper->getEarliestDropOpTime();
 }
 
 double ReplicationCoordinatorExternalStateImpl::getElectionTimeoutOffsetLimitFraction() const {

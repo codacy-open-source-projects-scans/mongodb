@@ -68,7 +68,9 @@ TEST(WiredTigerRecordStoreTest, StorageSizeStatisticsDisabled) {
     std::unique_ptr<RecordStore> rs(harnessHelper.newRecordStore("a.b"));
 
     ServiceContext::UniqueOperationContext opCtx(harnessHelper.newOperationContext());
-    ASSERT_THROWS(rs->storageSize(opCtx.get()), AssertionException);
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+
+    ASSERT_THROWS(rs->storageSize(ru), AssertionException);
 }
 
 TEST(WiredTigerRecordStoreTest, SizeStorer1) {
@@ -86,20 +88,19 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+
         {
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
             for (int i = 0; i < N; i++) {
                 StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "a", 2, Timestamp());
                 ASSERT_OK(res.getStatus());
             }
-            uow.commit();
+            txn.commit();
         }
     }
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(N, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(N, rs->numRecords());
 
     rs.reset(nullptr);
 
@@ -112,14 +113,13 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
 
         WiredTigerRecordStore::Params params;
-        params.nss = NamespaceString::createNamespaceString_forTest("a.b");
         params.ident = ident;
         params.engineName = std::string{kWiredTigerEngineName};
-        params.isCapped = false;
         params.keyFormat = KeyFormat::Long;
         params.overwrite = true;
         params.isEphemeral = false;
         params.isLogged = false;
+        params.isChangeCollection = false;
         params.sizeStorer = &ss;
         params.tracksSizeAdjustments = true;
         params.forceUpdateWithFullDocument = false;
@@ -128,26 +128,22 @@ TEST(WiredTigerRecordStoreTest, SizeStorer1) {
             nullptr,
             WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx.get())),
             params);
-        ret->postConstructorInit(opCtx.get(), params.nss);
         rs.reset(ret);
     }
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(N, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(N, rs->numRecords());
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
 
-        WiredTigerRecoveryUnit* ru =
-            checked_cast<WiredTigerRecoveryUnit*>(shard_role_details::getRecoveryUnit(opCtx.get()));
+        auto& ru = *checked_cast<WiredTigerRecoveryUnit*>(
+            shard_role_details::getRecoveryUnit(opCtx.get()));
 
         {
-            WriteUnitOfWork uow(opCtx.get());
-            WT_SESSION* s = ru->getSession()->getSession();
+            StorageWriteTransaction txn(ru);
+            WT_SESSION* s = ru.getSession()->getSession();
             invariantWTOK(s->create(s, indexUri.c_str(), ""), s);
-            uow.commit();
+            txn.commit();
         }
 
         ss.flush(true);
@@ -201,40 +197,41 @@ protected:
 TEST_F(SizeStorerUpdateTest, Basic) {
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
     long long val = 5;
-    rs->updateStatsAfterRepair(opCtx.get(), val, val);
+    rs->updateStatsAfterRepair(val, val);
     ASSERT_EQUALS(getNumRecords(), val);
     ASSERT_EQUALS(getDataSize(), val);
 };
 
 TEST_F(SizeStorerUpdateTest, DataSizeModification) {
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
 
     RecordId recordId;
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         auto rId = rs->insertRecord(opCtx.get(), "12345", 5, Timestamp{1});
         ASSERT_TRUE(rId.isOK());
         recordId = rId.getValue();
-        uow.commit();
+        txn.commit();
     }
 
     ASSERT_EQ(getDataSize(), 5);
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         ASSERT_OK(rs->updateRecord(opCtx.get(), recordId, "54321", 5));
-        uow.commit();
+        txn.commit();
     }
     ASSERT_EQ(getDataSize(), 5);
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         ASSERT_OK(rs->updateRecord(opCtx.get(), recordId, "1234", 4));
-        uow.commit();
+        txn.commit();
     }
     ASSERT_EQ(getDataSize(), 4);
 
     RecordData oldRecordData("1234", 4);
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         const auto damageSource = "";
         DamageVector damageVector;
         damageVector.push_back(DamageEvent(0, 0, 0, 1));
@@ -244,10 +241,10 @@ TEST_F(SizeStorerUpdateTest, DataSizeModification) {
         oldRecordData = newDoc.getValue().getOwned();
         ASSERT_EQ(std::memcmp(oldRecordData.data(), "234", 3), 0);
         ASSERT_EQ(getDataSize(), 3);
-        uow.commit();
+        txn.commit();
     }
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         const auto damageSource = "3456";
         DamageVector damageVector;
         damageVector.push_back(DamageEvent(0, 4, 1, 2));
@@ -255,7 +252,7 @@ TEST_F(SizeStorerUpdateTest, DataSizeModification) {
             rs->updateWithDamages(opCtx.get(), recordId, oldRecordData, damageSource, damageVector)
                 .isOK());
         ASSERT_EQ(getDataSize(), 5);
-        uow.commit();
+        txn.commit();
     }
 }
 
@@ -264,19 +261,20 @@ TEST_F(SizeStorerUpdateTest, DataSizeModification) {
 // properly flushed to disk.
 TEST_F(SizeStorerUpdateTest, ReloadAfterRollbackAndFlush) {
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
 
     // Do an op for which the sizeInfo is persisted, for safety so we don't check against 0.
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         auto rId = rs->insertRecord(opCtx.get(), "12345", 5, Timestamp{1});
         ASSERT_TRUE(rId.isOK());
 
-        uow.commit();
+        txn.commit();
     }
 
     // An operation to rollback, with a flush between the original modification and the rollback.
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         auto rId = rs->insertRecord(opCtx.get(), "12345", 5, Timestamp{2});
         ASSERT_TRUE(rId.isOK());
 

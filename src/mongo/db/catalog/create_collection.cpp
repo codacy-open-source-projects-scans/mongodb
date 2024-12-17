@@ -69,7 +69,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
@@ -303,9 +303,7 @@ Status _createView(OperationContext* opCtx,
         // If the view creation rolls back, ensure that the Top entry created for the view is
         // deleted.
         shard_role_details::getRecoveryUnit(opCtx)->onRollback(
-            [nss, serviceContext = opCtx->getServiceContext()](OperationContext*) {
-                Top::get(serviceContext).collectionDropped(nss);
-            });
+            [nss](OperationContext* opCtx) { Top::getDecoration(opCtx).collectionDropped(nss); });
 
         if (MONGO_unlikely(failTimeseriesViewCreation.shouldFail([&nss](const BSONObj& data) {
                 const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns");
@@ -570,8 +568,8 @@ Status _createTimeseries(OperationContext* opCtx,
         // If the buckets collection and time-series view creation roll back, ensure that their
         // Top entries are deleted.
         shard_role_details::getRecoveryUnit(opCtx)->onRollback(
-            [serviceContext = opCtx->getServiceContext(), bucketsNs](OperationContext*) {
-                Top::get(serviceContext).collectionDropped(bucketsNs);
+            [bucketsNs](OperationContext* opCtx) {
+                Top::getDecoration(opCtx).collectionDropped(bucketsNs);
             });
 
 
@@ -728,9 +726,7 @@ Status _createCollection(
         // If the collection creation rolls back, ensure that the Top entry created for the
         // collection is deleted.
         shard_role_details::getRecoveryUnit(opCtx)->onRollback(
-            [nss, serviceContext = opCtx->getServiceContext()](OperationContext*) {
-                Top::get(serviceContext).collectionDropped(nss);
-            });
+            [nss](OperationContext* opCtx) { Top::getDecoration(opCtx).collectionDropped(nss); });
 
         // Even though 'collectionOptions' is passed by rvalue reference, it is not safe to move
         // because 'userCreateNS' may throw a WriteConflictException.
@@ -877,20 +873,6 @@ Status createCollectionForApplyOps(OperationContext* opCtx,
         auto opObserver = serviceContext->getOpObserver();
         if (currentName && *currentName == newCollName)
             return Status::OK();
-
-        if (currentName && currentName->isDropPendingNamespace()) {
-            LOGV2(20308,
-                  "CMD: create -- existing collection with conflicting UUID is in a drop-pending "
-                  "state",
-                  "newCollection"_attr = newCollName,
-                  "conflictingUUID"_attr = uuid,
-                  "existingCollection"_attr = *currentName);
-            return Status(ErrorCodes::NamespaceExists,
-                          str::stream()
-                              << "existing collection " << currentName->toStringForErrorMsg()
-                              << " with conflicting UUID " << uuid.toString()
-                              << " is in a drop-pending state.");
-        }
 
         // In the case of oplog replay, a future command may have created or renamed a
         // collection with that same name. In that case, renaming this future collection to

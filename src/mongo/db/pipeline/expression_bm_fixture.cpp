@@ -35,7 +35,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <random>
-#include <s2cellid.h>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
@@ -1951,6 +1950,15 @@ void ExpressionBenchmarkFixture::benchmarkSum(benchmark::State& state) {
                              << "$array"),
                         state,
                         std::vector<Document>(1, {{"array"_sd, array}}));
+}
+
+void ExpressionBenchmarkFixture::benchmarkRegexMatch(benchmark::State& state) {
+    benchmarkExpression(BSON("$regexFind" << BSON("input"
+                                                  << "$value"
+                                                  << "regex"
+                                                  << "cafe")),
+                        state,
+                        std::vector<Document>(1, {{"value"_sd, "cafe"_sd}}));
 }
 
 }  // namespace mongo

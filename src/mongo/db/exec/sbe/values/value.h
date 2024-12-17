@@ -85,10 +85,6 @@ namespace mongo {
  */
 class RecordId;
 
-namespace KeyString {
-class Value;
-}  // namespace KeyString
-
 class TimeZoneDatabase;
 class TimeZone;
 
@@ -269,6 +265,10 @@ inline constexpr bool isObject(TypeTags tag) noexcept {
 inline constexpr bool isArray(TypeTags tag) noexcept {
     return tag == TypeTags::Array || tag == TypeTags::ArraySet || tag == TypeTags::ArrayMultiSet ||
         tag == TypeTags::bsonArray;
+}
+
+inline constexpr bool isContainer(TypeTags tag) noexcept {
+    return isObject(tag) || isArray(tag) || tag == TypeTags::MultiMap;
 }
 
 inline constexpr bool isInList(TypeTags tag) noexcept {
@@ -985,13 +985,19 @@ public:
     void push_back(TypeTags tag, Value val) {
         if (tag != TypeTags::Nothing) {
             ValueGuard guard{tag, val};
+            MONGO_COMPILER_DIAGNOSTIC_PUSH
+            MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wstringop-overflow")
             _vals.push_back({tag, val});
+            MONGO_COMPILER_DIAGNOSTIC_POP
             guard.reset();
         }
     }
 
     void push_back(std::pair<TypeTags, Value> val) {
+        MONGO_COMPILER_DIAGNOSTIC_PUSH
+        MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wstringop-overflow")
         push_back(val.first, val.second);
+        MONGO_COMPILER_DIAGNOSTIC_POP
     }
 
     void pop_back() {

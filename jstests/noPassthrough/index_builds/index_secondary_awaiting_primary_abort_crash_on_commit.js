@@ -5,11 +5,16 @@
  * @tags: [
  *   requires_fcv_71,
  *   requires_replication,
+ *   incompatible_with_windows_tls,
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+
+// Because this test intentionally crashes the server, we instruct the
+// the shell to clean up after us and remove the core dump.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
 
 const rst = new ReplSetTest({
     nodes: [
@@ -87,7 +92,7 @@ assert.eq(MongoRunner.EXIT_ABORT, res.exitCode);
 // Expect the secondary to crash. Depending on timing, this can be either because the secondary was
 // waiting for a primary abort when a 'commitIndexBuild' is applied, or because the build fails and
 // tries to request an abort while a 'commitIndexBuild' is being applied.
-assert(rawMongoProgramOutput().match('Fatal assertion.*(7329403|7329407)'),
+assert(rawMongoProgramOutput(".*").match('Fatal assertion.*(7329403|7329407)'),
        'Receiving a commit from the primary for a failing index build should crash the secondary');
 
 createIdx();

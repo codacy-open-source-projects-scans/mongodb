@@ -8,7 +8,7 @@
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
 
-var dbname = 'dropbgindex';
+var dbname = jsTestName();
 var collection = 'jstests_feh';
 var size = 100;
 
@@ -44,7 +44,7 @@ var bulk = primaryDB.getCollection(collection).initializeUnorderedBulkOp();
 for (i = 0; i < size; ++i) {
     bulk.insert({i: Random.rand()});
 }
-assert.commandWorked(bulk.execute({w: 2, wtimeout: replTest.kDefaultTimeoutMS}));
+assert.commandWorked(bulk.execute({w: 2, wtimeout: replTest.timeoutMS}));
 
 assert.commandWorked(
     secondDB.adminCommand({configureFailPoint: "hangAfterStartingIndexBuild", mode: "alwaysOn"}));

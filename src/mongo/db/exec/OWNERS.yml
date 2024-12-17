@@ -2,34 +2,39 @@ version: 1.0.0
 filters:
   - "*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-classic-engine
+  - "OWNERS.yml":
+    approvers:
+      - 10gen/query-execution-staff-leads
+      - 10gen/query-optimization-staff-leads
+      - 10gen/query-integration-staff-leads
   - "*timeseries*":
     approvers:
       - 10gen/query-integration-timeseries
   - "text_*":
     approvers:
       - 10gen/query-integration-staff-leads
-  - "geo_*":
+  - "*near*":
     approvers:
       - 10gen/query-integration-geo
   - "cached_plan*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners
   - "multi_plan*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners
   - "subplan*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners
   - "plan_cache_util*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-plan-cache
   - "trial_period_utils*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners
   - "trial_run_tracker.h":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners
   - "trial_stage*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners

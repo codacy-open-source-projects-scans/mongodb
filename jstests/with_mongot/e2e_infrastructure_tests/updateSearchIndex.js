@@ -1,10 +1,7 @@
 /**
  * This test validates that updateSearchIndex works for standalone and sharded configurations.
- * @tags: [
- * requires_mongot_1_42
- * ]
  */
-import {updateSearchIndex} from "jstests/libs/search.js";
+import {createSearchIndex, dropSearchIndex, updateSearchIndex} from "jstests/libs/search.js";
 
 const testDb = db.getSiblingDB(jsTestName());
 const coll = testDb.underlyingSourceCollection;
@@ -25,8 +22,11 @@ assert.commandWorked(coll.insertMany([
     },
 ]));
 
-let indexDef = {mappings: {dynamic: true}, storedSource: {exclude: ["facts.state_motto"]}};
-assert.commandWorked(coll.createSearchIndex({name: "updateSearchIndexTest", definition: indexDef}));
+let indexDef = {
+    mappings: {dynamic: true, fields: {}},
+    storedSource: {exclude: ["facts.state_motto"]}
+};
+createSearchIndex(coll, {name: "updateSearchIndexTest", definition: indexDef});
 
 // This query returns all documents in the collection but it is kind of silly as a search query.
 let pipeline = [{
@@ -59,3 +59,5 @@ results.forEach(state => {
     assert(!state.facts.hasOwnProperty("state_flower"));
     assert(state.facts.hasOwnProperty("state_motto"));
 });
+
+dropSearchIndex(coll, {name: "updateSearchIndexTest"});

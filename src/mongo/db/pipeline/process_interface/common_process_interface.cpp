@@ -46,6 +46,8 @@
 #include "mongo/db/client.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/generic_argument_util.h"
+#include "mongo/db/list_collections_gen.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_time_tracker.h"
@@ -60,6 +62,7 @@
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/grid.h"
+#include "mongo/s/router_role.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
@@ -81,7 +84,7 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
     CurrentOpUserMode userMode,
     CurrentOpTruncateMode truncateMode,
     CurrentOpCursorMode cursorMode) const {
-    OperationContext* opCtx = expCtx->opCtx;
+    OperationContext* opCtx = expCtx->getOperationContext();
     AuthorizationSession* ctxAuth = AuthorizationSession::get(opCtx->getClient());
 
     std::vector<BSONObj> ops;
@@ -98,7 +101,7 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
 
                 // If currOp is being run for a particular tenant, ignore any ops that don't belong
                 // to it.
-                if (auto expCtxTenantId = expCtx->ns.tenantId()) {
+                if (auto expCtxTenantId = expCtx->getNamespaceString().tenantId()) {
                     auto userName = AuthorizationSession::get(client)->getAuthenticatedUserName();
                     if ((userName && userName->tenantId() &&
                          userName->tenantId() != expCtxTenantId) ||
@@ -115,9 +118,31 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
                 continue;
             }
 
+            // Here, we first convert the operation managed by the client object into its BSON
+            // representation that will be returned to the caller. Although its still possible that
+            // this operation/client is filtered out based on the configured mode of this call,
+            // it guarantees that the properties (specifically the 'active' status in this case) of
+            // the operation will not change between checking them and including them the results.
+            // Remember that other concurrent processes are updating the state of the underlying
+            // operation while this function is executing. Even though the 'client' object is
+            // locked, it holds pointers to other objects that are being concurrently modified. Note
+            // that this specific 'copy, then check' flow here specifically for the 'active' status
+            // is not comprehensive to all possible race-conditions of this type, where the state of
+            // the operation changes between a check and then copy, as changing the current code
+            // structure to address all possibilities of this type is complex, and will require a
+            // broader initiative.
+            // TODO SERVER-97558: Examine the current op fetching logic, and look for race-condition
+            // bugs of this nature that result in incorrect results being returned.
+            //
             // Delegate to the mongoD- or mongoS-specific implementation of
             // _reportCurrentOpForClient.
-            ops.emplace_back(_reportCurrentOpForClient(expCtx, client, truncateMode));
+            BSONObj candidateOpBSON = _reportCurrentOpForClient(expCtx, client, truncateMode);
+            if (connMode == CurrentOpConnectionsMode::kExcludeIdle &&
+                !candidateOpBSON["active"].Bool()) {
+                continue;
+            }
+
+            ops.emplace_back(std::move(candidateOpBSON));
         }
     };
 
@@ -143,9 +168,9 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
                         str::stream()
                             << "SerializationContext on the expCtx should not be empty, with ns: "
                             << ns->toStringForErrorMsg(),
-                        expCtx->serializationCtxt != SerializationContext::stateDefault());
-                cursorObj.append("ns",
-                                 NamespaceStringUtil::serialize(*ns, expCtx->serializationCtxt));
+                        expCtx->getSerializationContext() != SerializationContext::stateDefault());
+                cursorObj.append(
+                    "ns", NamespaceStringUtil::serialize(*ns, expCtx->getSerializationContext()));
             } else
                 cursorObj.append("ns", "");
 
@@ -231,24 +256,6 @@ bool CommonProcessInterface::keyPatternNamesExactPaths(const BSONObj& keyPattern
     return nFieldsMatched == uniqueKeyPaths.size();
 }
 
-boost::optional<ShardVersion> CommonProcessInterface::refreshAndGetCollectionVersion(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx, const NamespaceString& nss) const {
-    const auto cri = uassertStatusOK(Grid::get(expCtx->opCtx)
-                                         ->catalogCache()
-                                         ->getCollectionRoutingInfoWithRefresh(expCtx->opCtx, nss));
-
-    return cri.cm.isSharded() ? boost::make_optional(cri.getCollectionVersion()) : boost::none;
-}
-
-boost::optional<mongo::DatabaseVersion> CommonProcessInterface::refreshAndGetDatabaseVersion(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx, const DatabaseName& dbName) const {
-
-    auto db =
-        Grid::get(expCtx->opCtx)->catalogCache()->getDatabaseWithRefresh(expCtx->opCtx, dbName);
-
-    return db.isOK() ? boost::make_optional(db.getValue()->getVersion()) : boost::none;
-}
-
 std::vector<FieldPath> CommonProcessInterface::shardKeyToDocumentKeyFields(
     const std::vector<std::unique_ptr<FieldRef>>& keyPatternFields) {
     std::vector<FieldPath> result;
@@ -299,6 +306,108 @@ boost::optional<ShardId> CommonProcessInterface::findOwningShard(OperationContex
 
 std::string CommonProcessInterface::getHostAndPort(OperationContext* opCtx) const {
     return prettyHostNameAndPort(opCtx->getClient()->getLocalPort());
+}
+
+std::vector<DatabaseName> CommonProcessInterface::_getAllDatabasesOnAShardedCluster(
+    OperationContext* opCtx, boost::optional<TenantId> tenantId) {
+    tassert(9525808, "This method can only run on a sharded cluster", Grid::get(opCtx));
+
+    const std::vector<DatabaseType> databaseTypes = Grid::get(opCtx)->catalogClient()->getAllDBs(
+        opCtx, repl::ReadConcernLevel::kSnapshotReadConcern);
+
+    std::vector<DatabaseName> databases;
+    databases.reserve(databaseTypes.size());
+
+    std::transform(databaseTypes.begin(),
+                   databaseTypes.end(),
+                   std::back_inserter(databases),
+                   [](const DatabaseType& dbType) -> DatabaseName { return dbType.getDbName(); });
+
+    return databases;
+}
+
+std::vector<BSONObj> CommonProcessInterface::_runListCollectionsCommandOnAShardedCluster(
+    OperationContext* opCtx, const NamespaceString& nss, bool addPrimaryShard) {
+    tassert(9525809, "This method can only run on a sharded cluster", Grid::get(opCtx));
+
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+    const bool isCollectionless = nss.coll().empty();
+    return router.route(
+        opCtx,
+        "CommonMongodProcessInterface::_runListCollectionsCommandOnAShardedCluster",
+        [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
+            ListCollections listCollectionsCmd;
+            listCollectionsCmd.setDbName(nss.dbName());
+            if (!isCollectionless) {
+                listCollectionsCmd.setFilter(BSON("name" << nss.coll()));
+            }
+
+            listCollectionsCmd.setReadConcern(std::invoke([opCtx] {
+                const auto& readConcern = repl::ReadConcernArgs::get(opCtx);
+                tassert(9746001,
+                        str::stream() << "listCollections only allows 'local' read concern. Trying "
+                                         "to call it with '"
+                                      << repl::readConcernLevels::toString(readConcern.getLevel())
+                                      << "' read concern level.",
+                        readConcern.getLevel() == repl::ReadConcernLevel::kLocalReadConcern);
+                return readConcern;
+            }));
+
+            generic_argument_util::setDbVersionIfPresent(listCollectionsCmd, cdb->getVersion());
+
+            const auto shard = uassertStatusOK(
+                Grid::get(opCtx)->shardRegistry()->getShard(opCtx, cdb->getPrimary()));
+            Shard::QueryResponse resultCollections;
+
+            try {
+                resultCollections = uassertStatusOK(shard->runExhaustiveCursorCommand(
+                    opCtx,
+                    ReadPreferenceSetting::get(opCtx),
+                    nss.dbName(),
+                    listCollectionsCmd.toBSON(),
+                    opCtx->hasDeadline() ? opCtx->getRemainingMaxTimeMillis() : Milliseconds(-1)));
+            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+                return std::vector<BSONObj>();
+            }
+
+            auto addPrimaryField = [&cdb](BSONObj obj) {
+                BSONObjBuilder bob(obj.getOwned());
+                bob.append("primary", cdb->getPrimary());
+                return bob.obj();
+            };
+
+            if (isCollectionless) {
+                if (addPrimaryShard) {
+                    std::vector<BSONObj> collections;
+                    collections.reserve(resultCollections.docs.size());
+                    for (BSONObj& bsonObj : resultCollections.docs) {
+                        collections.emplace_back(addPrimaryField(bsonObj.getOwned()));
+                    }
+                    return collections;
+                }
+                return resultCollections.docs;
+            }
+
+            for (BSONObj& bsonObj : resultCollections.docs) {
+                // Return the entire 'listCollections' response for the first element which matches
+                // on name.
+                const BSONElement nameElement = bsonObj["name"];
+                if (!nameElement || nameElement.valueStringDataSafe() != nss.coll()) {
+                    continue;
+                }
+
+                return (addPrimaryShard ? std::vector<BSONObj>{addPrimaryField(bsonObj.getOwned())}
+                                        : std::vector<BSONObj>{bsonObj.getOwned()});
+
+                tassert(5983900,
+                        str::stream()
+                            << "Expected at most one collection with the name "
+                            << nss.toStringForErrorMsg() << ": " << resultCollections.docs.size(),
+                        resultCollections.docs.size() <= 1);
+            }
+
+            return std::vector<BSONObj>();
+        });
 }
 
 }  // namespace mongo

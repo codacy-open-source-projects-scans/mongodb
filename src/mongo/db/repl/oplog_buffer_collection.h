@@ -45,7 +45,6 @@
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/interruptible.h"
-#include "mongo/util/queue.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -144,9 +143,6 @@ public:
     Status seekToTimestamp(OperationContext* opCtx,
                            const Timestamp& ts,
                            SeekStrategy exact = SeekStrategy::kExact) final;
-
-    // Only currently used by the TenantMigrationRecipientService, so not part of a parent API.
-    Timestamp getLastPushedTimestamp() const;
 
     // ---- Testing API ----
     Timestamp getLastPoppedTimestamp_forTest() const;

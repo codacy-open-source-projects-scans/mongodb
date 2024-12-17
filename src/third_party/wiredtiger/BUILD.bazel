@@ -50,7 +50,11 @@ WT_CCFLAGS = [
     "@platforms//cpu:s390x": ["-Isrc/third_party/wiredtiger/src/checksum/zseries"],
     "//conditions:default": [],
 }) + select({
-    "@platforms//os:linux": ["-Wno-uninitialized"],
+    "@platforms//os:linux": [
+        "-Wno-uninitialized",
+        "-Wno-array-bounds",
+        "-Wno-format-overflow",
+    ],
     "//conditions:default": [],
 })
 
@@ -102,7 +106,7 @@ mongo_cc_library(
     ] + select({
         "@platforms//cpu:aarch64": WT_FILELIST_ARM64_HOST,
         "@platforms//cpu:x86_64": WT_FILELIST_X86_HOST,
-        "@platforms//cpu:ppc64le": WT_FILELIST_POWERPC_HOST,
+        "@platforms//cpu:ppc": WT_FILELIST_POWERPC_HOST,
         "@platforms//cpu:s390x": [
             WT_FILELIST_ZSERIES_HOST[0],
             ":wiredtiger_s390x_checksum_index_1",
@@ -157,5 +161,6 @@ mongo_cc_binary(
         "//conditions:default": [],
     }),
     local_defines = WT_DEFINES,
+    tags = ["dist_test"],
     deps = ["wiredtiger"],
 )

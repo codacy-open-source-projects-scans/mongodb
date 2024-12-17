@@ -34,7 +34,6 @@
 #include <boost/optional/optional.hpp>
 #include <map>
 #include <memory>
-#include <mutex>
 
 #include "mongo/db/auth/cluster_auth_mode.h"
 #include "mongo/db/namespace_string.h"

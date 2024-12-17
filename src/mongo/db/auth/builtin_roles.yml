@@ -253,6 +253,7 @@ roles:
           - getParameter
           - getShardMap
           - hostInfo
+          - listClusterCatalog
           - listDatabases
           - listSampledQueries
           - listSessions # clusterManager gets this also
@@ -359,7 +360,6 @@ roles:
           - flushRouterConfig # hostManager gets this also
           - cleanupOrphaned
           - getDefaultRWConcern # clusterMonitor gets this also
-          - runTenantMigration
           - setDefaultRWConcern
           - setFeatureCompatibilityVersion
           - setClusterParameter

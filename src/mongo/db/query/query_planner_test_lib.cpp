@@ -873,6 +873,15 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
             }
         }
 
+        BSONElement isFetching = distinctObj["isFetching"];
+        if (!isFetching.eoo() && isFetching.Bool() != node->isFetching) {
+            return {
+                ErrorCodes::Error{9245904},
+                str::stream()
+                    << "Provided JSON gave a 'distinct' stage with a different 'isFetching' field"
+                    << direction};
+        }
+
         return Status::OK();
     }
 
@@ -1101,8 +1110,9 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
 
         // Create an empty/dummy expression context without access to the operation context and
         // collator. This should be sufficient to parse a projection.
-        auto expCtx = make_intrusive<ExpressionContext>(
-            nullptr, nullptr, NamespaceString::createNamespaceString_forTest("test.dummy"));
+        auto expCtx = ExpressionContextBuilder{}
+                          .ns(NamespaceString::createNamespaceString_forTest("test.dummy"))
+                          .build();
         auto projection = projection_ast::parseAndAnalyze(
             expCtx,
             spec.Obj(),

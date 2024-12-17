@@ -221,6 +221,7 @@ enum class DocumentSourceType {
     kInternalDensify,                       // DocumentSourceInternalDensify
     kInternalGeoNearDistance,               // DocumentSourceInternalGeoNearDistance
     kInternalInhibitOptimization,           // DocumentSourceInternalInhibitOptimization
+    kInternalListCollections,               // DocumentSourceInternalListCollections
     kInternalProjection,                    // DocumentSourceInternalProjection
     kInternalReplaceRoot,                   // DocumentSourceInternalReplaceRoot
     kInternalSearchIdLookUp,                // DocumentSourceInternalSearchIdLookUp
@@ -234,6 +235,7 @@ enum class DocumentSourceType {
     kLimit,                                 // DocumentSourceLimit
     kListCatalog,                           // DocumentSourceListCatalog
     kListLocalSessions,                     // DocumentSourceListLocalSessions
+    kListMqlEntities,                       // DocumentSourceListMqlEntities
     kListSampledQueries,                    // DocumentSourceListSampledQueries
     kListSearchIndexes,                     // DocumentSourceListSearchIndexes
     kLookUp,                                // DocumentSourceLookUp
@@ -253,7 +255,6 @@ enum class DocumentSourceType {
     kReshardingOwnershipMatch,              // DocumentSourceReshardingOwnershipMatch
     kSample,                                // DocumentSourceSample
     kSampleFromRandomCursor,                // DocumentSourceSampleFromRandomCursor
-    kScore,                                 // DocumentSourceScore
     kSearch,                                // DocumentSourceSearch
     kSearchMeta,                            // DocumentSourceSearchMeta
     kSequentialDocumentCache,               // DocumentSourceSequentialDocumentCache
@@ -269,7 +270,7 @@ enum class DocumentSourceType {
     kValidateStub,                          // DocumentSourceValidateStub
     kVectorSearch,                          // DocumentSourceVectorSearch
     kWindowStub,                            // DocumentSourceWindowStub
-    kExternalApi,                           // DocumentSourceExternalApiStub
+    kHttps,                                 // DocumentSourceHttpsStub
 };
 
 class DocumentSource : public RefCountable {
@@ -291,6 +292,11 @@ public:
     using TransactionRequirement = StageConstraints::TransactionRequirement;
     using LookupRequirement = StageConstraints::LookupRequirement;
     using UnionRequirement = StageConstraints::UnionRequirement;
+
+    struct ParserRegistration {
+        DocumentSource::Parser parser;
+        boost::optional<FeatureFlag> featureFlag;
+    };
 
     /**
      * This is what is returned from the main DocumentSource API: getNext(). It is essentially a
@@ -418,6 +424,19 @@ public:
         };
     };
 
+    /**
+     * Describes context pipelineDependentDistributedPlanLogic() should take into account to make a
+     * decision about whether or not a document source can be pushed down to shards.
+     */
+    struct DistributedPlanContext {
+        // The pipeline up to but not including the current document source.
+        const Pipeline& pipelinePrefix;
+        // The pipeline after and not including the document source.
+        const Pipeline& pipelineSuffix;
+        // The set of paths provided by the shard key.
+        const boost::optional<OrderedPathSet>& shardKeyPaths;
+    };
+
     ~DocumentSource() override {}
 
     /**
@@ -464,7 +483,7 @@ public:
             return doGetNext();
         }
 
-        auto serviceCtx = pExpCtx->opCtx->getServiceContext();
+        auto serviceCtx = pExpCtx->getOperationContext()->getServiceContext();
         dassert(serviceCtx);
 
         auto timer = getOptTimer(serviceCtx);
@@ -580,7 +599,7 @@ public:
      * subpipelines, match the argument.
      */
     virtual bool validateOperationContext(const OperationContext* opCtx) const {
-        return getContext()->opCtx == opCtx;
+        return getContext()->getOperationContext() == opCtx;
     }
 
     virtual bool usedDisk() {
@@ -888,6 +907,21 @@ public:
     virtual boost::optional<DistributedPlanLogic> distributedPlanLogic() = 0;
 
     /**
+     * Check if a source is able to run in parallel across a distributed collection, given
+     * sharding context and that it will be evaluated _after_ pipelinePrefix, and _before_
+     * pipelineSuffix.
+     *
+     * For stages which do not have any pipeline-dependent behaviour, the default impl
+     * calls distributedPlanLogic.
+     *
+     * See distributedPlanLogic() for conditions and return values.
+     */
+    virtual boost::optional<DistributedPlanLogic> pipelineDependentDistributedPlanLogic(
+        const DistributedPlanContext& ctx) {
+        return distributedPlanLogic();
+    }
+
+    /**
      * Returns true if it would be correct to execute this stage in parallel across the shards in
      * cases where the final stage is a stage which can perform a write operation, such as $merge.
      * For example, a $group stage which is just merging the groups from the shards can be run in
@@ -969,6 +1003,14 @@ protected:
     }};
 
 private:
+    // Give access to 'parserMap' for the implementation of $listMqlEntities but hiding 'parserMap'
+    // from all other DocumentSource implementations.
+    friend class DocumentSourceListMqlEntities;
+
+    // Used to keep track of which DocumentSources are registered under which name. Initialized
+    // during process initialization and const thereafter.
+    static StringMap<ParserRegistration> parserMap;
+
     CommonStats _commonStats;
 
     /**

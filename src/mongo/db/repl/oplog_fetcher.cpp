@@ -35,7 +35,6 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
 #include <fmt/format.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 #include <algorithm>
@@ -59,7 +58,6 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_auth.h"
@@ -81,7 +79,6 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/intrusive_counter.h"
-#include "mongo/util/net/ssl_options.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
@@ -421,13 +418,6 @@ void OplogFetcher::_runQuery(const executor::TaskExecutor::CallbackArgs& callbac
 
     _setMetadataWriterAndReader();
     auto cursorStatus = _createNewCursor(true /* initialFind */);
-    if (!cursorStatus.isOK()) {
-        invariant(_config.forTenantMigration);
-        // If we are a TenantOplogFetcher, we never retry as we will always restart the entire
-        // TenantMigrationRecipient state machine on failure. So instead, we just fail and exit.
-        _finishCallback(cursorStatus);
-        return;
-    }
     while (true) {
         Status status{Status::OK()};
         {
@@ -457,10 +447,7 @@ void OplogFetcher::_runQuery(const executor::TaskExecutor::CallbackArgs& callbac
                 ChangeSyncSourceAction::kContinueSyncing;
 
             // Recreate a cursor if we have enough retries left.
-            // If we are a TenantOplogFetcher, we never retry as we will always restart the
-            // TenantMigrationRecipient state machine on failure. So instead, we just fail and exit.
-            if (!stopFetching && _oplogFetcherRestartDecision->shouldContinue(this, brStatus) &&
-                !_config.forTenantMigration) {
+            if (!stopFetching && _oplogFetcherRestartDecision->shouldContinue(this, brStatus)) {
                 hangBeforeOplogFetcherRetries.pauseWhileSet();
                 _cursor.reset();
                 continue;
@@ -584,21 +571,15 @@ void OplogFetcher::_setMetadataWriterAndReader() {
 AggregateCommandRequest OplogFetcher::_makeAggregateCommandRequest(long long maxTimeMs,
                                                                    Timestamp startTs) const {
     auto opCtx = cc().makeOperationContext();
-    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
-    boost::intrusive_ptr<ExpressionContext> expCtx =
-        make_intrusive<ExpressionContext>(opCtx.get(),
-                                          boost::none, /* explain */
-                                          false,       /* fromRouter */
-                                          false,       /* needsMerge */
-                                          true,        /* allowDiskUse */
-                                          true,        /* bypassDocumentValidation */
-                                          false,       /* isMapReduceCommand */
-                                          _nss,
-                                          boost::none, /* runtimeConstants */
-                                          nullptr,     /* collator */
-                                          MongoProcessInterface::create(opCtx.get()),
-                                          std::move(resolvedNamespaces),
-                                          boost::none); /* collUUID */
+    StringMap<ResolvedNamespace> resolvedNamespaces;
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx.get())
+                      .mongoProcessInterface(MongoProcessInterface::create(opCtx.get()))
+                      .ns(_nss)
+                      .resolvedNamespace(std::move(resolvedNamespaces))
+                      .allowDiskUse(true)
+                      .bypassDocumentValidation(true)
+                      .build();
     Pipeline::SourceContainer stages;
     // Match oplog entries greater than or equal to the last fetched timestamp.
     BSONObjBuilder builder(BSON("$or" << BSON_ARRAY(_config.queryFilter << BSON("ts" << startTs))));
@@ -689,27 +670,9 @@ Status OplogFetcher::_createNewCursor(bool initialFind) {
                                                              : _getRetriedFindMaxTime());
     _setSocketTimeout(maxTimeMs);
 
-    if (_config.forTenantMigration) {
-        // We set 'secondaryOk'=false here to avoid duplicating OP_MSG fields since we already
-        // set the request metadata readPreference to `secondaryPreferred`.
-        auto ret = DBClientCursor::fromAggregationRequest(
-            _conn.get(),
-            _makeAggregateCommandRequest(maxTimeMs, _getLastOpTimeFetched().getTimestamp()),
-            false /* secondaryOk */,
-            oplogFetcherUsesExhaust);
-        if (!ret.isOK()) {
-            LOGV2_DEBUG(5761701,
-                        2,
-                        "Failed to create aggregation cursor in TenantOplogFetcher",
-                        "status"_attr = ret.getStatus());
-            return ret.getStatus();
-        }
-        _cursor = std::move(ret.getValue());
-    } else {
-        auto findCmd = _makeFindCmdRequest(maxTimeMs);
-        _cursor = std::make_unique<DBClientCursor>(
-            _conn.get(), std::move(findCmd), ReadPreferenceSetting{}, oplogFetcherUsesExhaust);
-    }
+    auto findCmd = _makeFindCmdRequest(maxTimeMs);
+    _cursor = std::make_unique<DBClientCursor>(
+        _conn.get(), std::move(findCmd), ReadPreferenceSetting{}, oplogFetcherUsesExhaust);
 
     _firstBatch = true;
 
@@ -723,11 +686,9 @@ StatusWith<OplogFetcher::Documents> OplogFetcher::_getNextBatch() {
         Timer timer;
         if (!_cursor) {
             // An error occurred and we should recreate the cursor.
-            // The OplogFetcher uses an aggregation command in tenant migrations, which does not
-            // support tailable cursors. When recreating the cursor, use the longer initial max time
+            // When recreating the cursor, use the longer initial max time
             // to avoid timing out.
-            const bool initialFind = _config.forTenantMigration;
-            auto status = _createNewCursor(initialFind /* initialFind */);
+            auto status = _createNewCursor(false);
             if (!status.isOK()) {
                 return status;
             }
@@ -740,18 +701,15 @@ StatusWith<OplogFetcher::Documents> OplogFetcher::_getNextBatch() {
             // indicate a problem with the sync source.
             // We can't call `init()` when using an aggregate command because
             // `DBClientCursor::fromAggregationRequest` will already have processed the `cursorId`.
-            if (!_config.forTenantMigration && !_cursor->init()) {
+            if (!_cursor->init()) {
                 _cursor.reset();
                 return {ErrorCodes::InvalidSyncSource,
                         str::stream() << "Oplog fetcher could not create cursor on source: "
                                       << _config.source};
             }
 
-            // Aggregate commands do not support tailable cursors outside of change streams.
-            if (!_config.forTenantMigration) {
-                // This will also set maxTimeMS on the generated getMore command.
-                _cursor->setAwaitDataTimeoutMS(_awaitDataTimeout);
-            }
+            // This will also set maxTimeMS on the generated getMore command.
+            _cursor->setAwaitDataTimeoutMS(_awaitDataTimeout);
 
             // The 'find' command has already been executed, so reset the socket timeout to reflect
             // the awaitData timeout with a network buffer.
@@ -836,8 +794,7 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
             },
             [&](const BSONObj& data) {
                 auto opCtx = cc().makeOperationContext();
-                boost::intrusive_ptr<ExpressionContext> expCtx(
-                    new ExpressionContext(opCtx.get(), nullptr, _nss));
+                auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx.get()).ns(_nss).build();
                 Matcher m(data["document"].Obj(), expCtx);
                 // TODO SERVER-46240: Handle batchSize 1 in DBClientCursor.
                 // Due to a bug in DBClientCursor, it actually uses batchSize 2 if the given
@@ -904,8 +861,7 @@ Status OplogFetcher::_onSuccessfulBatch(const Documents& documents) {
             firstDocToApply++;
         } else if (!_config.queryFilter.isEmpty()) {
             auto opCtx = cc().makeOperationContext();
-            auto expCtx =
-                make_intrusive<ExpressionContext>(opCtx.get(), nullptr /* collator */, _nss);
+            auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx.get()).ns(_nss).build();
             Matcher m(_config.queryFilter, expCtx);
             if (!m.matches(*firstDocToApply))
                 firstDocToApply++;

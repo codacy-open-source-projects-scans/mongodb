@@ -73,6 +73,9 @@ function retryOnRetryableError(func, numRetries, sleepMs, additionalCodesToRetry
     additionalCodesToRetry = additionalCodesToRetry || [];
 
     while (true) {
+        if (numRetries % 10 === 0) {
+            print("retryOnRetryableError has " + numRetries + " retries remaining.");
+        }
         try {
             return func();
         } catch (e) {
@@ -169,7 +172,7 @@ const retryableErrs = [
     "NotPrimaryNoSecondaryOk",
     "NotPrimaryOrSecondary",
     "PrimarySteppedDown",
-    "WriteConcernFailed",
+    "WriteConcernTimeout",
     "WriteConcernLegacyOK",
     "UnknownReplWriteConcern",
     "UnsatisfiableWriteConcern",
@@ -453,7 +456,6 @@ jsTestOptions = function() {
             mongosBinVersion: TestData.mongosBinVersion || "",
             mixedBinVersions: TestData.mixedBinVersions || false,
             networkMessageCompressors: TestData.networkMessageCompressors,
-            replSetFeatureCompatibilityVersion: TestData.replSetFeatureCompatibilityVersion,
             skipRetryOnNetworkError: TestData.skipRetryOnNetworkError,
             skipValidationOnInvalidViewDefinitions: TestData.skipValidationOnInvalidViewDefinitions,
             forceValidationWithFeatureCompatibilityVersion:
@@ -514,7 +516,6 @@ jsTestOptions = function() {
             inEvergreen: TestData.inEvergreen || false,
             defaultReadPreference: TestData.defaultReadPreference,
 
-            undoRecorderPath: TestData.undoRecorderPath,
             backupOnRestartDir: TestData.backupOnRestartDir || false,
 
             evergreenTaskId: TestData.evergreenTaskId || null,

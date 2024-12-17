@@ -23,24 +23,20 @@ if [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
   abs_path=$(cygpath -w "$TMPDIR" | tr '\\' '/')
   echo "startup --output_user_root=Z:/bazel_tmp" > .bazelrc.evergreen
   echo "BAZELISK_HOME=${abs_path}/bazelisk_home" >> .bazeliskrc
+  echo "build --define GIT_COMMIT_HASH=$(git rev-parse HEAD)" >> .bazelrc.gitinfo
 else
   echo "startup --output_user_root=${TMPDIR}/bazel-output-root" > .bazelrc.evergreen
   echo "BAZELISK_HOME=${TMPDIR}/bazelisk_home" >> .bazeliskrc
+  echo "build --define GIT_COMMIT_HASH=$(git rev-parse HEAD)" >> .bazelrc.gitinfo
 fi
 
-# Setup the EngFlow credentials for Evergreen builds if remote execution is enabled.
-source ./evergreen/bazel_RBE_supported.sh
+uri="https://spruce.mongodb.com/task/${task_id:?}?execution=${execution:?}"
 
-if bazel_rbe_supported; then
-
-  uri="https://spruce.mongodb.com/task/${task_id:?}?execution=${execution:?}"
-
-  echo "common --tls_client_certificate=./engflow.cert" >> .bazelrc.evergreen
-  echo "common --tls_client_key=./engflow.key" >> .bazelrc.evergreen
-  echo "common --bes_keywords=engflow:CiCdPipelineName=${build_variant:?}" >> .bazelrc.evergreen
-  echo "common --bes_keywords=engflow:CiCdJobName=${task_name:?}" >> .bazelrc.evergreen
-  echo "common --bes_keywords=engflow:CiCdUri=${uri:?}" >> .bazelrc.evergreen
-  echo "common --bes_keywords=evg:project=${project:?}" >> .bazelrc.evergreen
-  echo "common --remote_upload_local_results=True" >> .bazelrc.evergreen
-  echo "common --workspace_status_command=./evergreen/engflow_workspace_status.sh" >> .bazelrc.evergreen
-fi
+echo "common --tls_client_certificate=./engflow.cert" >> .bazelrc.evergreen
+echo "common --tls_client_key=./engflow.key" >> .bazelrc.evergreen
+echo "common --bes_keywords=engflow:CiCdPipelineName=${build_variant:?}" >> .bazelrc.evergreen
+echo "common --bes_keywords=engflow:CiCdJobName=${task_name:?}" >> .bazelrc.evergreen
+echo "common --bes_keywords=engflow:CiCdUri=${uri:?}" >> .bazelrc.evergreen
+echo "common --bes_keywords=evg:project=${project:?}" >> .bazelrc.evergreen
+echo "common --remote_upload_local_results=True" >> .bazelrc.evergreen
+echo "common --workspace_status_command=./evergreen/engflow_workspace_status.sh" >> .bazelrc.evergreen

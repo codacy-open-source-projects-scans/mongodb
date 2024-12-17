@@ -35,9 +35,10 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_rank_fusion.h"
-#include "mongo/db/pipeline/document_source_score.h"
 #include "mongo/db/pipeline/document_source_score_fusion.h"
 #include "mongo/db/pipeline/document_source_score_fusion_gen.h"
+#include "mongo/db/pipeline/document_source_set_metadata.h"
+#include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/search/document_source_search.h"
@@ -50,9 +51,24 @@ REGISTER_DOCUMENT_SOURCE_WITH_FEATURE_FLAG(scoreFusion,
                                            DocumentSourceScoreFusion::LiteParsed::parse,
                                            DocumentSourceScoreFusion::createFromBson,
                                            AllowedWithApiStrict::kNeverInVersion1,
-                                           feature_flags::gFeatureFlagSearchHybridScoring);
+                                           feature_flags::gFeatureFlagSearchHybridScoringFull);
 
 namespace {
+
+/**
+ * Checks is this stage is a $score stage, where it has been desugared to $setMetadata with the meta
+ * type MetaType::kScore.
+ */
+bool isScoreStage(boost::intrusive_ptr<DocumentSource> stage) {
+    if (stage->getSourceName() != DocumentSourceSetMetadata::kStageName) {
+        return false;
+    }
+    auto singleDocTransform = static_cast<DocumentSourceSingleDocumentTransformation*>(stage.get());
+    auto setMetadataTransform =
+        static_cast<SetMetadataTransformation*>(&singleDocTransform->getTransformer());
+    return setMetadataTransform->getMetaType() == DocumentMetadataFields::MetaType::kScore;
+}
+
 /**
  * Checks that the input pipeline is a valid scored pipeline. This means it is either one of
  * $search, $vectorSearch, $scoreFusion, $rankFusion (which have scored output) or has an explicit
@@ -68,9 +84,7 @@ static void scoreFusionPipelineValidator(const Pipeline& pipeline) {
     auto sources = pipeline.getSources();
     auto firstStageName = sources.front()->getSourceName();
     auto isScoredPipeline = implicitlyScoredStages.contains(firstStageName) ||
-        std::any_of(sources.begin(), sources.end(), [](auto& stage) {
-                                return stage->getSourceName() == DocumentSourceScore::kStageName;
-                            });
+        std::any_of(sources.begin(), sources.end(), isScoreStage);
     uassert(
         9402500,
         str::stream()
@@ -102,13 +116,16 @@ static void scoreFusionPipelineValidator(const Pipeline& pipeline) {
 
 std::unique_ptr<DocumentSourceScoreFusion::LiteParsed> DocumentSourceScoreFusion::LiteParsed::parse(
     const NamespaceString& nss, const BSONElement& spec) {
-    std::vector<LiteParsedPipeline> liteParsedPipelines;
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << kStageName << " must take a nested object but found: " << spec,
+            spec.type() == BSONType::Object);
 
     auto parsedSpec = ScoreFusionSpec::parse(IDLParserContext(kStageName), spec.embeddedObject());
 
     // Ensure that all pipelines are valid scored selection pipelines.
+    std::vector<LiteParsedPipeline> liteParsedPipelines;
     for (const auto& input : parsedSpec.getInputs()) {
-        liteParsedPipelines.emplace_back(LiteParsedPipeline(nss, input.getPipeline()));
+        liteParsedPipelines.emplace_back(nss, input.getPipeline());
     }
 
     return std::make_unique<DocumentSourceScoreFusion::LiteParsed>(spec.fieldName(),
@@ -127,9 +144,10 @@ std::list<boost::intrusive_ptr<DocumentSource>> DocumentSourceScoreFusion::creat
     std::list<std::unique_ptr<Pipeline, PipelineDeleter>> inputPipelines;
     // Ensure that all pipelines are valid scored selection pipelines.
     for (const auto& input : spec.getInputs()) {
-        inputPipelines.push_back(Pipeline::parse(input.getPipeline(),
-                                                 pExpCtx->copyForSubPipeline(pExpCtx->ns),
-                                                 scoreFusionPipelineValidator));
+        inputPipelines.push_back(
+            Pipeline::parse(input.getPipeline(),
+                            pExpCtx->copyForSubPipeline(pExpCtx->getNamespaceString()),
+                            scoreFusionPipelineValidator));
     }
 
     // TODO SERVER-94022: Desugar $scoreFusion (will return something then)

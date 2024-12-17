@@ -34,9 +34,7 @@
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_impl.h"
 #include "mongo/db/catalog_raii.h"
-#include "mongo/db/multitenancy.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/durable_catalog.h"
@@ -61,11 +59,13 @@ public:
     }
 
     StatusWith<DurableCatalog::EntryIdentifier> createCollection(OperationContext* opCtx,
-                                                                 NamespaceString ns) {
+                                                                 NamespaceString ns,
+                                                                 CollectionOptions options = {}) {
         Lock::GlobalWrite lk(opCtx);
         AutoGetDb db(opCtx, ns.dbName(), LockMode::MODE_X);
-        CollectionOptions options;
-        options.uuid = UUID::gen();
+        if (!options.uuid) {
+            options.uuid = UUID::gen();
+        }
         RecordId catalogId;
         std::unique_ptr<RecordStore> rs;
         {
@@ -86,6 +86,13 @@ public:
         });
 
         return {{_storageEngine->getCatalog()->getEntry(catalogId)}};
+    }
+
+    StatusWith<DurableCatalog::EntryIdentifier> createTempCollection(OperationContext* opCtx,
+                                                                     NamespaceString ns) {
+        CollectionOptions options;
+        options.temp = true;
+        return createCollection(opCtx, ns, options);
     }
 
     std::unique_ptr<TemporaryRecordStore> makeTemporary(OperationContext* opCtx) {
@@ -110,11 +117,11 @@ public:
             CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss)->getCatalogId();
         std::string indexIdent =
             _storageEngine->getCatalog()->getIndexIdent(opCtx, catalogId, indexName);
-        return dropIdent(shard_role_details::getRecoveryUnit(opCtx), indexIdent);
+        return dropIdent(shard_role_details::getRecoveryUnit(opCtx), indexIdent, false);
     }
 
-    Status dropIdent(RecoveryUnit* ru, StringData ident) {
-        return _storageEngine->getEngine()->dropIdent(ru, ident);
+    Status dropIdent(RecoveryUnit* ru, StringData ident, bool identHasSizeInfo) {
+        return _storageEngine->getEngine()->dropIdent(ru, ident, identHasSizeInfo);
     }
 
     StatusWith<StorageEngine::ReconcileResult> reconcile(OperationContext* opCtx) {
@@ -166,11 +173,12 @@ public:
                            std::string key,
                            boost::optional<UUID> buildUUID) {
         BSONObjBuilder builder;
+        builder.append("v", 2);
         {
             BSONObjBuilder keyObj;
             builder.append("key", keyObj.append(key, 1).done());
         }
-        BSONObj spec = builder.append("name", key).append("v", 2).done();
+        BSONObj spec = builder.append("name", key).done();
 
         Collection* collection =
             CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForMetadataWrite(opCtx,

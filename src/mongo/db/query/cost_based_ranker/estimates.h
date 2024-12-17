@@ -40,7 +40,13 @@
 
 namespace mongo::cost_based_ranker {
 
-constexpr double nsToMs = 1.0e-6;
+/**
+ * Convert nanoseconds to milliseconds.
+ */
+constexpr double operator""_ms(long double v) {
+    return v * 1.0e-6;
+}
+
 
 /**
  * Approximate comparison of double numbers within 'epsilon'.
@@ -75,13 +81,13 @@ QUERY_UTIL_NAMED_ENUM_DEFINE(EstimationUnit, ESTIMATION_UNITS_NAMES);
  *         Most often used for internal testing.
  */
 #define ESTIMATION_SOURCE_NAMES(F) \
-    F(Unknown)                     \
     F(Histogram)                   \
     F(Sampling)                    \
     F(Heuristics)                  \
     F(Mixed)                       \
     F(Metadata)                    \
-    F(Code)
+    F(Code)                        \
+    F(Unknown)
 QUERY_UTIL_NAMED_ENUM_DEFINE(EstimationSource, ESTIMATION_SOURCE_NAMES);
 #undef ESTIMATION_SOURCE_NAMES
 
@@ -128,26 +134,26 @@ struct SelectivityTagParam {
 };
 
 struct CostCoefficientTagParam {
-    static constexpr double kMin = 0.0;
-    static constexpr double kMax = std::numeric_limits<double>::max();
-    static constexpr double kEpsilon = 1.0e-5;
-};
-
-struct CostTagParam {
     // The smallest cost coefficient is equal to the cost of the fastest QE
     // operation. This is typically the cost of a simple binary comparison of a
     // scalar value.
     // TODO (SERVER-94981): based on Bonsai cost calibration it is 1 ns, assuming
     //  all cost calibration measurements are in 'ms'. Should be updated with a
     //  reference to the relevant cost coefficient in the new cost model.
-    static constexpr double kMin = 50 * nsToMs;
+    static constexpr double kMin = 50.0_ms;
     // The maximum value of a cost coefficient is the most expensive operation per
     // document according to the cost model.
     // TODO (SERVER-94981): Currently this is based on Bonsai calibration, and it
     //  should be updated to reference the relevant cost coefficient in the new cost
     //  model.
-    static constexpr double kMax = 15000 * nsToMs;
+    static constexpr double kMax = 15000.0_ms;
     // TODO (SERVER-94981): Define this value based on cost model sensitivity.
+    static constexpr double kEpsilon = 1.0e-5;
+};
+
+struct CostTagParam {
+    static constexpr double kMin = 0.0;
+    static constexpr double kMax = std::numeric_limits<double>::max();
     static constexpr double kEpsilon = 1.0e-5;
 };
 
@@ -167,16 +173,16 @@ using CostTag = StrongDoubleTag<"Cost",
                                 // Cost has some abstract cost units.
                                 EstimationUnit::CostUnits,
                                 double,
-                                CostCoefficientTagParam>;
+                                CostTagParam>;
 
 using CostCoefficientTag =
     StrongDoubleTag<"Cost coefficient",
                     // Cost coefficients establish the cost of processing per one input document.
                     EstimationUnit::CostPerDataItem,
                     double,
-                    CostTagParam>;
+                    CostCoefficientTagParam>;
 
-template <typename T>
+template <class T1, class T2>
 class OptimizerEstimate;
 class CardinalityEstimate;
 class CostEstimate;
@@ -238,7 +244,7 @@ public:
                 _v <= TypeTag::kMaxValue);
     }
 
-    template <typename T>
+    template <typename T1, typename T2>
     friend class OptimizerEstimate;
     friend class SelectivityEstimate;
     friend SelectivityEstimate operator/(const CardinalityEstimate& smaller_ce,
@@ -264,11 +270,28 @@ using CostCoefficientType = StrongDouble<CostCoefficientTag>;
 class EstimateBase {
 public:
     EstimateBase() = delete;
-    EstimateBase(EstimationSource s) : _source(s){};
+    constexpr EstimateBase(EstimationSource s) : _source(s){};
 
     /**
      * Merge this estimate with another one - used in operators that combine two estimates.
      * The source of this estimate is adjusted depending on the 'other' estimate.
+     * Merging follows the following general rules:
+     * - Source pairs are symmetric.
+     * - Any type of source merged with itself results in the same type of source.
+     * - Merging Code with any other type of source results in the other type.
+     * - Merging Metadata with any other type of source except Code results in the other type.
+     * - The combination of any other two different types of sources results in the Mixed type.
+     *
+     * These rules result in the following state table:
+     * --------------------------------------------------------------------
+     *            | Histogram  Sampling Heuristics Mixed  Metadata   Code
+     * --------------------------------------------------------------------
+     * Histogram  | Histogram  Mixed    Mixed      Mixed  Histogram  Histogram
+     * Sampling   |            Sampling Mixed      Mixed  Sampling   Sampling
+     * Heuristics |                     Heuristics Mixed  Heuristics Heuristics
+     * Mixed      |                                Mixed  Mixed      Mixed
+     * Metadata   |                                       Metadata   Metadata
+     * Code       |                                                  Code
      */
     void mergeSources(const EstimateBase& other);
 
@@ -280,13 +303,20 @@ protected:
  * Generic optimizer estimate that is specialized via the 'EstimateType' parameter which is itself
  * a specilisation of a StrongDouble. This class implements all operations common across all kinds
  * of estimates.
+ *
+ * In order for the resulting values of the operators be of the specific subclasses that inherit
+ * from OptimizerEstimate, the declaration of this class uses the The Curiously Recurring Template
+ * Pattern (CRTP) approach where the template parameters are:
+ * - 'ValueType' is the type of the estimate that each subclass holds, that is, a specific
+ *   StrongDouble.
+ * - 'EstimateType' is the subtype of OptimizerEstimate itself.
  */
-template <class EstimateType>
+template <class ValueType, class EstimateType>
 class OptimizerEstimate : public EstimateBase {
 public:
     OptimizerEstimate() = delete;
 
-    OptimizerEstimate(EstimateType e, EstimationSource s) : EstimateBase(s), _estimate(e) {}
+    constexpr OptimizerEstimate(ValueType e, EstimationSource s) : EstimateBase(s), _estimate(e) {}
 
     void assertValid() const {
         _estimate.assertValid();
@@ -327,28 +357,27 @@ public:
     OptimizerEstimate& operator=(const OptimizerEstimate& other) = default;
 
     // Comparison operators
-    bool operator==(const OptimizerEstimate<EstimateType>& e) const {
-        return this == &e ||
-            nearlyEqual(this->_estimate._v, e._estimate._v, EstimateType::epsilon());
+    bool operator==(const OptimizerEstimate<ValueType, EstimateType>& e) const {
+        return this == &e || nearlyEqual(this->_estimate._v, e._estimate._v, ValueType::epsilon());
     }
 
-    bool operator!=(const OptimizerEstimate<EstimateType>& e) const {
+    bool operator!=(const OptimizerEstimate<ValueType, EstimateType>& e) const {
         return !(*this == e);
     }
 
-    bool operator>(const OptimizerEstimate<EstimateType>& e) const {
+    bool operator>(const OptimizerEstimate<ValueType, EstimateType>& e) const {
         return (*this != e) && this->_estimate._v > e._estimate._v;
     }
 
-    bool operator>=(const OptimizerEstimate<EstimateType>& e) const {
+    bool operator>=(const OptimizerEstimate<ValueType, EstimateType>& e) const {
         return (*this == e) || this->_estimate._v > e._estimate._v;
     }
 
-    bool operator<(const OptimizerEstimate<EstimateType>& e) const {
+    bool operator<(const OptimizerEstimate<ValueType, EstimateType>& e) const {
         return (*this != e) && this->_estimate._v < e._estimate._v;
     }
 
-    bool operator<=(const OptimizerEstimate<EstimateType>& e) const {
+    bool operator<=(const OptimizerEstimate<ValueType, EstimateType>& e) const {
         return (*this == e) || this->_estimate._v < e._estimate._v;
     }
 
@@ -358,29 +387,29 @@ public:
     // On the other hand, multiplication and division cannot be used to combine arbitrary
     // estimates. These operations are implemented below only the meaningful combinations
     // of estimate subtypes.
-    OptimizerEstimate<EstimateType>& operator+=(const OptimizerEstimate<EstimateType>& e) {
+    EstimateType& operator+=(const EstimateType& e) {
         this->mergeSources(e);
         this->_estimate._v += e._estimate._v;
         assertValid();
-        return *this;
+        return *static_cast<EstimateType*>(this);
     }
-    OptimizerEstimate<EstimateType> operator+(const OptimizerEstimate<EstimateType>& e) const {
-        OptimizerEstimate<EstimateType> result(*this);
+    EstimateType operator+(const EstimateType& e) const {
+        EstimateType result(*static_cast<const EstimateType*>(this));
         result += e;
         return result;
     }
 
-    OptimizerEstimate<EstimateType>& operator-=(const OptimizerEstimate<EstimateType>& e) {
+    EstimateType& operator-=(const EstimateType& e) {
         this->mergeSources(e);
         this->_estimate._v -= e._estimate._v;
         assertValid();
-        return *this;
+        return *static_cast<EstimateType*>(this);
     }
 
-    OptimizerEstimate<EstimateType> operator-(const OptimizerEstimate<EstimateType>& e) const {
-        OptimizerEstimate<EstimateType> result(*this);
+    EstimateType operator-(const EstimateType& e) const {
+        EstimateType result(*static_cast<const EstimateType*>(this));
         result -= e;
-        return result;
+        return static_cast<EstimateType>(result);
     }
 
 protected:
@@ -389,20 +418,21 @@ protected:
     }
 
     std::string estimateName() const {
-        return std::string{EstimateType::name()};
+        return std::string{ValueType::name()};
     }
 
-    EstimateType _estimate;
+    ValueType _estimate;
 };
 
 /**
  * Model Cardinality estimates.
  */
-class CardinalityEstimate : public OptimizerEstimate<CardinalityType> {
+class CardinalityEstimate : public OptimizerEstimate<CardinalityType, CardinalityEstimate> {
 public:
     CardinalityEstimate() = delete;
 
-    CardinalityEstimate(CardinalityType ce, EstimationSource src) : OptimizerEstimate(ce, src) {}
+    constexpr CardinalityEstimate(CardinalityType ce, EstimationSource src)
+        : OptimizerEstimate(ce, src) {}
 
     CardinalityType cardinality() const {
         return _estimate;
@@ -410,7 +440,7 @@ public:
 
     // Multiplication is undefined for two CEs - this operation has no meaning - the unit of the
     // result would be documents^2. However, it is common to multiply CE by some unitless factor,
-    // or multiply cost with CE to get the cost of a node's output.
+    // or multiply a cost coefficient with CE to get the cost of a node's output.
     friend CardinalityEstimate operator*(const CardinalityEstimate& ce, double factor);
     friend CardinalityEstimate operator*(double factor, const CardinalityEstimate& ce);
 
@@ -428,11 +458,11 @@ public:
 /**
  * Model Cost estimates.
  */
-class CostEstimate : public OptimizerEstimate<CostType> {
+class CostEstimate : public OptimizerEstimate<CostType, CostEstimate> {
 public:
     CostEstimate() = delete;
 
-    CostEstimate(CostType c, EstimationSource src) : OptimizerEstimate(c, src) {}
+    constexpr CostEstimate(CostType c, EstimationSource src) : OptimizerEstimate(c, src) {}
 
     CostType cost() const {
         return _estimate;
@@ -442,13 +472,14 @@ public:
 /**
  * Model Cost coefficients. Their unit is "cost unit / document".
  */
-class CostCoefficient : public OptimizerEstimate<CostCoefficientType> {
+class CostCoefficient : public OptimizerEstimate<CostCoefficientType, CostCoefficient> {
 public:
     CostCoefficient() = delete;
 
     // Cost coefficients are stored in C++ code. In the future we can envision other ways to
     // derive cost coefficients - for instance user-supplied or automatic (re-)calibration.
-    CostCoefficient(CostCoefficientType cc) : OptimizerEstimate(cc, EstimationSource::Code) {}
+    constexpr CostCoefficient(CostCoefficientType cc)
+        : OptimizerEstimate(cc, EstimationSource::Code) {}
 
     // Addition and subtraction do not make sense for cost coefficients
     CostCoefficient& operator+=(const CostCoefficient& e) = delete;
@@ -462,15 +493,31 @@ public:
 };
 
 
-class SelectivityEstimate : public OptimizerEstimate<SelectivityType> {
+class SelectivityEstimate : public OptimizerEstimate<SelectivityType, SelectivityEstimate> {
 public:
     SelectivityEstimate() = delete;
 
-    SelectivityEstimate(SelectivityType sel, EstimationSource src) : OptimizerEstimate(sel, src) {}
+    constexpr SelectivityEstimate(SelectivityType sel, EstimationSource src)
+        : OptimizerEstimate(sel, src) {}
 
     SelectivityEstimate operator*(const SelectivityEstimate s) {
         SelectivityEstimate result(*this);
+        result.mergeSources(s);
         result._estimate._v *= s._estimate._v;
+        assertValid();
+        return result;
+    }
+
+    SelectivityEstimate pow(double exp) const {
+        SelectivityEstimate result(*this);
+        result._estimate._v = std::pow(result._estimate._v, exp);
+        assertValid();
+        return result;
+    }
+
+    SelectivityEstimate negate() const {
+        SelectivityEstimate result(*this);
+        result._estimate._v = 1 - result._estimate._v;
         assertValid();
         return result;
     }
@@ -495,9 +542,44 @@ SelectivityEstimate operator/(const CardinalityEstimate& smaller_ce,
 CardinalityEstimate operator*(const SelectivityEstimate& s, const CardinalityEstimate& ce);
 CardinalityEstimate operator*(const CardinalityEstimate& ce, const SelectivityEstimate& s);
 
+/**
+ * The optimizer's estimate of a single QSN in the physical plan.
+ */
+struct QSNEstimate {
+    // A QSN may have three estimates:
+    // - the number of processed data items (docs or keys): 'inCE'
+    // - the number of filtered data items by the attached filter (if any): 'filterCE'
+    // - the number of produced data items: 'outCE'
+    // Only leaf QSN nodes have both 'inCE' and 'outCE' estimates. All other nodes have an
+    // 'out' CE since their input size is equal to the number of produced items by their child.
+    // For instance:
+    // - For a CollectionScan with a filter expression, 'inCE' is the total collection cardinality,
+    //   and 'filterCE' is the number of documents after applying the filter, 'outCE' is the same as
+    //   'filterCE'.
+    // - For an IndexScan node 'inCE' is the number of scanned keys, 'filterCE' is the number of
+    //   keys after applying a possible filter expression, and 'outCE' is the size of the final
+    //   result.
+    boost::optional<CardinalityEstimate> inCE;
+    boost::optional<CardinalityEstimate> filterCE;
+    CardinalityEstimate outCE{CardinalityType{0}, EstimationSource::Code};
+    CostEstimate cost{CostType::maxValue(), EstimationSource::Code};
+};
+
 // Predefined constants
-inline const CardinalityEstimate zeroCE(CardinalityType{0.0}, EstimationSource::Code);
-inline const CardinalityEstimate minCE(CardinalityType::minValue(), EstimationSource::Code);
-inline const CardinalityEstimate maxCE(CardinalityType::maxValue(), EstimationSource::Code);
+inline const CardinalityEstimate zeroCE{CardinalityType{0.0}, EstimationSource::Code};
+inline const CardinalityEstimate oneCE{CardinalityType{1}, EstimationSource::Code};
+inline const CardinalityEstimate minCE{CardinalityType::minValue(), EstimationSource::Code};
+inline const CardinalityEstimate maxCE{CardinalityType::maxValue(), EstimationSource::Code};
+
+inline const SelectivityEstimate zeroSel{SelectivityType{0.0}, EstimationSource::Code};
+inline const SelectivityEstimate oneSel{SelectivityType{1.0}, EstimationSource::Code};
+
+inline const CostCoefficient minCC{CostCoefficientType::minValue()};
+
+inline const CostEstimate zeroCost{CostType{0.0}, EstimationSource::Code};
+// No query plan can be cheaper than running the cheapest operation for a single input value.
+static const CostEstimate minCost{CostType{CostCoefficientType::minValue().v()},
+                                  EstimationSource::Code};
+inline const CostEstimate maxCost{CostType::maxValue(), EstimationSource::Code};
 
 }  // namespace mongo::cost_based_ranker

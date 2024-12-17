@@ -61,7 +61,7 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/time_support.h"
-#include "mongo/util/tracking_context.h"
+#include "mongo/util/tracking/context.h"
 
 namespace mongo::bsoncolumn {
 namespace {
@@ -83,8 +83,8 @@ public:
         // platforms/implementations so we cannot check the exact memory usage in an platform
         // independent way. But we make sure that the memory usage is 0 when all these are torn down
         // to ensure there's no memory tracking leaks after moving.
-        BSONColumnBuilder<TrackingAllocator<void>> moveContructBuilder{std::move(cb)};
-        BSONColumnBuilder<TrackingAllocator<void>> moveAssignBuilder{
+        BSONColumnBuilder<tracking::Allocator<void>> moveContructBuilder{std::move(cb)};
+        BSONColumnBuilder<tracking::Allocator<void>> moveAssignBuilder{
             trackingContextChecker.trackingContext.makeAllocator<void>()};
         moveAssignBuilder = std::move(moveContructBuilder);
     }
@@ -167,9 +167,9 @@ public:
         return _elementMemory.front().firstElement();
     }
 
-    BSONElement createRegex(StringData options = "") {
+    BSONElement createRegex(StringData pattern = "", StringData options = "") {
         BSONObjBuilder ob;
-        ob.appendRegex("0"_sd, options);
+        ob.appendRegex("0"_sd, pattern, options);
         _elementMemory.emplace_front(ob.obj());
         return _elementMemory.front().firstElement();
     }
@@ -1111,12 +1111,12 @@ protected:
             ASSERT_EQ(trackingContext.allocated(), 0);
         }
 
-        TrackingContext trackingContext;
+        tracking::Context trackingContext;
     };
 
     // Needs to be defined first so it is destroyed after BSONColumnBuilder
     TrackingContextChecker trackingContextChecker;
-    BSONColumnBuilder<TrackingAllocator<void>> cb{
+    BSONColumnBuilder<tracking::Allocator<void>> cb{
         trackingContextChecker.trackingContext.makeAllocator<void>()};
 
 private:
@@ -2247,6 +2247,40 @@ TEST_F(BSONColumnTest, DoubleDecreaseScaleAfterBlockUsingSkipThenScaleBackUp) {
     verifyDecompression(binData, elems);
 }
 
+TEST_F(BSONColumnTest, DoubleRescalingPreserveRLE) {
+    // This test is using large deltas for the double type where the values are mostly unscalable
+    // except for one of the doubles that is scalable. This will trigger the rescaling logic and
+    // we're testing that the RLE state is properly preserved through the rescaling as the deltas
+    // are all identical.
+    static constexpr uint64_t kLargeDelta = 0x0474747474747474;
+
+    std::vector<BSONElement> elems;
+    uint64_t value = 0xbea6a6a6a6e78efc;
+    elems.push_back(createElementDouble(std::bit_cast<double>(value)));
+    elems.push_back(BSONElement());
+    elems.push_back(createElementDouble(std::bit_cast<double>(value += kLargeDelta)));
+    elems.push_back(createElementDouble(std::bit_cast<double>(value += kLargeDelta)));
+    elems.push_back(createElementDouble(std::bit_cast<double>(value += kLargeDelta)));
+
+    // One of the values are scalable, this will trigger rescaling.
+    ASSERT_TRUE(Simple8bTypeUtil::encodeDouble(elems.at(2).Double(), 0).has_value());
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    appendSimple8bControl(expected, 0b1000, 0b0011);
+    appendSimple8bBlocks64(
+        expected, deltaDoubleMemory(elems.begin() + 1, elems.end(), elems.front()), 4);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
 TEST_F(BSONColumnTest, DoubleUnscalable) {
     std::vector<BSONElement> elems;
     elems.push_back(createElementDouble(1.0));
@@ -2979,6 +3013,25 @@ TEST_F(BSONColumnTest, RegexBasic) {
     verifyDecompression(binData, {first, second, second});
 }
 
+TEST_F(BSONColumnTest, RegexBasicWithOptions) {
+    auto first = createRegex("regex", "ims");
+    auto second = createRegex("regex");
+    cb.append(first);
+    cb.append(first);
+    cb.append(second);
+
+    BufBuilder expected;
+    appendLiteral(expected, first);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock64(expected, kDeltaForBinaryEqualValues);
+    appendLiteral(expected, second);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {first, first, second});
+}
+
 TEST_F(BSONColumnTest, RegexAfterChangeBack) {
     auto regex = createRegex();
     auto elemInt32 = createElementInt32(0);
@@ -2998,6 +3051,27 @@ TEST_F(BSONColumnTest, RegexAfterChangeBack) {
     auto binData = cb.finalize();
     verifyBinary(binData, expected);
     verifyDecompression(binData, {elemInt32, regex, regex});
+}
+
+TEST_F(BSONColumnTest, RegexAfterChangeBackWithOption) {
+    auto regexWithOptions = createRegex("regex", "xu");
+    auto elemInt32 = createElementInt32(0);
+
+    cb.append(regexWithOptions);
+    cb.append(regexWithOptions);
+    cb.append(elemInt32);
+
+    BufBuilder expected;
+    appendLiteral(expected, regexWithOptions);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock64(expected, kDeltaForBinaryEqualValues);
+    appendLiteral(expected, elemInt32);
+
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {regexWithOptions, regexWithOptions, elemInt32});
 }
 
 TEST_F(BSONColumnTest, DBRefBasic) {

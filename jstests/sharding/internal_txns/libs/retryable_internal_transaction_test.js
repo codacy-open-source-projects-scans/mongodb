@@ -2,9 +2,9 @@
  * Utilities for testing that internal transactions for retryable writes can be retried.
  */
 
+import {withRetryOnTransientTxnError} from "jstests/libs/auto_retry_transaction_in_sharding.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
-import {runTxnRetryOnTransientError} from "jstests/sharding/internal_txns/libs/fixture_helpers.js";
 import {
     getImageEntriesForTxn,
     getImageEntriesForTxnOnNode,
@@ -41,7 +41,8 @@ export function getOplogEntriesForTxnWithRetries(rs, lsid, txnNumber) {
     return oplogEntries;
 }
 
-export function RetryableInternalTransactionTest(collectionOptions = {}) {
+export function RetryableInternalTransactionTest(collectionOptions = {},
+                                                 initiateWithDefaultElectionTimeout = false) {
     // This test requires running prepareTransaction and commitTransaction directly against the
     // shard.
     TestData.replicaSetEndpointIncompatible = true;
@@ -62,7 +63,8 @@ export function RetryableInternalTransactionTest(collectionOptions = {}) {
                 maxNumberOfTransactionOperationsInSingleOplogEntry:
                     maxNumberOfTransactionOperationsInSingleOplogEntry
             }
-        }
+        },
+        initiateWithDefaultElectionTimeout: initiateWithDefaultElectionTimeout
     });
 
     const kTestMode = {kNonRecovery: 1, kRestart: 2, kFailover: 3, kRollback: 4};
@@ -140,7 +142,7 @@ export function RetryableInternalTransactionTest(collectionOptions = {}) {
     }
 
     function retryCommittedInternalTransaction(cmdObj, initialRes, checkRetryResponseFunc) {
-        runTxnRetryOnTransientError(() => {
+        withRetryOnTransientTxnError(() => {
             const retryRes = assert.commandWorked(mongosTestDB.runCommand(cmdObj));
             checkRetryResponseFunc(initialRes, retryRes);
         });
@@ -157,7 +159,7 @@ export function RetryableInternalTransactionTest(collectionOptions = {}) {
         // Initial try.
         const initialLsid = txnOptions.makeSessionIdFunc();
         let initialTxnNumber = 0;
-        runTxnRetryOnTransientError(() => {
+        withRetryOnTransientTxnError(() => {
             initialTxnNumber++;
             setTxnFields(cmdObj, initialLsid, initialTxnNumber);
             assert.commandWorked(mongosTestDB.runCommand(cmdObj));
@@ -198,7 +200,7 @@ export function RetryableInternalTransactionTest(collectionOptions = {}) {
         const initialLsid = txnOptions.makeSessionIdFunc();
         let initialTxnNumber = 0;
         let initialRes;
-        runTxnRetryOnTransientError(() => {
+        withRetryOnTransientTxnError(() => {
             initialTxnNumber++;
             setTxnFields(cmdObj, initialLsid, initialTxnNumber);
             initialRes = assert.commandWorked(mongosTestDB.runCommand(cmdObj));
@@ -222,7 +224,7 @@ export function RetryableInternalTransactionTest(collectionOptions = {}) {
         // different txnUUID) to simulate a retry from a different mongos.
         const retryLsid = Object.assign({}, initialLsid, {txnUUID: UUID()});
         let retryTxnNumber = 0;
-        runTxnRetryOnTransientError(() => {
+        withRetryOnTransientTxnError(() => {
             retryTxnNumber++;
             setTxnFields(cmdObj, retryLsid, retryTxnNumber);
             const retryRes = assert.commandWorked(mongosTestDB.runCommand(cmdObj));
@@ -284,7 +286,7 @@ export function RetryableInternalTransactionTest(collectionOptions = {}) {
         const initialLsid = txnOptions.makeSessionIdFunc();
         let initialTxnNumber = 0;
         let initialRes;
-        runTxnRetryOnTransientError(() => {
+        withRetryOnTransientTxnError(() => {
             initialTxnNumber++;
             setTxnFields(cmdObjToRetry, initialLsid, initialTxnNumber);
             insertCmdObjs.forEach(cmdObj => setTxnFields(cmdObj, initialLsid, initialTxnNumber));
@@ -330,7 +332,7 @@ export function RetryableInternalTransactionTest(collectionOptions = {}) {
         // different txnUUID) to simulate a retry from a different mongos.
         const retryLsid = Object.assign({}, initialLsid, {txnUUID: UUID()});
         let retryTxnNumber = 0;
-        runTxnRetryOnTransientError(() => {
+        withRetryOnTransientTxnError(() => {
             retryTxnNumber++;
             setTxnFields(cmdObjToRetry, retryLsid, retryTxnNumber);
             insertCmdObj0.startTransaction = true;

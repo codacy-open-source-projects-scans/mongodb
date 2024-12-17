@@ -30,14 +30,8 @@
 #include <boost/move/utility_core.hpp>
 #include <memory>
 
-#include "mongo/base/string_data.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/sorted_data_interface_test_assert.h"
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 
@@ -46,129 +40,81 @@ namespace {
 
 // Insert multiple keys and verify that omitting the commit()
 // on the WriteUnitOfWork causes the changes to not become visible.
-TEST(SortedDataInterface, InsertWithoutCommit) {
-    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(
-        harnessHelper->newSortedDataInterface(/*unique=*/true, /*partial=*/false));
+TEST_F(SortedDataInterfaceTest, InsertWithoutCommit) {
+    const auto sorted(
+        harnessHelper()->newSortedDataInterface(opCtx(), /*unique=*/true, /*partial=*/false));
+
+    ASSERT(sorted->isEmpty(opCtx()));
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT(sorted->isEmpty(opCtx.get()));
+        StorageWriteTransaction txn(recoveryUnit());
+        ASSERT_SDI_INSERT_OK(
+            sorted->insert(opCtx(), makeKeyString(sorted.get(), key1, loc1), false));
+        // no commit
     }
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_X);
-        {
-            WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key1, loc1), false));
-            // no commit
-        }
-    }
+    ASSERT(sorted->isEmpty(opCtx()));
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT(sorted->isEmpty(opCtx.get()));
+        StorageWriteTransaction txn(recoveryUnit());
+        ASSERT_SDI_INSERT_OK(
+            sorted->insert(opCtx(), makeKeyString(sorted.get(), key2, loc1), false));
+        ASSERT_SDI_INSERT_OK(
+            sorted->insert(opCtx(), makeKeyString(sorted.get(), key3, loc2), false));
+        // no commit
     }
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_X);
-        {
-            WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key2, loc1), false));
-            ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key3, loc2), false));
-            // no commit
-        }
-    }
-
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT(sorted->isEmpty(opCtx.get()));
-    }
+    ASSERT(sorted->isEmpty(opCtx()));
 }
 
 // Insert multiple keys, then unindex those same keys and verify that
 // omitting the commit() on the WriteUnitOfWork causes the changes to
 // not become visible.
-TEST(SortedDataInterface, UnindexWithoutCommit) {
-    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
-    const std::unique_ptr<SortedDataInterface> sorted(
-        harnessHelper->newSortedDataInterface(/*unique=*/false, /*partial=*/false));
+TEST_F(SortedDataInterfaceTest, UnindexWithoutCommit) {
+    const auto sorted(
+        harnessHelper()->newSortedDataInterface(opCtx(), /*unique=*/false, /*partial=*/false));
+
+    ASSERT(sorted->isEmpty(opCtx()));
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT(sorted->isEmpty(opCtx.get()));
+        StorageWriteTransaction txn(recoveryUnit());
+        ASSERT_SDI_INSERT_OK(
+            sorted->insert(opCtx(), makeKeyString(sorted.get(), key1, loc1), true));
+        ASSERT_SDI_INSERT_OK(
+            sorted->insert(opCtx(), makeKeyString(sorted.get(), key2, loc2), true));
+        txn.commit();
     }
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_X);
-        {
-            WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key1, loc1), true));
-            ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key2, loc2), true));
-            uow.commit();
-        }
-    }
+    ASSERT_EQUALS(2, sorted->numEntries(opCtx()));
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
-        ASSERT_EQUALS(2, sorted->numEntries(opCtx.get()));
+        StorageWriteTransaction txn(recoveryUnit());
+        sorted->unindex(opCtx(), makeKeyString(sorted.get(), key2, loc2), true);
+        ASSERT_EQUALS(1, sorted->numEntries(opCtx()));
+        // no commit
     }
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_X);
-        {
-            WriteUnitOfWork uow(opCtx.get());
-            sorted->unindex(opCtx.get(), makeKeyString(sorted.get(), key2, loc2), true);
-            ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
-            // no commit
-        }
-    }
+    ASSERT_EQUALS(2, sorted->numEntries(opCtx()));
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
-        ASSERT_EQUALS(2, sorted->numEntries(opCtx.get()));
+        StorageWriteTransaction txn(recoveryUnit());
+        ASSERT_SDI_INSERT_OK(
+            sorted->insert(opCtx(), makeKeyString(sorted.get(), key3, loc3), true));
+        txn.commit();
     }
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_X);
-        {
-            WriteUnitOfWork uow(opCtx.get());
-            ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key3, loc3), true));
-            uow.commit();
-        }
-    }
+    ASSERT_EQUALS(3, sorted->numEntries(opCtx()));
 
     {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
-        ASSERT_EQUALS(3, sorted->numEntries(opCtx.get()));
+        StorageWriteTransaction txn(recoveryUnit());
+        sorted->unindex(opCtx(), makeKeyString(sorted.get(), key1, loc1), true);
+        ASSERT_EQUALS(2, sorted->numEntries(opCtx()));
+        sorted->unindex(opCtx(), makeKeyString(sorted.get(), key3, loc3), true);
+        ASSERT_EQUALS(1, sorted->numEntries(opCtx()));
+        // no commit
     }
 
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_X);
-        {
-            WriteUnitOfWork uow(opCtx.get());
-            sorted->unindex(opCtx.get(), makeKeyString(sorted.get(), key1, loc1), true);
-            ASSERT_EQUALS(2, sorted->numEntries(opCtx.get()));
-            sorted->unindex(opCtx.get(), makeKeyString(sorted.get(), key3, loc3), true);
-            ASSERT_EQUALS(1, sorted->numEntries(opCtx.get()));
-            // no commit
-        }
-    }
-
-    {
-        const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        Lock::GlobalLock globalLock(opCtx.get(), MODE_S);
-        ASSERT_EQUALS(3, sorted->numEntries(opCtx.get()));
-    }
+    ASSERT_EQUALS(3, sorted->numEntries(opCtx()));
 }
 
 }  // namespace

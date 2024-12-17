@@ -239,6 +239,16 @@ add_option(
 )
 
 add_option(
+    "remote-exec-release",
+    choices=["on", "off"],
+    const="off",
+    default=build_profile.remote_exec_release,
+    help="Turn on bazel remote execution for release",
+    nargs="?",
+    type="choice",
+)
+
+add_option(
     "lto",
     help="enable full link time optimizations (experimental, except with MSVC)",
     nargs=0,
@@ -499,6 +509,12 @@ add_option(
 )
 
 add_option(
+    "bolt",
+    help="compile with bolt",
+    nargs=0,
+)
+
+add_option(
     "enable-http-client",
     choices=["auto", "on", "off"],
     default="auto",
@@ -629,6 +645,13 @@ add_option(
 )
 
 add_option(
+    "bazel-build-tag",
+    default=[],
+    action="append",
+    help="Specify additional tags to aggregate for --build_tag_filters",
+)
+
+add_option(
     "streams-release-build",
     default=False,
     action="store_true",
@@ -734,6 +757,31 @@ add_option(
     help="Name a toolchain root for use with toolchain selection Variables files in etc/scons",
 )
 
+if mongo_toolchain_execroot:
+    bin_dir = os.path.join(mongo_toolchain_execroot, "external/mongo_toolchain/v4/bin")
+    gcc_path = os.path.dirname(
+        os.path.realpath(os.path.join(bin_dir, os.readlink(os.path.join(bin_dir, "g++"))))
+    )
+    clang_path = os.path.dirname(
+        os.path.realpath(os.path.join(bin_dir, os.readlink(os.path.join(bin_dir, "clang++"))))
+    )
+else:
+    gcc_path = ""
+    clang_path = ""
+
+add_option(
+    "bazel-toolchain-clang",
+    default=clang_path,
+    help="used in Variables files to help find the real bazel toolchain location.",
+)
+
+add_option(
+    "bazel-toolchain-gcc",
+    default=gcc_path,
+    help="used in Variables files to help find the real bazel toolchain location.",
+)
+
+
 add_option(
     "msvc-debugging-format",
     choices=["codeview", "pdb"],
@@ -821,6 +869,13 @@ add_option(
     default=False,
     action="store_true",
     help="Bypass link-model=dynamic check for macos versions <12.",
+)
+
+add_option(
+    "bazel-dynamic-execution",
+    default=False,
+    action="store_true",
+    help="use bazel dynamic execution experimental feature",
 )
 
 
@@ -1523,6 +1578,13 @@ env_vars.Add(
     "ENABLE_GRPC_BUILD",
     help="Set the boolean (auto, on/off true/false 1/0) to enable building grpc and protobuf compiler.",
     converter=functools.partial(bool_var_converter, var="ENABLE_GRPC_BUILD"),
+    default="0",
+)
+
+env_vars.Add(
+    "ENABLE_OTEL_BUILD",
+    help="Set the boolean (auto, on/off true/false 1/0) to enable building otel and protobuf compiler.",
+    converter=functools.partial(bool_var_converter, var="ENABLE_OTEL_BUILD"),
     default="0",
 )
 
@@ -3863,46 +3925,12 @@ def doConfigure(myenv):
         # TODO SERVER-58675 - Remove this suppression after abseil is upgraded
         myenv.AddToCXXFLAGSIfSupported("-Wno-deprecated-builtins")
 
-        # Check if we can set "-Wnon-virtual-dtor" when "-Werror" is set. The only time we can't set it is on
-        # clang 3.4, where a class with virtual function(s) and a non-virtual destructor throws a warning when
-        # it shouldn't.
-        def CheckNonVirtualDtor(context):
-            test_body = """
-            class Base {
-            public:
-                virtual void foo() const = 0;
-            protected:
-                ~Base() {};
-            };
+        # This warning overzealously warns on uses of non-virtual destructors which are benign.
+        myenv.AddToCXXFLAGSIfSupported("-Wno-non-virtual-dtor")
 
-            class Derived : public Base {
-            public:
-                virtual void foo() const {}
-            };
-            """
-
-            context.Message("Checking if -Wnon-virtual-dtor works reasonably... ")
-            ret = context.TryCompile(textwrap.dedent(test_body), ".cpp")
-            context.Result(ret)
-            return ret
-
-        myenvClone = myenv.Clone()
-        myenvClone.Append(
-            CCFLAGS=[
-                "$CCFLAGS_WERROR",
-                "-Wnon-virtual-dtor",
-            ],
-        )
-        conf = Configure(
-            myenvClone,
-            help=False,
-            custom_tests={
-                "CheckNonVirtualDtor": CheckNonVirtualDtor,
-            },
-        )
-        if conf.CheckNonVirtualDtor():
-            myenv.Append(CXXFLAGS=["-Wnon-virtual-dtor"])
-        conf.Finish()
+        # TODO(SERVER-97447): Remove this once we're fully on the v5 toolchain. In the meantime, we
+        # need to suppress some warnings that are only recognized by the new compilers.
+        myenv.AddToCXXFLAGSIfSupported("-Wno-unknown-warning-option")
 
         # As of XCode 9, this flag must be present (it is not enabled
         # by -Wall), in order to enforce that -mXXX-version-min=YYY
@@ -6592,39 +6620,14 @@ elif env.GetOption("build-mongot"):
     )
 
 
-# Ensure that every thin target transitively-included library is auto-installed.
-# Note that BAZEL_LIBDEPS_AUTOINSTALLED ensures we only invoke it once for each such library
-BAZEL_LIBDEPS_AUTOINSTALLED = set()
-
-
-def bazel_auto_install_emitter(target, source, env):
-    global BAZEL_LIBDEPS_AUTOINSTALLED
-
-    for libdep in env.Flatten(env.get("LIBDEPS", [])) + env.Flatten(env.get("LIBDEPS_PRIVATE", [])):
-        libdep_node = libdeps._get_node_with_ixes(env, env.Entry(libdep).abspath, "SharedLibrary")
-        if str(libdep_node.abspath) not in BAZEL_LIBDEPS_AUTOINSTALLED:
-            shlib_suffix = env.subst("$SHLIBSUFFIX")
-            env.BazelAutoInstall(libdep_node, shlib_suffix)
-            BAZEL_LIBDEPS_AUTOINSTALLED.add(str(libdep_node.abspath))
-
-    return target, source
-
-
-for builder_name in ["Program", "SharedLibrary"]:
-    builder = env["BUILDERS"][builder_name]
-    base_emitter = builder.emitter
-    new_emitter = SCons.Builder.ListEmitter([base_emitter, bazel_auto_install_emitter])
-    builder.emitter = new_emitter
-
 # load the tool late to make sure we can copy over any new
 # emitters/scanners we may have created in the SConstruct when
 # we go to make stand in bazel builders for the various scons builders
 
 # __NINJA_NO is ninja callback to scons signal, in that case we care about
 # scons only targets not thin targets.
-if env.get("__NINJA_NO") != "1":
-    env.Tool("integrate_bazel")
-else:
+env.Tool("integrate_bazel")
+if env.get("__NINJA_NO") == "1":
     env.LoadBazelBuilders()
 
     def noop(*args, **kwargs):
@@ -6632,6 +6635,112 @@ else:
 
     env.AddMethod(noop, "WaitForBazel")
     env.AddMethod(noop, "BazelAutoInstall")
+
+if env.get("__NINJA_NO") != "1":
+    BAZEL_AUTOINSTALLED_LIBDEPS = set()
+
+    # the next emitters will read link lists
+    # to determine dependencies in order for scons
+    # to handle the install
+    def bazel_auto_install_emitter(target, source, env):
+        for libdep in env.Flatten(env.get("LIBDEPS", [])) + env.Flatten(
+            env.get("LIBDEPS_PRIVATE", [])
+        ):
+            libdep_node = libdeps._get_node_with_ixes(
+                env, env.Entry(libdep).abspath, "SharedLibrary"
+            )
+            try:
+                shlib_suffix = env.subst("$SHLIBSUFFIX")
+                bazel_libdep = env.File(
+                    f"#/{env['SCONS2BAZEL_TARGETS'].bazel_output(libdep_node.path)}"
+                )
+                if str(bazel_libdep).endswith(shlib_suffix):
+                    if bazel_libdep not in BAZEL_AUTOINSTALLED_LIBDEPS:
+                        env.BazelAutoInstall(bazel_libdep, shlib_suffix)
+                        BAZEL_AUTOINSTALLED_LIBDEPS.add(bazel_libdep)
+                    env.Depends(
+                        env.GetAutoInstalledFiles(target[0]),
+                        env.GetAutoInstalledFiles(bazel_libdep),
+                    )
+            except KeyError:
+                pass
+
+        return target, source
+
+    for builder_name in ["Program", "SharedLibrary"]:
+        builder = env["BUILDERS"][builder_name]
+        base_emitter = builder.emitter
+        new_emitter = SCons.Builder.ListEmitter([base_emitter, bazel_auto_install_emitter])
+        builder.emitter = new_emitter
+
+    def bazel_program_auto_install_emitter(target, source, env):
+        if env.GetOption("link-model") == "dynamic-sdk":
+            return target, source
+
+        bazel_target = env["SCONS2BAZEL_TARGETS"].bazel_target(target[0].path)
+
+        linkfile = bazel_target.replace("//src/", "bazel-bin/src/") + "_links.list"
+        linkfile = "/".join(linkfile.rsplit(":", 1))
+
+        with open(os.path.join(env.Dir("#").abspath, linkfile)) as f:
+            query_results = f.read()
+
+        filtered_results = ""
+        for lib in query_results.splitlines():
+            bazel_out_path = lib.replace("\\", "/").replace(
+                f"{env['BAZEL_OUT_DIR']}/src", "bazel-bin/src"
+            )
+            if os.path.exists(
+                env.File("#/" + bazel_out_path + ".exclude_lib").abspath.replace("\\", "/")
+            ):
+                continue
+            filtered_results += lib + "\n"
+        query_results = filtered_results
+
+        t = target[0]
+        suffix = getattr(t.attributes, "aib_effective_suffix", t.get_suffix())
+        bazel_node = env.File(
+            t.abspath.replace(
+                f"{env.Dir('#').abspath}/{env['BAZEL_OUT_DIR']}/src", env.Dir("$BUILD_DIR").path
+            )
+        )
+
+        prog_output = env.BazelAutoInstallSingleTarget(bazel_node, suffix, bazel_node)
+
+        libs = []
+        debugs = []
+        for lib in query_results.splitlines():
+            libdep = env.File(
+                lib.replace("\\", "/").replace(f"{env['BAZEL_OUT_DIR']}/src", "$BUILD_DIR")
+            )
+            libdep_node = libdeps._get_node_with_ixes(
+                env, env.Entry(libdep).abspath, "SharedLibrary"
+            )
+            bazel_libdep = env.File(
+                f"#/{env['SCONS2BAZEL_TARGETS'].bazel_output(libdep_node.path)}"
+            )
+            shlib_suffix = env.subst("$SHLIBSUFFIX")
+            if str(bazel_libdep).endswith(shlib_suffix):
+                if bazel_libdep not in BAZEL_AUTOINSTALLED_LIBDEPS:
+                    env.BazelAutoInstall(bazel_libdep, shlib_suffix)
+                    BAZEL_AUTOINSTALLED_LIBDEPS.add(bazel_libdep)
+                libs.append(env.GetAutoInstalledFiles(bazel_libdep)[0])
+                if hasattr(bazel_libdep.attributes, "separate_debug_files"):
+                    debugs.append(
+                        env.GetAutoInstalledFiles(
+                            getattr(bazel_libdep.attributes, "separate_debug_files")[0]
+                        )[0]
+                    )
+
+            env.Depends(prog_output[0], libs)
+            if len(prog_output) == 2:
+                env.Depends(prog_output[1], debugs)
+        return target, source
+
+    builder = env["BUILDERS"]["BazelProgram"]
+    base_emitter = builder.emitter
+    new_emitter = SCons.Builder.ListEmitter([bazel_program_auto_install_emitter, base_emitter])
+    builder.emitter = new_emitter
 
 
 def injectMongoIncludePaths(thisEnv):
@@ -6768,6 +6877,9 @@ names = [
     "install-second-quarter-unittests",
     "install-third-quarter-unittests",
     "install-fourth-quarter-unittests",
+    # TODO SERVER-97990 Not all unittests are being excluded.
+    "install-mongo-crypt-test",
+    "install-stitch-support-test",
 ]
 
 env.Alias(

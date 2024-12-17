@@ -33,15 +33,10 @@
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <mutex>
-#include <type_traits>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
@@ -217,20 +212,22 @@ void KVDropPendingIdentReaper::dropIdentsOlderThan(OperationContext* opCtx, cons
             const auto& dropTimestamp = timestampAndIdentInfo.first;
             auto& identInfo = timestampAndIdentInfo.second;
             const auto& identName = identInfo->identName;
-            LOGV2(22237,
-                  "Completing drop for ident",
-                  "ident"_attr = identName,
-                  "dropTimestamp"_attr = dropTimestamp);
+            LOGV2_PROD_ONLY(22237,
+                            "Completing drop for ident",
+                            "ident"_attr = identName,
+                            "dropTimestamp"_attr = dropTimestamp);
             WriteUnitOfWork wuow(opCtx);
-            auto status = _engine->dropIdent(
-                shard_role_details::getRecoveryUnit(opCtx), identName, identInfo->onDrop);
+            auto status = _engine->dropIdent(shard_role_details::getRecoveryUnit(opCtx),
+                                             identName,
+                                             ident::isCollectionIdent(identName),
+                                             identInfo->onDrop);
             if (!status.isOK()) {
                 if (status == ErrorCodes::ObjectIsBusy) {
-                    LOGV2(6936300,
-                          "Drop-pending ident is still in use",
-                          "ident"_attr = identName,
-                          "dropTimestamp"_attr = dropTimestamp,
-                          "error"_attr = status);
+                    LOGV2_PROD_ONLY(6936300,
+                                    "Drop-pending ident is still in use",
+                                    "ident"_attr = identName,
+                                    "dropTimestamp"_attr = dropTimestamp,
+                                    "error"_attr = status);
 
                     stdx::lock_guard<stdx::mutex> lock(_mutex);
                     identInfo->identState = IdentInfo::State::kNotDropped;

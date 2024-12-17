@@ -38,30 +38,30 @@
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <memory>
-#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/index_builds.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/index_builds/index_builds.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/startup_recovery.h"
 #include "mongo/db/storage/devnull/devnull_kv_engine.h"
 #include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/key_format.h"
@@ -70,25 +70,18 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_impl.h"
-#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_engine_test_fixture.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/future.h"
-#include "mongo/util/future_impl.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/periodic_runner_factory.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
@@ -112,7 +105,6 @@ TEST_F(StorageEngineTest, ReconcileIdentsTest) {
         createCollTable(opCtx.get(), NamespaceString::createNamespaceString_forTest("db.coll2")));
 
     auto reconcileResult = unittest::assertGet(reconcile(opCtx.get()));
-    ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToRestart.size());
 
     auto identsVec = getAllKVEngineIdents(opCtx.get());
@@ -124,8 +116,9 @@ TEST_F(StorageEngineTest, ReconcileIdentsTest) {
     ASSERT_TRUE(idents.find("_mdb_catalog") != idents.end());
 
     // Drop the `db.coll1` table, while leaving the DurableCatalog entry.
-    ASSERT_OK(
-        dropIdent(shard_role_details::getRecoveryUnit(opCtx.get()), swCollInfo.getValue().ident));
+    ASSERT_OK(dropIdent(shard_role_details::getRecoveryUnit(opCtx.get()),
+                        swCollInfo.getValue().ident,
+                        /*identHasSizeInfo=*/true));
     ASSERT_EQUALS(static_cast<const unsigned long>(1), getAllKVEngineIdents(opCtx.get()).size());
 
     // Reconciling this should result in an error.
@@ -141,8 +134,9 @@ TEST_F(StorageEngineTest, LoadCatalogDropsOrphansAfterUncleanShutdown) {
     auto swCollInfo = createCollection(opCtx.get(), collNs);
     ASSERT_OK(swCollInfo.getStatus());
 
-    ASSERT_OK(
-        dropIdent(shard_role_details::getRecoveryUnit(opCtx.get()), swCollInfo.getValue().ident));
+    ASSERT_OK(dropIdent(shard_role_details::getRecoveryUnit(opCtx.get()),
+                        swCollInfo.getValue().ident,
+                        /*identHasSizeInfo=*/true));
     ASSERT(collectionExists(opCtx.get(), collNs));
 
     // After the catalog is reloaded, we expect that the collection has been dropped because the
@@ -185,6 +179,10 @@ TEST_F(StorageEngineTest, TemporaryRecordStoreClustered) {
 
 class StorageEngineReconcileTest : public StorageEngineTest {
 protected:
+    UUID collectionUUID = UUID::gen();
+    UUID buildUUID = UUID::gen();
+    std::string resumableIndexFileName = "foo";
+
     // Makes an empty internal table.
     std::unique_ptr<TemporaryRecordStore> makeInternalTable(OperationContext* opCtx) {
         std::unique_ptr<TemporaryRecordStore> ret;
@@ -196,16 +194,44 @@ protected:
         return ret;
     }
 
+    std::string prepareIndexBuild(OperationContext* opCtx, BSONObj& indexSpec) {
+        // Creates a collection.
+        auto ns = NamespaceString::createNamespaceString_forTest("db.coll1");
+        auto swCollInfo = createCollection(opCtx, ns);
+        ASSERT_OK(swCollInfo.getStatus());
+        auto catalogId = swCollInfo.getValue().catalogId;
+        auto uuid = CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, ns);
+        ASSERT(uuid);
+        collectionUUID = *uuid;
+
+        // Starts an index build on the collection.
+        auto indexName = "a_1";
+        {
+            Lock::GlobalLock lk(opCtx, MODE_IX);
+            Lock::DBLock dbLk(opCtx, ns.dbName(), MODE_IX);
+            Lock::CollectionLock collLk(opCtx, ns, MODE_X);
+            WriteUnitOfWork wuow(opCtx);
+            ASSERT_OK(startIndexBuild(opCtx, ns, indexName, buildUUID));
+            wuow.commit();
+        }
+        auto md = _storageEngine->getCatalog()->getParsedCatalogEntry(opCtx, catalogId)->metadata;
+        auto offset = md->findIndexOffset(indexName);
+        indexSpec = md->indexes[offset].spec;
+        return _storageEngine->getCatalog()->getIndexIdent(opCtx, catalogId, indexName);
+    }
+
     // Makes an internal table that contains index-resume metadata, where |pretendSideTable| is an
     // internal table used for that resume.
     std::unique_ptr<TemporaryRecordStore> makeIndexBuildResumeTable(
-        OperationContext* opCtx, const TemporaryRecordStore& pretendSideTable) {
+        OperationContext* opCtx,
+        const TemporaryRecordStore& pretendSideTable,
+        const BSONObj& indexSpec = {}) {
         std::unique_ptr<TemporaryRecordStore> ret;
         {
             Lock::GlobalLock lk(opCtx, MODE_IX);
             ret = _storageEngine->makeTemporaryRecordStoreForResumableIndexBuild(opCtx,
                                                                                  KeyFormat::Long);
-            BSONObj resInfo = makePretendResumeInfo(pretendSideTable);
+            BSONObj resInfo = makePretendResumeInfo(pretendSideTable, indexSpec);
             WriteUnitOfWork wuow(opCtx);
             ASSERT_OK(
                 ret->rs()->insertRecord(opCtx, resInfo.objdata(), resInfo.objsize(), Timestamp()));
@@ -217,15 +243,18 @@ protected:
 
     // Returns index-resume metadata which would use the given |pretendSideTable| in the index's
     // build.
-    BSONObj makePretendResumeInfo(const TemporaryRecordStore& pretendSideTable) {
+    BSONObj makePretendResumeInfo(const TemporaryRecordStore& pretendSideTable,
+                                  const BSONObj& indexSpec) {
         IndexStateInfo indexInfo;
-        indexInfo.setSpec({});
+        indexInfo.setSpec(indexSpec);
         indexInfo.setIsMultikey({});
         indexInfo.setMultikeyPaths({});
         indexInfo.setSideWritesTable(pretendSideTable.rs()->getIdent());
+        indexInfo.setFileName(resumableIndexFileName);
+        indexInfo.setRanges({{}});
         ResumeIndexInfo resumeInfo;
-        resumeInfo.setBuildUUID(UUID::gen());
-        resumeInfo.setCollectionUUID(UUID::gen());
+        resumeInfo.setBuildUUID(buildUUID);
+        resumeInfo.setCollectionUUID(collectionUUID);
         resumeInfo.setPhase({});
         resumeInfo.setIndexes(std::vector<IndexStateInfo>{std::move(indexInfo)});
         return resumeInfo.toBSON();
@@ -243,7 +272,6 @@ TEST_F(StorageEngineReconcileTest, ReconcileDropsAllIdentsForUncleanShutdown) {
     // Reconcile will drop all temporary idents when starting up after an unclean shutdown.
     auto reconcileResult = unittest::assertGet(reconcileAfterUncleanShutdown(opCtx.get()));
 
-    ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToRestart.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToResume.size());
     ASSERT_FALSE(identExists(opCtx.get(), irrelevantRs->rs()->getIdent()));
@@ -263,12 +291,197 @@ TEST_F(StorageEngineReconcileTest, ReconcileOnlyKeepsNecessaryIdentsForCleanShut
 
     // After clean shutdown, an internal ident should be kept if-and-only-if it is needed to resume
     // an index build.
-    ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToRestart.size());
     ASSERT_EQUALS(1UL, reconcileResult.indexBuildsToResume.size());
     ASSERT_FALSE(identExists(opCtx.get(), irrelevantRs->rs()->getIdent()));
     ASSERT_FALSE(identExists(opCtx.get(), resumableIndexRs->rs()->getIdent()));
     ASSERT_TRUE(identExists(opCtx.get(), necessaryRs->rs()->getIdent()));
+}
+
+void createTempFiles(const boost::filesystem::path& tempDir,
+                     boost::optional<const boost::filesystem::path&> indexFile = boost::none,
+                     boost::optional<const boost::filesystem::path&> irrelevantFile = boost::none) {
+    boost::filesystem::remove_all(tempDir);
+    ASSERT_TRUE(boost::filesystem::create_directory(tempDir));
+    if (indexFile) {
+        std::ofstream file(indexFile->string());
+        ASSERT_TRUE(boost::filesystem::exists(*indexFile));
+    }
+    if (irrelevantFile) {
+        std::ofstream file(irrelevantFile->string());
+        ASSERT_TRUE(boost::filesystem::exists(*irrelevantFile));
+    }
+}
+
+TEST_F(StorageEngineReconcileTest, StartupRecoveryForUncleanShutdown) {
+    repl::StorageInterface::set(getServiceContext(),
+                                std::make_unique<repl::StorageInterfaceImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    std::unique_ptr<TemporaryRecordStore> irrelevantRs = makeInternalTable(opCtx.get());
+    std::unique_ptr<TemporaryRecordStore> necessaryRs = makeInternalTable(opCtx.get());
+    std::unique_ptr<TemporaryRecordStore> resumableIndexRs =
+        makeIndexBuildResumeTable(opCtx.get(), *necessaryRs);
+
+    // Test cleanup of temporary directory used by resumable index build
+    auto tempDir = boost::filesystem::path(storageGlobalParams.dbpath).append("_tmp");
+    createTempFiles(tempDir);
+
+    startup_recovery::repairAndRecoverDatabases(opCtx.get(),
+                                                StorageEngine::LastShutdownState::kUnclean);
+
+    // tempDir is not used and completely cleared when starting up after an unclean shutdown.
+    ASSERT_FALSE(boost::filesystem::exists(tempDir));
+
+    // Reconcile will drop all temporary idents when starting up after an unclean shutdown.
+    ASSERT_FALSE(identExists(opCtx.get(), irrelevantRs->rs()->getIdent()));
+    ASSERT_FALSE(identExists(opCtx.get(), resumableIndexRs->rs()->getIdent()));
+    ASSERT_FALSE(identExists(opCtx.get(), necessaryRs->rs()->getIdent()));
+}
+
+// Abort the two-phase index build since it hangs in vote submission, because we are not running
+// a full featured mongodb replica set.
+void abortIndexBuild(OperationContext* opCtx, const UUID& buildUUID) {
+    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
+    // Pretend initial sync mode, otherwise abort is not allowed as a Secondary.
+    ASSERT_OK(
+        repl::ReplicationCoordinator::get(opCtx)->setFollowerMode(repl::MemberState::RS_STARTUP2));
+    ASSERT_TRUE(IndexBuildsCoordinator::get(opCtx)->abortIndexBuildByBuildUUID(
+        opCtx, buildUUID, IndexBuildAction::kInitialSyncAbort, "Shutdown"));
+}
+
+TEST_F(StorageEngineReconcileTest, StartupRecoveryResumableIndexForCleanShutdown) {
+    repl::StorageInterface::set(getServiceContext(),
+                                std::make_unique<repl::StorageInterfaceImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    std::unique_ptr<TemporaryRecordStore> irrelevantRs = makeInternalTable(opCtx.get());
+    std::unique_ptr<TemporaryRecordStore> necessaryRs = makeInternalTable(opCtx.get());
+    BSONObj indexSpec;
+    auto indexIdent = prepareIndexBuild(opCtx.get(), indexSpec);
+    std::unique_ptr<TemporaryRecordStore> resumableIndexRs =
+        makeIndexBuildResumeTable(opCtx.get(), *necessaryRs, indexSpec);
+
+    // Test cleanup of temporary directory used by resumable index build
+    auto tempDir = boost::filesystem::path(storageGlobalParams.dbpath).append("_tmp");
+    auto irrelevantFile = tempDir / "garbage";
+    // Create a file for resumable index build
+    auto indexFile = tempDir / resumableIndexFileName;
+    createTempFiles(tempDir, indexFile, irrelevantFile);
+
+    ScopeGuard abortIndexOnExit([this, &opCtx] { abortIndexBuild(opCtx.get(), buildUUID); });
+    startup_recovery::repairAndRecoverDatabases(opCtx.get(),
+                                                StorageEngine::LastShutdownState::kClean);
+
+    // tempDir is cleared except for files for resumable builds.
+    ASSERT_TRUE(boost::filesystem::exists(tempDir));
+    ASSERT_TRUE(boost::filesystem::exists(indexFile));
+    ASSERT_FALSE(boost::filesystem::exists(irrelevantFile));
+
+    // After clean shutdown, an internal ident should be kept if-and-only-if it is needed to resume
+    // an index build.
+    ASSERT_FALSE(identExists(opCtx.get(), irrelevantRs->rs()->getIdent()));
+    ASSERT_FALSE(identExists(opCtx.get(), resumableIndexRs->rs()->getIdent()));
+    ASSERT_TRUE(identExists(opCtx.get(), necessaryRs->rs()->getIdent()));
+    ASSERT_TRUE(identExists(opCtx.get(), indexIdent));
+}
+
+TEST_F(StorageEngineReconcileTest, StartupRecoveryResumableIndexFallbackToRestart) {
+    repl::StorageInterface::set(getServiceContext(),
+                                std::make_unique<repl::StorageInterfaceImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    std::unique_ptr<TemporaryRecordStore> irrelevantRs = makeInternalTable(opCtx.get());
+    std::unique_ptr<TemporaryRecordStore> necessaryRs = makeInternalTable(opCtx.get());
+    std::string indexIdent;
+    {
+        BSONObj unusedSpec;
+        indexIdent = prepareIndexBuild(opCtx.get(), unusedSpec);
+    }
+
+    // Use an empty indexSpec which is invalid to resume.
+    // The resumable index build will fail and fall back to restart.
+    std::unique_ptr<TemporaryRecordStore> resumableIndexRs =
+        makeIndexBuildResumeTable(opCtx.get(), *necessaryRs);
+
+    // Test cleanup of temporary directory used by resumable index build
+    auto tempDir = boost::filesystem::path(storageGlobalParams.dbpath).append("_tmp");
+    auto indexFile = tempDir / resumableIndexFileName;
+    createTempFiles(tempDir, indexFile);
+
+    ScopeGuard abortIndexOnExit([this, &opCtx] { abortIndexBuild(opCtx.get(), buildUUID); });
+    startup_recovery::repairAndRecoverDatabases(opCtx.get(),
+                                                StorageEngine::LastShutdownState::kClean);
+
+    ASSERT_TRUE(boost::filesystem::exists(tempDir));
+    // When resumable index build fails its temp file is removed.
+    ASSERT_FALSE(boost::filesystem::exists(indexFile));
+
+    ASSERT_FALSE(identExists(opCtx.get(), irrelevantRs->rs()->getIdent()));
+    ASSERT_FALSE(identExists(opCtx.get(), resumableIndexRs->rs()->getIdent()));
+    ASSERT_TRUE(identExists(opCtx.get(), necessaryRs->rs()->getIdent()));
+    ASSERT_TRUE(identExists(opCtx.get(), indexIdent));
+}
+
+TEST_F(StorageEngineReconcileTest, StartupRecoveryRestartIndexForCleanShutdown) {
+    repl::StorageInterface::set(getServiceContext(),
+                                std::make_unique<repl::StorageInterfaceImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    std::string indexIdent;
+    {
+        BSONObj unusedSpec;
+        indexIdent = prepareIndexBuild(opCtx.get(), unusedSpec);
+    }
+
+    // Test cleanup of temporary directory used by resumable index build
+    auto tempDir = boost::filesystem::path(storageGlobalParams.dbpath).append("_tmp");
+    createTempFiles(tempDir);
+
+    ScopeGuard abortIndexOnExit([this, &opCtx] { abortIndexBuild(opCtx.get(), buildUUID); });
+    startup_recovery::repairAndRecoverDatabases(opCtx.get(),
+                                                StorageEngine::LastShutdownState::kClean);
+
+    // tempDir is removed because there is no resumable build.
+    ASSERT_FALSE(boost::filesystem::exists(tempDir));
+
+    ASSERT(identExists(opCtx.get(), indexIdent));
+}
+
+TEST_F(StorageEngineTest, StartupRecoveryBuildMissingIdIndex) {
+    repl::StorageInterface::set(getServiceContext(),
+                                std::make_unique<repl::StorageInterfaceImpl>());
+    auto opCtx = cc().makeOperationContext();
+    auto ns = NamespaceString::createNamespaceString_forTest("db.coll1");
+    auto swCollInfo = createCollection(opCtx.get(), ns);
+    ASSERT_OK(swCollInfo.getStatus());
+
+    auto coll = CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), ns);
+    ASSERT(coll);
+    // _id index is missing initially.
+    ASSERT_FALSE(coll->getIndexCatalog()->findIdIndex(opCtx.get()));
+    startup_recovery::repairAndRecoverDatabases(opCtx.get(),
+                                                StorageEngine::LastShutdownState::kClean);
+    coll = CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), ns);
+    ASSERT(coll);
+    // _id index is built after recovery.
+    ASSERT(coll->getIndexCatalog()->findIdIndex(opCtx.get()));
+}
+
+TEST_F(StorageEngineTest, StartupRecoveryClearLocalTempCollections) {
+    repl::StorageInterface::set(getServiceContext(),
+                                std::make_unique<repl::StorageInterfaceImpl>());
+    auto opCtx = cc().makeOperationContext();
+    // Create a local temp collection.
+    auto ns = NamespaceString::createNamespaceString_forTest("local.coll1");
+    auto swCollInfo = createTempCollection(opCtx.get(), ns);
+    ASSERT_OK(swCollInfo.getStatus());
+
+    startup_recovery::repairAndRecoverDatabases(opCtx.get(),
+                                                StorageEngine::LastShutdownState::kClean);
+    auto coll = CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), ns);
+    // The local temp collection is removed.
+    ASSERT_FALSE(coll);
 }
 
 TEST_F(StorageEngineTest, TemporaryRecordStoreDoesNotTrackSizeAdjustments) {
@@ -284,8 +497,8 @@ TEST_F(StorageEngineTest, TemporaryRecordStoreDoesNotTrackSizeAdjustments) {
         ASSERT_TRUE(s.isOK());
         wuow.commit();
 
-        ASSERT_EQ(rs->numRecords(opCtx.get()), 0);
-        ASSERT_EQ(rs->dataSize(opCtx.get()), 0);
+        ASSERT_EQ(rs->numRecords(), 0);
+        ASSERT_EQ(rs->dataSize(), 0);
     };
 
     // Create the temporary record store and get its ident.
@@ -399,10 +612,6 @@ TEST_F(StorageEngineTest, ReconcileUnfinishedIndex) {
     // Reconcile should have to dropped the ident to allow the index to be rebuilt.
     ASSERT(!identExists(opCtx.get(), indexIdent));
 
-    // Because this index is unfinished, reconcile will drop the index and not require it to be
-    // rebuilt.
-    ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
-
     // There are no two-phase builds to resume or restart.
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToRestart.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToResume.size());
@@ -452,10 +661,6 @@ TEST_F(StorageEngineTest, ReconcileTwoPhaseIndexBuilds) {
     // transactionally with the start.
     ASSERT(identExists(opCtx.get(), indexIdentA));
     ASSERT(identExists(opCtx.get(), indexIdentB));
-
-    // Because this is an unfinished two-phase index build, reconcile will not require this index to
-    // be rebuilt to completion, rather restarted.
-    ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
 
     // Only one index build should be indicated as needing to be restarted.
     ASSERT_EQUALS(1UL, reconcileResult.indexBuildsToRestart.size());
@@ -510,14 +715,14 @@ TEST_F(StorageEngineRepairTest, ReconcileSucceeds) {
     auto swCollInfo = createCollection(opCtx.get(), collNs);
     ASSERT_OK(swCollInfo.getStatus());
 
-    ASSERT_OK(
-        dropIdent(shard_role_details::getRecoveryUnit(opCtx.get()), swCollInfo.getValue().ident));
+    ASSERT_OK(dropIdent(shard_role_details::getRecoveryUnit(opCtx.get()),
+                        swCollInfo.getValue().ident,
+                        /*identHasSizeInfo=*/true));
     ASSERT(collectionExists(opCtx.get(), collNs));
 
     // Reconcile would normally return an error if a collection existed with a missing ident in the
     // storage engine. When in a repair context, that should not be the case.
     auto reconcileResult = unittest::assertGet(reconcile(opCtx.get()));
-    ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToRestart.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToResume.size());
 
@@ -590,7 +795,6 @@ TEST_F(StorageEngineTest, LoadCatalogDropsOrphans) {
     }
     // reconcileCatalogAndIdents() drops orphaned idents.
     auto reconcileResult = unittest::assertGet(reconcile(opCtx.get()));
-    ASSERT_EQUALS(0UL, reconcileResult.indexesToRebuild.size());
     ASSERT_EQUALS(0UL, reconcileResult.indexBuildsToRestart.size());
 
     ASSERT(!identExists(opCtx.get(), swCollInfo.getValue().ident));

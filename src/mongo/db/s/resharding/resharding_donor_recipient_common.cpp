@@ -70,6 +70,7 @@
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/resharding/common_types_gen.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/stdx/unordered_set.h"
@@ -209,12 +210,18 @@ void processReshardingFieldsForDonorCollection(OperationContext* opCtx,
 }
 
 bool isCurrentShardPrimary(OperationContext* opCtx, const NamespaceString& nss) {
-    // At this point of resharding execution, the coordinator is holding a DDL lock which means
-    // the DB primary is stable and we have gossiped-in the `configTime` which created that
-    // coordinator. Therefore the withRefresh call is guaranteed to see the most-up-to date DB
-    // primary.
-    auto dbInfo = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getDatabaseWithRefresh(opCtx, nss.dbName()));
+    auto dbInfo = [&] {
+        // At this point of resharding execution, the coordinator is holding a DDL lock which means
+        // the DB primary is stable and we have gossiped-in the `configTime` which created that
+        // coordinator. Therefore if we force a routing cache refresh thorugh
+        // onStaleDatabaseVersion() we have the guarantee to fetch the most-up-to date DB info.
+        // primary.
+        //
+        // TODO SERVER-96115 Use the CatalogClient to fetch DB info and avoid this forced refresh
+        const auto& catalogCache = Grid::get(opCtx)->catalogCache();
+        catalogCache->onStaleDatabaseVersion(nss.dbName(), boost::none /* wantedVersion */);
+        return uassertStatusOK(catalogCache->getDatabase(opCtx, nss.dbName()));
+    }();
     return dbInfo->getPrimary() == ShardingState::get(opCtx)->shardId();
 }
 
@@ -365,6 +372,15 @@ ReshardingRecipientDocument constructRecipientDocumentFromReshardingFields(
     recipientDoc.setMetrics(std::move(metrics));
 
     recipientDoc.setCommonReshardingMetadata(std::move(commonMetadata));
+    const bool skipCloningAndApplying =
+        resharding::gFeatureFlagReshardingSkipCloningAndApplyingIfApplicable.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        !metadata.currentShardHasAnyChunks();
+    recipientDoc.setSkipCloningAndApplying(skipCloningAndApplying);
+
+    recipientDoc.setStoreOplogFetcherProgress(
+        resharding::gFeatureFlagReshardingStoreOplogFetcherProgress.isEnabled(
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
     recipientDoc.setOplogBatchTaskCount(recipientFields->getOplogBatchTaskCount());
 
@@ -446,9 +462,9 @@ void clearFilteringMetadata(OperationContext* opCtx,
             ThreadClient tc("TriggerReshardingRecovery",
                             svcCtx->getService(ClusterRole::ShardServer));
             auto opCtx = tc->makeOperationContext();
-            FilteringMetadataCache::get(opCtx.get())
-                ->onCollectionPlacementVersionMismatch(
-                    opCtx.get(), nss, boost::none /* chunkVersionReceived */);
+            uassertStatusOK(FilteringMetadataCache::get(opCtx.get())
+                                ->onCollectionPlacementVersionMismatch(
+                                    opCtx.get(), nss, boost::none /* chunkVersionReceived */));
         })
             .until([](const Status& status) {
                 if (!status.isOK()) {

@@ -73,7 +73,7 @@ public:
         DBDirectClient db(&opCtx);
 
         db.dropDatabase(DatabaseName::createDatabaseName_forTest(boost::none, "test"));
-        query_settings::QuerySettingsManager::create(opCtx.getServiceContext(), {});
+        query_settings::QuerySettingsManager::create(opCtx.getServiceContext(), {}, {});
     }
 
     virtual ~Base() {
@@ -187,54 +187,6 @@ public:
         findRequest.setSort(BSON("a" << 1 << "b" << 1));
         std::unique_ptr<DBClientCursor> c = db.find(std::move(findRequest));
         ASSERT_EQUALS(1111, c->itcount());
-    }
-};
-
-class PushBack : public Base {
-public:
-    PushBack() : Base("PushBack") {}
-    void run() {
-        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
-        OperationContext& opCtx = *opCtxPtr;
-        DBDirectClient db(&opCtx);
-
-        for (int i = 0; i < 10; ++i) {
-            db.insert(nss(), BSON("i" << i));
-        }
-
-        FindCommandRequest findRequest{NamespaceString::createNamespaceString_forTest(ns())};
-        findRequest.setSort(BSON("i" << 1));
-        std::unique_ptr<DBClientCursor> c = db.find(std::move(findRequest));
-
-        BSONObj o = c->next();
-        ASSERT(c->more());
-        ASSERT_EQUALS(9, c->objsLeftInBatch());
-        ASSERT(c->moreInCurrentBatch());
-
-        c->putBack(o);
-        ASSERT(c->more());
-        ASSERT_EQUALS(10, c->objsLeftInBatch());
-        ASSERT(c->moreInCurrentBatch());
-
-        o = c->next();
-        BSONObj o2 = c->next();
-        BSONObj o3 = c->next();
-        c->putBack(o3);
-        c->putBack(o2);
-        c->putBack(o);
-        for (int i = 0; i < 10; ++i) {
-            o = c->next();
-            ASSERT_EQUALS(i, o["i"].number());
-        }
-        ASSERT(!c->more());
-        ASSERT_EQUALS(0, c->objsLeftInBatch());
-        ASSERT(!c->moreInCurrentBatch());
-
-        c->putBack(o);
-        ASSERT(c->more());
-        ASSERT_EQUALS(1, c->objsLeftInBatch());
-        ASSERT(c->moreInCurrentBatch());
-        ASSERT_EQUALS(1, c->itcount());
     }
 };
 
@@ -412,7 +364,6 @@ public:
         add<DropIndex>();
         add<BuildIndex>();
         add<CS_10>();
-        add<PushBack>();
         add<Create>();
         add<ConnectionStringTests>();
         add<CreateSimpleV1Index>();

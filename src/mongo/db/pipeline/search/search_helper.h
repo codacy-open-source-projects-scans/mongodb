@@ -81,10 +81,17 @@ bool isSearchPipeline(const Pipeline* pipeline);
  */
 bool isSearchMetaPipeline(const Pipeline* pipeline);
 
+/* This function is only called if the mongot pipeline is on a view. */
 void setResolvedNamespaceForSearch(const NamespaceString& origNss,
                                    const ResolvedView& resolvedView,
                                    boost::intrusive_ptr<ExpressionContext> expCtx,
                                    boost::optional<UUID> uuid = boost::none);
+
+/**
+ * Check if this is a stored source $search or $_internalSearchMongot pipeline.
+ */
+bool isStoredSource(const Pipeline* pipeline);
+
 /**
  * Check if this is a search-related pipeline, specifically that the front of the pipeline is a
  * stage that will rely on calls to mongot.
@@ -193,13 +200,15 @@ std::list<boost::intrusive_ptr<DocumentSource>> createInitialSearchPipeline(
 
     uassert(6600901,
             "Running search command in non-allowed context (update pipeline)",
-            !expCtx->isParsingPipelineUpdate);
+            !expCtx->getIsParsingPipelineUpdate());
 
     // This is only called from user pipelines during desugaring of $search/$searchMeta, so the
     // `specObj` should be the search query itself.
-    auto executor = executor::getMongotTaskExecutor(expCtx->opCtx->getServiceContext());
-    if ((!expCtx->mongoProcessInterface->isExpectedToExecuteQueries() ||
-         !expCtx->mongoProcessInterface->inShardedEnvironment(expCtx->opCtx)) ||
+    auto executor =
+        executor::getMongotTaskExecutor(expCtx->getOperationContext()->getServiceContext());
+    if ((!expCtx->getMongoProcessInterface()->isExpectedToExecuteQueries() ||
+         !expCtx->getMongoProcessInterface()->inShardedEnvironment(
+             expCtx->getOperationContext())) ||
         MONGO_unlikely(searchReturnEofImmediately.shouldFail())) {
         return {make_intrusive<TargetSearchDocumentSource>(std::move(specObj), expCtx, executor)};
     }

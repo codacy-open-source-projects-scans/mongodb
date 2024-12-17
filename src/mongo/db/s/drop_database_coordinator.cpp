@@ -47,6 +47,8 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
+#include "mongo/db/commands/list_collections_filter.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
@@ -97,6 +99,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/flush_database_cache_updates_gen.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/database_name_util.h"
@@ -114,6 +117,14 @@
 
 namespace mongo {
 namespace {
+
+BSONObj makeDatabaseQuery(const DatabaseName& dbName, const DatabaseVersion& dbVersion) {
+    // Making the dbVersion timestamp part of the query ensures idempotency.
+    return BSON(DatabaseType::kDbNameFieldName
+                << DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest())
+                << DatabaseType::kVersionFieldName + "." + DatabaseVersion::kTimestampFieldName
+                << dbVersion.getTimestamp());
+}
 
 void removeDatabaseFromConfigAndUpdatePlacementHistory(
     OperationContext* opCtx,
@@ -137,13 +148,7 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
     const auto transactionChain = [opCtx, dbName, dbVersion](
                                       const txn_api::TransactionClient& txnClient,
                                       ExecutorPtr txnExec) {
-        // Making the dbVersion timestamp part of the query ensures idempotency.
-        write_ops::DeleteOpEntry deleteDatabaseEntryOp{
-            BSON(DatabaseType::kDbNameFieldName
-                 << DatabaseNameUtil::serialize(dbName, SerializationContext::stateCommandRequest())
-                 << DatabaseType::kVersionFieldName + "." + DatabaseVersion::kTimestampFieldName
-                 << dbVersion.getTimestamp()),
-            false};
+        write_ops::DeleteOpEntry deleteDatabaseEntryOp{makeDatabaseQuery(dbName, dbVersion), false};
 
         write_ops::DeleteCommandRequest deleteDatabaseEntry(
             NamespaceString::kConfigDatabasesNamespace, {deleteDatabaseEntryOp});
@@ -165,8 +170,37 @@ void removeDatabaseFromConfigAndUpdatePlacementHistory(
                 return txnClient.runCRUDOp(insertPlacementEntry, {1});
             })
             .thenRunOn(txnExec)
-            .then([](const BatchedCommandResponse& insertPlacementEntryResponse) {
+            .then([&](const BatchedCommandResponse& insertPlacementEntryResponse) {
                 uassertStatusOK(insertPlacementEntryResponse.toStatus());
+
+                const bool createDatabaseDDLCoordinatorFeatureFlagEnabled =
+                    feature_flags::gCreateDatabaseDDLCoordinator.isEnabled(
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+
+                if (!createDatabaseDDLCoordinatorFeatureFlagEnabled) {
+                    BatchedCommandResponse noOpResponse;
+                    noOpResponse.setStatus(Status::OK());
+                    noOpResponse.setN(0);
+                    return SemiFuture<BatchedCommandResponse>(std::move(noOpResponse));
+                }
+
+                // Inserts a document {_id: <dbName>, version: {timestamp: <timestamp>}}
+                // to 'config.dropPendingDBs' collection on the config server. This
+                // blocks createDatabase coordinator from committing the creation of
+                // database with the same name to the sharding catalog.
+                write_ops::InsertCommandRequest insertConfigDropPendingDBsEntry(
+                    NamespaceString::kConfigDropPendingDBsNamespace,
+                    {BSON(DatabaseType::kDbNameFieldName
+                          << DatabaseNameUtil::serialize(
+                                 dbName, SerializationContext::stateCommandRequest())
+                          << DatabaseType::kVersionFieldName
+                          << BSON(DatabaseVersion::kTimestampFieldName
+                                  << dbVersion.getTimestamp()))});
+                return txnClient.runCRUDOp(insertConfigDropPendingDBsEntry, {2});
+            })
+            .thenRunOn(txnExec)
+            .then([](const BatchedCommandResponse& insertConfigDropPendingDBsEntryResponse) {
+                uassertStatusOK(insertConfigDropPendingDBsEntryResponse.toStatus());
             })
             .semi();
     };
@@ -244,7 +278,13 @@ void DropDatabaseCoordinator::_dropShardedCollection(
         useClusterTransaction,
         **executor);
 
-    sharding_ddl_util::removeTagsMetadataFromConfig(opCtx, nss, getNewSession(opCtx));
+    {
+        const auto session = getNewSession(opCtx);
+        sharding_ddl_util::removeTagsMetadataFromConfig(opCtx, nss, session);
+    }
+
+    // Remove the query sampling configuration documents for the collection, if it exists.
+    sharding_ddl_util::removeQueryAnalyzerMetadata(opCtx, {coll.getUuid()});
 
     const auto primaryShardId = ShardingState::get(opCtx)->shardId();
 
@@ -388,15 +428,22 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
                         opCtx, nss, getNewSession(opCtx));
                 }
 
-                // Remove the query sampling configuration documents for all collections in this
-                // database, if they exist.
-                auto db = DatabaseNameUtil::serialize(_dbName,
-                                                      SerializationContext::stateCommandRequest());
-                const std::string regex = "^" + pcre_util::quoteMeta(db) + "\\..*";
-                sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(
-                    opCtx,
-                    BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName
-                         << BSON("$regex" << regex)));
+                // Remove the query sampling configuration documents for all unsharded collections
+                // in this database, if they exist.
+                {
+                    std::vector<UUID> unshardedCollUUIDs;
+                    DBDirectClient dbClient(opCtx);
+                    // NOTE: UUIDs are retrieved through a filter that excludes timeseries
+                    // collections; this is fine, since no query analyzer can be configured on them.
+                    const auto collInfos = dbClient.getCollectionInfos(
+                        _dbName, ListCollectionsFilter::makeTypeCollectionFilter());
+                    for (const auto& collInfo : collInfos) {
+                        unshardedCollUUIDs.push_back(UUID::parse(collInfo.getObjectField("info")));
+                    }
+
+                    sharding_ddl_util::removeQueryAnalyzerMetadata(opCtx,
+                                                                   std::move(unshardedCollUUIDs));
+                }
 
                 const auto allShardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
                 {
@@ -511,6 +558,30 @@ ExecutorFuture<void> DropDatabaseCoordinator::_runImpl(
 
             ShardingLogging::get(opCtx)->logChange(opCtx, "dropDatabase", dbNss);
             LOGV2(5494506, "Database dropped", "db"_attr = _dbName);
+        })
+        .then([this, anchor = shared_from_this()] {
+            auto opCtxHolder = cc().makeOperationContext();
+            auto* opCtx = opCtxHolder.get();
+            getForwardableOpMetadata().setOn(opCtx);
+
+            BatchedCommandRequest request([&] {
+                write_ops::DeleteOpEntry deleteDatabaseEntryOp{
+                    makeDatabaseQuery(_dbName, *metadata().getDatabaseVersion()), false};
+
+                write_ops::DeleteCommandRequest deleteDatabaseEntry(
+                    NamespaceString::kConfigDropPendingDBsNamespace, {deleteDatabaseEntryOp});
+
+                return deleteDatabaseEntry;
+            }());
+
+            auto configServer = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+            uassertStatusOK(configServer
+                                ->runBatchWriteCommand(opCtx,
+                                                       Milliseconds::max(),
+                                                       request,
+                                                       ShardingCatalogClient::kMajorityWriteConcern,
+                                                       Shard::RetryPolicy::kIdempotent)
+                                .toStatus());
         });
 }
 

@@ -22,7 +22,7 @@ const collName = "testcoll";
 const rst = new ReplSetTest(
     {name: testName, nodes: 1, settings: {chainingAllowed: false}, useBridge: true});
 rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 const primary = rst.getPrimary();
 const primaryDb = primary.getDB(dbName);
@@ -100,7 +100,7 @@ jsTestLog("Allowing member to complete initial sync");
 let doNotRemoveNewlyAddedFP = configureFailPoint(primaryDb, "doNotRemoveNewlyAddedOnHeartbeats");
 assert.commandWorked(
     secondary.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}));
-rst.waitForState(secondary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [secondary]);
 
 jsTestLog("Checking that the 'newlyAdded' field is still set");
 assert(isMemberNewlyAdded(primary, 1));

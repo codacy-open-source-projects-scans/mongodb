@@ -219,6 +219,20 @@ build_grpc = rule(
 )
 
 # =========
+# otel
+# =========
+
+build_otel_provider = provider(
+    doc = """Enable building otel and protobuf compiler. This has no effect on non-linux operating systems.""",
+    fields = ["enabled"],
+)
+
+build_otel = rule(
+    implementation = lambda ctx: build_otel_provider(enabled = ctx.build_setting_value),
+    build_setting = config.bool(flag = True),
+)
+
+# =========
 # sanitize
 # =========
 
@@ -391,6 +405,28 @@ dbg_provider = provider(
 dbg = rule(
     implementation = lambda ctx: dbg_provider(enabled = ctx.build_setting_value),
     build_setting = config.bool(flag = True),
+)
+
+# ==========
+# dbg_level
+# ==========
+
+dbg_level_values = ["0", "1", "2", "3"]
+
+dbg_level_provider = provider(
+    doc = "Sets the level of debug information generated.",
+    fields = ["level"],
+)
+
+def dbg_level_support_impl(ctx):
+    dbg_level_value = ctx.build_setting_value
+    if dbg_level_value not in dbg_level_values:
+        fail(str(ctx.label) + "dbg_level allowed to take values {" + ", ".join(dbg_level_values) + "} but was set to unallowed value " + dbg_level_value)
+    return dbg_level_provider(level = dbg_level_value)
+
+dbg_level = rule(
+    implementation = dbg_level_support_impl,
+    build_setting = config.string(flag = True),
 )
 
 # =========

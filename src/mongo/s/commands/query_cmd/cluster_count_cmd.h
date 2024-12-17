@@ -57,12 +57,7 @@
 
 namespace mongo {
 
-namespace {
-
-// The # of documents returned is always 1 for the count command.
-static constexpr long long kNReturned = 1;
-
-BSONObj prepareCountForPassthrough(const BSONObj& cmdObj, bool requestQueryStats) {
+inline BSONObj prepareCountForPassthrough(const BSONObj& cmdObj, bool requestQueryStats) {
     if (!requestQueryStats) {
         return CommandHelpers::filterCommandRequestForPassthrough(cmdObj);
     }
@@ -71,8 +66,6 @@ BSONObj prepareCountForPassthrough(const BSONObj& cmdObj, bool requestQueryStats
     bob.append("includeQueryStatsMetrics", true);
     return CommandHelpers::filterCommandRequestForPassthrough(bob.done());
 }
-
-}  // namespace
 
 /**
  * Implements the find command on mongos.
@@ -143,12 +136,8 @@ public:
         std::vector<AsyncRequestsSender::Response> shardResponses;
         try {
             auto countRequest = CountCommandRequest::parse(IDLParserContext("count"), cmdObj);
-            if (shouldDoFLERewrite(countRequest)) {
-                if (!countRequest.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
-                    processFLECountS(opCtx, nss, &countRequest);
-                }
-                stdx::lock_guard<Client> lk(*opCtx->getClient());
-                CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
+            if (prepareForFLERewrite(opCtx, countRequest.getEncryptionInformation())) {
+                processFLECountS(opCtx, nss, countRequest);
             }
 
             const auto cri = uassertStatusOK(
@@ -287,6 +276,9 @@ public:
         total = applySkipLimit(total, cmdObj);
         result.appendNumber("n", total);
 
+        // The # of documents returned is always 1 for the count command.
+        static constexpr long long kNReturned = 1;
+
         auto* curOp = CurOp::get(opCtx);
         curOp->setEndOfOpMetrics(kNReturned);
 
@@ -322,11 +314,8 @@ public:
                 nss.isValid());
 
         // If the command has encryptionInformation, rewrite the query as necessary.
-        if (shouldDoFLERewrite(countRequest)) {
-            processFLECountS(opCtx, nss, &countRequest);
-
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
-            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
+        if (prepareForFLERewrite(opCtx, countRequest.getEncryptionInformation())) {
+            processFLECountS(opCtx, nss, countRequest);
         }
 
         BSONObj targetingQuery = countRequest.getQuery();

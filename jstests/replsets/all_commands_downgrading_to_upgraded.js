@@ -102,6 +102,7 @@ const allCommands = {
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrConvertToCapped: {skip: isAnInternalCommand},
     _shardsvrRegisterIndex: {skip: isAnInternalCommand},
+    _shardsvrRunSearchIndexCommand: {skip: isAnInternalCommand},
     _shardsvrCommitIndexParticipant: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
@@ -236,7 +237,6 @@ const allCommands = {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
         },
         command: {analyze: collName},
-        checkFeatureFlag: "CommonQueryFramework",
         teardown: function(conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
@@ -1557,6 +1557,10 @@ const allCommands = {
     },
     transitionToShardedCluster: {skip: isAnInternalCommand},
     unshardCollection: {skip: cannotRunWhileDowngrading},
+    untrackUnshardedCollection: {
+        // The command requires moveCollection on setup which is not allowed in fcv downgrading.
+        skip: cannotRunWhileDowngrading
+    },
     update: {
         setUp: function(conn) {
             assert.commandWorked(conn.getCollection(fullNs).insert({x: 1}));

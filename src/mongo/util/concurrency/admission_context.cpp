@@ -35,7 +35,6 @@
 namespace mongo {
 
 namespace {
-static constexpr StringData kLowString = "low"_sd;
 static constexpr StringData kNormalString = "normal"_sd;
 static constexpr StringData kExemptString = "exempt"_sd;
 }  // namespace
@@ -67,8 +66,12 @@ boost::optional<TickSource::Tick> AdmissionContext::startQueueingTime() const {
     return startQueueingTime;
 }
 
-int AdmissionContext::getAdmissions() const {
+std::int32_t AdmissionContext::getAdmissions() const {
     return _admissions.loadRelaxed();
+}
+
+std::int32_t AdmissionContext::getExemptedAdmissions() const {
+    return _exemptedAdmissions.loadRelaxed();
 }
 
 AdmissionContext::Priority AdmissionContext::getPriority() const {
@@ -77,6 +80,18 @@ AdmissionContext::Priority AdmissionContext::getPriority() const {
 
 void AdmissionContext::recordAdmission() {
     _admissions.fetchAndAdd(1);
+}
+
+void AdmissionContext::setAdmission_forTest(int32_t admissions) {
+    _admissions.store(admissions);
+}
+
+void AdmissionContext::setTotalTimeQueuedMicros_forTest(int64_t micros) {
+    _totalTimeQueuedMicros.store(micros);
+}
+
+void AdmissionContext::recordExemptedAdmission() {
+    _exemptedAdmissions.fetchAndAdd(1);
 }
 
 ScopedAdmissionPriorityBase::ScopedAdmissionPriorityBase(OperationContext* opCtx,
@@ -97,8 +112,6 @@ ScopedAdmissionPriorityBase::~ScopedAdmissionPriorityBase() {
 
 StringData toString(AdmissionContext::Priority priority) {
     switch (priority) {
-        case AdmissionContext::Priority::kLow:
-            return kLowString;
         case AdmissionContext::Priority::kNormal:
             return kNormalString;
         case AdmissionContext::Priority::kExempt:

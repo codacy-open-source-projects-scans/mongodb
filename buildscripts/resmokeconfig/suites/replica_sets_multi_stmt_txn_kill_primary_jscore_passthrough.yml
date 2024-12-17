@@ -91,7 +91,7 @@ selector:
 
     # $collStats
     - jstests/core/**/operation_latency_histogram.js
-    - jstests/core/query/collstats/views_coll_stats.js
+    - jstests/core/catalog/collstats/views_coll_stats.js
     - jstests/core/views/views_stats.js
 
     # Errors expected to happen in tests, which can cause transactions to get aborted.
@@ -193,9 +193,6 @@ selector:
     # op3 will still be using the snapshot from op1, and not see op2 at all.
     - jstests/core/**/benchrun_pipeline_updates.js
     - jstests/core/**/cursora.js
-
-    # Expect drops/creates to fail or have a certain response:
-    - jstests/core/**/explain_upsert.js
 
     # Expect certain responses, but retries of successfully completed commands may return
     # different values:

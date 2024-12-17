@@ -53,7 +53,7 @@ public:
     /**
      * Throws a AssertionException if a field name does not pass validation.
      */
-    static void uassertValidFieldName(StringData fieldName);
+    static Status validateFieldName(StringData fieldName);
 
     /**
      * Concatenates 'prefix' and 'suffix' using dotted path notation. 'prefix' is allowed to be
@@ -72,7 +72,7 @@ public:
      * Throws a AssertionException if the string is empty or if any of the field names fail
      * validation.
      *
-     * Field names are validated using uassertValidFieldName().
+     * Field names are validated using validateFieldName().
      */
     /* implicit */ FieldPath(std::string inputPath,
                              bool precomputeHashes = false,
@@ -165,6 +165,14 @@ public:
     }
 
     FieldPath concat(const FieldPath& tail) const;
+
+    bool isPrefixOf(const FieldPath& rhsPath) const {
+        const auto& lhsStr = fullPath();
+        const auto& rhsStr = rhsPath.fullPath();
+        return lhsStr.size() < rhsStr.size()
+            ? rhsStr.starts_with(lhsStr) && rhsStr[lhsStr.size()] == '.'
+            : lhsStr == rhsStr;
+    }
 
 private:
     FieldPath(std::string string, std::vector<size_t> dots, std::vector<size_t> hashes)

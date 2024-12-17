@@ -5,8 +5,6 @@
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
-TestData.skipEnforceTimeseriesBucketsAreAlwaysCompressedOnValidate = true;
-
 const replTest = new ReplSetTest({nodes: 1});
 replTest.startSet();
 replTest.initiate();
@@ -56,7 +54,7 @@ assert.commandWorked(bucketsColl.insert(bucket));
 
 const secondary = replTest.add();
 replTest.reInitiate();
-replTest.waitForState(secondary, ReplSetTest.State.SECONDARY);
+replTest.awaitSecondaryNodes(null, [secondary]);
 replTest.awaitReplication();
 
 const primaryColl = primary.getDB(db.getName())[bucketsColl.getName()];

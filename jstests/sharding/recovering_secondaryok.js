@@ -2,7 +2,7 @@
  * This tests that secondaryOk'd queries in sharded setups get correctly routed when a secondary
  * goes into RECOVERING state, and don't break
  * @tags: [
- *    # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  */
@@ -99,8 +99,7 @@ rsA.getSecondaries().forEach(
 
 print("9: wait for recovery");
 
-rsA.getSecondaries().forEach(
-    secondary => rsA.waitForState(secondary, ReplSetTest.State.SECONDARY, 5 * 60 * 1000));
+rsA.awaitSecondaryNodes(5 * 60 * 1000);
 
 print("10: check our regular and secondaryOk query");
 

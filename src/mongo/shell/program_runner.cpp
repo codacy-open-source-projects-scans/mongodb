@@ -188,6 +188,7 @@ void ProgramRegistry::registerProgram(ProcessId pid, int port) {
                           << " is already in use",
             !isPidRegistered(pid));
     _registeredPids.emplace(pid);
+    _registeredPidsHistory.push_back(pid);
     if (port != -1) {
         _portToPidMap.emplace(port, pid);
     }
@@ -335,6 +336,11 @@ void ProgramRegistry::getRegisteredPids(vector<ProcessId>& pids) {
     for (const auto& pid : _registeredPids) {
         pids.emplace_back(pid);
     }
+}
+
+std::vector<ProcessId> ProgramRegistry::getRegisteredPidsHistory() {
+    stdx::lock_guard<stdx::recursive_mutex> lk(_mutex);
+    return _registeredPidsHistory;
 }
 
 #ifdef _WIN32
@@ -610,7 +616,10 @@ void ProgramRunner::launchProcess(int child_stdout) {
     for (unsigned i = 0; i < _argv.size(); i++) {
         if (i)
             ss << ' ';
-        if (_argv[i].find(' ') == string::npos)
+        // If any of these characters are present, at minimum quotes must be added around the
+        // argument. In certain cases, escaping is necessary as well.
+        if (_argv[i].find(' ') == string::npos && _argv[i].find('"') == string::npos &&
+            _argv[i].find('^') == string::npos)
             ss << _argv[i];
         else {
             ss << '"';

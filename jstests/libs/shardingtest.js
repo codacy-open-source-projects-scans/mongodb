@@ -1,3 +1,4 @@
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {Thread} from "jstests/libs/parallelTester.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
@@ -81,6 +82,14 @@ export class ShardingTest {
 
         throw Error("can't find server connection for db '" + dbname +
                     "'s primary shard: " + tojson(primaryShard));
+    }
+
+    // TODO SERVER-95358 remove once 9.0 becomes last LTS.
+    getMergeType(db) {
+        if (FeatureFlagUtil.isPresentAndEnabled(db, "AggMongosToRouter")) {
+            return "router";
+        }
+        return "mongos";
     }
 
     normalize(x) {
@@ -919,7 +928,6 @@ export class ShardingTest {
      * Checks for bin versions via:
      *     jsTestOptions().mongosBinVersion,
      *     otherParams.configOptions.binVersion,
-     *     otherParams.shardOptions.binVersion,
      *     otherParams.mongosOptions.binVersion
      */
     getClusterVersionInfo() {
@@ -977,7 +985,6 @@ export class ShardingTest {
      * @property {Object} [rs] Same `rs` parameter to ShardingTest constructor
      * @property {number} [chunkSize] Same as chunkSize parameter to ShardingTest constructor
      * @property {string} [keyFile] The location of the keyFile
-     * @property {Object} [shardOptions] Same as the `shards` parameter to ShardingTest constructor.
      * Can be used to specify options that are common all shards.
      * @property {Object} [configOptions] Same as the `config` parameter to ShardingTest
      * constructor. Can be used to specify options that are common all config servers.
@@ -993,13 +1000,18 @@ export class ShardingTest {
      * replica set nodes should be created with the 'causal consistency' flag enabled, which means
      * they will gossip the cluster time and add readConcern afterClusterTime where applicable.
      * @property {Object} [bridgeOptions={}] Options to apply to all mongobridge processes.
-     *
-     * // replica Set only:
      * @property {Object} [rsOptions] Same as the `rs` parameter to ShardingTest constructor. Can be
      * used to specify options that are common all replica members.
+     *
+     * // replica Set only:
      * @property {boolean} [useHostname] if true, use hostname of machine, otherwise use localhost
      * @property {number} [numReplicas]
      * @property {boolean} [configShard] Add the config server as a shard if true.
+     * @property {boolean} [initiateWithDefaultElectionTimeout] Set the electionTimeoutMillis to its
+     * default value when initiating all replica sets for both config and non-config shards. If not
+     * set, 'ReplSetTest.initiate' defaults to a very high election timeout value (24 hours).
+     * @property {boolean} [allNodesAuthorizedToRunRSGetStatus] Informs `ReplSetTest.initiate`
+     * whether all nodes in the replica set are authorized to run `replSetGetStatus`.
      * @property {boolean} [useAutoBootstrapProcedure] Use the auto-bootstrapping procedure on every
      * shard and config server if set to true.
      * @property {boolean} [alwaysUseTestNameForShardName] Always use the testname as the name of
@@ -1039,7 +1051,7 @@ export class ShardingTest {
      *     (*) There are two ways For multiple configuration objects.
      *       (1) Using the object format. Example:
      *           { d0: { verbose: 5 }, d1: { auth: '' }, rs2: { oplogsize: 10 }}
-     *           In this format, d = mongod, s = mongos & c = config servers
+     *           In this format, d0 = shard0, s = mongos & c = config servers
      *
      *       (2) Using the array format. Example:
      *           [{ verbose: 5 }, { auth: '' }]
@@ -1261,6 +1273,21 @@ export class ShardingTest {
             randomSeedAlreadySet = true;
         }
 
+        TestData.setParameters = TestData.setParameters || {};
+        let setDefaultTransactionLockTimeout = false;
+        if (TestData.setParameters.maxTransactionLockRequestTimeoutMillis === undefined) {
+            // Set a higher maxTransactionLockRequestTimeoutMillis. Tests written with ShardingTest
+            // are generally single threaded and often don't expect lock timeouts, so a higher
+            // timeout avoids spurious failures on slow machines.
+            //
+            // TODO SERVER-98408: Ideally this would be passed as a default setParameter to
+            // ReplSetTest, but the rules for passing default options to ReplSetTest via
+            // ShardingTest are finnicky and tests rely on the current behaviors. Once this is
+            // refactored, we should be able to avoid using TestData.
+            TestData.setParameters.maxTransactionLockRequestTimeoutMillis = 5 * 60 * 1000;
+            setDefaultTransactionLockTimeout = true;
+        }
+
         try {
             const clusterVersionInfo = this.getClusterVersionInfo();
 
@@ -1344,25 +1371,24 @@ export class ShardingTest {
                     rsDefaults.shardsvr = '';
                 }
 
-                if (otherParams.rs || otherParams["rs" + i]) {
+                if (otherParams.rs || otherParams["rs" + i] || otherParams.rsOptions) {
                     if (otherParams.rs) {
                         rsDefaults = Object.merge(rsDefaults, otherParams.rs);
                     }
                     if (otherParams["rs" + i]) {
                         rsDefaults = Object.merge(rsDefaults, otherParams["rs" + i]);
                     }
-                    rsDefaults = Object.merge(rsDefaults, otherParams.rsOptions);
-                    rsDefaults.nodes = rsDefaults.nodes || otherParams.numReplicas;
-                } else {
-                    if (otherParams.shardOptions && otherParams.shardOptions.binVersion) {
-                        otherParams.shardOptions.binVersion =
-                            MongoRunner.versionIterator(otherParams.shardOptions.binVersion);
+                    if (otherParams.rsOptions) {
+                        rsDefaults = Object.merge(rsDefaults, otherParams.rsOptions);
                     }
 
+                    rsDefaults.nodes = rsDefaults.nodes || otherParams.numReplicas;
+                } else {
                     rsDefaults = Object.merge(rsDefaults, otherParams["d" + i]);
-                    rsDefaults = Object.merge(rsDefaults, otherParams.shardOptions);
                 }
 
+                // TODO SERVER-98408: Passing setParameter via rsDefaults will always override any
+                // setParameters passed via replSetTestOpts. Instead the options should be merged.
                 rsDefaults.setParameter = rsDefaults.setParameter || {};
 
                 if (typeof (rsDefaults.setParameter) === "string") {
@@ -1466,6 +1492,11 @@ export class ShardingTest {
                   "ms with " + this.configRS.nodeList().length + " config server nodes and " +
                   totalNumShardNodes(this) + " total shard nodes.");
 
+            if (setDefaultTransactionLockTimeout) {
+                // Clean up TestData.setParameters to avoid affecting other tests.
+                delete TestData.setParameters.maxTransactionLockRequestTimeoutMillis;
+            }
+
             //
             // Initiate each shard replica set and wait for replication. Also initiate the config
             // replica set. Whenever possible, in parallel.
@@ -1495,10 +1526,26 @@ export class ShardingTest {
                     rstConfig.writeConcernMajorityJournalDefault = true;
                 }
 
+                let rstInitiateArgs = {
+                    allNodesAuthorizedToRunRSGetStatus: true,
+                    initiateWithDefaultElectionTimeout: false
+                };
+
+                if (otherParams.hasOwnProperty("allNodesAuthorizedToRunRSGetStatus") &&
+                    otherParams.allNodesAuthorizedToRunRSGetStatus == false) {
+                    rstInitiateArgs.allNodesAuthorizedToRunRSGetStatus = false;
+                }
+
+                if (otherParams.hasOwnProperty("initiateWithDefaultElectionTimeout") &&
+                    otherParams.initiateWithDefaultElectionTimeout == true) {
+                    rstInitiateArgs.initiateWithDefaultElectionTimeout = true;
+                }
+
                 const makeNodeHost = (node) => {
                     const [_, port] = node.name.split(":");
                     return `127.0.0.1:${port}`;
                 };
+
                 return {
                     rst,
                     // Arguments for creating instances of each replica set within parallel threads.
@@ -1515,11 +1562,14 @@ export class ShardingTest {
                     },
                     // Replica set configuration for initiating the replica set.
                     rstConfig,
+
+                    // Args to be sent to rst.initiate
+                    rstInitiateArgs
                 };
             });
 
-            const initiateReplicaSet = (rst, rstConfig) => {
-                rst.initiateWithAnyNodeAsPrimary(rstConfig);
+            const initiateReplicaSet = (rst, rstConfig, rstInitiateArgs) => {
+                rst.initiate(rstConfig, null, rstInitiateArgs);
 
                 // Do replication.
                 rst.awaitNodesAgreeOnPrimary();
@@ -1557,13 +1607,13 @@ export class ShardingTest {
             if (isParallelSupported) {
                 const threads = [];
                 try {
-                    for (let {rstArgs, rstConfig} of replicaSetsToInitiate) {
-                        const thread =
-                            new Thread(async (rstArgs, rstConfig, initiateReplicaSet) => {
+                    for (let {rstArgs, rstConfig, rstInitiateArgs} of replicaSetsToInitiate) {
+                        const thread = new Thread(
+                            async (rstArgs, rstConfig, rstInitiateArgs, initiateReplicaSet) => {
                                 const {ReplSetTest} = await import("jstests/libs/replsettest.js");
                                 try {
                                     const rst = new ReplSetTest({rstArgs});
-                                    initiateReplicaSet(rst, rstConfig);
+                                    initiateReplicaSet(rst, rstConfig, rstInitiateArgs);
                                     return {ok: 1};
                                 } catch (e) {
                                     return {
@@ -1574,7 +1624,11 @@ export class ShardingTest {
                                         stack: e.stack,
                                     };
                                 }
-                            }, rstArgs, rstConfig, initiateReplicaSet);
+                            },
+                            rstArgs,
+                            rstConfig,
+                            rstInitiateArgs,
+                            initiateReplicaSet);
                         thread.start();
                         threads.push(thread);
                     }
@@ -1591,8 +1645,8 @@ export class ShardingTest {
                     });
                 }
             } else {
-                for (let {rst, rstConfig} of replicaSetsToInitiate) {
-                    initiateReplicaSet(rst, rstConfig);
+                for (let {rst, rstConfig, rstInitiateArgs} of replicaSetsToInitiate) {
+                    initiateReplicaSet(rst, rstConfig, rstInitiateArgs);
                 }
             }
 
@@ -2273,11 +2327,6 @@ function clusterHasBinVersion(st, version) {
         if (hasBinVersionInParams(st._otherParams['c' + i])) {
             return true;
         }
-    }
-
-    // Check for mongod servers.
-    if (hasBinVersionInParams(st._otherParams.shardOptions)) {
-        return true;
     }
 
     if (hasBinVersionInParams(st._otherParams.rs)) {

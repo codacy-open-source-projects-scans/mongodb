@@ -50,7 +50,6 @@
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
@@ -72,20 +71,18 @@ public:
         invariantWTOK(ret, nullptr);
 
         _fastClockSource = std::make_unique<SystemClockSource>();
-        _sessionCache = new WiredTigerSessionCache(_conn, _fastClockSource.get());
+        _sessionCache = std::make_unique<WiredTigerSessionCache>(_conn, _fastClockSource.get());
     }
 
     ~WiredTigerIndexHarnessHelper() final {
-        delete _sessionCache;
+        _sessionCache.reset();
         _conn->close(_conn, nullptr);
     }
 
-    std::unique_ptr<SortedDataInterface> newIdIndexSortedDataInterface() final {
+    std::unique_ptr<SortedDataInterface> newIdIndexSortedDataInterface(
+        OperationContext* opCtx) final {
         std::string ns = "test.wt";
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
-        auto opCtxHolder{newOperationContext()};
-        auto* const opCtx{opCtxHolder.get()};
-
         BSONObj spec = BSON("key" << BSON("_id" << 1) << "name" << IndexConstants::kIdIndexName
                                   << "v" << static_cast<int>(IndexDescriptor::kLatestIndexVersion)
                                   << "unique" << true);
@@ -95,8 +92,13 @@ public:
         invariant(desc.isIdIndex());
 
         const bool isLogged = false;
-        StatusWith<std::string> result = WiredTigerIndex::generateCreateString(
-            std::string{kWiredTigerEngineName}, "", "", nss, desc, isLogged);
+        StatusWith<std::string> result =
+            WiredTigerIndex::generateCreateString(std::string{kWiredTigerEngineName},
+                                                  "",
+                                                  "",
+                                                  NamespaceStringUtil::serializeForCatalog(nss),
+                                                  desc,
+                                                  isLogged);
         ASSERT_OK(result.getStatus());
 
         std::string uri = "table:" + ns;
@@ -110,13 +112,12 @@ public:
             opCtx, uri, UUID::gen(), "" /* ident */, &desc, isLogged);
     }
 
-    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique,
+    std::unique_ptr<SortedDataInterface> newSortedDataInterface(OperationContext* opCtx,
+                                                                bool unique,
                                                                 bool partial,
                                                                 KeyFormat keyFormat) final {
         std::string ns = "test.wt";
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
-        auto opCtxHolder{newOperationContext()};
-        auto* const opCtx{opCtxHolder.get()};
 
         BSONObj spec = BSON("key" << BSON("a" << 1) << "name"
                                   << "testIndex"
@@ -138,7 +139,7 @@ public:
             WiredTigerIndex::generateCreateString(std::string{kWiredTigerEngineName},
                                                   "",
                                                   "",
-                                                  nss,
+                                                  NamespaceStringUtil::serializeForCatalog(nss),
                                                   desc,
                                                   WiredTigerUtil::useTableLogging(nss));
         ASSERT_OK(result.getStatus());
@@ -169,7 +170,7 @@ public:
     }
 
     std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
-        return std::make_unique<WiredTigerRecoveryUnit>(_sessionCache, &_oplogManager);
+        return std::make_unique<WiredTigerRecoveryUnit>(_sessionCache.get(), nullptr);
     }
 
 private:
@@ -177,8 +178,7 @@ private:
     std::unique_ptr<ClockSource> _fastClockSource;
     std::vector<IndexDescriptor> _descriptors;
     WT_CONNECTION* _conn;
-    WiredTigerSessionCache* _sessionCache;
-    WiredTigerOplogManager _oplogManager;
+    std::unique_ptr<WiredTigerSessionCache> _sessionCache;
 };
 
 MONGO_INITIALIZER(RegisterSortedDataInterfaceHarnessFactory)(InitializerContext* const) {

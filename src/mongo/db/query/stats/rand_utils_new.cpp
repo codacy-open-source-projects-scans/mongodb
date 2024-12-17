@@ -49,8 +49,12 @@ const std::string StrDistribution::_alphabet =
     "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 void DataTypeDistrNew::generate(std::vector<SBEValue>& randValues, std::mt19937_64& gen) {
-    if (_nullsRatio > 0 && _nullSelector(gen) < _nullsRatio) {
+    auto rand = _selector(gen);
+    if (_nullsRatio > 0 && rand >= 0 && rand < _nullsRatio) {
         auto [tag, val] = makeNullValue();
+        randValues.emplace_back(tag, val);
+    } else if (_nanRatio > 0 && rand >= _nullsRatio && rand < _nullsRatio + _nanRatio) {
+        auto [tag, val] = stats::makeNaNValue();
         randValues.emplace_back(tag, val);
     } else {
         size_t idx = (*_idxDist)(gen);
@@ -61,7 +65,8 @@ void DataTypeDistrNew::generate(std::vector<SBEValue>& randValues, std::mt19937_
 }
 
 void DataTypeDistrNew::generate(value::Array* randValueArray, std::mt19937_64& gen) {
-    if (_nullsRatio > 0 && _nullSelector(gen) < _nullsRatio) {
+    auto rand = _selector(gen);
+    if (_nullsRatio > 0 && rand < _nullsRatio) {
         auto [tag, val] = makeNullValue();
         randValueArray->push_back(tag, val);
     } else {
@@ -72,17 +77,53 @@ void DataTypeDistrNew::generate(value::Array* randValueArray, std::mt19937_64& g
     }
 }
 
+NullDistribution::NullDistribution(MixedDistributionDescriptor distrDescriptor,
+                                   double weight,
+                                   size_t ndv)
+    : DataTypeDistrNew(distrDescriptor, value::TypeTags::Null, weight, ndv, 1) {}
+
+void NullDistribution::init(DatasetDescriptorNew* parentDesc, std::mt19937_64& gen) {}
+
+BooleanDistribution::BooleanDistribution(MixedDistributionDescriptor distrDescriptor,
+                                         double weight,
+                                         size_t ndv,
+                                         bool includeFalse,
+                                         bool includeTrue,
+                                         double nullsRatio)
+    : DataTypeDistrNew(distrDescriptor, value::TypeTags::NumberInt64, weight, ndv, nullsRatio),
+      _includeFalse(includeFalse),
+      _includeTrue(includeTrue) {
+    uassert(9163901, "At least one of the values needs to be true.", (includeFalse || includeTrue));
+}
+
+void BooleanDistribution::init(DatasetDescriptorNew* parentDesc, std::mt19937_64& gen) {
+    _valSet.reserve(2);
+
+    if (_includeFalse) {
+        const auto [tagFalse, valFalse] = makeBooleanValue(0);
+        _valSet.emplace_back(tagFalse, valFalse);
+    }
+
+    if (_includeTrue) {
+        const auto [tagTrue, valTrue] = makeBooleanValue(1);
+        _valSet.emplace_back(tagTrue, valTrue);
+    }
+    _idxDist = MixedDistribution::make(_mixedDistrDescriptor, 0, _valSet.size() - 1);
+}
+
 IntDistribution::IntDistribution(MixedDistributionDescriptor distrDescriptor,
                                  double weight,
                                  size_t ndv,
                                  int minInt,
                                  int maxInt,
-                                 double nullsRatio)
+                                 double nullsRatio,
+                                 double nanRatio)
     : DataTypeDistrNew(distrDescriptor,
                        value::TypeTags::NumberInt64,
                        weight,
                        std::min(ndv, static_cast<size_t>(std::abs(maxInt - minInt))),
-                       nullsRatio),
+                       nullsRatio,
+                       nanRatio),
       _minInt(minInt),
       _maxInt(maxInt) {
     uassert(6660507, "Maximum integer number must be >= the minimum one.", (maxInt >= minInt));
@@ -190,8 +231,10 @@ DoubleDistribution::DoubleDistribution(MixedDistributionDescriptor distrDescript
                                        size_t ndv,
                                        double min,
                                        double max,
-                                       double nullsRatio)
-    : DataTypeDistrNew(distrDescriptor, value::TypeTags::NumberDouble, weight, ndv, nullsRatio),
+                                       double nullsRatio,
+                                       double nanRatio)
+    : DataTypeDistrNew(
+          distrDescriptor, value::TypeTags::NumberDouble, weight, ndv, nullsRatio, nanRatio),
       _min(min),
       _max(max) {
     uassert(7169302,

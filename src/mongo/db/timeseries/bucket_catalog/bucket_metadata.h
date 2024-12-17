@@ -38,16 +38,15 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/util/shared_buffer.h"
-#include "mongo/util/tracking_allocator.h"
-#include "mongo/util/tracking_context.h"
+#include "mongo/util/tracking/allocator.h"
+#include "mongo/util/tracking/context.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
 struct BucketMetadata {
 public:
-    BucketMetadata(TrackingContext&,
+    BucketMetadata(tracking::Context&,
                    BSONElement elem,
-                   const StringDataComparator* comparator,
                    boost::optional<StringData> trueMetaFieldName);
 
     bool operator==(const BucketMetadata& other) const;
@@ -57,8 +56,6 @@ public:
     BSONElement element() const;
 
     boost::optional<StringData> getMetaField() const;
-
-    const StringDataComparator* getComparator() const;
 
     template <typename H>
     friend H AbslHashValue(H h, const BucketMetadata& metadata) {
@@ -70,12 +67,10 @@ public:
 
 private:
     // Empty if metadata field isn't present, owns a copy otherwise.
-    allocator_aware::SharedBuffer<TrackingAllocator<void>> _metadata;
+    allocator_aware::SharedBuffer<tracking::Allocator<void>> _metadata;
 
     // Only the value of '_metadataElement' is used for hashing and comparison.
     BSONElement _metadataElement;
-
-    const StringDataComparator* _comparator = nullptr;
 };
 
 }  // namespace mongo::timeseries::bucket_catalog

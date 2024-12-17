@@ -230,12 +230,6 @@ boost::optional<BSONObj> mergeLetAndCVariables(const boost::optional<BSONObj>& l
     return c;
 }
 
-template <FLETokenType TokenT>
-FLEToken<TokenT> FLETokenFromCDR(ConstDataRange cdr) {
-    auto block = PrfBlockfromCDR(cdr);
-    return FLEToken<TokenT>(block);
-}
-
 std::vector<QECountInfoRequestTokenSet> toTagSets(
     const std::vector<std::vector<FLEEdgePrfBlock>>& blockSets) {
 
@@ -266,9 +260,8 @@ std::vector<QECountInfoRequestTokenSet> toTagSets(
 
 FLEEdgeCountInfo convertTokensToEdgeCount(const QECountInfoReplyTokens& token) {
 
-    auto edc = token.getEDCDerivedFromDataTokenAndContentionFactorToken().map([](auto& t) {
-        return FLETokenFromCDR<FLETokenType::EDCDerivedFromDataTokenAndContentionFactorToken>(t);
-    });
+    auto edc = token.getEDCDerivedFromDataTokenAndContentionFactorToken().map(
+        [](auto& t) { return EDCDerivedFromDataTokenAndContentionFactorToken::parse(t); });
 
     auto spos = token.getSearchedPositions().map([](auto& pair) {
         EmuBinaryResult newPair;
@@ -284,10 +277,9 @@ FLEEdgeCountInfo convertTokensToEdgeCount(const QECountInfoReplyTokens& token) {
         return newPair;
     });
 
-    auto esc =
-        FLETokenFromCDR<FLETokenType::ESCTwiceDerivedTagToken>(token.getESCTwiceDerivedTagToken());
+    auto esc = ESCTwiceDerivedTagToken::parse(token.getESCTwiceDerivedTagToken());
 
-    return FLEEdgeCountInfo(token.getCount(), esc.data, spos, npos, token.getStats(), edc);
+    return FLEEdgeCountInfo(token.getCount(), esc.asPrfBlock(), spos, npos, token.getStats(), edc);
 }
 
 std::vector<std::vector<FLEEdgeCountInfo>> toEdgeCounts(
@@ -345,11 +337,13 @@ boost::intrusive_ptr<ExpressionContext> makeExpCtx(OperationContext* opCtx,
         uassertStatusOK(statusWithCollator.getStatus());
         collator = std::move(statusWithCollator.getValue());
     }
-    auto expCtx = make_intrusive<ExpressionContext>(opCtx,
-                                                    std::move(collator),
-                                                    request.getNamespace(),
-                                                    request.getLegacyRuntimeConstants(),
-                                                    request.getLet());
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx)
+                      .collator(std::move(collator))
+                      .ns(request.getNamespace())
+                      .runtimeConstants(request.getLegacyRuntimeConstants())
+                      .letParameters(request.getLet())
+                      .build();
     expCtx->stopExpressionCounters();
     return expCtx;
 }
@@ -807,7 +801,7 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
 
             for (const auto& et : edgeTokenSet) {
                 FLEEdgePrfBlock block;
-                block.esc = PrfBlockfromCDR(et.getEscDerivedToken());
+                block.esc = et.getEscDerivedToken().asPrfBlock();
                 tokens.push_back(block);
                 totalTokens++;
             }
@@ -815,7 +809,7 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
             tokensSets.emplace_back(tokens);
         } else {
             FLEEdgePrfBlock block;
-            block.esc = PrfBlockfromCDR(payload.payload.getEscDerivedToken());
+            block.esc = payload.payload.getEscDerivedToken().asPrfBlock();
             tokensSets.push_back({block});
             totalTokens++;
         }
@@ -861,12 +855,12 @@ void processFieldsForInsertV2(FLEQueryInterface* queryImpl,
             const auto& edgeTokenSet = payload.payload.getEdgeTokenSet().get();
 
             for (const auto& et : edgeTokenSet) {
-                ecocDocuments.push_back(ECOCCollection::generateDocument(payload.fieldPathName,
-                                                                         et.getEncryptedTokens()));
+                ecocDocuments.push_back(
+                    et.getEncryptedTokens().generateDocument(payload.fieldPathName));
             }
         } else {
-            ecocDocuments.push_back(ECOCCollection::generateDocument(
-                payload.fieldPathName, payload.payload.getEncryptedTokens()));
+            ecocDocuments.push_back(
+                payload.payload.getEncryptedTokens().generateDocument(payload.fieldPathName));
         }
     }
 
@@ -1338,12 +1332,14 @@ std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
     OperationContext* opCtx, const BatchedCommandRequest& request) {
     invariant(request.hasEncryptionInformation());
     auto getExpCtx = [&](const auto& op) {
-        auto expCtx = make_intrusive<ExpressionContext>(
-            opCtx,
-            fle::collatorFromBSON(opCtx, op.getCollation().value_or(BSONObj())),
-            request.getNS(),
-            request.getLegacyRuntimeConstants(),
-            request.getLet());
+        auto expCtx =
+            ExpressionContextBuilder{}
+                .opCtx(opCtx)
+                .collator(fle::collatorFromBSON(opCtx, op.getCollation().value_or(BSONObj())))
+                .ns(request.getNS())
+                .runtimeConstants(request.getLegacyRuntimeConstants())
+                .letParameters(request.getLet())
+                .build();
         expCtx->stopExpressionCounters();
         return expCtx;
     };
@@ -1397,8 +1393,8 @@ write_ops::FindAndModifyCommandReply processFindAndModify(
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest) {
 
     {
-        stdx::lock_guard<Client> lk(*expCtx->opCtx->getClient());
-        CurOp::get(expCtx->opCtx)->setShouldOmitDiagnosticInformation(lk, true);
+        stdx::lock_guard<Client> lk(*expCtx->getOperationContext()->getClient());
+        CurOp::get(expCtx->getOperationContext())->setShouldOmitDiagnosticInformation(lk, true);
     }
 
     auto edcNss = findAndModifyRequest.getNamespace();
@@ -1939,8 +1935,8 @@ void processFLEFindS(OperationContext* opCtx,
 
 void processFLECountS(OperationContext* opCtx,
                       const NamespaceString& nss,
-                      CountCommandRequest* countCommand) {
-    fle::processCountCommand(opCtx, nss, countCommand, &getTransactionWithRetriesForMongoS);
+                      CountCommandRequest& countCommand) {
+    fle::processCountCommand(opCtx, nss, &countCommand, &getTransactionWithRetriesForMongoS);
 }
 
 std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineS(

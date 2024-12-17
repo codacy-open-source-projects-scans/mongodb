@@ -82,7 +82,8 @@ std::function<bool(Client*)> checkAuthForInternalClient = [](Client*) {
 
 void Client::initThread(StringData desc,
                         Service* service,
-                        std::shared_ptr<transport::Session> session) {
+                        std::shared_ptr<transport::Session> session,
+                        ClientOperationKillableByStepdown killable) {
     invariantNoCurrentClient();
 
     std::string fullDesc;
@@ -95,7 +96,7 @@ void Client::initThread(StringData desc,
     setThreadName(fullDesc);
 
     // Create the client obj, attach to thread
-    currentClient = service->makeClient(fullDesc, std::move(session));
+    currentClient = service->makeClient(fullDesc, std::move(session), killable);
     setLogService(toLogService(service));
 }
 
@@ -122,11 +123,15 @@ Client* Client::getCurrent() {
     return currentClient.get();
 }
 
-Client::Client(std::string desc, Service* service, std::shared_ptr<transport::Session> session)
+Client::Client(std::string desc,
+               Service* service,
+               std::shared_ptr<transport::Session> session,
+               ClientOperationKillableByStepdown killable)
     : _service(service),
       _session(std::move(session)),
       _desc(std::move(desc)),
       _connectionId(_session ? _session->id() : 0),
+      _operationKillable(killable),
       _prng(generateSeed(_desc)),
       _isRouterClient(checkIfRouterClient(_session)),
       _uuid(UUID::gen()),
@@ -169,6 +174,10 @@ bool haveClient() {
     return static_cast<bool>(currentClient);
 }
 
+bool isProcessInternalClient(const Client& client) {
+    return client.isInDirectClient() || !client.session();
+}
+
 /**
  * User connections are listed active so long as they are associated with an opCtx.
  * Non-user connections are listed active if they have an opCtx and not waiting on a condvar.
@@ -191,10 +200,11 @@ void Client::setKilled() noexcept {
 
 ThreadClient::ThreadClient(StringData desc,
                            Service* service,
-                           std::shared_ptr<transport::Session> session) {
+                           std::shared_ptr<transport::Session> session,
+                           Killable killable) {
     invariantNoCurrentClient();
     _originalThreadName = getThreadNameRef();
-    Client::initThread(desc, service, std::move(session));
+    Client::initThread(desc, service, std::move(session), killable);
 }
 
 ThreadClient::~ThreadClient() {

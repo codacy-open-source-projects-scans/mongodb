@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-
-#include <memory>
 #include <string>
 
 #include <boost/move/utility_core.hpp>
@@ -40,17 +38,21 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/s/create_database_coordinator.h"
+#include "mongo/db/s/create_database_coordinator_document_gen.h"
+#include "mongo/db/s/create_database_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/rpc/op_msg.h"
 #include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
+#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -90,18 +92,54 @@ public:
             repl::ReadConcernArgs::get(opCtx) =
                 repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
 
-            auto dbname = request().getCommandParameter();
+            const auto dbNameStr = request().getCommandParameter();
+            const auto dbName = DatabaseNameUtil::deserialize(
+                boost::none, dbNameStr, request().getSerializationContext());
 
-            audit::logEnableSharding(opCtx->getClient(), dbname);
+            audit::logEnableSharding(opCtx->getClient(), dbNameStr);
 
-            auto dbt = ShardingCatalogManager::get(opCtx)->createDatabase(
-                opCtx,
-                DatabaseNameUtil::deserialize(
-                    boost::none, dbname, request().getSerializationContext()),
-                request().getPrimaryShardId(),
-                request().getSerializationContext());
+            // Checks for restricted and invalid namespaces.
+            if (const auto configDatabaseOpt =
+                    create_database_util::checkDbNameConstraints(dbName)) {
+                return configDatabaseOpt->getVersion();
+            }
+            const auto optResolvedPrimaryShard =
+                create_database_util::resolvePrimaryShard(opCtx, request().getPrimaryShardId());
 
-            return {dbt.getVersion()};
+            std::function<Response()> getCreateDatabaseResponse;
+            {
+                FixedFCVRegion fixedFcvRegion{opCtx};
+                bool createDatabaseDDLCoordinatorFeatureFlagEnabled =
+                    feature_flags::gCreateDatabaseDDLCoordinator.isEnabled(
+                        (*fixedFcvRegion).acquireFCVSnapshot());
+
+                if (!createDatabaseDDLCoordinatorFeatureFlagEnabled) {
+                    getCreateDatabaseResponse = [&]() {
+                        auto dbt = ShardingCatalogManager::get(opCtx)->createDatabase(
+                            opCtx,
+                            dbName,
+                            optResolvedPrimaryShard,
+                            request().getSerializationContext());
+
+                        return Response(dbt.getVersion());
+                    };
+                } else {
+                    CreateDatabaseCoordinatorDocument coordinatorDoc;
+                    coordinatorDoc.setShardingDDLCoordinatorMetadata(
+                        {{NamespaceString(dbName), DDLCoordinatorTypeEnum::kCreateDatabase}});
+                    coordinatorDoc.setPrimaryShard(optResolvedPrimaryShard);
+                    coordinatorDoc.setUserSelectedPrimary(optResolvedPrimaryShard.is_initialized());
+                    auto service = ShardingDDLCoordinatorService::getService(opCtx);
+                    auto createDatabaseCoordinator =
+                        checked_pointer_cast<CreateDatabaseCoordinator>(
+                            service->getOrCreateInstance(opCtx, coordinatorDoc.toBSON()));
+                    getCreateDatabaseResponse = [opCtx,
+                                                 coord = std::move(createDatabaseCoordinator)]() {
+                        return coord->getResult(opCtx);
+                    };
+                }
+            }
+            return getCreateDatabaseResponse();
         }
 
     private:

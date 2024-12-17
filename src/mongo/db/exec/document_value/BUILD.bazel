@@ -24,10 +24,44 @@ mongo_cc_library(
         "document_metadata_fields.h",
         "value.h",
         "value_comparator.h",
+        "//src/mongo/db:feature_flag.h",
+        "//src/mongo/db/query:query_feature_flags_gen",
     ],
     deps = [
         "//src/mongo:base",
         "//src/mongo/db/pipeline:field_path",
         "//src/mongo/db/query/datetime:date_time_support",  # TODO(SERVER-93876): Remove.
     ],
+)
+
+mongo_cc_library(
+    name = "document_value_test_util",
+    srcs = [
+        "document_value_test_util.cpp",
+    ],
+    hdrs = [
+        "document_value_test_util.h",
+    ],
+    deps = [
+        ":document_value",
+        "//src/mongo/unittest",
+    ],
+)
+
+# TODO(SERVER-96859): Remove cycle created by moving //src/mongo/db/exec/document_value:document.h to //src/mongo/db/exec/document_value:document_value
+filegroup(
+    name = "document_hdrs",
+    srcs = [":document.h"],
+)
+
+# TODO(SERVER-96859): Remove cycle created by moving //src/mongo/db/exec/document_value:document_metadata_fields.h to //src/mongo/db/exec/document_value:document_value
+filegroup(
+    name = "document_metadata_fields_hdrs",
+    srcs = [":document_metadata_fields.h"],
+)
+
+# TODO(SERVER-96859): Remove cycle created by moving //src/mongo/db/exec/document_value:value.h to //src/mongo/db/exec/document_value:document_value
+filegroup(
+    name = "value_hdrs",
+    srcs = [":value.h"],
 )

@@ -115,7 +115,12 @@ static constexpr int64_t kBigChunkMarker = std::numeric_limits<int64_t>::max();
 ShardVersion getShardVersion(OperationContext* opCtx,
                              const ShardId& shardId,
                              const NamespaceString& nss) {
-    auto cri = RoutingInformationCache::get(opCtx)->getShardedCollectionRoutingInfo(opCtx, nss);
+    auto cri =
+        uassertStatusOK(RoutingInformationCache::get(opCtx)->getCollectionRoutingInfo(opCtx, nss));
+    uassert(ErrorCodes::NamespaceNotSharded,
+            str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                          << " to be sharded",
+            cri.cm.isSharded());
     return cri.getShardVersion(shardId);
 }
 
@@ -743,8 +748,8 @@ public:
 private:
     // Internal representation of the chunk metadata required to generate a MoveAndMergeRequest
     struct ChunkRangeInfo {
-        ChunkRangeInfo(ChunkRange&& range, const ShardId& shard, long long estimatedSizeBytes)
-            : range(std::move(range)),
+        ChunkRangeInfo(const ChunkRange& range, const ShardId& shard, long long estimatedSizeBytes)
+            : range(range),
               shard(shard),
               estimatedSizeBytes(estimatedSizeBytes),
               busyInOperation(false) {}
@@ -1612,7 +1617,7 @@ void BalancerDefragmentationPolicy::_clearDefragmentationState(OperationContext*
 
     // Clear datasize estimates from chunks
     write_ops::checkWriteErrors(dbClient.update(write_ops::UpdateCommandRequest(
-        ChunkType::ConfigNS, {[&] {
+        NamespaceString::kConfigsvrChunksNamespace, {[&] {
             write_ops::UpdateOpEntry entry;
             entry.setQ(BSON(CollectionType::kUuidFieldName << uuid));
             entry.setU(write_ops::UpdateModification::parseFromClassicUpdate(

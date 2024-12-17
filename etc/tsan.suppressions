@@ -48,10 +48,6 @@ deadlock:mongo::executor::EgressConnectionCloserManager::add
 deadlock:mongo::executor::EgressConnectionCloserManager::setKeepOpen
 deadlock:mongo::ShardRegistry::_initConfigShard
 
-# TODO SERVER-71207
-deadlock:mongo::repl::TenantOplogBatcher::_doStartup_inlock
-deadlock:mongo::repl::TenantMigrationRecipientService::Instance::_interrupt
-
 # TODO SERVER-91827
 deadlock:mongo::executor::EgressConnectionCloserManager::remove
 deadlock:mongo::repl::ReplicationCoordinatorExternalStateImpl::tooStale
@@ -63,11 +59,6 @@ deadlock:mongo::executor::ConnectionPool::dropConnections
 # deadlock:mongo::ShardRegistry::getConfigShard (relevant to this and above deadlock)
 deadlock:mongo::ReplicaSetMonitorManager::getOrCreateMonitor
 deadlock:mongo::ShardingTaskExecutorPoolController::ReplicaSetChangeListener::onDroppedSet
-
-# TODO SERVER-91871
-# Unittest authz manager race between main thread setting and background job getting via observer
-race:mongo::AuthorizationManager::set
-race:mongo::AuthorizationManager::get
 
 # TODO SERVER-91877 inversion b/w SSL manager and some crypto mutex
 deadlock:mongo::(anonymous namespace)::SSLManagerOpenSSL::SSLManagerOpenSSL

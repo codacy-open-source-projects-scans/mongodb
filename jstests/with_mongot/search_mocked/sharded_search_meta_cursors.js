@@ -2,6 +2,7 @@
  * Test that if a mongod gets an aggregation command from a mongoS with a $search stage it will
  * return two cursors by default or when requiresSearchMetaCursor is explicitly true, and will
  * only return one cursor when requiresSearchMetaCursor is explicitly false.
+ * @tags: [featureFlagRankFusionFull, requires_fcv_81]
  */
 
 import "jstests/libs/query/sbe_assert_error_override.js";
@@ -41,7 +42,6 @@ const stWithMock = new ShardingTestWithMongotMock({
     other: {
         rsOptions: nodeOptions,
         mongosOptions: nodeOptions,
-        shardOptions: nodeOptions,
     }
 });
 stWithMock.start();
@@ -150,7 +150,7 @@ function validateGetMoreResponse(getMoreRes, expectedId) {
 // Command obj to be sent to mongod. The "pipeline" field will be configured per test.
 let commandObj = {
     aggregate: collName,
-    fromMongos: true,
+    fromRouter: true,
     needsMerge: true,
     // Internal client has to provide writeConcern
     writeConcern: {w: "majority"},
@@ -231,9 +231,9 @@ function runTestNoMetaCursorOnConn(shardDB, expectedDocs) {
 let expectedDocs = [
     // SortKey and searchScore are included because we're getting results directly from the
     // shard.
-    {_id: 1, val: 1, "$searchScore": .4, "$sortKey": [.4]},
-    {_id: 2, val: 2, "$searchScore": .3, "$sortKey": [.3]},
-    {_id: 3, val: 3, "$searchScore": .123, "$sortKey": [.123]}
+    {_id: 1, val: 1, "$searchScore": .4, "$score": .4, "$sortKey": [.4]},
+    {_id: 2, val: 2, "$searchScore": .3, "$score": .3, "$sortKey": [.3]},
+    {_id: 3, val: 3, "$searchScore": .123, "$score": .123, "$sortKey": [.123]}
 ];
 let expectedMetaResults = [{metaVal: 1}, {metaVal: 2}, {metaVal: 3}, {metaVal: 4}];
 const shardZeroConn = makeInternalConn(st.rs0.getPrimary());
@@ -249,9 +249,9 @@ runTestNoMetaCursorOnConn(shardZeroDB, expectedDocs);
 
 // Repeat for second shard.
 expectedDocs = [
-    {_id: 5, val: 5, "$searchScore": .4, "$sortKey": [.4]},
-    {_id: 6, val: 6, "$searchScore": .3, "$sortKey": [.3]},
-    {_id: 7, val: 7, "$searchScore": .123, "$sortKey": [.123]}
+    {_id: 5, val: 5, "$searchScore": .4, "$score": .4, "$sortKey": [.4]},
+    {_id: 6, val: 6, "$searchScore": .3, "$score": .3, "$sortKey": [.3]},
+    {_id: 7, val: 7, "$searchScore": .123, "$score": .123, "$sortKey": [.123]}
 ];
 expectedMetaResults = [{metaVal: 10}, {metaVal: 11}, {metaVal: 12}, {metaVal: 13}];
 const shardOneConn = makeInternalConn(st.rs1.getPrimary());
@@ -269,7 +269,7 @@ runTestNoMetaCursorOnConn(shardOneDB, expectedDocs);
 commandObj = {
     aggregate: collName,
     pipeline: [shardPipelineRequiresMetaCursorImplicit],
-    fromMongos: true,
+    fromRouter: true,
     needsMerge: true,
     exchange: {policy: "roundrobin", consumers: NumberInt(4), bufferSize: NumberInt(1024)},
     writeConcern: {w: "majority"},

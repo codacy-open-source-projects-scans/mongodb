@@ -30,11 +30,11 @@
 #include <benchmark/benchmark.h>
 #include <memory>
 
-#include "mongo/db/bonsai_query_bm_fixture.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/plan_cache/plan_cache_bm_fixture.h"
 #include "mongo/db/query/query_test_service_context.h"
 
 namespace mongo::optimizer {
@@ -42,7 +42,7 @@ namespace {
 /**
  * Benchmarks parsing of BSON to CQ and encoding of CanonicalQuery to SBE PlanCacheKey.
  */
-class CanonicalQueryParseAndEncodeSBE : public BonsaiQueryBenchmarkFixture {
+class CanonicalQueryParseAndEncodeSBE : public PlanCacheBenchmarkFixture {
 public:
     CanonicalQueryParseAndEncodeSBE() {}
 
@@ -53,9 +53,9 @@ public:
         auto findCommand = std::make_unique<FindCommandRequest>(nss);
         findCommand->setFilter(matchSpec);
         findCommand->setProjection(projectSpec);
-        auto cq = std::make_unique<CanonicalQuery>(
-            CanonicalQueryParams{.expCtx = makeExpressionContext(opCtx, *findCommand),
-                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx, *findCommand).build(),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
         cq->setSbeCompatible(true);
 
         return canonical_query_encoder::encodeSBE(*cq);

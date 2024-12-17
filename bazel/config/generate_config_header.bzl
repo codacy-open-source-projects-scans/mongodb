@@ -1,6 +1,7 @@
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load("//bazel/config:configs.bzl", "developer_dir_provider")
+load("//bazel:mongo_src_rules.bzl", "write_target")
 
 def generate_config_header_impl(ctx):
     cc_toolchain = find_cpp_toolchain(ctx)
@@ -23,11 +24,30 @@ def generate_config_header_impl(ctx):
         action_name = ACTION_NAMES.cpp_compile,
         variables = compile_variables,
     )
+    link_flags = cc_common.get_memory_inefficient_command_line(
+        feature_configuration = feature_configuration,
+        action_name = ACTION_NAMES.cpp_link_executable,
+        variables = compile_variables,
+    )
     env_flags = cc_common.get_environment_variables(
         feature_configuration = feature_configuration,
         action_name = ACTION_NAMES.cpp_compile,
         variables = compile_variables,
     )
+
+    expanded_extra_definitions = {}
+    for key, val in ctx.attr.extra_definitions.items():
+        # Bazel throws an error if you try to call this on a location var
+        if "$(location" not in val:
+            expanded_extra_definitions |= {
+                key: ctx.expand_make_variables("generate_config_header_expand", val, ctx.var),
+            }
+
+    expanded_extra_definitions |= {
+        "compile_variables": " ".join(compiler_flags + ctx.attr.cpp_opts),
+        "linkflags": " ".join(link_flags + ctx.attr.cpp_linkflags),
+        "cpp_defines": " ".join(ctx.attr.cpp_defines),
+    }
 
     python = ctx.toolchains["@bazel_tools//tools/python:toolchain_type"].py3_runtime
     generator_script = ctx.attr.generator_script.files.to_list()[0].path
@@ -66,7 +86,7 @@ def generate_config_header_impl(ctx):
                         "--compiler-path",
                         compiler_bin,
                         "--extra-definitions",
-                        json.encode(ctx.attr.extra_definitions),
+                        json.encode(expanded_extra_definitions),
                     ] +
                     additional_inputs +
                     [
@@ -79,7 +99,7 @@ def generate_config_header_impl(ctx):
 
     return [DefaultInfo(files = depset([ctx.outputs.output]))]
 
-generate_config_header = rule(
+generate_config_header_rule = rule(
     generate_config_header_impl,
     attrs = {
         "output": attr.output(
@@ -106,6 +126,15 @@ generate_config_header = rule(
             doc = "Additional inputs to this rule.",
             allow_files = True,
         ),
+        "cpp_linkflags": attr.string_list(
+            doc = "C++ linkflags.",
+        ),
+        "cpp_opts": attr.string_list(
+            doc = "C++ opts.",
+        ),
+        "cpp_defines": attr.string_list(
+            doc = "C++ defines.",
+        ),
         "generator_script": attr.label(
             doc = "The python generator script to use.",
             default = "//bazel/config:generate_config_header.py",
@@ -118,3 +147,15 @@ generate_config_header = rule(
     toolchains = ["@bazel_tools//tools/cpp:toolchain_type", "@bazel_tools//tools/python:toolchain_type"],
     output_to_genfiles = True,
 )
+
+def generate_config_header(name, tags = [], **kwargs):
+    write_target(
+        name = name + "_gen_source_tag",
+        target_name = name,
+        tags = ["scons_link_lists"],
+    )
+    generate_config_header_rule(
+        name = name,
+        tags = tags + ["gen_source"],
+        **kwargs
+    )

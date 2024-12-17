@@ -27,12 +27,10 @@
  *    it in the license file.
  */
 
-
 #include "mongo/logv2/log_severity.h"
 #include <boost/optional.hpp>
 #include <boost/smart_ptr.hpp>
 #include <fmt/format.h>
-#include <mutex>
 #include <string>
 #include <utility>
 
@@ -118,15 +116,12 @@
 #include "mongo/s/transaction_participant_failed_unyield_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/transport/hello_metrics.h"
-#include "mongo/transport/service_executor.h"
-#include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/scopeguard.h"
-#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -436,7 +431,6 @@ private:
     void _onStaleDbVersion(Status& status);
     void _onSnapshotError(Status& status);
     void _onShardCannotRefreshDueToLocksHeldError(Status& status);
-    void _onTenantMigrationAborted(Status& status);
     void _onCannotImplicitlyCreateCollection(Status& status);
 
     ParseAndRunCommand* const _parc;
@@ -713,8 +707,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
 
     if (canApplyDefaultWC) {
         auto getDefaultWC = ([&]() {
-            auto rwcDefaults =
-                ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
+            auto rwcDefaults = ReadWriteConcernDefaults::get(opCtx).getDefault(opCtx);
             auto wcDefault = rwcDefaults.getDefaultWriteConcern();
             const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
             customDefaultWriteConcernWasApplied = defaultWriteConcernSource &&
@@ -821,8 +814,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     auto shouldApplyDefaults = startTransaction || !TransactionRouter::get(opCtx);
     if (readConcernSupport.defaultReadConcernPermit.isOK() && shouldApplyDefaults) {
         if (readConcernArgs.isEmpty()) {
-            const auto rwcDefaults =
-                ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
+            const auto rwcDefaults = ReadWriteConcernDefaults::get(opCtx).getDefault(opCtx);
             const auto rcDefault = rwcDefaults.getDefaultReadConcern();
             if (rcDefault) {
                 const auto readConcernSource = rwcDefaults.getDefaultReadConcernSource();
@@ -840,8 +832,7 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     if (!readConcernSupport.defaultReadConcernPermit.isOK() &&
         readConcernSupport.implicitDefaultReadConcernPermit.isOK() && shouldApplyDefaults &&
         readConcernArgs.isEmpty()) {
-        const auto rcDefault = ReadWriteConcernDefaults::get(opCtx->getServiceContext())
-                                   .getImplicitDefaultReadConcern();
+        const auto rcDefault = ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern();
         applyDefaultReadConcern(rcDefault);
     }
 
@@ -917,14 +908,14 @@ Status ParseAndRunCommand::RunInvocation::_setup() {
     command->incrementCommandsExecuted();
 
     if (command->shouldAffectCommandCounter()) {
-        globalOpCounters.gotCommand();
+        serviceOpCounters(opCtx).gotCommand();
         if (analyze_shard_key::supportsSamplingQueries(opCtx)) {
             analyze_shard_key::QueryAnalysisSampler::get(opCtx).gotCommand(command->getName());
         }
     }
 
     if (command->shouldAffectQueryCounter()) {
-        globalOpCounters.gotQuery();
+        serviceOpCounters(opCtx).gotQuery();
     }
 
     if (opCtx->routedByReplicaSetEndpoint()) {
@@ -1094,10 +1085,6 @@ void ParseAndRunCommand::RunAndRetry::_onShardCannotRefreshDueToLocksHeldError(S
     _checkRetryForTransaction(status);
 }
 
-void ParseAndRunCommand::RunAndRetry::_onTenantMigrationAborted(Status& status) {
-    invariant(status.code() == ErrorCodes::TenantMigrationAborted);
-}
-
 void ParseAndRunCommand::RunAndRetry::_onCannotImplicitlyCreateCollection(Status& status) {
     invariant(status.code() == ErrorCodes::CannotImplicitlyCreateCollection);
 
@@ -1130,8 +1117,6 @@ void ParseAndRunCommand::RunAndRetry::run() {
                 _onSnapshotError(status);
             } else if (status == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
                 _onShardCannotRefreshDueToLocksHeldError(status);
-            } else if (status == ErrorCodes::TenantMigrationAborted) {
-                _onTenantMigrationAborted(status);
             } else if (status == ErrorCodes::CannotImplicitlyCreateCollection) {
                 _onCannotImplicitlyCreateCollection(status);
             } else if (status == ErrorCodes::TransactionParticipantFailedUnyield) {
@@ -1270,9 +1255,26 @@ void ClientCommand::_handleException(Status status) {
     auto opCtx = _rec->getOpCtx();
     auto reply = _rec->getReplyBuilder();
 
+    // Salvage the value of the 'writeConcernError' field, if already set in the reply.
+    // We will re-add this value later to the reply we will build from scratch.
+    BSONObjBuilder wceBuilder;
+    {
+        auto bob = reply->getBodyBuilder().asTempObj();
+        if (auto f = bob.getField("writeConcernError"_sd); !f.eoo()) {
+            wceBuilder.append(f);
+            wceBuilder.done();
+        }
+    }
+
+    // Wipe whatever was already built in the reply so far and start a new reply.
     reply->reset();
     auto bob = reply->getBodyBuilder();
+
     CommandHelpers::appendCommandStatusNoThrow(bob, status);
+
+    // Append original writeConcernError if it was set in the original reply.
+    bob.appendElements(wceBuilder.asTempObj());
+
     appendRequiredFieldsToResponse(opCtx, &bob);
 
     // Only attach the topology version to the response if mongos is in quiesce mode. If mongos

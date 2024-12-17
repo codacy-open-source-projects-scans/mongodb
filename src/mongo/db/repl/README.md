@@ -288,13 +288,13 @@ Otherwise, the secondary found a sync source! At that point `BackgroundSync` sta
 
 ### Oplog Entry Persistence
 
-There is a dedicated thread called [`OplogWriter`](https://github.com/10gen/mongo/blob/r8.0.0-rc2/src/mongo/db/repl/oplog_writer.h)
+There is a dedicated thread called [`OplogWriter`](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/oplog_writer.h#L44)
 to write the fetched oplog entries into `rs.oplog` collection and trigger journal flush to persist
 those oplog entries.
 
 The `OplogWriter` runs in an endless loop doing the followings:
 
-1. Get a batch from the writer batcher, which is encapsulated in the [`OplogWriterBatcher`](https://github.com/10gen/mongo/blob/r8.0.0-rc2/src/mongo/db/repl/oplog_writer_batcher.cpp#L59).
+1. Get a batch from the writer batcher, which is encapsulated in the [`OplogWriterBatcher`](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/oplog_writer_batcher.cpp#L60).
 2. Write the batch of oplog entries into the oplog.
 3. Update [**oplog visibility**](../catalog/README.md#oplog-visibility) by notifying the storage
    engine of the new oplog entries.
@@ -339,8 +339,8 @@ endless loop doing the following:
 - [SyncSourceResolver chooses a sync source to sync from](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/repl/sync_source_resolver.cpp#L545)
 - [OplogBuffer currently uses a BlockingQueue as underlying data structure](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/repl/oplog_buffer_blocking_queue.h#L41)
 - [OplogFetcher queries from sync source and put fetched oplogs in OplogApplier::\_oplogBuffer](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/repl/oplog_fetcher.cpp#L209)
-- [OplogWriterBatcher merges oplog entries from the oplog writer buffer to create a batch to write](https://github.com/10gen/mongo/blob/r8.0.0-rc2/src/mongo/db/repl/oplog_writer_batcher.cpp#L79)
-- [OplogWriter writes down the oplog entries batched by OplogWriterBatcher](https://github.com/10gen/mongo/blob/r8.0.0-rc2/src/mongo/db/repl/oplog_writer_impl.cpp#L231)
+- [OplogWriterBatcher merges oplog entries from the oplog writer buffer to create a batch to write](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/oplog_writer_batcher.cpp#L80)
+- [OplogWriter writes down the oplog entries batched by OplogWriterBatcher](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/oplog_writer_impl.cpp#L225)
 - [OplogApplierBatcher polls oplogs from OplogApplier::\_oplogBuffer and creates an OplogBatch to apply](https://github.com/mongodb/mongo/blob/r8.0.0-rc2/src/mongo/db/repl/oplog_applier_batcher.cpp#L337)
 - [OplogApplier gets batches of oplog entries from the OplogApplierBatcher and applies entries in parallel](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/repl/oplog_applier_impl.cpp#L297)
 - [SyncSourceFeedback keeps checking if there are new oplogs applied on this instance and issues `UpdatePositionCmd` to sync source](https://github.com/mongodb/mongo/blob/r6.2.0/src/mongo/db/repl/sync_source_feedback.cpp#L157)
@@ -877,7 +877,7 @@ command, on each shard participating in the transaction.
 
 Each participating shard must majority commit the `prepareTransaction` command (thus making sure
 that the prepare operation cannot be rolled back) before the `TransactionCoordinator` will [send out
-the `commitTransaction` command](https://github.com/10gen/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/s/transaction_coordinator.cpp#L396-L402). This will help ensure that once a node prepares a transaction, it
+the `commitTransaction` command](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/s/transaction_coordinator.cpp#L402-L408). This will help ensure that once a node prepares a transaction, it
 will remain in the prepared state until the transaction is committed or aborted by the
 `TransactionCoordinator`. If one of the shards fails to prepare the transaction, the
 `TransactionCoordinator` will [tell all participating shards to abort the transaction](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/s/transaction_coordinator.cpp#L405-L410) via the
@@ -901,7 +901,7 @@ oplog entry(s) cannot fall off the back of the oplog.
 ### Preparing a Transaction on the Primary
 
 When a primary receives a `prepareTransaction` command, it will [transition the associated
-transaction's `txnState` to `kPrepared`](https://github.com/10gen/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1727). Next it will [reserve an **oplog slot**](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1739-L1754) (which is a unique
+transaction's `txnState` to `kPrepared`](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/transaction/transaction_participant.cpp#L1844). Next it will [reserve an **oplog slot**](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L1739-L1754) (which is a unique
 `OpTime`) for the `prepareTransaction` oplog entry. The `prepareTransaction` oplog entry will
 contain all the operations from the transaction, which means that if the transaction is larger than
 16MB (and thus requires multiple oplog entries), the node will reserve multiple oplog slots. The
@@ -981,7 +981,7 @@ difference is that before aborting a prepared transaction, the node must [re-acq
 the abort is in progress. Non-prepared transactions don't have to do this because the node will
 still have the RSTL at this point. We then [reserve an oplog slot](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L2290-L2293),
 [abort the storage transaction](https://github.com/mongodb/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L2303),
-and [write the abortTransaction oplog entry](https://github.com/10gen/mongo/blob/be38579dc72a40988cada1f43ab6695dcff8cc36/src/mongo/db/transaction/transaction_participant.cpp#L2312).
+and [write the abortTransaction oplog entry](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/transaction/transaction_participant.cpp#L2444).
 
 ## State Transitions and Failovers with Transactions
 
@@ -1745,7 +1745,7 @@ Before the data clone phase begins, the node will do the following:
    node restarts while this flag is set, it will restart initial sync even though it may already
    have data because it means that initial sync didn't complete. We also check this flag to prevent
    reading from the oplog while initial sync is in progress.
-2. [Reset the in-memory FCV to `kUnsetDefaultLastLTSBehavior`.](https://github.com/10gen/mongo/blob/b718dc1aa3ffb3e6df4f61a30d54cda578cf2830/src/mongo/db/repl/initial_syncer.cpp#L689). This is to ensure compatibility between the sync source and sync
+2. [Reset the in-memory FCV to `kUnsetDefaultLastLTSBehavior`.](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/initial_syncer.cpp#L695). This is to ensure compatibility between the sync source and sync
    target. If the sync source is actually in a different feature compatibility version, we will find
    out when we clone from the sync source.
 3. Find a sync source.
@@ -1765,7 +1765,13 @@ Before the data clone phase begins, the node will do the following:
    or the timestamp that it begins applying oplog entries at once it has completed the data clone
    phase. If there was no active transaction on the sync source, the `beginFetchingTimestamp` will
    be the same as the `beginApplyingTimestamp`.
-9. [Set the in-memory FCV to the sync source's FCV.](https://github.com/10gen/mongo/blob/b718dc1aa3ffb3e6df4f61a30d54cda578cf2830/src/mongo/db/repl/initial_syncer.cpp#L1153). This is because during the cloning phase, we do expect to clone the sync source's "admin.system.version" collection eventually (which contains the FCV document), but we can't guarantee that we will clone "admin.system.version" first. Setting the in-memory FCV value to the sync source's FCV first will ensure that we clone collections using the same FCV as the sync source. However, we won't persist the FCV to disk nor will we update our minWireVersion until we clone the actual document.
+9. [Set the in-memory FCV to the sync source's FCV.](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/initial_syncer.cpp#L1165).
+   This is because during the cloning phase, we do expect to clone the sync source's
+   "admin.system.version" collection eventually (which contains the FCV document), but we can't
+   guarantee that we will clone "admin.system.version" first. Setting the in-memory FCV value to the
+   sync source's FCV first will ensure that we clone collections using the same FCV as the sync
+   source. However, we won't persist the FCV to disk nor will we update our minWireVersion until we
+   clone the actual document.
 10. Create an `OplogFetcher` and start fetching and buffering oplog entries from the sync source
     to be applied later. Operations are buffered to a collection so that they are not limited by the
     amount of memory available.
@@ -1835,7 +1841,7 @@ and if their timestamp is after the `beginApplyingTimestamp`, applies them to th
 Oplog entries continue to be fetched and added to the buffer while this is occurring. One thing to
 note is that the oplog writes are not performed by the `OplogWriter` thread like [steady state
 replication](#oplog-entry-persistence) but the initial sync thread pool, so it still needs to set
-the [`oplogTruncateAfterPoint`](#replication-timestamp-glossary) to the node's [last written optime](https://github.com/10gen/mongo/blob/r8.0.0-rc2/src/mongo/db/repl/oplog_writer_impl.cpp#L274)
+the [`oplogTruncateAfterPoint`](#replication-timestamp-glossary) to the node's [last written optime](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/oplog_writer_impl.cpp#L268)
 (before this batch) to aid in [startup recovery](#startup-recovery) if the node shuts down in the
 middle of writing entries to the oplog. After writing the batch, it will reset the
 `oplogTruncateAfterPoint` to null.
@@ -2063,7 +2069,7 @@ even after a shutdown.
 
 The `oplogTruncateAfterPoint` can be set in two scenarios. The first is during
 [oplog batch application](#oplog-entry-application). Before writing a batch of oplog entries to the
-oplog, the node will [set the `oplogTruncateAfterPoint` to the `lastWritten` timestamp](https://github.com/10gen/mongo/blob/r8.0.0-rc2/src/mongo/db/repl/oplog_writer_impl.cpp#L274).
+oplog, the node will [set the `oplogTruncateAfterPoint` to the `lastWritten` timestamp](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/oplog_writer_impl.cpp#L268).
 If the node shuts down before it finishes writing the batch, then during startup recovery the node will truncate
 the oplog back to the point saved before the batch application began. If the node successfully
 finishes writing the batch to the oplog, it will
@@ -2118,6 +2124,90 @@ guaranteed to be taken with the "appliedThrough" cleared. Therefore, if this nod
 the first stable checkpoint, it can safely recover from the last unstable checkpoint with a correct
 appliedThrough value. Otherwise, if this node crashes after the first stable checkpoint is taken,
 it can safely recover from a stable checkpoint (with a cleared "appliedThrough").
+
+# Flow Control
+
+The Flow Control mechanism aims to keep replica set majority committed lag less than or equal to a
+configured maximum. The default value for this maximum lag is 10 seconds. The Flow Control mechanism
+starts throttling writes on the primary once the majority committed replication lag reaches a
+threshold percentage of the configured maximum. The mechanism uses a "ticket admission"-based
+approach to throttle writes. With this mechanism, in a given period of 1 second, a fixed number of
+"flow control tickets" is available. Operations must acquire a flow control ticket in order to
+acquire a global IX lock to execute a write. Acquisition attempts that occur after this fixed number
+has been granted will stall until the next 1 second period. Certain system operations circumvent the
+ticket admission mechanism and are allowed to proceed even when there are no tickets available.
+
+To address the possibility of this Flow Control mechanism causing indefinite stalls in
+Primary-Secondary-Arbiter replica sets in which a majority cannot be established, the mechanism only
+executes when read concern majority is enabled. Additionally, the mechanism can be disabled by an
+admin.
+
+Flow Control is configurable via several server parameters. Additionally, currentOp, serverStatus,
+database profiling, and slow op log lines include Flow Control information.
+
+## Flow Control Ticket Admission Mechanism
+
+The ticket admission Flow Control mechanism allows a specified number of global IX lock acquisitions
+every second. Most global IX lock acquisitions (except for those that explicitly circumvent Flow
+Control) must first acquire a "Flow Control ticket" before acquiring a ticket for the lock. When
+there are no more flow control tickets available in a one second period, remaining attempts to
+acquire flow control tickets stall until the next period, when the available flow control tickets
+are replenished. It should be noted that there is no "pool" of flow control tickets that threads
+give and take from; an independent mechanism refreshes the ticket counts every second.
+
+When the Flow Control mechanism refreshes available tickets, it calculates how many tickets it
+should allow in order to address the majority committed lag.
+
+The Flow Control mechanism determines how many flow control tickets to replenish every period based
+on:
+
+1. The current majority committed replication lag with respect to the configured target maximum
+   replication lag
+1. How many operations the secondary sustaining the commit point has applied in the last period
+1. How many IX locks per operation were acquired in the last period
+
+## Configurable constants
+
+Criterion #2 determines a "base" number of flow control tickets to be used in the calculation. When
+the current majority committed lag is greater than or equal to a certain configurable threshold
+percentage of the target maximum, the Flow Control mechanism scales down this "base" number based on
+the discrepancy between the two lag values. For some configurable constant 0 < k < 1, it calculates
+the following:
+
+`base * k ^ ((lag - threshold)/threshold) * fudge factor`
+
+The fudge factor is also configurable and should be close to 1. Its purpose is to assign slightly
+lower than the "base" number of flow control tickets when the current lag is close to the threshold.
+Criterion #3 is then multiplied by the result of the above calculation to translate a count of
+operations into a count of lock acquisitions.
+
+When the majority committed lag is less than the threshold percentage of the target maximum, the
+number of tickets assigned in the previous period is used as the "base" of the calculation. This
+number is added to a configurable constant (the ticket "adder" constant), and the sum is multiplied
+by another configurable constant (the ticket "multiplier" constant). This product is the new number
+of tickets to be assigned in the next period.
+
+When the Flow Control mechanism is disabled, the ticket refresher mechanism always allows one
+billion flow control ticket acquisitions per second. The Flow Control mechanism can be disabled via
+a server parameter. Additionally, the mechanism is disabled on nodes that cannot accept writes.
+
+Criteria #2 and #3 are determined using a sampling mechanism that periodically stores the necessary
+data as primaries process writes. The sampling mechanism executes regardless of whether Flow Control
+is enabled.
+
+## Oscillations
+
+There are known scenarios in which the Flow Control mechanism causes write throughput to
+oscillate. There is no known work that can be done to eliminate oscillations entirely for this
+mechanism without hindering other aspects of the mechanism. Work was done (see SERVER-39867) to
+dampen the oscillations at the expense of throughput.
+
+## Throttling internal operations
+
+The Flow Control mechanism throttles all IX lock acquisitions regardless of whether they are from
+client or system operations unless they are part of an operation that is explicitly excluded from
+Flow Control. Writes that occur as part of replica set elections in particular are excluded. See
+SERVER-39868 for more details.
 
 # Feature Compatibility Version
 
@@ -2277,11 +2367,11 @@ committed. However, this is safe because we do not allow rollbacks before the
 ```
 
 - **`[1]`**: A node can never be in that state. One node can consider another to be in that state.
-- **`[2]`**: Not an actual MemberState, RECOVERING + a [separate flag](https://github.com/10gen/mongo/blob/v8.0/src/mongo/db/repl/topology_coordinator.h#L1206)
-- **`[3]`**: With manual replSetMaintenance or when [switching sync source](https://github.com/10gen/mongo/blob/v8.0/src/mongo/db/repl/bgsync.cpp#L485-L486)
+- **`[2]`**: Not an actual MemberState, RECOVERING + a [separate flag](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/bgsync.cpp#L421)
+- **`[3]`**: With manual replSetMaintenance or when [switching sync source](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/bgsync.cpp#L485-L491)
 - **`[4]`**: Too stale or manual replSetMaintenance
-- **`[5]`**: When stepping down with [\_hasOnlyAuthErrorUpHeartbeats(...) returning true](https://github.com/10gen/mongo/blob/v8.0/src/mongo/db/repl/topology_coordinator.cpp#L2737-L2739)
-- **`[6]`**: [Code in ReplicationCoordinatorImpl::\_startDataReplication](https://github.com/10gen/mongo/blob/v8.0/src/mongo/db/repl/replication_coordinator_impl.cpp#L899-L900) allows it
+- **`[5]`**: When stepping down with [\_hasOnlyAuthErrorUpHeartbeats(...) returning true](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/topology_coordinator.cpp#L2739-L2741)
+- **`[6]`**: [Code in ReplicationCoordinatorImpl::\_startDataReplication](https://github.com/mongodb/mongo/blob/r8.0.1/src/mongo/db/repl/replication_coordinator_impl.cpp#L921-L922) allows it
 
 # Non-replication subsystems dependent on replication state transitions.
 

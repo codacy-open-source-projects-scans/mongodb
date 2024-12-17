@@ -121,24 +121,12 @@ public:
     void run() noexcept override {}
     void stop() override {}
 
-    void runFor(Milliseconds time) noexcept override {
-        MONGO_UNREACHABLE;
-    }
-
     void drain() override {
         MONGO_UNREACHABLE;
     }
 
     void schedule(Task t) override {
         t(Status::OK());
-    }
-
-    void dispatch(Task) override {
-        MONGO_UNREACHABLE;
-    }
-
-    bool onReactorThread() const override {
-        MONGO_UNREACHABLE;
     }
 
     std::unique_ptr<ReactorTimer> makeTimer() override {
@@ -159,23 +147,11 @@ public:
     void run() noexcept override {}
     void stop() override {}
 
-    void runFor(Milliseconds time) noexcept override {
-        MONGO_UNREACHABLE;
-    }
-
     void drain() override {
         MONGO_UNREACHABLE;
     }
 
     void schedule(Task) override {
-        MONGO_UNREACHABLE;
-    }
-
-    void dispatch(Task) override {
-        MONGO_UNREACHABLE;
-    }
-
-    bool onReactorThread() const override {
         MONGO_UNREACHABLE;
     }
 

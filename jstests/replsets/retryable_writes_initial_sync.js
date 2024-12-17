@@ -14,7 +14,7 @@ TestData.skipCheckDBHashes = true;
 // Start a single node replica set.
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 const dbName = jsTest.name();
 const primary = rst.getPrimary();
@@ -78,7 +78,7 @@ jsTestLog({
 jsTestLog("Resuming initial sync.");
 assert.commandWorked(
     node1.adminCommand({configureFailPoint: "initialSyncHangAfterDataCloning", mode: 'off'}));
-rst.waitForState(node1, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [node1]);
 
 let initialSyncedNode = rst.getSecondary();
 rst.stepUp(initialSyncedNode);

@@ -27,6 +27,9 @@
  *    it in the license file.
  */
 
+#include <boost/filesystem/directory.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 
@@ -44,6 +47,16 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
 
 namespace mongo {
+namespace {
+
+// Key names for the logging subsystem setting in configuration string.
+// These are used to look up keys with the WiredTigerConfigParser.
+// Since these StringData values are created from c-strings, it is ok to use data() to get a
+// null-terminated c-string for the WiredTiger API.
+auto kLogKeyName = "log"_sd;
+auto kLogEnabledKeyName = "enabled"_sd;
+
+}  // namespace
 
 namespace {
 
@@ -288,7 +301,7 @@ Status WiredTigerUtil::checkTableCreationOptions(const BSONElement& configElem) 
         return {ErrorCodes::TypeMismatch, "'configString' must be a string."};
     }
 
-    std::vector<std::string> errors;
+    StringSet errors;
     ErrorAccumulator eventHandler(&errors);
 
     StringData config = configElem.valueStringData();
@@ -706,7 +719,7 @@ WT_EVENT_HANDLER* WiredTigerEventHandler::getWtEventHandler() {
     return ret;
 }
 
-WiredTigerUtil::ErrorAccumulator::ErrorAccumulator(std::vector<std::string>* errors)
+WiredTigerUtil::ErrorAccumulator::ErrorAccumulator(StringSet* errors)
     : WT_EVENT_HANDLER(defaultEventHandlers()),
       _errors(errors),
       _defaultErrorHandler(handle_error) {
@@ -722,7 +735,7 @@ int WiredTigerUtil::ErrorAccumulator::onError(WT_EVENT_HANDLER* handler,
                                               const char* message) {
     try {
         ErrorAccumulator* self = static_cast<ErrorAccumulator*>(handler);
-        self->_errors->push_back(message);
+        self->_errors->insert(message);
         return self->_defaultErrorHandler(handler, session, error, message);
     } catch (...) {
         std::terminate();
@@ -731,7 +744,8 @@ int WiredTigerUtil::ErrorAccumulator::onError(WT_EVENT_HANDLER* handler,
 
 int WiredTigerUtil::verifyTable(WiredTigerRecoveryUnit& ru,
                                 const std::string& uri,
-                                std::vector<std::string>* errors) {
+                                const boost::optional<std::string>& configurationOverride,
+                                StringSet* errors) {
     ErrorAccumulator eventHandler(errors);
 
     // Try to close as much as possible to avoid EBUSY errors.
@@ -754,8 +768,10 @@ int WiredTigerUtil::verifyTable(WiredTigerRecoveryUnit& ru,
 
     ON_BLOCK_EXIT([&] { session->close(session, ""); });
 
+    const char* config =
+        configurationOverride.has_value() ? configurationOverride->c_str() : nullptr;
     // Do the verify. Weird parens prevent treating "verify" as a macro.
-    return (session->verify)(session, uri.c_str(), nullptr);
+    return (session->verify)(session, uri.c_str(), config);
 }
 
 void WiredTigerUtil::validateTableLogging(WiredTigerRecoveryUnit& ru,
@@ -789,8 +805,9 @@ void WiredTigerUtil::validateTableLogging(WiredTigerRecoveryUnit& ru,
         return;
     }
 
-    if (metadata.getValue().find(fmt::format("log=(enabled={})", isLogged ? "true" : "false")) ==
-        std::string::npos) {
+    WiredTigerConfigParser metadataParser(metadata.getValue());
+    auto currentSetting = metadataParser.isTableLoggingEnabled();
+    if (!currentSetting || *currentSetting != isLogged) {
         attrs.add("expected", isLogged);
         LOGV2_ERROR(6898101, "Detected incorrect WT table logging setting", attrs);
 
@@ -851,7 +868,7 @@ Status WiredTigerUtil::setTableLogging(WiredTigerRecoveryUnit& ru,
     WiredTigerSessionCache* sessionCache = ru.getSessionCache();
     sessionCache->closeAllCursors(uri);
 
-    // This method does some "weak" parsing to see if the table is in the expected logging
+    // This method uses the WiredTiger config parser to see if the table is in the expected logging
     // state. Only attempt to alter the table when a change is needed. This avoids grabbing heavy
     // locks in WT when creating new tables for collections and indexes. Those tables are created
     // with the proper settings and consequently should not be getting changed here.
@@ -863,17 +880,20 @@ Status WiredTigerUtil::setTableLogging(WiredTigerRecoveryUnit& ru,
         auto session = sessionCache->getSession();
         existingMetadata = getMetadataCreate(session->getSession(), uri).getValue();
     }
-    if (existingMetadata.find("log=(enabled=true)") != std::string::npos &&
-        existingMetadata.find("log=(enabled=false)") != std::string::npos) {
+
+    {
+        WiredTigerConfigParser existingMetadataParser(existingMetadata);
+
         // Sanity check against a table having multiple logging specifications.
-        invariant(false,
+        invariant(existingMetadataParser.isTableLoggingSettingValid(),
                   str::stream() << "Table has contradictory logging settings. Uri: " << uri
                                 << " Conf: " << existingMetadata);
-    }
 
-    if (existingMetadata.find(setting) != std::string::npos) {
-        // The table is running with the expected logging settings.
-        return Status::OK();
+        auto currentSetting = existingMetadataParser.isTableLoggingEnabled();
+        if (currentSetting && *currentSetting == on) {
+            // The table is running with the expected logging settings.
+            return Status::OK();
+        }
     }
 
     LOGV2_DEBUG(
@@ -1051,6 +1071,13 @@ StatusWith<std::string> WiredTigerUtil::generateImportString(StringData ident,
     if (importOptions.importTimestampRule == ImportOptions::ImportTimestampRule::kStable) {
         ss << "compare_timestamp=stable_timestamp,";
     }
+    if (!importOptions.panicOnCorruptWtMetadata) {
+        invariant(!importOptions.repair);
+        ss << "panic_corrupt=false,";
+    }
+    if (importOptions.repair) {
+        ss << "repair=true,";
+    }
     ss << "file_metadata=(" << fileMetadata.String() << "))";
 
     return StatusWith<std::string>(ss.str());
@@ -1089,7 +1116,7 @@ std::string WiredTigerUtil::generateRestoreConfig() {
 }
 
 bool WiredTigerUtil::willRestoreFromBackup() {
-    if (!storageGlobalParams.restore) {
+    if (!(storageGlobalParams.restore || storageGlobalParams.magicRestore)) {
         return false;
     }
 
@@ -1249,5 +1276,87 @@ Status WiredTigerUtil::canRunAutoCompact(bool isEphemeral) {
     return Status::OK();
 }
 
+boost::optional<bool> WiredTigerConfigParser::isTableLoggingEnabled() const {
+    WT_CONFIG_ITEM value;
+    if (auto retCode = get(kLogKeyName.data(), &value); retCode != 0) {
+        invariant(
+            retCode == WT_NOTFOUND,
+            fmt::format("expected WT_NOTFOUND from WT_CONFIG_PARSER::get() but got {} instead",
+                        retCode));
+        return boost::none;
+    }
+
+    if (value.type != WT_CONFIG_ITEM::WT_CONFIG_ITEM_STRUCT) {
+        return boost::none;
+    }
+
+    WiredTigerConfigParser logSettingParser(value);
+    WT_CONFIG_ITEM enabledValue;
+    // Not taking into consideration multiple "enabled" sub-keys within the "log" struct.
+    if (auto retCode = logSettingParser.get(kLogEnabledKeyName.data(), &enabledValue);
+        retCode != 0) {
+        invariant(retCode == WT_NOTFOUND,
+                  fmt::format("expected WT_NOTFOUND from WT_CONFIG_PARSER::get() but got {} "
+                              "instead. Log key value: {}",
+                              retCode,
+                              StringData{value.str, value.len}));
+        return boost::none;
+    }
+
+    if (enabledValue.type != WT_CONFIG_ITEM::WT_CONFIG_ITEM_BOOL) {
+        return boost::none;
+    }
+
+    return enabledValue.val;
+}
+
+bool WiredTigerConfigParser::isTableLoggingSettingValid() {
+    invariant(!_nextCalled);
+    _nextCalled = true;
+
+    // If there are multiple well-formed "log" keys, they have to match
+    // the first one stored here.
+    boost::optional<bool> firstLogEnabled;
+
+    int retCode;
+    WT_CONFIG_ITEM key;
+    WT_CONFIG_ITEM value;
+    while ((retCode = _next(&key, &value)) == 0) {
+        invariant(key.type == WT_CONFIG_ITEM::WT_CONFIG_ITEM_ID,
+                  fmt::format("unexpected key type {} while iterating keys in configuration string",
+                              key.type));
+        if (StringData{key.str, key.len} == kLogKeyName &&
+            value.type == WT_CONFIG_ITEM::WT_CONFIG_ITEM_STRUCT) {
+            WiredTigerConfigParser logSettingParser(value);
+            WT_CONFIG_ITEM enabledValue;
+            // Not taking into consideration multiple "enabled" sub-keys within the "log" struct.
+            if (auto retCode = logSettingParser.get(kLogEnabledKeyName.data(), &enabledValue);
+                retCode == 0) {
+                if (enabledValue.type == WT_CONFIG_ITEM::WT_CONFIG_ITEM_BOOL) {
+                    // Compare with previous log=(enabled=...) setting.
+                    if (firstLogEnabled) {
+                        if (static_cast<bool>(enabledValue.val) != *firstLogEnabled) {
+                            return false;
+                        }
+                    } else {
+                        firstLogEnabled = enabledValue.val;
+                    }
+                }
+            } else {
+                invariant(retCode == WT_NOTFOUND,
+                          fmt::format("expected WT_NOTFOUND from WT_CONFIG_PARSER::get() but got "
+                                      "{} instead. Log key value: {}",
+                                      retCode,
+                                      StringData{value.str, value.len}));
+            }
+        }
+    }
+
+    // We read all the keys without finding a conflict.
+    invariant(retCode == WT_NOTFOUND,
+              fmt::format("expected WT_NOTFOUND from WT_CONFIG_PARSER::next() but got {} instead",
+                          retCode));
+    return true;
+}
 
 }  // namespace mongo

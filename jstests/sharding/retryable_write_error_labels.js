@@ -2,7 +2,7 @@
  * Test RetryableWriteError label in retryable writes and in transactions.
  *
  * @tags: [
- *    # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  *   uses_transactions,
  * ]
@@ -335,7 +335,7 @@ const retryableCodes = [
     ErrorCodes.NetworkTimeout,
     ErrorCodes.SocketException,
     ErrorCodes.ExceededTimeLimit,
-    ErrorCodes.WriteConcernFailed
+    ErrorCodes.WriteConcernTimeout
 ];
 
 // mongos should never attach RetryableWriteError labels to retryable errors from shards.

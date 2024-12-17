@@ -34,7 +34,6 @@
 #include <cstdint>
 #include <iosfwd>
 #include <string>
-#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -47,7 +46,6 @@
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -181,7 +179,7 @@ struct IndexSeekPoint {
      * Elements starting at index 'prefixLen' are logically appended to the prefix.
      * The elements before index 'prefixLen' should be ignored.
      */
-    std::vector<const BSONElement*> keySuffix;
+    std::vector<BSONElement> keySuffix;
 
     /**
      * If non-negative, then the comparison will be exclusive and any elements after index

@@ -59,7 +59,7 @@ REGISTER_STABLE_WINDOW_FUNCTION(last, ExpressionLast::parse);
 REGISTER_STABLE_WINDOW_FUNCTION(linearFill, ExpressionLinearFill::parse);
 REGISTER_WINDOW_FUNCTION_WITH_FEATURE_FLAG(minMaxScalar,
                                            ExpressionMinMaxScalar::parse,
-                                           feature_flags::gFeatureFlagSearchHybridScoring,
+                                           feature_flags::gFeatureFlagSearchHybridScoringFull,
                                            AllowedWithApiStrict::kNeverInVersion1);
 REGISTER_STABLE_WINDOW_FUNCTION(minN, (ExpressionN<WindowFunctionMinN, AccumulatorMinN>::parse));
 REGISTER_STABLE_WINDOW_FUNCTION(maxN, (ExpressionN<WindowFunctionMaxN, AccumulatorMaxN>::parse));
@@ -108,7 +108,7 @@ intrusive_ptr<Expression> Expression::parse(BSONObj obj,
 
                 auto allowedWithApi = parserRegistration.allowedWithApi;
 
-                const auto opCtx = expCtx->opCtx;
+                const auto opCtx = expCtx->getOperationContext();
 
                 if (!opCtx) {
                     // It's expected that we always have an op context attached to the expression
@@ -281,7 +281,7 @@ boost::intrusive_ptr<Expression> ExpressionMinMaxScalar::parse(
     boost::intrusive_ptr<::mongo::Expression> input = minMaxScalarArgs.first;
     std::pair<Value, Value> sMinAndsMax = minMaxScalarArgs.second;
 
-    expCtx->sbeWindowCompatibility = SbeCompatibility::notCompatible;
+    expCtx->setSbeWindowCompatibility(SbeCompatibility::notCompatible);
     return make_intrusive<ExpressionMinMaxScalar>(
         expCtx, input, std::move(bounds), std::move(sMinAndsMax));
 }

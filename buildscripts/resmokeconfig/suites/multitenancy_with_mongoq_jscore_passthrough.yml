@@ -49,7 +49,7 @@ selector:
     - jstests/core/query/sbe/from_plan_cache_flag.js
     - jstests/core/query/sbe/plan_cache_sbe_with_or_queries.js
     - jstests/core/query/sbe/sbe_plan_cache_autoparameterize_collscan.js
-    - jstests/core/timeseries/bucket_unpacking_with_sort_plan_cache.js
+    - jstests/core/timeseries/query/bucket_unpacking_with_sort_plan_cache.js
     - jstests/core/**/wildcard_index_cached_plans.js
     # defaultPrompt() calls buildInfo command which is not allowed with security token.
     - jstests/core/txns/shell_prompt_in_transaction.js
@@ -91,7 +91,7 @@ executor:
         globalThis.testingReplication = true;
         await import('jstests/libs/override_methods/simulate_mongoq.js');
       global_vars:
-        TestData: &TestData
+        TestData:
           tenantId: "636d957b2646ddfaf9b5e13a"
           useSignedSecurityToken: true
           hashTestNamesForMultitenancy: true
@@ -103,8 +103,10 @@ executor:
     - class: CheckReplOplogs
     - class: CheckReplDBHash
     - class: ValidateCollections
+      use_legacy_validate: true
     - class: CleanEveryN
       n: 20
+      skip_database_deletion: true
   fixture:
     class: ReplicaSetFixture
     num_nodes: 2

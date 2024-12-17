@@ -1,6 +1,7 @@
 /*
  * Test that if a mongos sends mongod a $search pipeline with an unknown field in the $search stage,
  * mongod will ignore the superfluous field.
+ * @tags: [featureFlagRankFusionFull, requires_fcv_81]
  */
 
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
@@ -37,7 +38,6 @@ const stWithMock = new ShardingTestWithMongotMock({
     other: {
         rsOptions: nodeOptions,
         mongosOptions: nodeOptions,
-        shardOptions: nodeOptions,
     }
 });
 stWithMock.start();
@@ -107,7 +107,7 @@ const shardPipelineWithUnknownFields = {
 
 const commandObj = {
     aggregate: collName,
-    fromMongos: true,
+    fromRouter: true,
     needsMerge: true,
     // Internal client has to provide writeConcern
     writeConcern: {w: "majority"},
@@ -145,9 +145,9 @@ function runAndAssertMongodIgnoresUnknownFieldInSearch(shardDB, expectedDocs, ex
 const expectedDocsOnShardZero = [
     // SortKey and searchScore are included because we're getting results directly from the
     // shard.
-    {_id: 1, val: 1, "$searchScore": .4, "$sortKey": [.4]},
-    {_id: 2, val: 2, "$searchScore": .3, "$sortKey": [.3]},
-    {_id: 3, val: 3, "$searchScore": .123, "$sortKey": [.123]}
+    {_id: 1, val: 1, "$searchScore": .4, "$score": .4, "$sortKey": [.4]},
+    {_id: 2, val: 2, "$searchScore": .3, "$score": .3, "$sortKey": [.3]},
+    {_id: 3, val: 3, "$searchScore": .123, "$score": .123, "$sortKey": [.123]}
 ];
 const expectedMetaResultsOnShardZero = [{metaVal: 1}, {metaVal: 2}, {metaVal: 3}, {metaVal: 4}];
 
@@ -161,9 +161,9 @@ runAndAssertMongodIgnoresUnknownFieldInSearch(
 
 // Repeat for the second shard.
 const expectedDocsOnShardOne = [
-    {_id: 5, val: 5, "$searchScore": .4, "$sortKey": [.4]},
-    {_id: 6, val: 6, "$searchScore": .3, "$sortKey": [.3]},
-    {_id: 7, val: 7, "$searchScore": .123, "$sortKey": [.123]}
+    {_id: 5, val: 5, "$searchScore": .4, "$score": .4, "$sortKey": [.4]},
+    {_id: 6, val: 6, "$searchScore": .3, "$score": .3, "$sortKey": [.3]},
+    {_id: 7, val: 7, "$searchScore": .123, "$score": .123, "$sortKey": [.123]}
 ];
 const expectedMetaResultsOnShardOne = [{metaVal: 10}, {metaVal: 11}, {metaVal: 12}, {metaVal: 13}];
 const shardOneConn = makeInternalConn(st.rs1.getPrimary());

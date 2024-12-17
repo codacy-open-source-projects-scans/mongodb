@@ -88,6 +88,7 @@
 
 
 namespace mongo {
+using CollectionAndChangedChunks = CatalogCacheLoader::CollectionAndChangedChunks;
 namespace {
 
 MONGO_FAIL_POINT_DEFINE(blockCollectionCacheLookup);
@@ -106,7 +107,7 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
     const NamespaceString& nss,
     bool isIncremental,
     const RoutingTableHistoryValueHandle& existingHistory,
-    const CatalogCacheLoader::CollectionAndChangedChunks& collectionAndChunks) {
+    const CollectionAndChangedChunks& collectionAndChunks) {
     // If a refresh doesn't find new information -> re-use the existing RoutingTableHistory
     if (isIncremental && collectionAndChunks.changedChunks.size() == 1 &&
         collectionAndChunks.changedChunks[0].getVersion() == existingHistory->optRt->getVersion()) {
@@ -127,8 +128,8 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
                             "the collection placement version {}. Old value: {}, new value: {}",
                             nss.toStringForErrorMsg(),
                             existingHistory->optRt->getVersion().toString(),
-                            oldReshardingFields->toBSON().toString(),
-                            newReshardingFields->toBSON().toString()),
+                            oldReshardingFields ? oldReshardingFields->toBSON().toString() : "{}",
+                            newReshardingFields ? newReshardingFields->toBSON().toString() : "{}"),
                 [&] {
                     if (oldReshardingFields && newReshardingFields)
                         return oldReshardingFields->toBSON().woCompare(
@@ -180,6 +181,10 @@ std::shared_ptr<RoutingTableHistory> createUpdatedRoutingTableHistory(
 }
 
 }  // namespace
+
+bool CollectionRoutingInfo::hasRoutingTable() const {
+    return cm.hasRoutingTable();
+}
 
 ShardVersion CollectionRoutingInfo::getCollectionVersion() const {
     return ShardVersionFactory::make(
@@ -498,14 +503,6 @@ StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfo(Operati
     return _getCollectionRoutingInfoAt(opCtx, nss, boost::none /* atClusterTime */, allowLocks);
 }
 
-StatusWith<CollectionRoutingInfo> CatalogCache::getCollectionRoutingInfoWithRefresh(
-    OperationContext* opCtx, const NamespaceString& nss) {
-    _triggerPlacementVersionRefresh(nss);
-    _triggerIndexVersionRefresh(nss);
-    return _getCollectionRoutingInfoAt(opCtx, nss, boost::none /* atClusterTime */);
-}
-
-
 boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexInfo(
     OperationContext* opCtx, const NamespaceString& nss, bool allowLocks) {
 
@@ -570,13 +567,6 @@ boost::optional<ShardingIndexesCatalogCache> CatalogCache::_getCollectionIndexIn
     }
 }
 
-StatusWith<CachedDatabaseInfo> CatalogCache::getDatabaseWithRefresh(OperationContext* opCtx,
-                                                                    const DatabaseName& dbName) {
-    _databaseCache.advanceTimeInStore(
-        dbName, ComparableDatabaseVersion::makeComparableDatabaseVersionForForcedRefresh());
-    return getDatabase(opCtx, dbName);
-}
-
 void CatalogCache::_triggerPlacementVersionRefresh(const NamespaceString& nss) {
     _collectionCache.advanceTimeInStore(
         nss, ComparableChunkVersion::makeComparableChunkVersionForForcedRefresh());
@@ -625,84 +615,6 @@ CatalogCache::getCollectionIndexInfoWithRefresh(OperationContext* opCtx,
     try {
         _triggerIndexVersionRefresh(nss);
         return _getCollectionIndexInfo(opCtx, nss);
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
-}
-
-CollectionRoutingInfo CatalogCache::getShardedCollectionRoutingInfo(OperationContext* opCtx,
-                                                                    const NamespaceString& nss) {
-    auto cri = uassertStatusOK(getCollectionRoutingInfo(opCtx, nss));
-    uassert(ErrorCodes::NamespaceNotSharded,
-            str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                          << " to be sharded",
-            cri.cm.isSharded());
-    return cri;
-}
-
-StatusWith<CollectionRoutingInfo> CatalogCache::getShardedCollectionRoutingInfoWithRefresh(
-    OperationContext* opCtx, const NamespaceString& nss) {
-    try {
-        auto cri = uassertStatusOK(getCollectionRoutingInfoWithRefresh(opCtx, nss));
-        uassert(ErrorCodes::NamespaceNotSharded,
-                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                              << " to be sharded",
-                cri.cm.isSharded());
-        return cri;
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
-}
-
-StatusWith<CollectionRoutingInfo> CatalogCache::getShardedCollectionRoutingInfoWithPlacementRefresh(
-    OperationContext* opCtx, const NamespaceString& nss) {
-    try {
-        _triggerPlacementVersionRefresh(nss);
-        auto cri = uassertStatusOK(getCollectionRoutingInfo(opCtx, nss));
-        uassert(ErrorCodes::NamespaceNotSharded,
-                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                              << " to be sharded",
-                cri.cm.isSharded());
-        return cri;
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
-}
-
-CollectionRoutingInfo CatalogCache::getTrackedCollectionRoutingInfo(OperationContext* opCtx,
-                                                                    const NamespaceString& nss) {
-    auto cri = uassertStatusOK(getCollectionRoutingInfo(opCtx, nss));
-    uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                          << " to be tracked",
-            cri.cm.hasRoutingTable());
-    return cri;
-}
-
-StatusWith<CollectionRoutingInfo> CatalogCache::getTrackedCollectionRoutingInfoWithRefresh(
-    OperationContext* opCtx, const NamespaceString& nss) {
-    try {
-        auto cri = uassertStatusOK(getCollectionRoutingInfoWithRefresh(opCtx, nss));
-        uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                              << " to be tracked",
-                cri.cm.hasRoutingTable());
-        return cri;
-    } catch (const DBException& ex) {
-        return ex.toStatus();
-    }
-}
-
-StatusWith<CollectionRoutingInfo> CatalogCache::getTrackedCollectionRoutingInfoWithPlacementRefresh(
-    OperationContext* opCtx, const NamespaceString& nss) {
-    try {
-        _triggerPlacementVersionRefresh(nss);
-        auto cri = uassertStatusOK(getCollectionRoutingInfo(opCtx, nss));
-        uassert(ErrorCodes::NamespaceNotFound,
-                str::stream() << "Expected collection " << nss.toStringForErrorMsg()
-                              << " to be tracked",
-                cri.cm.hasRoutingTable());
-        return cri;
     } catch (const DBException& ex) {
         return ex.toStatus();
     }

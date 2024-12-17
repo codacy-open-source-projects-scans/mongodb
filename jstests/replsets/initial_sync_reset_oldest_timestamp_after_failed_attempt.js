@@ -20,7 +20,7 @@ replTest.startSet();
 
 // Increase the election timeout to 24 hours so that we do not accidentally trigger an election
 // while the secondary is restarting.
-replTest.initiateWithHighElectionTimeout();
+replTest.initiate();
 
 const primary = replTest.getPrimary();
 let secondary = replTest.getSecondary();
@@ -104,7 +104,7 @@ jsTestLog("Failing first initial sync attempt");
 assert.commandWorked(secondary.adminCommand(
     {configureFailPoint: "failInitialSyncBeforeApplyingBatch", mode: "off"}));
 
-replTest.waitForState(secondary, ReplSetTest.State.SECONDARY);
+replTest.awaitSecondaryNodes(null, [secondary]);
 
 jsTestLog("Initial sync completed");
 

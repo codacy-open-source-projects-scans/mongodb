@@ -56,12 +56,11 @@
 #include "mongo/s/query/planner/cluster_find.h"
 
 namespace mongo {
-namespace {
 /**
  * Parses the command object to a FindCommandRequest and validates that no runtime
  * constants were supplied and that querySettings was not passed into the command.
  */
-std::unique_ptr<FindCommandRequest> parseCmdObjectToFindCommandRequest(
+inline std::unique_ptr<FindCommandRequest> parseCmdObjectToFindCommandRequest(
     OperationContext* opCtx, const OpMsgRequest& request) {
     const auto& vts = auth::ValidatedTenancyScope::get(opCtx);
     auto findCommand = query_request_helper::makeFromFindCommand(
@@ -85,7 +84,6 @@ std::unique_ptr<FindCommandRequest> parseCmdObjectToFindCommandRequest(
 
     return findCommand;
 }
-}  // namespace
 
 /**
  * Implements the find command for a router.
@@ -192,7 +190,10 @@ public:
             setReadConcern(opCtx);
             doFLERewriteIfNeeded(opCtx);
 
-            auto expCtx = makeExpressionContext(opCtx, *_cmdRequest, verbosity);
+            auto expCtx = ExpressionContextBuilder{}
+                              .fromRequest(opCtx, *_cmdRequest)
+                              .explain(verbosity)
+                              .build();
             auto parsedFind = uassertStatusOK(parsed_find_command::parse(
                 expCtx,
                 {.findCommand = std::move(_cmdRequest),
@@ -210,7 +211,10 @@ public:
             });
 
             _cmdRequest = std::make_unique<FindCommandRequest>(cq.getFindCommandRequest());
-            expCtx = makeExpressionContext(opCtx, *_cmdRequest, verbosity);
+            expCtx = ExpressionContextBuilder{}
+                         .fromRequest(opCtx, *_cmdRequest)
+                         .explain(verbosity)
+                         .build();
 
             try {
                 long long millisElapsed;
@@ -273,8 +277,7 @@ public:
                 auto findRequest = parseCmdObjectToFindCommandRequest(opCtx, _request);
                 setReadConcern(opCtx);
                 doFLERewriteIfNeeded(opCtx);
-                auto expCtx = make_intrusive<ExpressionContext>(
-                    opCtx, *findRequest, nullptr, true /* mayDbProfile */);
+                auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx, *findRequest).build();
                 auto&& parsedFindResult = uassertStatusOK(parsed_find_command::parse(
                     expCtx,
                     {.findCommand = std::move(findRequest),
@@ -294,7 +297,7 @@ public:
             setReadConcern(opCtx);
             doFLERewriteIfNeeded(opCtx);
 
-            auto expCtx = makeExpressionContext(opCtx, *_cmdRequest);
+            auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx, *_cmdRequest).build();
             auto parsedFind = uassertStatusOK(parsed_find_command::parse(
                 expCtx,
                 {.findCommand = std::move(_cmdRequest),
@@ -348,13 +351,15 @@ public:
 
         void registerRequestForQueryStats(const boost::intrusive_ptr<ExpressionContext> expCtx,
                                           const ParsedFindCommand& parsedFind) {
-            if (!_didDoFLERewrite) {
-                query_stats::registerRequest(expCtx->opCtx, expCtx->ns, [&]() {
+            if (_didDoFLERewrite) {
+                return;
+            }
+            query_stats::registerRequest(
+                expCtx->getOperationContext(), expCtx->getNamespaceString(), [&]() {
                     // This callback is either never invoked or invoked immediately within
                     // registerRequest, so use-after-move of parsedFind isn't an issue.
                     return std::make_unique<query_stats::FindKey>(expCtx, parsedFind);
                 });
-            }
         }
 
         void retryOnViewError(
@@ -392,18 +397,12 @@ public:
         }
 
         void doFLERewriteIfNeeded(OperationContext* opCtx) {
-            if (!shouldDoFLERewrite(_cmdRequest)) {
-                return;
-            }
-
-            invariant(_cmdRequest->getNamespaceOrUUID().isNamespaceString());
-            if (!_cmdRequest->getEncryptionInformation()->getCrudProcessed().value_or(false)) {
+            if (prepareForFLERewrite(opCtx, _cmdRequest->getEncryptionInformation())) {
+                tassert(9483401,
+                        "Expecting namespace string for find command",
+                        _cmdRequest->getNamespaceOrUUID().isNamespaceString());
                 processFLEFindS(opCtx, _cmdRequest->getNamespaceOrUUID().nss(), _cmdRequest.get());
                 _didDoFLERewrite = true;
-            }
-            {
-                stdx::lock_guard<Client> lk(*opCtx->getClient());
-                CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
             }
         }
 

@@ -53,7 +53,6 @@
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/fts/fts_index_format.h"
 #include "mongo/db/fts/fts_query.h"
 #include "mongo/db/fts/fts_query_impl.h"
@@ -78,7 +77,6 @@
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/db/query/projection.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
@@ -271,26 +269,6 @@ bool isOplogTsLowerBoundPred(const mongo::MatchExpression* me) {
     }
 
     return me->path() == repl::OpTime::kTimestampFieldName;
-}
-
-/**
- * Sets the lowPriority parameter on the given index scan node.
- */
-void deprioritizeUnboundedIndexScan(IndexScanNode* solnRoot,
-                                    const FindCommandRequest& findCommand) {
-    auto sort = findCommand.getSort();
-    if (findCommand.getLimit() &&
-        (sort.isEmpty() || sort[query_request_helper::kNaturalSortField])) {
-        // There is a limit with either no sort or the natural sort.
-        return;
-    }
-
-    auto indexScan = checked_cast<IndexScanNode*>(solnRoot);
-    if (!indexScan->bounds.isUnbounded()) {
-        return;
-    }
-
-    indexScan->lowPriority = true;
 }
 
 // True if the element type is affected by a collator (i.e. it is or contains a String).
@@ -1071,36 +1049,48 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
     // We can't create a text stage if there aren't EQ predicates on its prefix terms.  So
     // if we've made it this far, we should have collected the prefix predicates in the
     // filter.
-    invariant(nullptr != tn->filter.get());
+    tassert(9751500, "unexpected empty filter in the given text node", tn->filter);
     MatchExpression* textFilterMe = tn->filter.get();
 
     BSONObjBuilder prefixBob;
 
     if (MatchExpression::AND != textFilterMe->matchType()) {
         // Only one prefix term.
-        invariant(1u == tn->numPrefixFields);
+        tassert(9751501,
+                str::stream() << "expected a single prefix term in the given text node, but got "
+                              << tn->numPrefixFields,
+                1u == tn->numPrefixFields);
         // Sanity check: must be an EQ.
-        invariant(MatchExpression::EQ == textFilterMe->matchType());
+        tassert(9751502,
+                str::stream() << "expected 'EQ' match type in the given text node, but got "
+                              << textFilterMe->matchType(),
+                MatchExpression::EQ == textFilterMe->matchType());
 
         EqualityMatchExpression* eqExpr = static_cast<EqualityMatchExpression*>(textFilterMe);
         prefixBob.append(eqExpr->getData());
         tn->filter.reset();
     } else {
-        invariant(MatchExpression::AND == textFilterMe->matchType());
+        tassert(9751503,
+                str::stream() << "expected 'AND' match type in the given text node, but got "
+                              << textFilterMe->matchType(),
+                MatchExpression::AND == textFilterMe->matchType());
 
         // Indexed by the keyPattern position index assignment.  We want to add
         // prefixes in order but we must order them first.
         vector<std::unique_ptr<MatchExpression>> prefixExprs(tn->numPrefixFields);
 
         AndMatchExpression* amExpr = static_cast<AndMatchExpression*>(textFilterMe);
-        invariant(amExpr->numChildren() >= tn->numPrefixFields);
+        tassert(9751504,
+                str::stream() << "'AND' expression children count " << amExpr->numChildren()
+                              << " is less than prefix term count " << tn->numPrefixFields,
+                amExpr->numChildren() >= tn->numPrefixFields);
 
         // Look through the AND children.  The prefix children we want to
         // stash in prefixExprs.
         size_t curChild = 0;
         while (curChild < amExpr->numChildren()) {
             IndexTag* ixtag = checked_cast<IndexTag*>(amExpr->getChild(curChild)->getTag());
-            invariant(nullptr != ixtag);
+            tassert(9751505, "expected non-null index tag", nullptr != ixtag);
             // Skip this child if it's not part of a prefix, or if we've already assigned a
             // predicate to this prefix position.
             if (ixtag->pos >= tn->numPrefixFields || prefixExprs[ixtag->pos] != nullptr) {
@@ -1115,8 +1105,13 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
         // Go through the prefix equalities in order and create an index prefix out of them.
         for (size_t i = 0; i < prefixExprs.size(); ++i) {
             auto prefixMe = prefixExprs[i].get();
-            invariant(nullptr != prefixMe);
-            invariant(MatchExpression::EQ == prefixMe->matchType());
+            tassert(9751506,
+                    "unexpected empty prefix term in the given text node",
+                    nullptr != prefixMe);
+            tassert(9751507,
+                    str::stream() << "expected 'EQ' match type in all prefix terms, but got "
+                                  << prefixMe->matchType(),
+                    MatchExpression::EQ == prefixMe->matchType());
             EqualityMatchExpression* eqExpr = static_cast<EqualityMatchExpression*>(prefixMe);
             prefixBob.append(eqExpr->getData());
         }
@@ -2096,8 +2091,6 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::scanWholeIndex(const Inde
         QueryPlannerCommon::reverseScans(isn.get());
         isn->direction = -1;
     }
-
-    deprioritizeUnboundedIndexScan(isn.get(), query.getFindCommandRequest());
 
     unique_ptr<MatchExpression> filter = query.getPrimaryMatchExpression()->clone();
 

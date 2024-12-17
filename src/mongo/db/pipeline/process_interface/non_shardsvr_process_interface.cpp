@@ -48,11 +48,13 @@
 #include "mongo/db/catalog/list_indexes.h"
 #include "mongo/db/catalog/rename_collection.h"
 #include "mongo/db/catalog_raii.h"
+#include "mongo/db/commands/list_databases_gen.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/query/write_ops/single_write_result_gen.h"
@@ -61,6 +63,7 @@
 #include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/util/str.h"
 
@@ -76,13 +79,15 @@ NonShardServerProcessInterface::preparePipelineForExecution(
 
 std::unique_ptr<Pipeline, PipelineDeleter>
 NonShardServerProcessInterface::preparePipelineForExecution(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const AggregateCommandRequest& aggRequest,
     Pipeline* pipeline,
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
     boost::optional<BSONObj> shardCursorsSortSpec,
     ShardTargetingPolicy shardTargetingPolicy,
-    boost::optional<BSONObj> readConcern) {
-    return attachCursorSourceToPipelineForLocalRead(pipeline, aggRequest);
+    boost::optional<BSONObj> readConcern,
+    bool shouldUseCollectionDefaultCollator) {
+    return attachCursorSourceToPipelineForLocalRead(
+        pipeline, aggRequest, shouldUseCollectionDefaultCollator);
 }
 
 std::list<BSONObj> NonShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
@@ -97,31 +102,74 @@ std::vector<FieldPath> NonShardServerProcessInterface::collectDocumentKeyFieldsA
     return {"_id"};  // Nothing is sharded.
 }
 
+std::vector<DatabaseName> NonShardServerProcessInterface::getAllDatabases(
+    OperationContext* opCtx, boost::optional<TenantId> tenantId) {
+    DBDirectClient dbClient(opCtx);
+    auto databasesResponse = dbClient.getDatabaseInfos(
+        BSONObj() /* filter */, true /* nameOnly */, true /* authorizedDatabases */);
+
+    std::vector<DatabaseName> databases;
+    databases.reserve(databasesResponse.size());
+    std::transform(
+        databasesResponse.begin(),
+        databasesResponse.end(),
+        std::back_inserter(databases),
+        [&tenantId](const BSONObj& dbBSON) {
+            const auto& dbStr = dbBSON.getStringField(ListDatabasesReplyItem::kNameFieldName);
+            tassert(9525810,
+                    str::stream() << "Missing '" << ListDatabasesReplyItem::kNameFieldName
+                                  << "'field on listDatabases output.",
+                    !dbStr.empty());
+            return DatabaseNameUtil::deserialize(
+                tenantId, dbStr, SerializationContext::stateDefault());
+        });
+
+    return databases;
+}
+
+std::vector<BSONObj> NonShardServerProcessInterface::runListCollections(OperationContext* opCtx,
+                                                                        const DatabaseName& db,
+                                                                        bool addPrimaryShard) {
+    DBDirectClient dbClient(opCtx);
+    const auto collectionsList = dbClient.getCollectionInfos(db);
+
+    std::vector<BSONObj> collections;
+    collections.reserve(collectionsList.size());
+    std::move(collectionsList.begin(), collectionsList.end(), std::back_inserter(collections));
+
+    return collections;
+}
+
 boost::optional<Document> NonShardServerProcessInterface::lookupSingleDocument(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const NamespaceString& nss,
-    UUID collectionUUID,
+    boost::optional<UUID> collectionUUID,
     const Document& documentKey,
     boost::optional<BSONObj> readConcern) {
     MakePipelineOptions opts;
     opts.shardTargetingPolicy = ShardTargetingPolicy::kNotAllowed;
     opts.readConcern = std::move(readConcern);
 
-    auto lookedUpDocument =
-        doLookupSingleDocument(expCtx, nss, collectionUUID, documentKey, std::move(opts));
+    // Do not inherit the collator from 'expCtx', but rather use the target collection default
+    // collator.
+    opts.useCollectionDefaultCollator = true;
+
+    auto lookedUpDocument = doLookupSingleDocument(
+        expCtx, nss, std::move(collectionUUID), documentKey, std::move(opts));
 
     // Set the speculative read timestamp appropriately after we do a document lookup locally. We
     // set the speculative read timestamp based on the timestamp used by the transaction.
     repl::SpeculativeMajorityReadInfo& speculativeMajorityReadInfo =
-        repl::SpeculativeMajorityReadInfo::get(expCtx->opCtx);
+        repl::SpeculativeMajorityReadInfo::get(expCtx->getOperationContext());
     if (speculativeMajorityReadInfo.isSpeculativeRead()) {
         // Speculative majority reads are required to use the 'kNoOverlap' read source.
         // Storage engine operations require at least Global IS.
-        Lock::GlobalLock lk(expCtx->opCtx, MODE_IS);
-        invariant(shard_role_details::getRecoveryUnit(expCtx->opCtx)->getTimestampReadSource() ==
-                  RecoveryUnit::ReadSource::kNoOverlap);
+        Lock::GlobalLock lk(expCtx->getOperationContext(), MODE_IS);
+        invariant(shard_role_details::getRecoveryUnit(expCtx->getOperationContext())
+                      ->getTimestampReadSource() == RecoveryUnit::ReadSource::kNoOverlap);
         boost::optional<Timestamp> readTs =
-            shard_role_details::getRecoveryUnit(expCtx->opCtx)->getPointInTimeReadTimestamp();
+            shard_role_details::getRecoveryUnit(expCtx->getOperationContext())
+                ->getPointInTimeReadTimestamp();
         invariant(readTs);
         speculativeMajorityReadInfo.setSpeculativeReadTimestampForward(*readTs);
     }
@@ -135,7 +183,8 @@ Status NonShardServerProcessInterface::insert(
     std::unique_ptr<write_ops::InsertCommandRequest> insertCommand,
     const WriteConcernOptions& wc,
     boost::optional<OID> targetEpoch) {
-    auto writeResults = write_ops_exec::performInserts(expCtx->opCtx, *insertCommand);
+    auto writeResults =
+        write_ops_exec::performInserts(expCtx->getOperationContext(), *insertCommand);
 
     // Need to check each result in the batch since the writes are unordered.
     for (const auto& result : writeResults.results) {
@@ -153,7 +202,8 @@ Status NonShardServerProcessInterface::insertTimeseries(
     const WriteConcernOptions& wc,
     boost::optional<OID> targetEpoch) {
     try {
-        auto insertReply = write_ops_exec::performTimeseriesWrites(expCtx->opCtx, *insertCommand);
+        auto insertReply = timeseries::write_ops::performTimeseriesWrites(
+            expCtx->getOperationContext(), *insertCommand);
 
         checkWriteErrors(insertReply.getWriteCommandReplyBase());
     } catch (DBException& ex) {
@@ -171,7 +221,8 @@ StatusWith<MongoProcessInterface::UpdateResult> NonShardServerProcessInterface::
     UpsertType upsert,
     bool multi,
     boost::optional<OID> targetEpoch) {
-    auto writeResults = write_ops_exec::performUpdates(expCtx->opCtx, *updateCommand);
+    auto writeResults =
+        write_ops_exec::performUpdates(expCtx->getOperationContext(), *updateCommand);
 
     // Need to check each result in the batch since the writes are unordered.
     UpdateResult updateResult;
@@ -296,7 +347,7 @@ BSONObj NonShardServerProcessInterface::preparePipelineAndExplain(
         // Managed pipeline goes out of scope at the end of this else block, but we've already
         // extracted the necessary information and won't need it again.
         std::unique_ptr<Pipeline, PipelineDeleter> managedPipeline(
-            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->opCtx));
+            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->getOperationContext()));
         pipelineVec = managedPipeline->writeExplainOps(opts);
         ownedPipeline = nullptr;
     } else {

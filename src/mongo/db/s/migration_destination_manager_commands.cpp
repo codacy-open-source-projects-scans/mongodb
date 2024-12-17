@@ -153,7 +153,7 @@ public:
 
         auto cloneRequest = uassertStatusOK(StartChunkCloneRequest::createFromCommand(nss, cmdObj));
 
-        const auto chunkRange = uassertStatusOK(ChunkRange::fromBSON(cmdObj));
+        const auto chunkRange = ChunkRange::fromBSON(cmdObj);
 
         const auto writeConcern =
             uassertStatusOK(ChunkMoveWriteConcernOptions::getEffectiveWriteConcern(
@@ -170,8 +170,8 @@ public:
 
         // We force a refresh immediately after registering this migration to guarantee that this
         // shard will not receive a chunk after refreshing.
-        FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
-            opCtx, nss, boost::none);
+        uassertStatusOK(FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
+            opCtx, nss, boost::none));
 
         // Wait for the ShardServerCatalogCacheLoader to finish flushing the metadata to the
         // storage. This is not required for correctness, but helps mitigate stalls on secondaries

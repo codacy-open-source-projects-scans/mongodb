@@ -67,9 +67,11 @@ public:
     CanonicalDistinctTest() {
         uniqueTxn = serviceContext.makeOperationContext();
         opCtx = uniqueTxn.get();
-        expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, testns);
-        expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
-        expCtx->explain = boost::none;
+        expCtx = ExpressionContextBuilder{}
+                     .opCtx(opCtx)
+                     .ns(testns)
+                     .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                     .build();
     }
 
 private:
@@ -85,7 +87,7 @@ std::unique_ptr<ParsedDistinctCommand> bsonToParsedDistinct(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONObj& cmd) {
     auto distinctCommand = std::make_unique<DistinctCommandRequest>(DistinctCommandRequest::parse(
         IDLParserContext("distinctCommandRequest",
-                         auth::ValidatedTenancyScope::get(expCtx->opCtx),
+                         auth::ValidatedTenancyScope::get(expCtx->getOperationContext()),
                          boost::none,
                          SerializationContext::stateDefault()),
         cmd));

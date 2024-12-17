@@ -236,7 +236,7 @@ export var EncryptedClient = class {
      * @param {string} name Name of collection
      * @param {Object} options Create Collection options
      */
-    createEncryptionCollection(name, options) {
+    createEncryptionCollection(name, options, implicitShardingKey) {
         assert(options != undefined);
         assert(options.hasOwnProperty("encryptedFields"));
         assert(options.encryptedFields.hasOwnProperty("fields"));
@@ -275,9 +275,13 @@ export var EncryptedClient = class {
 
         // All our tests use "last" as the key to query on so shard on "last" instead of "_id"
         if (this.useImplicitSharding) {
+            let shardKey = {last: "hashed"};
+            if (implicitShardingKey) {
+                shardKey = implicitShardingKey;
+            }
             let shardCollCmd = {
                 shardCollection: this._db.getName() + "." + name,
-                key: {last: "hashed"},
+                key: shardKey,
                 collation: {locale: "simple"}
             };
 
@@ -597,4 +601,20 @@ export function assertIsUnindexedEncryptedField(value) {
     assert.eq(value.subtype(), 6, "Expected Encrypted bindata: " + value);
     assert(value.hex().startsWith("10"),
            "Expected subtype 16 but found the wrong type: " + value.hex());
+}
+
+/**
+ * Runs the callback function and returns whether or not it threw a query analysis error, and
+ * if expectedErrorStr is given, if the error message contains it.
+ * The exception logged but not rethrown.
+ */
+export function codeFailsInQueryAnalysisWithError(callback, expectedErrorStr) {
+    try {
+        callback();
+        return false;
+    } catch (e) {
+        jsTestLog(`Test callback threw error: ${tojson(e)}`);
+        return (e.message.indexOf("Client Side Field Level Encryption Error") !== -1) &&
+            (!expectedErrorStr || (e.message.indexOf(expectedErrorStr) !== -1));
+    }
 }

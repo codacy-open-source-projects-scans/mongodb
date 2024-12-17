@@ -20,8 +20,10 @@ selector:
     # TODO: SERVER-78068 Remove Feature Flag for PM-2983
     - featureFlagRecordIdsReplicated
     # TODO: SERVER-85426 Remove Feature Flag for SPM-3541
-    - featureFlagSearchHybridScoring
-    - featureFlagSearchHybridScoringPrerequisites
+    - featureFlagRankFusionBasic
+    - featureFlagRankFusionFull
+    - featureFlagSearchHybridScoringFull
+    - featureFlagRankFusion
     # Transactions are aborted upon fcv upgrade or downgrade.
     - uses_transactions
     # Exclude tests that require a specific fcv.
@@ -53,14 +55,14 @@ selector:
     # These timeseries tests rely on specific bucketing behaviour that is not guaranteed across FCV
     # upgrade/downgrade
     # TODO SERVER-70605: remove this block.
-    - jstests/core/timeseries/bucket_granularity.js
-    - jstests/core/timeseries/timeseries_id_range.js
-    - jstests/core/timeseries/timeseries_insert_after_update.js
-    - jstests/core/timeseries/timeseries_sparse.js
-    - jstests/core/timeseries/timeseries_min_max.js
-    - jstests/core/timeseries/timeseries_simple.js
-    - jstests/core/timeseries/timeseries_collation.js
-    - jstests/core/timeseries/bucket_timestamp_rounding.js
+    - jstests/core/timeseries/ddl/bucket_granularity.js
+    - jstests/core/timeseries/query/timeseries_id_range.js
+    - jstests/core/timeseries/write/timeseries_insert_after_update.js
+    - jstests/core/timeseries/write/timeseries_sparse.js
+    - jstests/core/timeseries/write/timeseries_min_max.js
+    - jstests/core/timeseries/write/timeseries_simple.js
+    - jstests/core/timeseries/ddl/timeseries_collation.js
+    - jstests/core/timeseries/ddl/bucket_timestamp_rounding.js
 
     # TODO: Remove after fixing SERVER-78201: the following received command without explicit readConcern.
     - jstests/aggregation/sources/densify/internal_parse.js
@@ -109,8 +111,8 @@ selector:
     - jstests/core/bench_test1.js
 
     # Bucketing behavior changes based on the timeseriesAlwaysUseCompressedBuckets feature flag.
-    - jstests/core/timeseries/timeseries_lastpoint.js
-    - jstests/core/timeseries/timeseries_reopened_bucket_insert.js
+    - jstests/core/timeseries/query/timeseries_lastpoint.js
+    - jstests/core/timeseries/write/timeseries_reopened_bucket_insert.js
 
 executor:
   archive:
@@ -128,12 +130,6 @@ executor:
     - class: CheckReplOplogs
     - class: CheckReplDBHash
     - class: ValidateCollections
-      shell_options:
-        global_vars:
-          TestData:
-            # Skip enforcing this check in FCV upgrade/downgrade suites as time-series buckets are not
-            # always compressed in a downgraded FCV.
-            skipEnforceTimeseriesBucketsAreAlwaysCompressedOnValidate: true
     - class: FCVUpgradeDowngradeInBackground
     - class: CleanEveryN
       n: 20

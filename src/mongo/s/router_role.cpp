@@ -46,6 +46,7 @@
 #include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/s/stale_exception.h"
+#include "mongo/s/transaction_participant_failed_unyield_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/str.h"
 
@@ -167,9 +168,26 @@ void CollectionRouterCommon::_onException(OperationContext* opCtx,
             uassertStatusOK(s);
         }
 
-        const bool isShardStale = !si->getVersionWanted() ||
-            si->getVersionWanted()->placementVersion().isOlderThan(
-                si->getVersionReceived().placementVersion());
+        const bool isShardStale = [&]() {
+            if (!si->getVersionWanted()) {
+                return true;
+            }
+
+            const auto& wanted = si->getVersionWanted()->placementVersion();
+            const auto& received = si->getVersionReceived().placementVersion();
+
+            // TODO (SERVER-96322): Remove this workaround once shard version {0,0} is considered a
+            // non-comparable shard version.
+            if (wanted.isSameCollection(received) && !wanted.isSet()) {
+                // When comparing the same incarnation of the collection, if the wanted version
+                // indicates the shard has no chunks (i.e. a chunk version with {0,0}), we can't
+                // reliably compare placement versions. Pessimistically, we'll assume the router is
+                // stale.
+                return false;
+            }
+
+            return wanted.isOlderThan(received);
+        }();
         if (isShardStale && !_retryOnStaleShard) {
             uassertStatusOK(s);
         }
@@ -183,6 +201,27 @@ void CollectionRouterCommon::_onException(OperationContext* opCtx,
 
             catalogCache->onStaleCollectionVersion(si->getNss(), si->getVersionWanted());
         }
+    } else if (s == ErrorCodes::TransactionParticipantFailedUnyield) {
+        auto extraInfo = s.extraInfo<TransactionParticipantFailedUnyieldInfo>();
+        tassert(9690300, "TransactionParticipantFailedUnyield must have extraInfo", extraInfo);
+
+        auto originalStatus = extraInfo->getOriginalResponseStatus();
+
+        if (!originalStatus || originalStatus->isOK()) {
+            uassertStatusOK(s);
+        }
+
+        if (*originalStatus == ErrorCodes::StaleConfig) {
+            auto si = originalStatus->extraInfo<StaleConfigInfo>();
+            tassert(9690301, "StaleConfig must have extraInfo", si);
+            catalogCache->onStaleCollectionVersion(si->getNss(), si->getVersionWanted());
+        } else if (*originalStatus == ErrorCodes::StaleDbVersion) {
+            auto si = originalStatus->extraInfo<StaleDbRoutingVersion>();
+            tassert(9690302, "StaleDbVersion must have extraInfo", si);
+            catalogCache->onStaleDatabaseVersion(si->getDb(), si->getVersionWanted());
+        }
+
+        uassertStatusOK(s);
     } else {
         uassertStatusOK(s);
     }

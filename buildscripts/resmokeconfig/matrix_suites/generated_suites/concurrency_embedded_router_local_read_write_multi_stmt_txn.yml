@@ -16,10 +16,12 @@ executor:
     tests: true
   config:
     shell_options:
+      eval: await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
           defaultTransactionReadConcernLevel: local
           defaultTransactionWriteConcernW: 1
+          implicitlyShardOnCreateCollectionOnly: true
           runInsideTransaction: true
           runningWithBalancer: false
           runningWithCausalConsistency: false
@@ -31,7 +33,6 @@ executor:
     enable_balancer: false
     mongod_options:
       set_parameters:
-        defaultConfigCommandTimeoutMS: 90000
         enableTestCommands: 1
         featureFlagRouterPort: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
@@ -58,7 +59,7 @@ selector:
     - jstests/concurrency/fsm_workloads/ddl/create_index_background/create_index_background.js
     - jstests/concurrency/fsm_workloads/ddl/create_index_background/create_index_background_partial_filter.js
     - jstests/concurrency/fsm_workloads/ddl/create_index_background/create_index_background_wildcard.js
-    - jstests/concurrency/fsm_workloads/drop_index_during_replan.js
+    - jstests/concurrency/fsm_workloads/query/drop_index_during_replan.js
     - jstests/concurrency/fsm_workloads/query/drop_index_during_lookup.js
     - jstests/concurrency/fsm_workloads/query/update/update_rename.js
     - jstests/concurrency/fsm_workloads/query/update/update_rename_noindex.js

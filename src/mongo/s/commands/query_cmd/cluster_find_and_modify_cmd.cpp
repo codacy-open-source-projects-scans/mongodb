@@ -33,9 +33,7 @@
 #include <boost/none.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
 #include <memory>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -57,8 +55,6 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/query_cmd/update_metrics.h"
-#include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
@@ -69,7 +65,6 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/resource_yielder.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
@@ -82,7 +77,6 @@
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk.h"
@@ -105,17 +99,14 @@
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/timer.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
-
 
 namespace mongo {
 namespace {
@@ -138,15 +129,7 @@ BSONObj appendLegacyRuntimeConstantsToCommandObject(OperationContext* opCtx,
 }
 
 BSONObj stripWriteConcern(const BSONObj& cmdObj) {
-    BSONObjBuilder output;
-    for (const auto& elem : cmdObj) {
-        const auto name = elem.fieldNameStringData();
-        if (name == WriteConcernOptions::kWriteConcernField) {
-            continue;
-        }
-        output.append(elem);
-    }
-    return output.obj();
+    return cmdObj.removeField(WriteConcernOptions::kWriteConcernField);
 }
 
 BSONObj getCollation(const BSONObj& cmdObj) {
@@ -299,7 +282,7 @@ void updateReplyOnWouldChangeOwningShardSuccess(bool matchedDocOrUpserted,
 
 void handleWouldChangeOwningShardErrorTransaction(OperationContext* opCtx,
                                                   const NamespaceString nss,
-                                                  Status responseStatus,
+                                                  const Status& responseStatus,
                                                   bool shouldReturnPostImage,
                                                   BSONObjBuilder* result,
                                                   bool fleCrudProcessed) {
@@ -363,7 +346,7 @@ void handleWouldChangeOwningShardErrorTransaction(OperationContext* opCtx,
 
 void handleWouldChangeOwningShardErrorTransactionLegacy(OperationContext* opCtx,
                                                         const NamespaceString nss,
-                                                        Status responseStatus,
+                                                        const Status& responseStatus,
                                                         const BSONObj& cmdObj,
                                                         BSONObjBuilder* result,
                                                         bool isTimeseriesViewRequest,
@@ -583,7 +566,6 @@ ShardId targetSingleShard(boost::intrusive_ptr<ExpressionContext> expCtx,
                         collation,
                         cm,
                         &shardIds,
-                        nullptr,
                         true);
 
     uassert(ErrorCodes::ShardKeyNotFound,
@@ -613,12 +595,7 @@ Status FindAndModifyCmd::explain(OperationContext* opCtx,
         // Check whether the query portion needs to be rewritten for FLE.
         auto findAndModifyRequest = write_ops::FindAndModifyCommandRequest::parse(
             IDLParserContext("ClusterFindAndModify"), request.body);
-        if (shouldDoFLERewrite(findAndModifyRequest)) {
-            {
-                stdx::lock_guard<Client> lk(*opCtx->getClient());
-                CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-            }
-
+        if (prepareForFLERewrite(opCtx, findAndModifyRequest.getEncryptionInformation())) {
             auto newRequest = processFLEFindAndModifyExplainMongos(opCtx, findAndModifyRequest);
             return newRequest.first.toBSON();
         } else {
@@ -812,7 +789,7 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
                                                          letParams,
                                                          runtimeConstants,
                                                          isTimeseriesViewRequest)) {
-            findAndModifyNonTargetedShardedCount.increment(1);
+            getQueryCounters(opCtx).findAndModifyNonTargetedShardedCount.increment(1);
             auto allowShardKeyUpdatesWithoutFullShardKeyInQuery =
                 opCtx->isRetryableWrite() || opCtx->inMultiDocumentTransaction();
 
@@ -839,9 +816,9 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
             }
         } else {
             if (cm.isSharded()) {
-                findAndModifyTargetedShardedCount.increment(1);
+                getQueryCounters(opCtx).findAndModifyTargetedShardedCount.increment(1);
             } else {
-                findAndModifyUnshardedCount.increment(1);
+                getQueryCounters(opCtx).findAndModifyUnshardedCount.increment(1);
             }
 
             ShardId shardId =
@@ -859,7 +836,7 @@ bool FindAndModifyCmd::run(OperationContext* opCtx,
                         &result);
         }
     } else {
-        findAndModifyUnshardedCount.increment(1);
+        getQueryCounters(opCtx).findAndModifyUnshardedCount.increment(1);
         _runCommand(opCtx,
                     cm.dbPrimary(),
                     boost::make_optional(!cm.dbVersion().isFixed(), ShardVersion::UNSHARDED()),
@@ -908,10 +885,6 @@ void FindAndModifyCmd::_constructResult(OperationContext* opCtx,
         uassertStatusOK(responseStatus.withContext("findAndModify"));
     }
 
-    if (responseStatus.code() == ErrorCodes::TenantMigrationAborted) {
-        uassertStatusOK(responseStatus.withContext("findAndModify"));
-    }
-
     if (responseStatus.code() == ErrorCodes::WouldChangeOwningShard) {
         if (feature_flags::gFeatureFlagUpdateDocumentShardKeyUsingTransactionApi.isEnabled(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
@@ -943,14 +916,14 @@ void FindAndModifyCmd::_constructResult(OperationContext* opCtx,
         return;
     }
 
-    // Throw if a non-OK status is not because of any of the above errors.
-    uassertStatusOK(responseStatus);
-
     // First append the properly constructed writeConcernError. It will then be skipped in
     // appendElementsUnique.
     if (auto wcErrorElem = response["writeConcernError"]) {
         appendWriteConcernErrorToCmdResponse(shardId, wcErrorElem, *result);
     }
+
+    // Throw if a non-OK status is not because of any of the above errors.
+    uassertStatusOK(responseStatus);
 
     result->appendElementsUnique(CommandHelpers::filterCommandReplyForPassthrough(response));
 }
@@ -1145,12 +1118,12 @@ void FindAndModifyCmd::_handleWouldChangeOwningShardErrorRetryableWriteLegacy(
                                                          getLet(cmdObj),
                                                          getLegacyRuntimeConstants(cmdObj),
                                                          isTimeseriesViewRequest)) {
-            findAndModifyNonTargetedShardedCount.increment(1);
+            getQueryCounters(opCtx).findAndModifyNonTargetedShardedCount.increment(1);
             _runCommandWithoutShardKey(
                 opCtx, nss, stripWriteConcern(cmdObj), isTimeseriesViewRequest, result);
 
         } else {
-            findAndModifyTargetedShardedCount.increment(1);
+            getQueryCounters(opCtx).findAndModifyTargetedShardedCount.increment(1);
             _runCommand(opCtx,
                         shardId,
                         shardVersion,
@@ -1166,10 +1139,11 @@ void FindAndModifyCmd::_handleWouldChangeOwningShardErrorRetryableWriteLegacy(
         uassertStatusOK(getStatusFromCommandResult(result->asTempObj()));
         auto commitResponse = documentShardKeyUpdateUtil::commitShardKeyUpdateTransaction(opCtx);
 
-        uassertStatusOK(getStatusFromCommandResult(commitResponse));
         if (auto wcErrorElem = commitResponse["writeConcernError"]) {
             appendWriteConcernErrorToCmdResponse(shardId, wcErrorElem, *result);
         }
+
+        uassertStatusOK(getStatusFromCommandResult(commitResponse));
     } catch (DBException& e) {
         if (e.code() != ErrorCodes::DuplicateKey ||
             (e.code() == ErrorCodes::DuplicateKey &&
@@ -1189,7 +1163,7 @@ void FindAndModifyCmd::handleWouldChangeOwningShardError(OperationContext* opCtx
                                                          const ShardId& shardId,
                                                          const NamespaceString& nss,
                                                          const BSONObj& cmdObj,
-                                                         Status responseStatus,
+                                                         const Status& responseStatus,
                                                          BSONObjBuilder* result) {
     auto txnRouter = TransactionRouter::get(opCtx);
     bool isRetryableWrite = opCtx->getTxnNumber() && !txnRouter;

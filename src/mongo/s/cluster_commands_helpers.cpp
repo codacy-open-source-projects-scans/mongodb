@@ -40,7 +40,6 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/db/catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/commands.h"
@@ -74,14 +73,11 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/s/query_analysis_sampler_util.h"
-#include "mongo/s/request_types/reshard_collection_gen.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/s/shard_key_pattern_query_util.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
@@ -182,27 +178,21 @@ boost::intrusive_ptr<ExpressionContext> makeExpressionContextWithDefaultsForTarg
         }
     }();
 
-    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
-    resolvedNamespaces.emplace(nss.coll(),
-                               ExpressionContext::ResolvedNamespace(nss, std::vector<BSONObj>{}));
+    StringMap<ResolvedNamespace> resolvedNamespaces;
+    resolvedNamespaces.emplace(nss.coll(), ResolvedNamespace(nss, std::vector<BSONObj>{}));
 
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx,
-        verbosity,
-        true,   // fromRouter
-        false,  // needs merge
-        false,  // disk use is banned on mongos
-        true,   // bypass document validation, mongos isn't a storage node
-        false,  // not mapReduce
-        nss,
-        runtimeConstants,
-        std::move(cif),
-        MongoProcessInterface::create(opCtx),
-        std::move(resolvedNamespaces),
-        boost::none,  // collection uuid
-        letParameters,
-        false  // mongos has no profile collection
-    );
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx)
+                      .collator(std::move(cif))
+                      .mongoProcessInterface(MongoProcessInterface::create(opCtx))
+                      .ns(nss)
+                      .resolvedNamespace(std::move(resolvedNamespaces))
+                      .fromRouter(true)
+                      .bypassDocumentValidation(true)
+                      .explain(verbosity)
+                      .runtimeConstants(runtimeConstants)
+                      .letParameters(letParameters)
+                      .build();
 
     // Ignore the collator if the collection is untracked and the user did not specify a collator.
     if (!cri.cm.hasRoutingTable() && noCollationSpecified) {
@@ -232,8 +222,10 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequests(
     requests.reserve(shardIds.size());
 
     const auto targetedSampleId = eligibleForSampling
-        ? analyze_shard_key::tryGenerateTargetedSampleId(
-              expCtx->opCtx, nss, cmdObj.firstElementFieldNameStringData(), shardIds)
+        ? analyze_shard_key::tryGenerateTargetedSampleId(expCtx->getOperationContext(),
+                                                         nss,
+                                                         cmdObj.firstElementFieldNameStringData(),
+                                                         shardIds)
         : boost::none;
 
     for (const ShardId& shardId : shardIds) {
@@ -267,7 +259,7 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
     const BSONObj& query,
     const BSONObj& collation,
     bool eligibleForSampling = false) {
-    auto opCtx = expCtx->opCtx;
+    auto opCtx = expCtx->getOperationContext();
 
     const auto& cm = cri.cm;
     std::set<ShardId> shardIds;
@@ -284,7 +276,7 @@ std::vector<AsyncRequestsSender::Request> buildVersionedRequestsForTargetedShard
                 CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
         }
 
-        getShardIdsForQuery(expCtx, query, collation, cm, &shardIds, nullptr /* info */);
+        getShardIdsForQuery(expCtx, query, collation, cm, &shardIds);
     }
     for (const auto& shardToSkip : shardsToSkip) {
         shardIds.erase(shardToSkip);
@@ -354,13 +346,6 @@ std::vector<AsyncRequestsSender::Response> gatherResponsesImpl(
             // rewrite the request as an aggregation and retry it.
             if (ErrorCodes::CommandOnShardedViewNotSupportedOnMongod == status) {
                 uassertStatusOK(status);
-            }
-
-            if (ErrorCodes::TenantMigrationAborted == status) {
-                uassertStatusOK(status.withContext(
-                    str::stream() << "got TenantMigrationAborted response from shard "
-                                  << response.shardId << " at host "
-                                  << response.shardHostAndPort->toString()));
             }
         }
         responses.push_back(std::move(response));
@@ -572,7 +557,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
     bool eligibleForSampling) {
     const auto requests = buildVersionedRequestsForTargetedShards(
         expCtx, nss, cri, {} /* shardsToSkip */, cmdObj, query, collation, eligibleForSampling);
-    return gatherResponses(expCtx->opCtx, dbName, readPref, retryPolicy, requests);
+    return gatherResponses(expCtx->getOperationContext(), dbName, readPref, retryPolicy, requests);
 }
 
 std::vector<AsyncRequestsSender::Response>
@@ -826,7 +811,7 @@ std::set<ShardId> getTargetedShardsForQuery(boost::intrusive_ptr<ExpressionConte
         // The collection has a routing table. Use it to decide which shards to target based on the
         // query and collation.
         std::set<ShardId> shardIds;
-        getShardIdsForQuery(expCtx, query, collation, cm, &shardIds, nullptr /* info */);
+        getShardIdsForQuery(expCtx, query, collation, cm, &shardIds);
         return shardIds;
     }
 
@@ -851,7 +836,7 @@ std::set<ShardId> getTargetedShardsForCanonicalQuery(const CanonicalQuery& query
                 query.getExpCtx(), cm, findCommand.getFilter(), findCommand.getCollation());
         }
 
-        query.getExpCtx()->uuid = cm.getUUID();
+        query.getExpCtx()->setUUID(cm.getUUID());
 
         // 'getShardIdsForCanonicalQuery' assumes that the ExpressionContext has the appropriate
         // collation set. Here, if the query collation is empty, we use the collection default
@@ -863,7 +848,7 @@ std::set<ShardId> getTargetedShardsForCanonicalQuery(const CanonicalQuery& query
         }
 
         std::set<ShardId> shardIds;
-        getShardIdsForCanonicalQuery(query, cm, &shardIds, nullptr /* info */);
+        getShardIdsForCanonicalQuery(query, cm, &shardIds);
         return shardIds;
     }
 
@@ -924,6 +909,21 @@ StatusWith<CollectionRoutingInfo> getCollectionRoutingInfoForTxnCmd(OperationCon
 
     return catalogCache->getCollectionRoutingInfo(opCtx, nss, allowLocks);
 }
+
+CollectionRoutingInfo getRefreshedCollectionRoutingInfoAssertSharded_DEPRECATED(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    const auto& catalogCache = Grid::get(opCtx)->catalogCache();
+
+    catalogCache->onStaleCollectionVersion(nss, boost::none /* wantedVersion */);
+
+    auto cri = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
+
+    uassert(ErrorCodes::NamespaceNotSharded,
+            str::stream() << "Command not supported on unsharded collection "
+                          << nss.toStringForErrorMsg(),
+            cri.cm.isSharded());
+    return cri;
+};
 
 BSONObj forceReadConcernLocal(OperationContext* opCtx, BSONObj& cmd) {
     const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);

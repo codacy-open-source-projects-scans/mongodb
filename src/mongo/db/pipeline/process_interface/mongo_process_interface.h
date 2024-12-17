@@ -58,6 +58,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/exec/exec_shard_filter_policy.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -430,16 +431,32 @@ public:
         boost::optional<BSONObj> readConcern = boost::none) = 0;
 
     /**
-     * Same as above but takes in an aggRequest and pipeline. This preserves any
-     * aggregation options set on the AggregateCommandRequest.
+     * Prepares a pipeline for execution based on the provided aggregation request and pipeline.
+     * This method preserves any aggregation options specified in the AggregateCommandRequest.
+     *
+     * The 'shardCursorsSortSpec' parameter, if provided, specifies the expected sort order of
+     * cursors from the shards. The cursors must be sorted according to this specification and
+     * include a "$sortKey" metadata field for result comparison.
+     *
+     * The routing of the corresponding 'aggRequest' to local or remote shards is determined by the
+     * 'shardTargetingPolicy'. If 'shardTargetingPolicy' is set to kNotAllowed, the request will
+     * only be routed for local reads, regardless of the sharded environment.
+     *
+     * The 'readConcern' parameter specifies the read concern level for the aggregation request. If
+     * 'shouldUseCollectionDefaultCollator' is set to true, the default collection collator will be
+     * attached to the 'expCtx'.
+     *
+     * This function takes ownership of the 'pipeline' argument, which is expected to be a valid
+     * pointer to a Pipeline object.
      */
     virtual std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
         Pipeline* pipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
-        boost::optional<BSONObj> readConcern = boost::none) = 0;
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) = 0;
 
     /**
      * Accepts a pipeline and attaches a cursor source to it. Returns a BSONObj of the form
@@ -455,9 +472,12 @@ public:
      * this method on a shard server will only return results which match the pipeline on that
      * shard.
 
-     * Performs no further optimization of the pipeline. NamespaceNotFound will be
-     * thrown if ExpressionContext has a UUID and that UUID doesn't match the ExpressionContext's
-     * ns. That should be the only case where NamespaceNotFound is returned.
+     * Performs no further optimization of the pipeline. CollectionUUIDMismatch exception will be
+     * thrown if 'aggRequest' has 'collectionUUID' set and it doesn't match with the UUID of the
+     * collection acquired via the nss.
+     *
+     * When 'shouldUseCollectionDefaultCollator' is set to true, the collator of the target
+     * collection will be used instead of previously provided collator.
      *
      * This function takes ownership of the 'pipeline' argument as if it were a unique_ptr.
      * Changing it to a unique_ptr introduces a circular dependency on certain platforms where the
@@ -465,7 +485,9 @@ public:
      */
     virtual std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
         Pipeline* pipeline,
-        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none) = 0;
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
+        bool shouldUseCollectionDefaultCollator = false,
+        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) = 0;
 
     /**
      * Returns a vector of owned BSONObjs, each of which contains details of an in-progress
@@ -513,8 +535,14 @@ public:
     /**
      * Returns zero or one documents with the document key 'documentKey'. 'documentKey' is treated
      * as a unique identifier of a document, and may include an _id or all fields from the shard key
-     * and an _id. Throws if more than one match was found. Returns boost::none if no matching
-     * documents were found, including cases where the given namespace does not exist.
+     * and an _id. The lookup is performed using collection's default collator.
+     *
+     * The method will validate that the requested collection's UUID matches the provided
+     * 'collectionUUID' if specified. In case of collection not being present or UUID mismatch,
+     * boost::none will be returned.
+     *
+     * The method ensures that only one document is returned for the specified 'documentKey'. If
+     * more than one document is found, TooManyMatchingDocuments exception will be thrown.
      *
      * If this interface needs to send requests (possibly to other nodes) in order to look up the
      * document, 'readConcern' will be attached to these requests. Otherwise 'readConcern' will be
@@ -523,7 +551,7 @@ public:
     virtual boost::optional<Document> lookupSingleDocument(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const NamespaceString& nss,
-        UUID,
+        boost::optional<UUID> collectionUUID,
         const Document& documentKey,
         boost::optional<BSONObj> readConcern) = 0;
 
@@ -588,25 +616,6 @@ public:
         const std::set<FieldPath>& fieldPaths) const = 0;
 
     /**
-     * Refreshes the CatalogCache entry for the namespace 'nss', and returns the epoch associated
-     * with that namespace, if any. Note that this refresh will not necessarily force a new
-     * request to be sent to the config servers. If another thread has already requested a refresh,
-     * it will instead wait for that response.
-     */
-    virtual boost::optional<ShardVersion> refreshAndGetCollectionVersion(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        const NamespaceString& nss) const = 0;
-
-    /**
-     * Refreshes the CatalogCache entry for the database 'dbName', and returns the DatabaseVersion
-     * associated with that database, if any. It returns boost::none when failed to get a database
-     * by that name.
-     */
-    virtual boost::optional<mongo::DatabaseVersion> refreshAndGetDatabaseVersion(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        const DatabaseName& dbName) const = 0;
-
-    /**
      * Consults the CatalogCache to determine if this node has routing information for the
      * collection given by 'nss' which reports the same epoch as given by
      * 'targetCollectionPlacementVersion'. Major and minor versions in
@@ -616,6 +625,19 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const NamespaceString& nss,
         ChunkVersion targetCollectionPlacementVersion) const = 0;
+
+    /**
+     * Get all the databases from the server.
+     */
+    virtual std::vector<DatabaseName> getAllDatabases(OperationContext* opCtx,
+                                                      boost::optional<TenantId> tenantId) = 0;
+
+    /**
+     * Run listCollections command for the given database.
+     */
+    virtual std::vector<BSONObj> runListCollections(OperationContext* opCtx,
+                                                    const DatabaseName& db,
+                                                    bool addPrimaryShard = false) = 0;
 
     /**
      * Used to enforce the constraint that the foreign collection must be unsharded.

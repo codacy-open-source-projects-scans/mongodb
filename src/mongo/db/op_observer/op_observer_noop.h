@@ -66,9 +66,6 @@ public:
     void onStartIndexBuildSinglePhase(OperationContext* opCtx,
                                       const NamespaceString& nss) override {}
 
-    void onAbortIndexBuildSinglePhase(OperationContext* opCtx,
-                                      const NamespaceString& nss) override {}
-
     void onCommitIndexBuild(OperationContext* opCtx,
                             const NamespaceString& nss,
                             const UUID& collUUID,
@@ -138,7 +135,6 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  const CollectionDropType dropType,
                                   bool markFromMigrate) override {
         return {};
     }

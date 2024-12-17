@@ -35,8 +35,6 @@
 #include <algorithm>
 #include <boost/container/vector.hpp>
 #include <boost/move/utility_core.hpp>
-#include <map>
-#include <mutex>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
@@ -46,25 +44,22 @@
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/catalog/catalog_control.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_catalog_helper.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/historical_catalogid_tracker.h"
-#include "mongo/db/catalog/index_builds.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/global_settings.h"
 #include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/index_builds/index_builds.h"
+#include "mongo/db/index_builds/resumable_index_builds_gen.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/resumable_index_builds_gen.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
 #include "mongo/db/storage/deferred_drop_record_store.h"
 #include "mongo/db/storage/durable_catalog.h"
@@ -84,8 +79,6 @@
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/database_name_util.h"
-#include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
 
@@ -211,7 +204,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
 
     LOGV2(9529901,
           "Initializing durable catalog",
-          "numRecords"_attr = _catalogRecordStore->numRecords(opCtx));
+          "numRecords"_attr = _catalogRecordStore->numRecords());
     _catalog.reset(new DurableCatalog(
         _catalogRecordStore.get(), _options.directoryPerDB, _options.directoryForIndexes, this));
     _catalog->init(opCtx);
@@ -252,7 +245,7 @@ void StorageEngineImpl::loadCatalog(OperationContext* opCtx,
         // 'local.orphan.xxxxx' for it. However, in a nonrepair context, the orphaned idents
         // will be dropped in reconcileCatalogAndIdents().
         for (const auto& ident : identsKnownToStorageEngine) {
-            if (DurableCatalog::isCollectionIdent(ident)) {
+            if (ident::isCollectionIdent(ident)) {
                 bool isOrphan = !std::any_of(catalogEntries.begin(),
                                              catalogEntries.end(),
                                              [this, &ident](DurableCatalog::EntryIdentifier entry) {
@@ -563,7 +556,7 @@ bool StorageEngineImpl::_handleInternalIdent(OperationContext* opCtx,
                                              ReconcileResult* reconcileResult,
                                              std::set<std::string>* internalIdentsToKeep,
                                              std::set<std::string>* allInternalIdents) {
-    if (!DurableCatalog::isInternalIdent(ident)) {
+    if (!ident::isInternalIdent(ident)) {
         return false;
     }
 
@@ -575,7 +568,7 @@ bool StorageEngineImpl::_handleInternalIdent(OperationContext* opCtx,
         return true;
     }
 
-    if (!DurableCatalog::isResumableIndexBuildIdent(ident)) {
+    if (!ident::isResumableIndexBuildIdent(ident)) {
         return false;
     }
 
@@ -695,13 +688,13 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
             continue;
         }
 
-        if (!DurableCatalog::isUserDataIdent(it)) {
+        if (!ident::isUserDataIdent(it)) {
             continue;
         }
 
         // In repair context, any orphaned collection idents from the engine should already be
         // recovered in the catalog in loadCatalog().
-        invariant(!(DurableCatalog::isCollectionIdent(it) && _options.forRepair));
+        invariant(!(ident::isCollectionIdent(it) && _options.forRepair));
 
         // Leave drop-pending idents alone.
         // These idents have to be retained as long as the corresponding drops are not part of a
@@ -715,13 +708,15 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
 
         const auto& toRemove = it;
         const Timestamp identDropTs = stableTs;
-        LOGV2(22251, "Dropping unknown ident", "ident"_attr = toRemove, "ts"_attr = identDropTs);
+        LOGV2_PROD_ONLY(
+            22251, "Dropping unknown ident", "ident"_attr = toRemove, "ts"_attr = identDropTs);
         if (!identDropTs.isNull()) {
             addDropPendingIdent(identDropTs, std::make_shared<Ident>(toRemove), /*onDrop=*/nullptr);
         } else {
             WriteUnitOfWork wuow(opCtx);
-            Status status =
-                _engine->dropIdent(shard_role_details::getRecoveryUnit(opCtx), toRemove);
+            Status status = _engine->dropIdent(shard_role_details::getRecoveryUnit(opCtx),
+                                               toRemove,
+                                               ident::isCollectionIdent(toRemove));
             if (!status.isOK()) {
                 // A concurrent operation, such as a checkpoint could be holding an open data handle
                 // on the ident. Handoff the ident drop to the ident reaper to retry later.
@@ -837,8 +832,9 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
                       logAttrs(md->nss),
                       "index"_attr = indexName);
                 // Ensure the `ident` is dropped while we have the `indexIdent` value.
-                Status status =
-                    _engine->dropIdent(shard_role_details::getRecoveryUnit(opCtx), indexIdent);
+                Status status = _engine->dropIdent(shard_role_details::getRecoveryUnit(opCtx),
+                                                   indexIdent,
+                                                   /*identHasSizeInfo=*/false);
                 if (!status.isOK()) {
                     // A concurrent operation, such as a checkpoint could be holding an open data
                     // handle on the ident. Handoff the ident drop to the ident reaper to retry
@@ -874,7 +870,8 @@ StatusWith<StorageEngine::ReconcileResult> StorageEngineImpl::reconcileCatalogAn
         }
         LOGV2(22257, "Dropping internal ident", "ident"_attr = temp);
         WriteUnitOfWork wuow(opCtx);
-        Status status = _engine->dropIdent(shard_role_details::getRecoveryUnit(opCtx), temp);
+        Status status = _engine->dropIdent(
+            shard_role_details::getRecoveryUnit(opCtx), temp, ident::isCollectionIdent(temp));
         if (!status.isOK()) {
             // A concurrent operation, such as a checkpoint could be holding an open data handle on
             // the ident. Handoff the ident drop to the ident reaper to retry later.
@@ -1204,6 +1201,10 @@ boost::optional<Timestamp> StorageEngineImpl::getOplogNeededForCrashRecovery() c
     return _engine->getOplogNeededForCrashRecovery();
 }
 
+Timestamp StorageEngineImpl::getPinnedOplog() const {
+    return _engine->getPinnedOplog();
+}
+
 void StorageEngineImpl::_dumpCatalog(OperationContext* opCtx) {
     auto catalogRs = _catalogRecordStore.get();
     auto cursor = catalogRs->getCursor(opCtx);
@@ -1401,7 +1402,8 @@ int64_t StorageEngineImpl::sizeOnDiskForDb(OperationContext* opCtx, const Databa
     int64_t size = 0;
 
     auto perCollectionWork = [&](const Collection* collection) {
-        size += collection->getRecordStore()->storageSize(opCtx);
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+        size += collection->getRecordStore()->storageSize(ru);
 
         auto it = collection->getIndexCatalog()->getIndexIterator(
             opCtx,

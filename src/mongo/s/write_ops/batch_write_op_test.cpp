@@ -140,7 +140,7 @@ void addError(int code, const std::string& message, int index, BatchedCommandRes
 
 void addWCError(BatchedCommandResponse* response) {
     std::unique_ptr<WriteConcernErrorDetail> error(new WriteConcernErrorDetail);
-    error->setStatus({ErrorCodes::WriteConcernFailed, "mock wc error"});
+    error->setStatus({ErrorCodes::WriteConcernTimeout, "mock wc error"});
 
     response->setWriteConcernError(error.release());
 }
@@ -154,12 +154,6 @@ protected:
 
     ServiceContext::UniqueOperationContext _opCtxHolder;
     OperationContext* _opCtx;
-
-    // This failpoint is to skip running the useTwoPhaseWriteProtocol check which expects the Grid
-    // to be initialized. With the feature flag on, the helper always returns false, which signifies
-    // that we have a targetable write op.
-    std::unique_ptr<FailPointEnableBlock> _skipUseTwoPhaseWriteProtocolCheck =
-        std::make_unique<FailPointEnableBlock>("skipUseTwoPhaseWriteProtocolCheck");
 };
 
 using BatchWriteOpTest = WriteOpTestFixture;

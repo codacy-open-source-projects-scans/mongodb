@@ -31,7 +31,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/document_source_internal_shard_filter.h"
 #include "mongo/db/pipeline/document_source_limit.h"
-#include "mongo/db/query/search/internal_search_mongot_remote_spec_gen.h"
+#include "mongo/db/pipeline/search/document_source_internal_search_id_lookup_gen.h"
 
 namespace mongo {
 
@@ -44,19 +44,17 @@ REGISTER_DOCUMENT_SOURCE(_internalSearchIdLookup,
                          AllowedWithApiStrict::kInternal);
 
 DocumentSourceInternalSearchIdLookUp::DocumentSourceInternalSearchIdLookUp(
-    const intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSource(kStageName, pExpCtx) {
-    // We need to reset the docsSeenByIdLookup/docsReturnedByIdLookup in the state shared by the
-    // DocumentSourceInternalSearchMongotRemote and DocumentSourceInternalSearchIdLookup stages when
-    // we create a new DocumentSourceInternalSearchIdLookup stage. This is because if $search is
-    // part of a $lookup sub-pipeline, the sub-pipeline gets parsed anew for every document the
-    // stage processes, but each parse uses the same expression context.
-    _searchIdLookupMetrics->resetIdLookupMetrics();
-}
+    const intrusive_ptr<ExpressionContext>& expCtx,
+    long long limit,
+    ExecShardFilterPolicy shardFilterPolicy)
+    : DocumentSource(kStageName, expCtx), _limit(limit), _shardFilterPolicy(shardFilterPolicy) {
 
-DocumentSourceInternalSearchIdLookUp::DocumentSourceInternalSearchIdLookUp(
-    const intrusive_ptr<ExpressionContext>& pExpCtx, long long limit)
-    : DocumentSource(kStageName, pExpCtx), _limit(limit) {
+    // When search query is being run on a view, we need to store the view pipeline to append to
+    // the end of the idLookup's subpipeline.
+    if (expCtx->getViewNS()) {
+        auto resolvedNamespace = expCtx->getResolvedNamespace(*expCtx->getViewNS());
+        _viewPipeline = Pipeline::parse(resolvedNamespace.pipeline, pExpCtx);
+    }
     // We need to reset the docsSeenByIdLookup/docsReturnedByIdLookup in the state shared by the
     // DocumentSourceInternalSearchMongotRemote and DocumentSourceInternalSearchIdLookup stages when
     // we create a new DocumentSourceInternalSearchIdLookup stage. This is because if $search is
@@ -66,29 +64,21 @@ DocumentSourceInternalSearchIdLookUp::DocumentSourceInternalSearchIdLookUp(
 }
 
 intrusive_ptr<DocumentSource> DocumentSourceInternalSearchIdLookUp::createFromBson(
-    BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
-    // TODO SERVER-94711 replace this clunky parsing and error message with mini IDL.
-    uassert(
-        31016,
-        str::stream()
-            << "$_internalSearchIdLookup value must be an object. If non-empty, it must have "
-               "a field called 'subPipeline' and optionally a field called 'limit'. Found: "
-            << typeName(elem.type()),
-        elem.type() == BSONType::Object &&
-            (elem.embeddedObject().isEmpty() ||
-             ((elem.embeddedObject().nFields() == 1) &&
-              elem.embeddedObject().hasField("subPipeline")) ||
-             ((elem.embeddedObject().nFields() == 2) &&
-              elem.embeddedObject().hasField("subPipeline") &&
-              elem.embeddedObject().hasField(InternalSearchMongotRemoteSpec::kLimitFieldName))));
-    auto specObj = elem.embeddedObject();
+    BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
+    uassert(ErrorCodes::FailedToParse,
+            str::stream() << "The " << kStageName
+                          << " stage specification must be an object, found "
+                          << typeName(elem.type()),
+            elem.type() == BSONType::Object);
 
-    if (specObj.hasField(InternalSearchMongotRemoteSpec::kLimitFieldName)) {
-        auto limitElem = specObj.getField(InternalSearchMongotRemoteSpec::kLimitFieldName);
-        uassert(6770001, "Limit must be a long", limitElem.type() == BSONType::NumberLong);
-        return new DocumentSourceInternalSearchIdLookUp(pExpCtx, limitElem.Long());
+    auto searchIdLookupSpec =
+        DocumentSourceIdLookupSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
+
+    if (searchIdLookupSpec.getLimit()) {
+        return make_intrusive<DocumentSourceInternalSearchIdLookUp>(expCtx,
+                                                                    *searchIdLookupSpec.getLimit());
     }
-    return new DocumentSourceInternalSearchIdLookUp(pExpCtx);
+    return make_intrusive<DocumentSourceInternalSearchIdLookUp>(expCtx);
 }
 
 Value DocumentSourceInternalSearchIdLookUp::serialize(const SerializationOptions& opts) const {
@@ -96,23 +86,31 @@ Value DocumentSourceInternalSearchIdLookUp::serialize(const SerializationOptions
     if (_limit) {
         outputSpec["limit"] = Value(opts.serializeLiteral(Value((long long)_limit)));
     }
-    // At serialization, the _id value is unknown as it is only returned by mongot during execution.
-    std::vector<BSONObj> pipeline = {
-        BSON("$match" << Document({{"_id", Value("_id placeholder"_sd)}}))};
 
-    if (pExpCtx->viewNS) {
-        auto viewPipeline = pExpCtx->getResolvedNamespace(*pExpCtx->viewNS).pipeline;
-        pipeline.insert(pipeline.end(), viewPipeline.begin(), viewPipeline.end());
-    }
-    outputSpec["subPipeline"] = Value(Pipeline::parse(pipeline, pExpCtx)->serializeToBson(opts));
+    if (opts.verbosity) {
+        // At serialization, the _id value is unknown as it is only returned by mongot during
+        // execution.
+        // TODO SERVER-93637 add comment explaining why subPipeline is only needed for explain.
+        std::vector<BSONObj> pipeline = {
+            BSON("$match" << Document({{"_id", Value("_id placeholder"_sd)}}))};
 
-    if (opts.verbosity && opts.verbosity.value() >= ExplainOptions::Verbosity::kExecStats) {
-        const PlanSummaryStats& stats = _stats.planSummaryStats;
-        outputSpec["totalDocsExamined"] = Value(static_cast<long long>(stats.totalDocsExamined));
-        outputSpec["totalKeysExamined"] = Value(static_cast<long long>(stats.totalKeysExamined));
-        outputSpec["numDocsFilteredByIdLookup"] = opts.serializeLiteral(
-            Value((long long)(_searchIdLookupMetrics->getDocsSeenByIdLookup() -
-                              _searchIdLookupMetrics->getDocsReturnedByIdLookup())));
+        if (pExpCtx->getViewNS()) {
+            auto viewPipeline = pExpCtx->getResolvedNamespace(*pExpCtx->getViewNS()).pipeline;
+            pipeline.insert(pipeline.end(), viewPipeline.begin(), viewPipeline.end());
+        }
+        outputSpec["subPipeline"] =
+            Value(Pipeline::parse(pipeline, pExpCtx)->serializeToBson(opts));
+
+        if (opts.verbosity.value() >= ExplainOptions::Verbosity::kExecStats) {
+            const PlanSummaryStats& stats = _stats.planSummaryStats;
+            outputSpec["totalDocsExamined"] =
+                Value(static_cast<long long>(stats.totalDocsExamined));
+            outputSpec["totalKeysExamined"] =
+                Value(static_cast<long long>(stats.totalKeysExamined));
+            outputSpec["numDocsFilteredByIdLookup"] = opts.serializeLiteral(
+                Value((long long)(_searchIdLookupMetrics->getDocsSeenByIdLookup() -
+                                  _searchIdLookupMetrics->getDocsReturnedByIdLookup())));
+        }
     }
 
     return Value(DOC(getSourceName() << outputSpec.freezeToValue()));
@@ -139,27 +137,29 @@ DocumentSource::GetNextResult DocumentSourceInternalSearchIdLookUp::doGetNext() 
 
             uassert(31052,
                     "Collection must have a UUID to use $_internalSearchIdLookup.",
-                    pExpCtx->uuid.has_value());
+                    pExpCtx->getUUID().has_value());
 
             // Find the document by performing a local read.
             MakePipelineOptions pipelineOpts;
             pipelineOpts.attachCursorSource = false;
             auto pipeline =
                 Pipeline::makePipeline({BSON("$match" << documentKey)}, pExpCtx, pipelineOpts);
-            // TODO SERVER-94755 move this entire if clause to constructor and off the hot path.
-            if (pExpCtx->viewNS) {
+
+            if (pExpCtx->getViewNS()) {
                 // When search query is being run on a view, we append the view pipeline to the end
                 // of the idLookup's subpipeline. This allows idLookup to retrieve the
                 // full/unmodified documents (from the _id values returned by mongot), apply the
                 // view's data transforms, and pass said transformed documents through the rest of
                 // the user pipeline.
-                auto resolvedNamespace = pExpCtx->getResolvedNamespace(*pExpCtx->viewNS);
-                auto viewPipeline = Pipeline::parse(resolvedNamespace.pipeline, pExpCtx);
-                pipeline->appendPipeline(std::move(viewPipeline));
+                tassert(9475500,
+                        "We should have a _viewPipeline if pExpCtx references a view",
+                        _viewPipeline);
+                pipeline->appendPipeline(_viewPipeline->clone(pExpCtx));
             }
 
-            pipeline = pExpCtx->mongoProcessInterface->attachCursorSourceToPipelineForLocalRead(
-                pipeline.release());
+            pipeline =
+                pExpCtx->getMongoProcessInterface()->attachCursorSourceToPipelineForLocalRead(
+                    pipeline.release(), boost::none, false, _shardFilterPolicy);
 
             result = pipeline->getNext();
             if (auto next = pipeline->getNext()) {

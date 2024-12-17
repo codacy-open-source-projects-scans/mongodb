@@ -53,6 +53,7 @@ public:
         kComputedProjection,
         kReplaceRoot,
         kGroupFromFirstDocument,
+        kSetMetadata,
     };
     virtual ~TransformerInterface() = default;
     virtual Document applyTransformation(const Document& input) const = 0;
@@ -72,11 +73,18 @@ public:
     }
 
     /**
+     * Method used to toggle the 'noFieldModifications' stage constraint. True only if guaranteed
+     * this transformation will not modify any document fields (although it may modify metadata).
+     */
+    virtual bool noFieldModifications() const {
+        return false;
+    }
+
+    /**
      * Returns a document describing this transformation. For example, this function will return
      * {_id: 0, x: 1} for the stage parsed from {$project: {_id: 0, x: 1}}.
      */
-    virtual Document serializeTransformation(boost::optional<ExplainOptions::Verbosity> explain,
-                                             const SerializationOptions& options = {}) const = 0;
+    virtual Document serializeTransformation(const SerializationOptions& options = {}) const = 0;
 
     /**
      * Method used by inclusion and add fields projecton executors to extract computed projections

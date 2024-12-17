@@ -36,12 +36,9 @@
 #include <cstdint>
 #include <list>
 #include <memory>
-#include <string>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/column/bsoncolumnbuilder.h"
-#include "mongo/bson/oid.h"
 #include "mongo/db/operation_id.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
@@ -52,12 +49,10 @@
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_catalog/tracking_contexts.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
-#include "mongo/db/timeseries/bucket_compression.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/util/future.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/tracking/list.h"
+#include "mongo/util/tracking/set.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -115,11 +110,6 @@ public:
     // True if the bucket already exists and was reopened.
     bool isReopened = false;
 
-    // Whether the bucket was created while the always used compressed buckets feature flag was
-    // enabled.
-    // TODO SERVER-70605: remove this boolean.
-    const bool usingAlwaysCompressedBuckets;
-
     // For always compressed, the total compressed size in bytes of the bucket's BSON serialization,
     // not including measurements to be inserted until a WriteBatch is committed. With the feature
     // flag off, the total uncompressed size in bytes of the bucket's BSON serialization, including
@@ -152,14 +142,14 @@ public:
     std::shared_ptr<WriteBatch> preparedBatch;
 
     // If the bucket is in idleBuckets, then its position is recorded here.
-    using IdleList = tracked_list<Bucket*>;
+    using IdleList = tracking::list<Bucket*>;
     boost::optional<IdleList::iterator> idleListEntry = boost::none;
 
     // The bucket ID for the underlying document
     const BucketId bucketId;
 
     // Time field for the measurements that have been inserted into the bucket.
-    const tracked_string timeField;
+    const tracking::string timeField;
 
     // The key (i.e. (namespace, metadata)) for this bucket.
     const BucketKey key;
@@ -167,13 +157,13 @@ public:
     // Top-level hashed field names of the measurements that have been inserted into the bucket.
     // TODO(SERVER-70605): Remove to avoid extra overhead. These are stored as keys in
     // measurementMap.
-    TrackedStringSet fieldNames;
+    tracking::StringSet fieldNames;
 
     // Top-level hashed new field names that have not yet been committed into the bucket.
-    TrackedStringSet uncommittedFieldNames;
+    tracking::StringSet uncommittedFieldNames;
 
     // Batches, per operation, that haven't been committed or aborted yet.
-    tracked_unordered_map<OperationId, std::shared_ptr<WriteBatch>> batches;
+    tracking::unordered_map<OperationId, std::shared_ptr<WriteBatch>> batches;
 
     // The minimum and maximum values for each field in the bucket.
     MinMax minmax;

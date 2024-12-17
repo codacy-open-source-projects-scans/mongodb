@@ -6,7 +6,6 @@
  *   # This test depends on certain writes ending up in the same bucket. Stepdowns and tenant
  *   # migrations may result in writes splitting between two primaries, and thus different buckets.
  *   does_not_support_stepdowns,
- *   tenant_migration_incompatible,
  *   # Bucketing behavior with timestamp offsets greater than 32 bits was fixed in 6.1
  *   requires_fcv_61,
  *   # We need a timeseries collection.
@@ -20,7 +19,7 @@ const db = conn.getDB(dbName);
 
 // Test that measurements spanning the Unix Epoch end up in the same bucket.
 (function testUnixEpoch() {
-    let coll = db.timeseries_bucket_spanning_epoch;
+    let coll = db[jsTestName()];
     let bucketsColl = db.getCollection('system.buckets.' + coll.getName());
     coll.drop();
 
@@ -35,7 +34,7 @@ const db = conn.getDB(dbName);
 
 // Test that measurements spanning multiples of the Unix Epoch width end up in the different buckets
 (function testUnixEpoch() {
-    let coll = db.timeseries_bucket_spanning_epoch;
+    let coll = db[jsTestName()];
     let bucketsColl = db.getCollection('system.buckets.' + coll.getName());
     coll.drop();
 
@@ -59,7 +58,7 @@ const db = conn.getDB(dbName);
 
 // Test that measurements with timestamps equivalent modulo 2^32 end up in the same bucket.
 (function testUnixEpochPlus32BitsOverflow() {
-    let coll = db.timeseries_bucket_spanning_epoch;
+    let coll = db[jsTestName()];
     let bucketsColl = db.getCollection('system.buckets.' + coll.getName());
     coll.drop();
 
@@ -75,7 +74,7 @@ const db = conn.getDB(dbName);
 // Test that measurements with a difference of more than the maximum time span expressible in 32-bit
 // precision seconds-count cannot overflow to end up in the same bucket.
 (function testUnixEpochPlus32BitsAndSomeOverflow() {
-    let coll = db.timeseries_bucket_spanning_epoch;
+    let coll = db[jsTestName()];
     let bucketsColl = db.getCollection('system.buckets.' + coll.getName());
     coll.drop();
 
@@ -88,5 +87,4 @@ const db = conn.getDB(dbName);
     assert.eq(2, bucketsColl.find().itcount());
 })();
 
-// TODO SERVER-87065: Look into re-enabling validation on shutdown.
-MongoRunner.stopMongod(conn, null, {skipValidation: true});
+MongoRunner.stopMongod(conn);

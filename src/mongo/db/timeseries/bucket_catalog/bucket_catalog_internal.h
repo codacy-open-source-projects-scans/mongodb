@@ -29,7 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -102,7 +101,7 @@ StripeNumber getStripeNumber(const BucketCatalog& catalog, const BucketId& bucke
  * Extracts the information from the input 'doc' that is used to map the document to a bucket.
  */
 StatusWith<std::pair<BucketKey, Date_t>> extractBucketingParameters(
-    TrackingContext&,
+    tracking::Context&,
     const UUID& collectionUUID,
     const StringDataComparator* comparator,
     const TimeseriesOptions& options,
@@ -145,11 +144,12 @@ Bucket* useBucket(BucketCatalog& catalog,
                   WithLock stripeLock,
                   InsertContext& info,
                   AllowBucketCreation mode,
-                  const Date_t& time);
+                  const Date_t& time,
+                  const StringDataComparator* comparator);
 
 /**
  * Retrieve a previously closed bucket for write use if one exists in the catalog. Considers buckets
- * that are pending closure or archival but which are still eligible to recieve new measurements.
+ * that are pending closure or archival but which are still eligible to receive new measurements.
  */
 Bucket* useAlternateBucket(BucketCatalog& catalog,
                            Stripe& stripe,
@@ -163,14 +163,14 @@ Bucket* useAlternateBucket(BucketCatalog& catalog,
  * validate that the bucket is expected (i.e. to help resolve hash collisions for archived buckets).
  * Does *not* hand ownership of the bucket to the catalog.
  */
-StatusWith<unique_tracked_ptr<Bucket>> rehydrateBucket(BucketCatalog& catalog,
-                                                       ExecutionStatsController& stats,
-                                                       const UUID& collectionUUID,
-                                                       const StringDataComparator* comparator,
-                                                       const TimeseriesOptions& options,
-                                                       const BucketToReopen& bucketToReopen,
-                                                       uint64_t catalogEra,
-                                                       const BucketKey* expectedKey);
+StatusWith<tracking::unique_ptr<Bucket>> rehydrateBucket(BucketCatalog& catalog,
+                                                         ExecutionStatsController& stats,
+                                                         const UUID& collectionUUID,
+                                                         const StringDataComparator* comparator,
+                                                         const TimeseriesOptions& options,
+                                                         const BucketToReopen& bucketToReopen,
+                                                         uint64_t catalogEra,
+                                                         const BucketKey* expectedKey);
 
 /**
  * Given a rehydrated 'bucket', passes ownership of that bucket to the catalog, marking the bucket
@@ -181,7 +181,7 @@ StatusWith<std::reference_wrapper<Bucket>> reopenBucket(BucketCatalog& catalog,
                                                         WithLock stripeLock,
                                                         ExecutionStatsController& stats,
                                                         const BucketKey& key,
-                                                        unique_tracked_ptr<Bucket>&& bucket,
+                                                        tracking::unique_ptr<Bucket>&& bucket,
                                                         std::uint64_t targetEra,
                                                         ClosedBuckets& closedBuckets);
 
@@ -201,7 +201,9 @@ StatusWith<std::reference_wrapper<Bucket>> reuseExistingBucket(BucketCatalog& ca
 
 /**
  * Given an already-selected 'bucket', inserts 'doc' to the bucket if possible. If not, and 'mode'
- * is set to 'kYes', we will create a new bucket and insert into that bucket.
+ * is set to 'kYes', we will create a new bucket and insert into that bucket. If `existingBucket`
+ * was selected via `useAlternateBucket`, then the previous bucket returned by `useBucket` should be
+ * passed in as `excludedBucket`.
  */
 std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     BucketCatalog& catalog,
@@ -209,12 +211,14 @@ std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
     WithLock stripeLock,
     const BSONObj& doc,
     OperationId,
-    CombineWithInsertsFromOtherClients combine,
     AllowBucketCreation mode,
     InsertContext& insertContext,
     Bucket& existingBucket,
     const Date_t& time,
-    uint64_t storageCacheSize);
+    uint64_t storageCacheSizeBytes,
+    const StringDataComparator* comparator,
+    Bucket* excludedBucket = nullptr,
+    boost::optional<RolloverAction> excludedAction = boost::none);
 
 /**
  * Wait for other batches to finish so we can prepare 'batch'
@@ -256,7 +260,7 @@ boost::optional<OID> findArchivedCandidate(
  * buckets. Returns a pair of the effective value that respects the absolute bucket max and min
  * sizes and the raw value.
  */
-std::pair<int32_t, int32_t> getCacheDerivedBucketMaxSize(uint64_t storageCacheSize,
+std::pair<int32_t, int32_t> getCacheDerivedBucketMaxSize(uint64_t storageCacheSizeBytes,
                                                          uint32_t workloadCardinality);
 
 /**
@@ -271,7 +275,7 @@ InsertResult getReopeningContext(BucketCatalog& catalog,
                                  uint64_t catalogEra,
                                  AllowQueryBasedReopening allowQueryBasedReopening,
                                  const Date_t& time,
-                                 uint64_t storageCacheSize);
+                                 uint64_t storageCacheSizeBytes);
 
 /**
  * Aborts 'batch', and if the corresponding bucket still exists, proceeds to abort any other
@@ -335,12 +339,15 @@ Bucket& allocateBucket(BucketCatalog& catalog,
                        Stripe& stripe,
                        WithLock stripeLock,
                        InsertContext& info,
-                       const Date_t& time);
+                       const Date_t& time,
+                       const StringDataComparator* comparator);
 
 /**
  * Close the existing, full bucket and open a new one for the same metadata.
  *
- * Writes information about the closed bucket to the 'info' parameter.
+ * Writes information about the closed bucket to the 'info' parameter. Optionally, if `bucket` was
+ * selected via `useAlternateBucket`, pass the current open bucket as `additionalBucket` to mark for
+ * archival and preserve the invariant of only one open bucket per key.
  */
 Bucket& rollover(BucketCatalog& catalog,
                  Stripe& stripe,
@@ -348,7 +355,10 @@ Bucket& rollover(BucketCatalog& catalog,
                  Bucket& bucket,
                  InsertContext& info,
                  RolloverAction action,
-                 const Date_t& time);
+                 const Date_t& time,
+                 const StringDataComparator* comparator,
+                 Bucket* additionalBucket,
+                 boost::optional<RolloverAction> additionalAction);
 
 /**
  * Determines if 'bucket' needs to be rolled over to accommodate 'doc'. If so, determines whether
@@ -364,7 +374,8 @@ std::pair<RolloverAction, RolloverReason> determineRolloverAction(
     Sizes& sizesToBeAdded,
     AllowBucketCreation mode,
     const Date_t& time,
-    uint64_t storageCacheSize);
+    uint64_t storageCacheSizeBytes,
+    const StringDataComparator* comparator);
 
 /**
  * Retrieves or initializes the execution stats for the given namespace, for writing.
@@ -382,27 +393,27 @@ ExecutionStatsController getExecutionStats(BucketCatalog& catalog, const UUID& c
 /**
  * Retrieves the execution stats for the given namespace, if they have already been initialized.
  */
-shared_tracked_ptr<ExecutionStats> getCollectionExecutionStats(const BucketCatalog& catalog,
-                                                               const UUID& collectionUUID);
+tracking::shared_ptr<ExecutionStats> getCollectionExecutionStats(const BucketCatalog& catalog,
+                                                                 const UUID& collectionUUID);
 
 /**
  * Release the execution stats of a collection from the bucket catalog.
  */
-std::vector<shared_tracked_ptr<ExecutionStats>> releaseExecutionStatsFromBucketCatalog(
+std::vector<tracking::shared_ptr<ExecutionStats>> releaseExecutionStatsFromBucketCatalog(
     BucketCatalog& catalog, std::span<const UUID> collectionUUIDs);
 
 /**
  * Retrieves the execution stats from the side bucket catalog.
  * Assumes the side bucket catalog has the stats of one collection.
  */
-std::pair<UUID, shared_tracked_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
+std::pair<UUID, tracking::shared_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
     BucketCatalog& sideBucketCatalog);
 
 /**
  * Merges the execution stats of a collection into the bucket catalog.
  */
 void mergeExecutionStatsToBucketCatalog(BucketCatalog& catalog,
-                                        shared_tracked_ptr<ExecutionStats> collStats,
+                                        tracking::shared_ptr<ExecutionStats> collStats,
                                         const UUID& collectionUUID);
 
 /**
@@ -431,9 +442,6 @@ void closeOpenBucket(BucketCatalog& catalog,
 /**
  * Close an archived bucket, setting the state appropriately and removing it from the catalog.
  */
-void closeArchivedBucket(BucketCatalog& catalog,
-                         const BucketId& bucket,
-                         StringData timeField,
-                         ClosedBuckets& closedBuckets);
+void closeArchivedBucket(BucketCatalog& catalog, const BucketId& bucketId);
 
 }  // namespace mongo::timeseries::bucket_catalog::internal

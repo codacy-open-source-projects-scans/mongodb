@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-
-#include <memory>
-
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -39,14 +36,13 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog/validate_results.h"
+#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"

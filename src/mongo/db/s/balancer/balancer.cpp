@@ -258,19 +258,22 @@ protected:
     int _numCompleted;
 };
 
-Chunk getChunkForMaxBound(const ChunkManager& cm, const BSONObj& max) {
-    boost::optional<Chunk> chunkWithMaxBound;
-    cm.forEachChunk([&](const auto& chunk) {
-        if (chunk.getMax().woCompare(max) == 0) {
-            chunkWithMaxBound.emplace(chunk);
-            return false;
-        }
-        return true;
-    });
-    if (chunkWithMaxBound) {
-        return *chunkWithMaxBound;
+StatusWith<ChunkManager> getPlacementInfoForShardedCollection(OperationContext* opCtx,
+                                                              const NamespaceString& nss) {
+    auto swCm =
+        RoutingInformationCache::get(opCtx)->getCollectionPlacementInfoWithRefresh(opCtx, nss);
+
+    if (!swCm.isOK()) {
+        return swCm;
     }
-    return cm.findIntersectingChunkWithSimpleCollation(max);
+
+    if (!swCm.getValue().isSharded()) {
+        return Status{ErrorCodes::NamespaceNotSharded,
+                      str::stream() << "Expected collection " << nss.toStringForErrorMsg()
+                                    << " to be sharded"};
+    }
+
+    return swCm;
 }
 
 Status processManualMigrationOutcome(OperationContext* opCtx,
@@ -289,13 +292,11 @@ Status processManualMigrationOutcome(OperationContext* opCtx,
         return outcome;
     }
 
-    auto swCM =
-        RoutingInformationCache::get(opCtx)->getShardedCollectionRoutingInfoWithPlacementRefresh(
-            opCtx, nss);
-    if (!swCM.isOK()) {
-        return swCM.getStatus();
+    auto swCm = getPlacementInfoForShardedCollection(opCtx, nss);
+    if (!swCm.isOK()) {
+        return swCm.getStatus();
     }
-    const auto& cm = swCM.getValue().cm;
+    const auto& cm = swCm.getValue();
 
     const auto currentChunkInfo =
         min ? cm.findIntersectingChunkWithSimpleCollation(*min) : getChunkForMaxBound(cm, *max);
@@ -472,9 +473,8 @@ bool processRebalanceResponse(OperationContext* opCtx,
     }
 
     if (status == ErrorCodes::IndexNotFound) {
-        const auto [cm, _] = uassertStatusOK(
-            RoutingInformationCache::get(opCtx)->getCollectionRoutingInfoWithRefresh(
-                opCtx, migrateInfo.nss));
+        const auto cm =
+            uassertStatusOK(getPlacementInfoForShardedCollection(opCtx, migrateInfo.nss));
 
         if (cm.getShardKeyPattern().isHashedPattern()) {
             LOGV2(78252,
@@ -624,7 +624,8 @@ private:
                 auto matchStage = BSON("$match" << BSON(ChunkType::collectionUUID()
                                                         << collType.getUuid() << ChunkType::shard()
                                                         << BSON("$in" << drainingShardNameArray)));
-                AggregateCommandRequest aggRequest{ChunkType::ConfigNS, {std::move(matchStage)}};
+                AggregateCommandRequest aggRequest{NamespaceString::kConfigsvrChunksNamespace,
+                                                   {std::move(matchStage)}};
 
                 auto chunks = catalogClient->runCatalogAggregation(
                     opCtx, aggRequest, {repl::ReadConcernLevel::kMajorityReadConcern});
@@ -765,9 +766,7 @@ Status Balancer::moveRange(OperationContext* opCtx,
     const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
 
     const auto fromShardId = [&]() {
-        const auto [cm, _] =
-            uassertStatusOK(RoutingInformationCache::get(opCtx)
-                                ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, nss));
+        const auto cm = uassertStatusOK(getPlacementInfoForShardedCollection(opCtx, nss));
         if (request.getMin()) {
             const auto& chunk = cm.findIntersectingChunkWithSimpleCollation(*request.getMin());
             return chunk.getShardId();
@@ -1004,16 +1003,12 @@ void Balancer::_mainThread() {
         _joinCond.notify_all();
     });
 
-    ThreadClient threadClient("Balancer",
-                              getGlobalServiceContext()->getService(ClusterRole::ShardServer));
-    auto opCtx = threadClient->makeOperationContext();
-
     // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(*threadClient);
-        threadClient->setSystemOperationUnkillableByStepdown(lk);
-    }
+    ThreadClient threadClient("Balancer",
+                              getGlobalServiceContext()->getService(ClusterRole::ShardServer),
+                              ClientOperationKillableByStepdown{false});
 
+    auto opCtx = threadClient->makeOperationContext();
     auto shardingContext = Grid::get(opCtx.get());
 
     LOGV2(21856, "CSRS balancer is starting");
@@ -1058,8 +1053,6 @@ void Balancer::_mainThread() {
         _beginRound(opCtx.get());
 
         try {
-            shardingContext->shardRegistry()->reload(opCtx.get());
-
             uassert(13258, "oids broken after resetting!", _checkOIDs(opCtx.get()));
 
             Status refreshStatus = balancerConfig->refreshAndCheck(opCtx.get());
@@ -1359,14 +1352,11 @@ Status Balancer::_splitChunksIfNeeded(OperationContext* opCtx) {
     }
 
     for (const auto& splitInfo : chunksToSplitStatus.getValue()) {
-        auto routingInfoStatus =
-            RoutingInformationCache::get(opCtx)
-                ->getShardedCollectionRoutingInfoWithPlacementRefresh(opCtx, splitInfo.nss);
-        if (!routingInfoStatus.isOK()) {
-            return routingInfoStatus.getStatus();
+        const auto swCm = getPlacementInfoForShardedCollection(opCtx, splitInfo.nss);
+        if (!swCm.isOK()) {
+            return swCm.getStatus();
         }
-
-        const auto& [cm, _] = routingInfoStatus.getValue();
+        const auto cm = swCm.getValue();
 
         auto splitStatus = shardutil::splitChunkAtMultiplePoints(
             opCtx,

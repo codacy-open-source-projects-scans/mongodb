@@ -250,12 +250,6 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
         return PlanStage::IS_EOF;
     }
 
-    if (_params.lowPriority && !_priority && gDeprioritizeUnboundedUserCollectionScans.load() &&
-        opCtx()->getClient()->isFromUserConnection() &&
-        shard_role_details::getLocker(opCtx())->shouldWaitForTicket(opCtx())) {
-        _priority.emplace(opCtx(), AdmissionContext::Priority::kLow);
-    }
-
     boost::optional<Record> record;
     const bool needToMakeCursor = !_cursor;
     const auto& collPtr = collectionPtr();
@@ -403,7 +397,6 @@ PlanStage::StageState CollectionScan::doWork(WorkingSetID* out) {
 void CollectionScan::setLatestOplogEntryTimestampToReadTimestamp() {
     // Since this method is only ever called when iterating a change collection, the following check
     // effectively disables optime advancement in Serverless, for reasons outlined in SERVER-76288.
-    // TODO SERVER-76309: re-enable optime advancement to support sharding in Serverless.
     if (collectionPtr()->ns().isChangeCollection()) {
         return;
     }
@@ -579,11 +572,6 @@ void CollectionScan::doDetachFromOperationContext() {
 }
 
 void CollectionScan::doReattachToOperationContext() {
-    if (_params.lowPriority && gDeprioritizeUnboundedUserCollectionScans.load() &&
-        opCtx()->getClient()->isFromUserConnection() &&
-        shard_role_details::getLocker(opCtx())->shouldWaitForTicket(opCtx())) {
-        _priority.emplace(opCtx(), AdmissionContext::Priority::kLow);
-    }
     if (_cursor)
         _cursor->reattachToOperationContext(opCtx());
 }

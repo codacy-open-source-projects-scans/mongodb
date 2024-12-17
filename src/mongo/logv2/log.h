@@ -266,6 +266,34 @@
     LOGV2_DEBUG_OPTIONS(                  \
         ID, DLEVEL, ::mongo::logv2::LogOptions{MONGO_LOGV2_DEFAULT_COMPONENT}, MSG, ##__VA_ARGS__)
 
+/**
+ * Logs like a default (debug-0) level log in production, but debug-1 log in testing. See the
+ * documentation of 'LogSeverity::ProdOnly()' for more details.
+ *
+ * See LOGV2() for documentation of the parameters.
+ */
+#define LOGV2_PROD_ONLY(ID, MSG, ...)                                     \
+    LOGV2_IMPL(ID,                                                        \
+               ::mongo::logv2::LogSeverity::ProdOnly(),                   \
+               ::mongo::logv2::LogOptions{MONGO_LOGV2_DEFAULT_COMPONENT}, \
+               MSG,                                                       \
+               ##__VA_ARGS__)
+
+
+/**
+ * Logs like a default (debug-0) level log in production, but debug-1 log in testing with custom
+ * options. See the documentation of 'LogSeverity::ProdOnly()' for more details.
+ *
+ * See LOGV2_OPTIONS() for documentation of the parameters.
+ */
+#define LOGV2_PROD_ONLY_OPTIONS(ID, OPTIONS, MSG, ...)                                            \
+    LOGV2_IMPL(                                                                                   \
+        ID,                                                                                       \
+        ::mongo::logv2::LogSeverity::ProdOnly(),                                                  \
+        ::mongo::logv2::LogOptions::ensureValidComponent(OPTIONS, MONGO_LOGV2_DEFAULT_COMPONENT), \
+        MSG,                                                                                      \
+        ##__VA_ARGS__)
+
 namespace mongo::logv2 {
 inline bool shouldLog(LogComponent logComponent, LogSeverity severity) {
     return LogManager::global().getGlobalSettings().shouldLog(logComponent, severity);

@@ -61,6 +61,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/json.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -103,13 +104,14 @@
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/impersonated_user_metadata.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/async_requests_sender.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_collection_gen.h"
-#include "mongo/s/catalog/type_config_version.h"
+#include "mongo/s/catalog/type_config_version_gen.h"
 #include "mongo/s/catalog/type_namespace_placement_gen.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog/type_tags.h"
@@ -275,7 +277,7 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
     const bool unique = true;
     Status result = createIndexOnConfigCollection(
         opCtx,
-        ChunkType::ConfigNS,
+        NamespaceString::kConfigsvrChunksNamespace,
         BSON(ChunkType::collectionUUID() << 1 << ChunkType::min() << 1),
         unique);
     if (!result.isOK()) {
@@ -284,7 +286,7 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
 
     result = createIndexOnConfigCollection(
         opCtx,
-        ChunkType::ConfigNS,
+        NamespaceString::kConfigsvrChunksNamespace,
         BSON(ChunkType::collectionUUID() << 1 << ChunkType::shard() << 1 << ChunkType::min() << 1),
         unique);
     if (!result.isOK()) {
@@ -293,7 +295,7 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
 
     result = createIndexOnConfigCollection(
         opCtx,
-        ChunkType::ConfigNS,
+        NamespaceString::kConfigsvrChunksNamespace,
         BSON(ChunkType::collectionUUID() << 1 << ChunkType::lastmod() << 1),
         unique);
     if (!result.isOK()) {
@@ -301,7 +303,7 @@ Status createIndexesForConfigChunks(OperationContext* opCtx) {
     }
 
     result = createIndexOnConfigCollection(opCtx,
-                                           ChunkType::ConfigNS,
+                                           NamespaceString::kConfigsvrChunksNamespace,
                                            BSON(ChunkType::collectionUUID()
                                                 << 1 << ChunkType::shard() << 1
                                                 << ChunkType::onCurrentShardSince() << 1),
@@ -355,9 +357,9 @@ public:
     PipelineBuilder(OperationContext* opCtx,
                     const NamespaceString& nss,
                     std::vector<NamespaceString>&& resolvedNamespaces)
-        : _expCtx{make_intrusive<ExpressionContext>(opCtx, nullptr /*collator*/, nss)} {
+        : _expCtx{ExpressionContextBuilder{}.opCtx(opCtx).ns(nss).build()} {
 
-        StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespacesMap;
+        StringMap<ResolvedNamespace> resolvedNamespacesMap;
 
         for (const auto& collNs : resolvedNamespaces) {
             resolvedNamespacesMap[collNs.coll()] = {collNs, std::vector<BSONObj>() /* pipeline */};
@@ -380,7 +382,7 @@ public:
     }
 
     AggregateCommandRequest buildAsAggregateCommandRequest() {
-        return AggregateCommandRequest(_expCtx->ns, buildAsBson());
+        return AggregateCommandRequest(_expCtx->getNamespaceString(), buildAsBson());
     }
 
     boost::intrusive_ptr<ExpressionContext>& getExpCtx() {
@@ -496,7 +498,7 @@ AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
 
     auto pipeline = PipelineBuilder(opCtx,
                                     CollectionType::ConfigNS,
-                                    {ChunkType::ConfigNS,
+                                    {NamespaceString::kConfigsvrChunksNamespace,
                                      CollectionType::ConfigNS,
                                      NamespaceString::kConfigDatabasesNamespace,
                                      NamespaceString::kConfigsvrPlacementHistoryNamespace});
@@ -512,9 +514,10 @@ AggregateCommandRequest createInitPlacementHistoryAggregationRequest(
                                                                    << "$onCurrentShardSince")))
                                      .buildAsBson();
 
-        pipeline.addStage<Lookup>(BSON("from" << ChunkType::ConfigNS.coll() << "localField"
-                                              << CollectionType::kUuidFieldName << "foreignField"
-                                              << ChunkType::collectionUUID.name() << "as"
+        pipeline.addStage<Lookup>(BSON("from" << NamespaceString::kConfigsvrChunksNamespace.coll()
+                                              << "localField" << CollectionType::kUuidFieldName
+                                              << "foreignField" << ChunkType::collectionUUID.name()
+                                              << "as"
                                               << "timestampByShard"
                                               << "pipeline" << lookupPipelineObj));
     }
@@ -774,7 +777,7 @@ Status ShardingCatalogManager::_initConfigVersion(OperationContext* opCtx) {
     newVersion.setClusterId(OID::gen());
 
     auto insertStatus = _localCatalogClient->insertConfigDocument(
-        opCtx, VersionType::ConfigNS, newVersion.toBSON(), kNoWaitWriteConcern);
+        opCtx, NamespaceString::kConfigVersionNamespace, newVersion.toBSON(), kNoWaitWriteConcern);
     return insertStatus;
 }
 
@@ -819,6 +822,15 @@ Status ShardingCatalogManager::_initConfigIndexes(OperationContext* opCtx) {
         }
     }
 
+    result = createIndexOnConfigCollection(
+        opCtx,
+        NamespaceString::kConfigQueryAnalyzersNamespace,
+        BSON(analyze_shard_key::QueryAnalyzerDocument::kCollectionUuidFieldName << 1),
+        unique);
+    if (!result.isOK()) {
+        return result.withContext("couldn't create collUuid_1 index on config.queryAnalyzers");
+    }
+
     auto status = createIndexOnConfigCollection(
         opCtx,
         NamespaceString::kConfigsvrPlacementHistoryNamespace,
@@ -855,42 +867,18 @@ Status ShardingCatalogManager::_initConfigCollections(OperationContext* opCtx) {
     return Status::OK();
 }
 
-// TODO (SERVER-83264): Move new validator to _initConfigSettings and remove old validator once 8.0
-// becomes last LTS.
-BSONObj createConfigSettingsValidator() {
-    // (Generic FCV reference): on versions where the balancerSettingsSchema feature flag is
-    // enabled, install an extended validator. This must be the case even for transitional FCV
-    // states, as the validator is installed during FCV upgrade.
-    auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    auto targetVersion = fcvSnapshot.isUpgradingOrDowngrading()
-        ? getTransitionFCVFromAndTo(fcvSnapshot.getVersion()).second
-        : fcvSnapshot.getVersion();
-
-    if (feature_flags::gBalancerSettingsSchema.isEnabledOnVersion(targetVersion)) {
-        const auto noopValidator = BSON(
-            "properties" << BSON(
-                "_id" << BSON("enum" << BSON_ARRAY(AutoMergeSettingsType::kKey
-                                                   << ReadWriteConcernDefaults::kPersistedDocumentId
-                                                   << "audit"))));
-        return BSON("$jsonSchema" << BSON("oneOf" << BSON_ARRAY(BalancerSettingsType::kSchema
-                                                                << ChunkSizeSettingsType::kSchema
-                                                                << noopValidator)));
-    } else {
-        const auto noopValidator = BSON(
-            "properties" << BSON(
-                "_id" << BSON("enum" << BSON_ARRAY(BalancerSettingsType::kKey
-                                                   << AutoMergeSettingsType::kKey
-                                                   << ReadWriteConcernDefaults::kPersistedDocumentId
-                                                   << "audit"))));
-        return BSON("$jsonSchema" << BSON(
-                        "oneOf" << BSON_ARRAY(ChunkSizeSettingsType::kSchema << noopValidator)));
-    }
-}
-
 Status ShardingCatalogManager::_initConfigSettings(OperationContext* opCtx) {
     DBDirectClient client(opCtx);
 
-    const auto fullValidator = createConfigSettingsValidator();
+    const auto noopValidator =
+        BSON("properties" << BSON(
+                 "_id" << BSON("enum" << BSON_ARRAY(
+                                   AutoMergeSettingsType::kKey
+                                   << ReadWriteConcernDefaults::kPersistedDocumentId << "audit"))));
+    const auto fullValidator =
+        BSON("$jsonSchema" << BSON("oneOf" << BSON_ARRAY(BalancerSettingsType::kSchema
+                                                         << ChunkSizeSettingsType::kSchema
+                                                         << noopValidator)));
 
     BSONObj cmd = BSON("create" << NamespaceString::kConfigSettingsNamespace.coll());
     BSONObj result;
@@ -1024,14 +1012,13 @@ Status ShardingCatalogManager::_notifyClusterOnNewDatabases(
     try {
         // Setup an AlternativeClientRegion and a non-interruptible Operation Context to ensure that
         // the notification may be also sent out while the node is stepping down.
+        //
+        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
         auto altClient = opCtx->getServiceContext()
                              ->getService(ClusterRole::ShardServer)
-                             ->makeClient("_notifyClusterOnNewDatabases");
-        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-        {
-            mongo::stdx::lock_guard<mongo::Client> lk(*altClient.get());
-            altClient.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
+                             ->makeClient("_notifyClusterOnNewDatabases",
+                                          Client::noSession(),
+                                          ClientOperationKillableByStepdown{false});
         AlternativeClientRegion acr(altClient);
         auto altOpCtxHolder = cc().makeOperationContext();
         auto altOpCtx = altOpCtxHolder.get();
@@ -1541,14 +1528,13 @@ void ShardingCatalogManager::initializePlacementHistory(OperationContext* opCtx)
     // (This operation includes a $merge stage writing into the config database, which requires
     // internal client credentials).
     {
+        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
         auto altClient = opCtx->getServiceContext()
                              ->getService(ClusterRole::ShardServer)
-                             ->makeClient("initializePlacementHistory");
-        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(*altClient.get());
-            altClient.get()->setSystemOperationUnkillableByStepdown(lk);
-        }
+                             ->makeClient("initializePlacementHistory",
+                                          Client::noSession(),
+                                          ClientOperationKillableByStepdown{false});
+
         AuthorizationSession::get(altClient.get())->grantInternalAuthorization();
         AlternativeClientRegion acr(altClient);
         auto executor =
@@ -1692,29 +1678,5 @@ void ShardingCatalogManager::cleanUpPlacementHistory(OperationContext* opCtx,
 
     LOGV2_DEBUG(7068808, 2, "Cleaning up placement history - done deleting entries");
 }
-
-int ShardingCatalogManager::deleteMaxSizeMbFromShardEntries(OperationContext* opCtx) {
-    auto unsetMaxSizeMbReq = BSON("$unset" << BSON("maxSize"
-                                                   << ""));
-    DBDirectClient client(opCtx);
-    write_ops::UpdateCommandRequest updateOp(NamespaceString::kConfigsvrShardsNamespace);
-    updateOp.setUpdates({[&] {
-        write_ops::UpdateOpEntry entry;
-        entry.setU(unsetMaxSizeMbReq);
-        entry.setQ({});
-        entry.setMulti(true);
-        entry.setUpsert(false);
-        return entry;
-    }()});
-    updateOp.getWriteCommandRequestBase().setOrdered(false);
-    auto updateReply = client.update(updateOp);
-    write_ops::checkWriteErrors(updateReply);
-    return updateReply.getN();
-}
-
-Status ShardingCatalogManager::upgradeDowngradeConfigSettings(OperationContext* opCtx) {
-    return _initConfigSettings(opCtx);
-}
-
 
 }  // namespace mongo

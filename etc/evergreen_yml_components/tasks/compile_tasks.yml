@@ -52,9 +52,9 @@ variables:
       - func: "save mongo coredumps"
       - func: "generate hang analyzer tasks"
       - func: "save failed unittests"
-      - func: "save UndoDB recordings"
       - func: "save unstripped dbtest"
       - func: "save bazel headers"
+      - func: "save bazel jvm dump"
       - func: "save hang analyzer debugger files"
       - func: "save disk statistics"
       - func: "save system resource information"
@@ -185,6 +185,7 @@ tasks:
           targets: >-
             install-all
             archive-all
+          bazel_build_tags: --bazel-build-tag=all
           task_compile_flags: >-
             ICECC=
             CCACHE=
@@ -214,7 +215,7 @@ tasks:
             --keep-going
 
   # TODO(SERVER-82195): simplify this to avoid duplication of parameters in other tests.
-  - name: compile_bazel_dist_test
+  - name: compile_dist_test_quick
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
     depends_on:
       - name: version_expansions_gen
@@ -235,130 +236,6 @@ tasks:
         vars:
           output: build/opt/mongo/db/commands/libfsync_locked.a
 
-  - name: compile_bazel_dist_test_windows
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "scons compile"
-        vars:
-          targets: >-
-            build/opt/mongo/db/commands/fsync_locked.lib
-            build/opt/mongo/db/commands/test_commands_enabled.lib
-          task_compile_flags: >-
-            ICECC=
-            --build-profile=opt
-            --ninja=disabled
-            --link-model=static
-            --modules=
-      - func: "verify build output present"
-        vars:
-          output: build/opt/mongo/db/commands/fsync_locked.lib
-
-  # Validates that the bazel mongo toolchain can be used to compile targets that
-  # contain C and asssembly source code files.
-  # TODO(SERVER-82195): simplify this to avoid duplication of parameters in other tests.
-  - name: compile_bazel_c_and_asm_targets_gcc
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "fetch bazel"
-      - func: "bazel compile (gcc)"
-        vars:
-          targets: src/third_party/unwind:unwind
-          compiler: gcc
-
-  # Validates that the scons setting --use-libunwind is propagated to bazel's invocation (via --//bazel/config:use_libunwind)
-  # and that the bazel compilation correctly injects the libunwind dependency into other targets.
-  # TODO(SERVER-82195): simplify this to avoid duplication of parameters in other tests.
-  - name: compile_bazel_libunwind
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "scons compile"
-        vars:
-          targets: >-
-            build/opt/third_party/unwind/libunwind.a
-          task_compile_flags: >-
-            ICECC=
-            --build-profile=opt
-            --ninja=disabled
-            --link-model=static
-            --use-libunwind=on
-            --modules=
-      - func: "verify build output present"
-        vars:
-          output: build/opt/third_party/unwind/libunwind.a
-
-  - name: compile_bazel_program
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "scons compile"
-        vars:
-          targets: >-
-            build/opt/mongo/platform/visibility_test1
-          separate_debug: on
-          task_compile_flags: >-
-            ICECC=
-            --build-profile=opt
-            --ninja=disabled
-            --link-model=dynamic
-            --use-libunwind=off
-            --modules=
-      - func: "verify build output present"
-        vars:
-          output: build/opt/mongo/platform/visibility_test1
-
-  - name: run_bazel_scons_unittest
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "scons compile"
-        vars:
-          targets: >-
-            +visibility_test1 +visibility_test2
-          separate_debug: on
-          task_compile_flags: >-
-            ICECC=
-            --build-profile=opt
-            --ninja=disabled
-            --link-model=dynamic
-            --modules=
-      - func: "verify build output present"
-        vars:
-          output: build/install/bin/visibility_test1
-
-  - name: run_bazel_scons_unittest_sanitize
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "scons compile"
-        vars:
-          targets: >-
-            +visibility_test1 +visibility_test2
-          separate_debug: on
-          task_compile_flags: >-
-            ICECC=
-            --build-profile=san
-            --ninja=disabled
-            --link-model=dynamic
-            --modules=
-      - func: "verify build output present"
-        vars:
-          output: build/install/bin/visibility_test1
-
   - name: run_bazel_program
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary", "bazel_check"]
     depends_on:
@@ -369,7 +246,7 @@ tasks:
       - func: "bazel run"
         vars:
           target: >-
-            //src/mongo/platform:visibility_test1
+            //src/mongo/platform:visibility1_test
 
   - <<: *clang_tidy_task_template
     name: run_bazel_clang_tidy
@@ -393,7 +270,7 @@ tasks:
       - func: "bazel run"
         vars:
           target: >-
-            //src/mongo/platform:visibility_test1
+            //src/mongo/platform:visibility1_test
           # TODO DEVPROD-2508 remove dbg flags when compilation_mode is synced with build_mode automatically
           args: >-
             --compilation_mode=dbg
@@ -424,6 +301,7 @@ tasks:
           targets: >-
             install-benchmarks
             archive-benchmarks
+          bazel_build_tags: --bazel-build-tag=mongo_benchmark --bazel-build-tag=mongo_library
           compiling_for_test: true
       - command: s3.put
         params:
@@ -438,6 +316,8 @@ tasks:
 
   - name: compile_upload_benchmarks_debug
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
+    # TODO(SERVER-86426): Figure out a workable long-term solution to benchmark debug symbols
+    disable: true
     depends_on:
       - name: compile_upload_benchmarks
     commands:
@@ -672,18 +552,6 @@ tasks:
           ninja_file: "build.ninja"
           targets: "install-devcore compiledb"
 
-  - name: compile_build_tools_next
-    tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
-    depends_on:
-      - name: version_expansions_gen
-        variant: generate-tasks-for-version
-    commands:
-      - func: "scons compile"
-        vars:
-          task_compile_flags: >-
-            --build-tools=next
-          targets: install-core
-
   - name: libdeps_graph_linting
     tags:
       [
@@ -704,6 +572,7 @@ tasks:
             --force-macos-dynamic-link
             --build-tools=next
           targets: generate-libdeps-graph
+          bazel_build_tags: --bazel-build-tag=all
       - command: subprocess.exec
         params:
           binary: bash
@@ -761,21 +630,16 @@ tasks:
           display_name: Libdeps Graph Data
 
   ## compile_all - build all scons targets ##
-  - &compile_all
-    name: compile_all
+  - name: compile_all_future_git_tag_multiversion
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
-      - name: compile_dist_test
+      - name: compile_dist_test_future_git_tag_multiversion
     commands:
       - func: "scons compile"
         vars:
           targets: install-all-meta
+          bazel_build_tags: --bazel-build-tag=all
           compiling_for_test: true
-
-  - <<: *compile_all
-    name: compile_all_future_git_tag_multiversion
-    depends_on:
-      - name: compile_dist_test_future_git_tag_multiversion
 
   - name: compile_all_but_not_unittests
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
@@ -786,6 +650,11 @@ tasks:
         vars:
           targets: install-all-meta-but-not-unittests
           compiling_for_test: true
+          # The executables generated by the install-all target are not used after successfully being
+          # compiled. We therefore compile them without debug symbols to compile them faster.
+          task_compile_flags: >-
+            --debug-symbols=off
+          bazel_build_tags: --bazel-build-tag=-mongo_unittest --bazel-build-tag=mongo_binary --bazel-build-tag=mongo_benchmark --bazel-build-tag=mongo_integration_test --bazel-build-tag=mongo_library
 
   - <<: *clang_tidy_task_template
     name: clang_tidy_1
@@ -832,18 +701,18 @@ tasks:
           split: 4
 
   ## compile_unittests ##
-  - &compile_unittests
-    name: compile_unittests
+  - name: compile_unittests_future_git_tag_multiversion
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
-      - name: compile_dist_test
+      - name: compile_dist_test_future_git_tag_multiversion
     commands:
       - func: "scons compile"
         vars:
           targets: install-unittests install-unittests-debug
+          bazel_build_tags: --bazel-build-tag=mongo_unittest --bazel-build-tag=mongo_binary_unittest
           compiling_for_test: true
 
-  - name: compile_and_run_unittests_first_quarter
+  - name: compile_libraries_for_unittests
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
       - name: version_expansions_gen
@@ -852,9 +721,26 @@ tasks:
     commands:
       - func: "scons compile"
         vars:
+          # Target the conf to just run the bazel part of the build
+          targets: \$BUILD_ROOT/scons/\$VARIANT_DIR/sconf_temp
+          compiling_for_test: true
+          task_compile_flags: ${unittest_compile_flags}
+          bazel_build_tags: --bazel-build-tag=mongo_library
+
+  - name: compile_and_run_unittests_first_quarter
+    tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
+    depends_on:
+      - name: version_expansions_gen
+        variant: generate-tasks-for-version
+      - name: compile_libraries_for_unittests
+    exec_timeout_secs: 32400 # 9 hours
+    commands:
+      - func: "scons compile"
+        vars:
           targets: install-first-quarter-unittests install-first-quarter-unittests-debug
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
+          bazel_build_tags: --bazel-build-tag=mongo_unittest_first_group --bazel-build-tag=mongo_binary_unittest --bazel-build-tag=mongo_library
       - func: "f_expansions_write"
       - func: "run diskstats"
       - func: "f_expansions_write"
@@ -871,6 +757,7 @@ tasks:
     depends_on:
       - name: version_expansions_gen
         variant: generate-tasks-for-version
+      - name: compile_libraries_for_unittests
     exec_timeout_secs: 32400 # 9 hours
     commands:
       - func: "scons compile"
@@ -878,6 +765,7 @@ tasks:
           targets: install-second-quarter-unittests install-second-quarter-unittests-debug
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
+          bazel_build_tags: --bazel-build-tag=mongo_unittest_second_group --bazel-build-tag=mongo_binary_unittest --bazel-build-tag=stitch_support_test --bazel-build-tag=mongo_library
       - func: "f_expansions_write"
       - func: "run diskstats"
       - func: "f_expansions_write"
@@ -894,6 +782,7 @@ tasks:
     depends_on:
       - name: version_expansions_gen
         variant: generate-tasks-for-version
+      - name: compile_libraries_for_unittests
     exec_timeout_secs: 32400 # 9 hours
     commands:
       - func: "scons compile"
@@ -901,6 +790,7 @@ tasks:
           targets: install-third-quarter-unittests install-third-quarter-unittests-debug
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
+          bazel_build_tags: --bazel-build-tag=mongo_unittest_third_group --bazel-build-tag=mongo_binary_unittest --bazel-build-tag=mongo_library
       - func: "f_expansions_write"
       - func: "run diskstats"
       - func: "f_expansions_write"
@@ -917,6 +807,7 @@ tasks:
     depends_on:
       - name: version_expansions_gen
         variant: generate-tasks-for-version
+      - name: compile_libraries_for_unittests
     exec_timeout_secs: 32400 # 9 hours
     commands:
       - func: "scons compile"
@@ -924,6 +815,7 @@ tasks:
           targets: install-fourth-quarter-unittests install-fourth-quarter-unittests-debug
           compiling_for_test: true
           task_compile_flags: ${unittest_compile_flags}
+          bazel_build_tags: --bazel-build-tag=mongo_unittest_fourth_group --bazel-build-tag=mongo_binary_unittest --bazel-build-tag=mongo_library
       - func: "f_expansions_write"
       - func: "run diskstats"
       - func: "f_expansions_write"
@@ -935,21 +827,11 @@ tasks:
           install_dir: build/install/bin
           exec_timeout_secs: 32400 # 9 hours
 
-  - <<: *compile_unittests
-    name: compile_unittests_future_git_tag_multiversion
-    depends_on:
-      - name: compile_dist_test_future_git_tag_multiversion
-
-  ## A copy of the compile_unittests task for the recorded unittest taskgroup ##
-  - <<: *compile_unittests
-    name: compile_unittests_for_recorded_unittest
-
   ## run_unittests ##
-  - &run_unittests
-    name: run_unittests
+  - name: run_unittests_future_git_tag_multiversion
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
-      - name: compile_unittests
+      - name: compile_unittests_future_git_tag_multiversion
     commands:
       - func: "f_expansions_write"
       - func: "run diskstats"
@@ -960,40 +842,6 @@ tasks:
         vars:
           suite: unittests
           install_dir: build/install/bin
-
-  - <<: *run_unittests
-    name: run_unittests_future_git_tag_multiversion
-    depends_on:
-      - name: compile_unittests_future_git_tag_multiversion
-
-  ## run_unittests with UndoDB live-record ##
-  #- name: run_unittests_with_recording
-  #  tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
-  #  depends_on:
-  #  - name: compile_unittests_for_recorded_unittest
-  #  commands:
-  #    - *f_expansions_write
-  #    - func: "run diskstats"
-  #    - func: "f_expansions_write"
-  #    - func: "monitor process threads"
-  #    - func: "collect system resource info"
-  #    - command: subprocess.exec
-  #      params:
-  #        binary: bash
-  #        args:
-  #          - "./src/evergreen/undo_wiki_page.sh"
-  #    - command: attach.artifacts
-  #      params:
-  #        files:
-  #          - undo_wiki_page_location.json
-  #    - func: "run tests"
-  #      vars:
-  #        suite: unittests
-  #        record_with: --recordWith /opt/undodb5/bin/live-record
-  #        # Start fewer jobs since there's a constant amount of overhead of starting
-  #        # live-record for each job.
-  #        resmoke_jobs_factor: 0.3
-  #        install_dir: build/install/bin
 
   ##compile_and_archive_libfuzzertests - build libfuzzertests ##
   - name: compile_and_archive_libfuzzertests
@@ -1082,8 +930,8 @@ tasks:
       - func: "scons compile"
         vars:
           targets: install-integration-tests
+          bazel_build_tags: --bazel-build-tag=mongo_integration_test --bazel-build-tag=dist_test --bazel-build-tag=mongo_library
           compiling_for_test: true
-          separate_debug: off
 
   - name: archive_jstestshell
     tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
@@ -1099,6 +947,7 @@ tasks:
           targets: archive-jstestshell
           compiling_for_test: true
           separate_debug: on
+          bazel_build_tags: --bazel-build-tag=jstestshell
           task_compile_flags: >-
             PREFIX=dist-test
             --link-model=static
@@ -1156,6 +1005,7 @@ tasks:
       - func: "scons compile"
         vars:
           targets: install-stitch-support install-stitch-support-debug install-stitch-support-dev
+          bazel_build_tags: --bazel-build-tag=stitch_support
           task_compile_flags: >-
             --link-model=dynamic-sdk
             --ssl=off
@@ -1198,6 +1048,7 @@ tasks:
       - func: "scons compile"
         vars:
           targets: install-stitch-support-test
+          bazel_build_tags: --bazel-build-tag=stitch_support_test
           compiling_for_test: true
           task_compile_flags: >-
             --ssl=off
@@ -1223,6 +1074,7 @@ tasks:
       - func: "scons compile"
         vars:
           targets: archive-mongo-crypt-dev archive-mongo-crypt-debug
+          bazel_build_tags: --bazel-build-tag=mongo_library
           task_compile_flags: >-
             --dbg=on
             --opt=off
@@ -2206,25 +2058,21 @@ task_groups:
     name: compile_dist_test_TG
     tasks:
       - compile_dist_test
+
   - <<: *compile_bazel_task_group_template
     name: compile_bazel_TG
     tasks:
-      - compile_bazel_dist_test
-      - compile_bazel_c_and_asm_targets_gcc
-      - compile_bazel_libunwind
-      - compile_bazel_program
-      - run_bazel_scons_unittest
+      - compile_dist_test_quick
+
+  - <<: *compile_bazel_task_group_template
+    name: run_bazel_TG
+    tasks:
       - run_bazel_program
 
   - <<: *compile_task_group_template
     name: bazel_workstation_TG
     tasks:
       - bazel_workstation_unittests
-
-  - <<: *compile_bazel_task_group_template
-    name: compile_bazel_sanitize_TG
-    tasks:
-      - run_bazel_scons_unittest_sanitize
 
   - <<: *compile_bazel_task_group_template
     name: compile_bazel_ninja_TG
@@ -2234,13 +2082,12 @@ task_groups:
   - <<: *compile_bazel_task_group_template
     name: compile_bazel_windows_TG
     tasks:
-      - compile_bazel_dist_test_windows
       - run_bazel_program_windows
 
   - <<: *compile_bazel_task_group_template
     name: compile_bazel_macos_TG
     tasks:
-      - compile_bazel_dist_test
+      - compile_dist_test_quick
 
   - <<: *compile_task_group_template
     name: compile_upload_benchmarks_TG
@@ -2268,11 +2115,6 @@ task_groups:
     name: compile_ninja_next_TG
     tasks:
       - compile_ninja_next
-
-  - <<: *compile_task_group_template
-    name: compile_build_tools_next_TG
-    tasks:
-      - compile_build_tools_next
 
   - <<: *compile_task_group_template
     name: compile_ninja_TG
@@ -2444,10 +2286,17 @@ task_groups:
     name: compile_test_parallel_unittest_stream_TG
     max_hosts: -1
     tasks:
+      - compile_libraries_for_unittests
       - compile_and_run_unittests_first_quarter
       - compile_and_run_unittests_second_quarter
       - compile_and_run_unittests_third_quarter
       - compile_and_run_unittests_fourth_quarter
+
+  - <<: *compile_task_group_template
+    name: compile_unittest_libaries_TG
+    max_hosts: -1
+    tasks:
+      - compile_libraries_for_unittests
 
   # These `parallel` task groups are only appropriate for builders that
   # use --link-model=dynamic, and have scons_cache_scope: shared and
@@ -2465,6 +2314,18 @@ task_groups:
       - determine_patch_tests
       - archive_dist_test
       - archive_dist_test_debug
+      - compile_all_but_not_unittests
+
+  - <<: *compile_task_group_template
+    name: compile_test_parallel_core_stream_no_compile_all_TG
+    tasks:
+      - compile_dist_test
+      - archive_dist_test
+      - archive_dist_test_debug
+
+  - <<: *compile_task_group_template
+    name: compile_all_but_not_unittests_TG
+    tasks:
       - compile_all_but_not_unittests
 
   - <<: *compile_task_group_template

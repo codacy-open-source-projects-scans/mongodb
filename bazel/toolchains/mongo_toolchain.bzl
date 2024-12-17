@@ -11,7 +11,7 @@ _OS_MAP = {
 _ARCH_MAP = {
     "aarch64": "@platforms//cpu:arm64",
     "x86_64": "@platforms//cpu:x86_64",
-    "ppc64le": "@platforms//cpu:ppc64le",
+    "ppc64le": "@platforms//cpu:ppc",
     "s390x": "@platforms//cpu:s390x",
 }
 
@@ -57,7 +57,7 @@ def _toolchain_download(ctx):
     elif arch == "x86_64":
         substitutions = {
             "{platforms_arch}": "x86_64",
-            "{bazel_toolchain_cpu}": "k8",
+            "{bazel_toolchain_cpu}": "x86_64",
             "{arch}": arch,
         }
     elif arch == "ppc64le":
@@ -74,6 +74,9 @@ def _toolchain_download(ctx):
         }
 
     distro = get_host_distro_major_version(ctx)
+    if distro == None:
+        fail("Failed to get mongo toolchain supported distribution for os {}".format(os))
+
     toolchain_key = "{distro}_{arch}".format(distro = distro, arch = arch)
 
     if toolchain_key in TOOLCHAIN_MAP:

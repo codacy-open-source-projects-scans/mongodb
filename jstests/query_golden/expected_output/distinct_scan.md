@@ -11,6 +11,9 @@
 	"winningPlan" : [
 		{
 			"direction" : "forward",
+			"filter" : {
+				
+			},
 			"stage" : "COLLSCAN"
 		}
 	]
@@ -31,6 +34,7 @@
 {  "_id" : 7 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
 	"rejectedPlans" : [ ],
@@ -40,6 +44,9 @@
 		},
 		{
 			"direction" : "forward",
+			"filter" : {
+				
+			},
 			"stage" : "COLLSCAN"
 		}
 	]
@@ -104,6 +111,7 @@
 {  "_id" : 7 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -221,6 +229,7 @@
 {  "_id" : 7,  "firstField" : 1 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -306,6 +315,7 @@
 {  "_id" : 7,  "firstField" : 1 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -314,9 +324,6 @@
 				"rejectedPlans" : [
 					[
 						{
-							"stage" : "FETCH"
-						},
-						{
 							"direction" : "forward",
 							"indexBounds" : {
 								"a" : [
@@ -324,7 +331,7 @@
 								]
 							},
 							"indexName" : "a_1",
-							"isFetching" : false,
+							"isFetching" : true,
 							"isMultiKey" : false,
 							"isPartial" : false,
 							"isShardFiltering" : false,
@@ -419,6 +426,7 @@
 {  "_id" : 7,  "firstField" : 1 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -582,6 +590,7 @@
 {  "_id" : 3 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -729,50 +738,36 @@
 {  "_id" : 4 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
-	"stages" : [
+	"rejectedPlans" : [ ],
+	"winningPlan" : [
 		{
-			"$cursor" : {
-				"rejectedPlans" : [ ],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"a" : 1
-						}
-					},
-					{
-						"stage" : "FETCH"
-					},
-					{
-						"direction" : "forward",
-						"indexBounds" : {
-							"b" : [
-								"[3.0, 3.0]"
-							]
-						},
-						"indexName" : "b_1",
-						"isMultiKey" : false,
-						"isPartial" : false,
-						"isSparse" : false,
-						"isUnique" : false,
-						"keyPattern" : {
-							"b" : 1
-						},
-						"multiKeyPaths" : {
-							"b" : [ ]
-						},
-						"stage" : "IXSCAN"
-					}
-				]
-			}
+			"stage" : "GROUP"
 		},
 		{
-			"$group" : {
-				"_id" : "$a"
-			}
+			"stage" : "FETCH"
+		},
+		{
+			"direction" : "forward",
+			"indexBounds" : {
+				"b" : [
+					"[3.0, 3.0]"
+				]
+			},
+			"indexName" : "b_1",
+			"isMultiKey" : false,
+			"isPartial" : false,
+			"isSparse" : false,
+			"isUnique" : false,
+			"keyPattern" : {
+				"b" : 1
+			},
+			"multiKeyPaths" : {
+				"b" : [ ]
+			},
+			"stage" : "IXSCAN"
 		}
 	]
 }

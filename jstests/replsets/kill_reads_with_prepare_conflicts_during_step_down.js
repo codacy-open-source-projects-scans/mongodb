@@ -12,7 +12,7 @@ import {ReplSetTest} from "jstests/libs/replsettest.js";
 // Start one of the nodes with priority: 0 to avoid elections.
 const rst = new ReplSetTest({nodes: [{}, {rsConfig: {priority: 0}}]});
 rst.startSet();
-rst.initiate();
+rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 let primary = rst.getPrimary();
 
@@ -77,7 +77,7 @@ assert.commandWorked(
 
 readBlockedOnPrepareConflictThread();
 
-rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [primary]);
 
 // Validate that the read operation got killed during step down.
 let replMetrics = assert.commandWorked(primaryAdmin.adminCommand({serverStatus: 1})).metrics.repl;

@@ -16,8 +16,10 @@ executor:
     tests: true
   config:
     shell_options:
+      eval: await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
+          implicitlyShardOnCreateCollectionOnly: true
           runningWithBalancer: false
   fixture:
     class: ShardedClusterFixture
@@ -25,7 +27,6 @@ executor:
     enable_balancer: false
     mongod_options:
       set_parameters:
-        defaultConfigCommandTimeoutMS: 90000
         enableTestCommands: 1
         featureFlagRouterPort: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1

@@ -39,11 +39,9 @@
 #include <cstring>
 #include <iterator>
 #include <memory>
-#include <string>
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -54,9 +52,9 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
+#include "mongo/db/timeseries/write_ops/measurement.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_truncation.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
@@ -85,7 +83,7 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
     std::unique_ptr<char[]> tamperedData;
 
     BSONObjBuilder builder;  // builder to build the compressed bucket
-    std::vector<details::Measurement>
+    std::vector<write_ops_utils::details::Measurement>
         measurements;                       // Extracted measurements from uncompressed bucket
     boost::optional<BSONObjIterator> time;  // Iterator to read time fields from uncompressed bucket
     std::vector<std::pair<StringData, BSONObjIterator>>
@@ -138,7 +136,7 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
         auto timeElement = time->next();
 
         // Get BSONElement's to all data elements. Missing data fields are represented as EOO.
-        details::Measurement measurement;
+        write_ops_utils::details::Measurement measurement;
         measurement.timeField = timeElement;
         measurement.dataFields.resize(columns.size());
 
@@ -185,7 +183,8 @@ CompressionResult _compressBucket(const BSONObj& bucketDoc,
     // Sort all the measurements on time order.
     std::sort(measurements.begin(),
               measurements.end(),
-              [](const details::Measurement& lhs, const details::Measurement& rhs) {
+              [](const write_ops_utils::details::Measurement& lhs,
+                 const write_ops_utils::details::Measurement& rhs) {
                   return lhs.timeField.date() < rhs.timeField.date();
               });
 
@@ -375,11 +374,9 @@ CompressionResult compressBucket(const BSONObj& bucketDoc,
                                 redact(base64::encode(bucketDoc.objdata(), bucketDoc.objsize())),
                             "ns"_attr = ns.toStringForErrorMsg());
         // Also log without any risk of PII
-        BSONElement id;
-        bucketDoc.getObjectID(id);
         LOGV2_ERROR(9547401,
                     "Couldn't compress time-series bucket",
-                    "bucketId"_attr = id,
+                    "bucketId"_attr = bucketDoc["_id"],
                     "ns"_attr = ns.toStringForErrorMsg());
         return {};
     }
@@ -458,7 +455,8 @@ bool isCompressedBucket(const BSONObj& bucketDoc) {
             "Time-series bucket documents must have 'control' object present",
             controlField && controlField.type() == BSONType::Object);
 
-    auto&& versionField = controlField.Obj()[timeseries::kBucketControlVersionFieldName];
+    auto&& controlFieldObj = controlField.Obj();
+    auto&& versionField = controlFieldObj[timeseries::kBucketControlVersionFieldName];
     uassert(6540601,
             "Time-series bucket documents must have 'control.version' field present",
             versionField && isNumericBSONType(versionField.type()));

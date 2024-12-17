@@ -364,7 +364,6 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
                 return;
             }
             auto opCtx = client->makeOperationContext();
-            _flushDiffs(opCtx.get());
             try {
                 _flushDiffs(opCtx.get());
             } catch (const DBException& e) {
@@ -401,7 +400,7 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
     threadPoolOptions.poolName = "QueryAnalysisWriterThreadPool";
     threadPoolOptions.onCreateThread = [service =
                                             opCtx->getService()](const std::string& threadName) {
-        Client::initThread(threadName.c_str(), service);
+        Client::initThread(threadName, service);
     };
     _executor = executor::ThreadPoolTaskExecutor::create(
         std::make_unique<ThreadPool>(threadPoolOptions),

@@ -47,7 +47,6 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/write_concern_options.h"
@@ -243,7 +242,7 @@ Status ReplicationCoordinatorMock::checkCanServeReadsFor_UNSAFE(OperationContext
 
 bool ReplicationCoordinatorMock::shouldRelaxIndexConstraints(OperationContext* opCtx,
                                                              const NamespaceString& ns) {
-    return (!canAcceptWritesFor(opCtx, ns) || tenantMigrationInfo(opCtx));
+    return (!canAcceptWritesFor(opCtx, ns));
 }
 
 void ReplicationCoordinatorMock::setMyHeartbeatMessage(const std::string& msg) {
@@ -467,21 +466,6 @@ ConnectionString ReplicationCoordinatorMock::getConfigConnectionString() const {
     return _getConfigReturnValue.getConnectionString();
 }
 
-Milliseconds ReplicationCoordinatorMock::getConfigElectionTimeoutPeriod() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.getElectionTimeoutPeriod();
-}
-
-std::vector<MemberConfig> ReplicationCoordinatorMock::getConfigVotingMembers() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.votingMembers();
-}
-
-size_t ReplicationCoordinatorMock::getNumConfigVotingMembers() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.votingMembers().size();
-}
-
 std::int64_t ReplicationCoordinatorMock::getConfigTerm() const {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
     return _getConfigReturnValue.getConfigTerm();
@@ -497,21 +481,6 @@ ConfigVersionAndTerm ReplicationCoordinatorMock::getConfigVersionAndTerm() const
     return _getConfigReturnValue.getConfigVersionAndTerm();
 }
 
-int ReplicationCoordinatorMock::getConfigNumMembers() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.getNumMembers();
-}
-
-Milliseconds ReplicationCoordinatorMock::getConfigHeartbeatTimeoutPeriodMillis() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.getHeartbeatTimeoutPeriodMillis();
-}
-
-BSONObj ReplicationCoordinatorMock::getConfigBSON() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.toBSON();
-}
-
 Status ReplicationCoordinatorMock::validateWriteConcern(
     const WriteConcernOptions& writeConcern) const {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
@@ -523,16 +492,6 @@ boost::optional<MemberConfig> ReplicationCoordinatorMock::findConfigMemberByHost
     stdx::lock_guard<stdx::mutex> lock(_mutex);
     const MemberConfig* result = _getConfigReturnValue.findMemberByHostAndPort(hap);
     return boost::make_optional(result, *result);
-}
-
-bool ReplicationCoordinatorMock::isConfigLocalHostAllowed() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.isLocalHostAllowed();
-}
-
-Milliseconds ReplicationCoordinatorMock::getConfigHeartbeatInterval() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _getConfigReturnValue.getHeartbeatInterval();
 }
 
 void ReplicationCoordinatorMock::setGetConfigReturnValue(ReplSetConfig returnValue) {

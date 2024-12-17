@@ -6,27 +6,32 @@ filters:
   - "*":
     approvers:
       - 10gen/query
+  - "OWNERS.yml":
+    approvers:
+      - 10gen/query-execution-staff-leads
+      - 10gen/query-optimization-staff-leads
+      - 10gen/query-integration-staff-leads
   # The IDL files in this directory are generally related to DocumentSource parsing, so they are
   # owned by QO by default.
   - "*.idl":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-parsers
   # This file deals primarily with parsing for accumulators, and is therefore owned by QO.
   - "accumulation_statement*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-parsers
   - "accumulator*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   - "aggregation_request*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-parsers
   - "*change_stream*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-change-streams
   - "dependencies*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-heuristic-rewrite
   - "document_source_current_op*":
     approvers:
       - 10gen/query-integration-observability
@@ -36,12 +41,15 @@ filters:
   - "document_source_fill*":
     approvers:
       - 10gen/query-integration-analytic-extensions
+  - "document_source*geo*":
+    approvers:
+      - 10gen/query-integration-geo
   - "document_source_hybrid_scoring*":
     approvers:
       - 10gen/query-integration-search
   - "document_source_index_stats*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-index-access-stats
   - "document_source_internal_unpack_bucket*":
     approvers:
       - 10gen/query-integration-timeseries
@@ -50,10 +58,10 @@ filters:
       - 10gen/query-integration-timeseries
   - "document_source_parsing_validators*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-parsers
   - "document_source_query_stats*":
     approvers:
-      - 10gen/query-integration-observability
+      - 10gen/query-integration-query-stats
   - "document_source_rank_fusion*":
     approvers:
       - 10gen/query-integration-search
@@ -66,9 +74,24 @@ filters:
   - "document_source_set_window_fields*":
     approvers:
       - 10gen/query-integration-analytic-extensions
+  - "expression_dependencies*":
+    approvers:
+      - 10gen/query-optimization-heuristic-rewrite
+  - "expression_javascript*":
+    approvers:
+      - 10gen/query-integration-javascript
+  - "expression_js*":
+    approvers:
+      - 10gen/query-integration-javascript
+  - "expression_visitor*":
+    approvers:
+      - 10gen/query-optimization-logical-models
+  - "expression_walker*":
+    approvers:
+      - 10gen/query-optimization-logical-models
   - "granularity_rounder*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   - "javascript_execution*":
     approvers:
       - 10gen/query-integration-javascript
@@ -77,46 +100,64 @@ filters:
       - 10gen/query-integration-javascript
   - "group_processor*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   - "lite_parsed*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-parsers
+  - "split_pipeline*":
+    approvers:
+      - 10gen/query-optimization-cluster-planning
+  - "sharded_agg_helpers*":
+    approvers:
+      - 10gen/query-optimization-cluster-planning
   - "merge_processor*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   # Percentile calculations fall under the umbrella of "analytical extensions" which are owned by
   # QI.
   - "percentile_algo*":
     approvers:
       - 10gen/query-integration-analytic-extensions
+  - "pipeline_metadata_tree*":
+    approvers:
+      - 10gen/query-integration-staff-leads
+  - "plan_explainer*":
+    approvers:
+      - 10gen/query-optimization-explain
   - "plan_executor_pipeline*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   - "resume_token*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-change-streams
+  - "sbe_pushdown*":
+    approvers:
+      - 10gen/query-execution-sbe
   - "semantic_analysis*":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-heuristic-rewrite
   - "sequential_document_cache*":
     approvers:
-      - 10gen/query-execution
-  - "single_document_transformation_processor*":
+      - 10gen/query-execution-aggregation
+  - "*_processor*":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   - "tee_buffer*":
     approvers:
-      - 10gen/query-execution
-  - "unwind_processor*":
-    approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   - "value.idl":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-aggregation
   - "document_source_coll_stats*":
     approvers:
       - 10gen/server-catalog-and-routing
   - "document_source_internal_all_collection_stats*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "document_source_internal_list_collections*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "document_source_list_cluster_catalog*":
     approvers:
       - 10gen/server-catalog-and-routing
   - "*list_catalog*":

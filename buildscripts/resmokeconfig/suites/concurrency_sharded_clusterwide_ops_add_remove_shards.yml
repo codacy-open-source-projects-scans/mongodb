@@ -19,7 +19,13 @@ executor:
       - CheckMetadataConsistencyInBackground
       - ValidateCollections
     tests: true
-  config: {}
+  config:
+    shell_options:
+      eval: >-
+        await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
+      global_vars:
+        TestData:
+          implicitlyShardOnCreateCollectionOnly: true
   hooks:
     - class: CheckShardFilteringMetadata
     - class: CheckReplDBHashInBackground
@@ -40,7 +46,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     shard_options:
       mongod_options:
         oplogSize: 1024
@@ -50,7 +55,6 @@ executor:
         roleGraphInvalidationIsFatal: 1
         queryAnalysisWriterIntervalSecs: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     num_rs_nodes_per_shard: 3
     num_shards: 2
     num_mongos: 2

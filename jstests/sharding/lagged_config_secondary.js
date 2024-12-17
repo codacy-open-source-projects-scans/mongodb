@@ -3,7 +3,7 @@
  * are behind the majority opTime.
  * @tags: [
  *   config_shard_incompatible,
- *    # TODO (SERVER-88122): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  */
@@ -25,8 +25,14 @@ var st = new ShardingTest({
     config: 3,
     configReplSetTestOptions: {settings: {chainingAllowed: false}},
     other: {
-        mongosOptions:
-            {setParameter: {"failpoint.disableShardingUptimeReporting": "{mode: 'alwaysOn'}"}}
+        mongosOptions: {
+            setParameter: {
+                "failpoint.disableShardingUptimeReporting": "{mode: 'alwaysOn'}",
+                // ShardingTest use a high config command timeout to avoid spurious failures but
+                // this test intentionally triggers a timeout, so we restore the default value.
+                defaultConfigCommandTimeoutMS: 30000,
+            }
+        }
     }
 });
 

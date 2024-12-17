@@ -10,7 +10,7 @@ import {ReplSetTest} from "jstests/libs/replsettest.js";
 const testName = "initial_sync_survives_restart";
 const rst = new ReplSetTest({name: testName, nodes: 1});
 rst.startSet();
-rst.initiate();
+rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 const primary = rst.getPrimary();
 const primaryDb = primary.getDB("test");
@@ -117,5 +117,5 @@ jsTestLog("Releasing the final cloner failpoint.");
 afterStageFailPoint.off();
 jsTestLog("Waiting for initial sync to complete.");
 // Wait for initial sync to complete.
-rst.waitForState(secondary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [secondary]);
 rst.stopSet();

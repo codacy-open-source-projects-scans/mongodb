@@ -41,7 +41,6 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
-#include <ratio>
 #include <set>
 #include <string>
 #include <utility>
@@ -67,7 +66,6 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/admission/execution_control_init.h"
 #include "mongo/db/audit.h"
-#include "mongo/db/audit_interface.h"
 #include "mongo/db/auth/auth_op_observer.h"
 #include "mongo/db/auth/authorization_backend_interface.h"
 #include "mongo/db/auth/authorization_manager.h"
@@ -109,8 +107,8 @@
 #include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/util.h"
 #include "mongo/db/global_settings.h"
-#include "mongo/db/index_builds_coordinator.h"
-#include "mongo/db/index_builds_coordinator_mongod.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
 #include "mongo/db/initialize_server_global_state.h"
 #include "mongo/db/keys_collection_client_direct.h"
 #include "mongo/db/keys_collection_manager.h"
@@ -142,12 +140,14 @@
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_settings/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/search/mongot_options.h"
+#include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/query/stats/stats_cache_loader_impl.h"
 #include "mongo/db/query/stats/stats_catalog.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongod.h"
 #include "mongo/db/repl/base_cloner.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/initial_syncer_factory.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/primary_only_service.h"
@@ -163,12 +163,6 @@
 #include "mongo/db/repl/replication_recovery.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_registry.h"
-#include "mongo/db/repl/tenant_migration_donor_op_observer.h"
-#include "mongo/db/repl/tenant_migration_donor_service.h"
-#include "mongo/db/repl/tenant_migration_recipient_op_observer.h"
-#include "mongo/db/repl/tenant_migration_recipient_service.h"
-#include "mongo/db/repl/tenant_migration_util.h"
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/repl_set_member_in_standalone_mode.h"
@@ -176,8 +170,8 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/collection_sharding_state_factory_shard.h"
 #include "mongo/db/s/config/configsvr_coordinator_service.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/config_server_op_observer.h"
+#include "mongo/db/s/ddl_lock_manager.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/migration_util.h"
@@ -190,6 +184,7 @@
 #include "mongo/db/s/resharding/resharding_donor_service.h"
 #include "mongo/db/s/resharding/resharding_op_observer.h"
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/shard_server_op_observer.h"
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
@@ -205,7 +200,6 @@
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_killer.h"
-#include "mongo/db/session_manager_mongod.h"
 #include "mongo/db/set_change_stream_state_coordinator.h"
 #include "mongo/db/startup_recovery.h"
 #include "mongo/db/startup_warnings_mongod.h"
@@ -250,7 +244,6 @@
 #include "mongo/platform/random.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
-#include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/catalog_cache.h"
@@ -258,6 +251,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sampler.h"
+#include "mongo/s/read_write_concern_defaults_cache_lookup_mongos.h"
 #include "mongo/s/resource_yielders.h"
 #include "mongo/s/routing_information_cache.h"
 #include "mongo/s/service_entry_point_router_role.h"
@@ -272,10 +266,10 @@
 #include "mongo/util/allocator_thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/background.h"
+#include "mongo/util/buildinfo.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/cmdline_utils/censor_cmdline.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/debugger.h"
@@ -303,6 +297,10 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/version.h"
 #include "mongo/watchdog/watchdog_mongod.h"
+
+#ifdef MONGO_CONFIG_GRPC
+#include "mongo/transport/grpc/grpc_feature_flag_gen.h"
+#endif
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -338,8 +336,39 @@ auto makeTransportLayer(ServiceContext* svcCtx) {
         // TODO SERVER-78730: add support for load-balanced connections.
     }
 
-    return transport::TransportLayerManagerImpl::createWithConfig(
-        &serverGlobalParams, svcCtx, std::move(loadBalancerPort), std::move(routerPort));
+    // Mongod should not bind to any ports in repair mode so only allow egress.
+    if (storageGlobalParams.repair) {
+        return transport::TransportLayerManagerImpl::makeDefaultEgressTransportLayer();
+    }
+
+    bool useEgressGRPC = false;
+#ifdef MONGO_CONFIG_GRPC
+    if (globalMongotParams.useGRPC) {
+        uassert(9715900,
+                "Egress GRPC for search is not enabled",
+                feature_flags::gEgressGrpcForSearch.isEnabled(
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+        useEgressGRPC = true;
+    }
+#endif
+
+    return transport::TransportLayerManagerImpl::createWithConfig(&serverGlobalParams,
+                                                                  svcCtx,
+                                                                  useEgressGRPC,
+                                                                  std::move(loadBalancerPort),
+                                                                  std::move(routerPort));
+}
+
+ExitCode initializeTransportLayer(ServiceContext* serviceContext, BSONObjBuilder* timerReport) {
+    TimeElapsedBuilderScopedTimer scopedTimer(
+        serviceContext->getFastClockSource(), "Transport layer setup", timerReport);
+    auto tl = makeTransportLayer(serviceContext);
+    if (auto res = tl->setup(); !res.isOK()) {
+        LOGV2_ERROR(20568, "Error setting up transport layer", "error"_attr = res);
+        return ExitCode::netError;
+    }
+    serviceContext->setTransportLayerManager(std::move(tl));
+    return ExitCode::clean;
 }
 
 void logStartup(OperationContext* opCtx) {
@@ -356,10 +385,12 @@ void logStartup(OperationContext* opCtx) {
     toLog.append("pid", ProcessId::getCurrent().asLongLong());
 
 
-    BSONObjBuilder buildinfo(toLog.subobjStart("buildinfo"));
-    VersionInfoInterface::instance().appendBuildInfo(&buildinfo);
-    appendStorageEngineList(opCtx->getServiceContext(), &buildinfo);
-    buildinfo.doneFast();
+    {
+        BSONObjBuilder buildinfo(toLog.subobjStart("buildinfo"));
+        auto info = getBuildInfo();
+        info.setStorageEngines(getStorageEngineNames(opCtx->getServiceContext()));
+        info.serialize(&buildinfo);
+    }
 
     BSONObj o = toLog.obj();
 
@@ -432,16 +463,15 @@ void registerPrimaryOnlyServices(ServiceContext* serviceContext) {
     }
 
     if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
+        auto shardingDDLCoordinatorService =
+            std::make_unique<ShardingDDLCoordinatorService>(serviceContext);
+        DDLLockManager::get(serviceContext)->setRecoverable(shardingDDLCoordinatorService.get());
+
+        services.emplace_back(std::move(shardingDDLCoordinatorService));
         services.push_back(std::make_unique<RenameCollectionParticipantService>(serviceContext));
-        services.push_back(std::make_unique<ShardingDDLCoordinatorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingDonorService>(serviceContext));
         services.push_back(std::make_unique<ReshardingRecipientService>(serviceContext));
         services.push_back(std::make_unique<MultiUpdateCoordinatorService>(serviceContext));
-    }
-
-    if (getGlobalReplSettings().isServerless()) {
-        services.push_back(std::make_unique<TenantMigrationDonorService>(serviceContext));
-        services.push_back(std::make_unique<repl::TenantMigrationRecipientService>(serviceContext));
     }
 
     if (change_stream_serverless_helpers::canInitializeServices()) {
@@ -479,13 +509,11 @@ void logMongodStartupTimeElapsedStatistics(ServiceContext* serviceContext,
 // of the initialization steps within.  If you add or change any of these steps, make sure
 // any necessary changes are also made to File Copy Based Initial Sync.
 ExitCode _initAndListen(ServiceContext* serviceContext) {
-    Client::initThread("initandlisten", serviceContext->getService(ClusterRole::ShardServer));
-
     // TODO(SERVER-74659): Please revisit if this thread could be made killable.
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
-    }
+    Client::initThread("initandlisten",
+                       serviceContext->getService(ClusterRole::ShardServer),
+                       Client::noSession(),
+                       ClientOperationKillableByStepdown{false});
 
     BSONObjBuilder startupTimeElapsedBuilder;
     BSONObjBuilder startupInfoBuilder;
@@ -549,10 +577,12 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
         serviceContext->setPeriodicRunner(std::move(runner));
     }
 
-    // When starting the server with --queryableBackupMode or --recoverFromOplogAsStandalone, we are
-    // in read-only mode and don't allow user-originating operations to perform writes
+    // When starting the server with --queryableBackupMode, --recoverFromOplogAsStandalone or
+    // --magicRestore, we are in read-only mode and don't allow user-originating operations to
+    // perform writes
     if (storageGlobalParams.queryableBackupMode ||
-        repl::ReplSettings::shouldRecoverFromOplogAsStandalone()) {
+        repl::ReplSettings::shouldRecoverFromOplogAsStandalone() ||
+        storageGlobalParams.magicRestore) {
         serviceContext->disallowUserWrites();
     }
 
@@ -567,17 +597,9 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
     CertificateExpirationMonitor::get()->start(serviceContext);
 #endif
 
-    if (!storageGlobalParams.repair) {
-        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
-                                                  "Transport layer setup",
-                                                  &startupTimeElapsedBuilder);
-        auto tl = makeTransportLayer(serviceContext);
-        if (auto res = tl->setup(); !res.isOK()) {
-            LOGV2_ERROR(20568, "Error setting up listener", "error"_attr = res);
-            return ExitCode::netError;
-        }
-        serviceContext->setTransportLayerManager(std::move(tl));
-    }
+    if (auto ec = initializeTransportLayer(serviceContext, &startupTimeElapsedBuilder);
+        ec != ExitCode::clean)
+        return ec;
 
     FlowControl::set(serviceContext,
                      std::make_unique<FlowControl>(
@@ -850,7 +872,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
 
     try {
         if (serverGlobalParams.clusterRole.has(ClusterRole::None) && replSettings.isReplSet()) {
-            ReadWriteConcernDefaults::get(startupOpCtx.get()->getServiceContext())
+            ReadWriteConcernDefaults::get(startupOpCtx.get())
                 .refreshIfNecessary(startupOpCtx.get());
         }
     } catch (const DBException& ex) {
@@ -878,6 +900,7 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
                               << "startupRecoveryForRestore at the same time",
                 !repl::startupRecoveryForRestore);
 
+        // This uassert will also cover if we are running magic restore.
         uassert(ErrorCodes::BadValue,
                 str::stream() << "Cannot use queryableBackupMode in a replica set",
                 !replCoord->getSettings().isReplSet());
@@ -1006,15 +1029,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
 
         if (replSettings.isReplSet() || !gInternalValidateFeaturesAsPrimary) {
             serverGlobalParams.validateFeaturesAsPrimary.store(false);
-        }
-
-        if (replSettings.isReplSet()) {
-            TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
-                                                      "Create an oplog view for tenant migrations",
-                                                      &startupTimeElapsedBuilder);
-            Lock::GlobalWrite lk(startupOpCtx.get());
-            OldClientContext ctx(startupOpCtx.get(), NamespaceString::kRsOplogNamespace);
-            tenant_migration_util::createOplogViewForTenantMigrations(startupOpCtx.get(), ctx.db());
         }
 
         storageEngine->startTimestampMonitor();
@@ -1154,9 +1168,11 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
     // operation context anymore
     startupOpCtx.reset();
 
+    executor::startupSearchExecutorsIfNeeded(serviceContext);
+
     transport::ServiceExecutor::startupAll(serviceContext);
 
-    if (!storageGlobalParams.repair) {
+    {
         TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
                                                   "Start transport layer",
                                                   &startupTimeElapsedBuilder);
@@ -1184,16 +1200,6 @@ ExitCode _initAndListen(ServiceContext* serviceContext) {
     if (MONGO_unlikely(shutdownAtStartup.shouldFail())) {
         LOGV2(20556, "Starting clean exit via failpoint");
         exitCleanly(ExitCode::clean);
-    }
-
-    if (storageGlobalParams.magicRestore) {
-        TimeElapsedBuilderScopedTimer scopedTimer(
-            serviceContext->getFastClockSource(), "Magic restore", &startupTimeElapsedBuilder);
-        if (getMagicRestoreMain() == nullptr) {
-            LOGV2_ERROR(7180701, "--magicRestore cannot be used with a community build");
-            exitCleanly(ExitCode::badOptions);
-        }
-        return getMagicRestoreMain()(serviceContext);
     }
 
     globalServerLifecycleMonitor().onFinishingStartup();
@@ -1369,11 +1375,10 @@ auto makeReplicaSetNodeExecutor(ServiceContext* serviceContext) {
     tpOptions.poolName = "ReplNodeDbWorkerThreadPool";
     tpOptions.maxThreads = ThreadPool::Options::kUnlimited;
     tpOptions.onCreateThread = [serviceContext](const std::string& threadName) {
-        Client::initThread(threadName.c_str(),
-                           serviceContext->getService(ClusterRole::ShardServer));
-
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
+        Client::initThread(threadName,
+                           serviceContext->getService(ClusterRole::ShardServer),
+                           Client::noSession(),
+                           ClientOperationKillableByStepdown{false});
     };
     return executor::ThreadPoolTaskExecutor::create(
         std::make_unique<ThreadPool>(tpOptions),
@@ -1387,11 +1392,10 @@ auto makeReplicationExecutor(ServiceContext* serviceContext) {
     tpOptions.poolName = "ReplCoordThreadPool";
     tpOptions.maxThreads = 50;
     tpOptions.onCreateThread = [serviceContext](const std::string& threadName) {
-        Client::initThread(threadName.c_str(),
-                           serviceContext->getService(ClusterRole::ShardServer));
-
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
+        Client::initThread(threadName,
+                           serviceContext->getService(ClusterRole::ShardServer),
+                           Client::noSession(),
+                           ClientOperationKillableByStepdown{false});
     };
     auto hookList = std::make_unique<rpc::EgressMetadataHookList>();
     hookList->addHook(std::make_unique<rpc::VectorClockMetadataHook>(serviceContext));
@@ -1414,10 +1418,6 @@ void setUpReplication(ServiceContext* serviceContext) {
             storageInterface, std::move(consistencyMarkers), std::move(recovery)));
     auto replicationProcess = repl::ReplicationProcess::get(serviceContext);
 
-    repl::DropPendingCollectionReaper::set(
-        serviceContext, std::make_unique<repl::DropPendingCollectionReaper>(storageInterface));
-    auto dropPendingCollectionReaper = repl::DropPendingCollectionReaper::get(serviceContext);
-
     repl::TopologyCoordinator::Options topoCoordOptions;
     topoCoordOptions.maxSyncSourceLagSecs = Seconds(repl::maxSyncSourceLagSecs);
     topoCoordOptions.clusterRole = serverGlobalParams.clusterRole;
@@ -1426,7 +1426,7 @@ void setUpReplication(ServiceContext* serviceContext) {
         serviceContext,
         getGlobalReplSettings(),
         std::make_unique<repl::ReplicationCoordinatorExternalStateImpl>(
-            serviceContext, dropPendingCollectionReaper, storageInterface, replicationProcess),
+            serviceContext, storageInterface, replicationProcess),
         makeReplicationExecutor(serviceContext),
         std::make_unique<repl::TopologyCoordinator>(topoCoordOptions),
         replicationProcess,
@@ -1473,12 +1473,7 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
-        if (getGlobalReplSettings().isServerless()) {
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationDonorOpObserver>());
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        }
+
         if (!gMultitenancySupport) {
             opObserverRegistry->addObserver(
                 std::make_unique<analyze_shard_key::QueryAnalysisOpObserverShardSvr>());
@@ -1500,12 +1495,6 @@ void setUpObservers(ServiceContext* serviceContext) {
         opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
-        if (getGlobalReplSettings().isServerless()) {
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationDonorOpObserver>());
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        }
 
         auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
         if (!gMultitenancySupport && replCoord && replCoord->getSettings().isReplSet()) {
@@ -1644,13 +1633,12 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     if (Client::getCurrent()) {
         oldClient = Client::releaseCurrent();
     }
-    Client::setCurrent(
-        serviceContext->getService(ClusterRole::ShardServer)->makeClient("shutdownTask"));
+    Client::setCurrent(serviceContext->getService(ClusterRole::ShardServer)
+                           ->makeClient("shutdownTask",
+                                        Client::noSession(),
+                                        ClientOperationKillableByStepdown{false}));
     const auto client = Client::getCurrent();
-    {
-        stdx::lock_guard<Client> lk(*client);
-        client->setSystemOperationUnkillableByStepdown(lk);
-    }
+
     // The new client and opCtx are stashed in the ServiceContext, will survive past this
     // function and are never destructed. This is required to avoid releasing the global lock until
     // the process calls exit().
@@ -1858,20 +1846,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
             }
         }
 
-        {
-            // Clear tenant migration access blockers after killing all operation contexts to ensure
-            // that no operation context cancellation token continuation holds the last reference to
-            // the TenantMigrationAccessBlockerExecutor.
-            TimeElapsedBuilderScopedTimer scopedTimer(
-                serviceContext->getFastClockSource(),
-                "Shut down all tenant migration access blockers on global shutdown",
-                &shutdownTimeElapsedBuilder);
-            LOGV2_OPTIONS(5093807,
-                          {LogComponent::kTenantMigration},
-                          "Shutting down all TenantMigrationAccessBlockers on global shutdown");
-            TenantMigrationAccessBlockerRegistry::get(serviceContext).shutDown();
-        }
-
         // Destroy all stashed transaction resources, in order to release locks.
         {
             TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
@@ -1945,18 +1919,6 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         validator->shutDown();
     }
 
-    // The migrationutil executor must be shut down before shutting down the CatalogCache and the
-    // ExecutorPool. Otherwise, it may try to schedule work on those components and fail.
-    LOGV2_OPTIONS(4784921, {LogComponent::kSharding}, "Shutting down the MigrationUtilExecutor");
-    auto migrationUtilExecutor = migrationutil::getMigrationUtilExecutor(serviceContext);
-    {
-        TimeElapsedBuilderScopedTimer scopedTimer(serviceContext->getFastClockSource(),
-                                                  "Shut down the migration util executor",
-                                                  &shutdownTimeElapsedBuilder);
-        migrationUtilExecutor->shutdown();
-        migrationUtilExecutor->join();
-    }
-
     if (TestingProctor::instance().isEnabled()) {
         auto pool = Grid::get(serviceContext)->isInitialized()
             ? Grid::get(serviceContext)->getExecutorPool()
@@ -1977,6 +1939,9 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         LOGV2_OPTIONS(6773201, {LogComponent::kSharding}, "Shutting down the CatalogCache");
         Grid::get(serviceContext)->catalogCache()->shutDownAndJoin();
     }
+
+    LOGV2_OPTIONS(9439300, {LogComponent::kSharding}, "Shutting down the filtering metadata cache");
+    FilteringMetadataCache::get(opCtx)->shutDown();
 
     if (auto configServerRoutingInfoCache = RoutingInformationCache::get(serviceContext)) {
         LOGV2_OPTIONS(
@@ -2114,12 +2079,10 @@ int mongod_main(int argc, char* argv[]) {
 
     auto* service = [] {
         try {
-            auto serviceContextHolder = ServiceContext::make();
+            auto serviceContextHolder =
+                ServiceContext::make(FastClockSourceFactory::create(Milliseconds(10)));
             auto* serviceContext = serviceContextHolder.get();
 
-            // This FastClockSourceFactory creates a background thread ClockSource. It must be set
-            // on ServiceContext before any other threads can get and use it.
-            serviceContext->setFastClockSource(FastClockSourceFactory::create(Milliseconds(10)));
             setGlobalServiceContext(std::move(serviceContextHolder));
 
             return serviceContext;
@@ -2175,14 +2138,21 @@ int mongod_main(int argc, char* argv[]) {
 
     startAllocatorThread();
 
-    ReadWriteConcernDefaults::create(service, readWriteConcernDefaultsCacheLookupMongoD);
+    auto routerService = service->getService(ClusterRole::RouterServer);
+    auto shardService = service->getService(ClusterRole::ShardServer);
+    if (routerService) {
+        ReadWriteConcernDefaults::create(routerService, readWriteConcernDefaultsCacheLookupMongoS);
+    }
+    ReadWriteConcernDefaults::create(shardService, readWriteConcernDefaultsCacheLookupMongoD);
+
     ChangeStreamOptionsManager::create(service);
 
     if (change_stream_serverless_helpers::canInitializeServices()) {
         ChangeStreamChangeCollectionManager::create(service);
     }
 
-    query_settings::QuerySettingsManager::create(service, {});
+    query_settings::QuerySettingsManager::create(
+        service, {}, query_settings::utils::sanitizeQuerySettingsHints);
 
 #if defined(_WIN32)
     if (ntservice::shouldStartService()) {
@@ -2190,10 +2160,6 @@ int mongod_main(int argc, char* argv[]) {
         // exits directly and so never reaches here either.
     }
 #endif
-
-    LOGV2_OPTIONS(
-        7091600, {LogComponent::kTenantMigration}, "Starting TenantMigrationAccessBlockerRegistry");
-    TenantMigrationAccessBlockerRegistry::get(service).startup();
 
     ExitCode exitCode = initAndListen(service);
     exitCleanly(exitCode);

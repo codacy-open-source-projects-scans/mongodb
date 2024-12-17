@@ -29,15 +29,18 @@
 
 #pragma once
 
-#include "mongo/db/query/stats/ce_histogram.h"
+#include "mongo/db/exec/sbe/values/value.h"
+
+#include "mongo/db/query/cost_based_ranker/estimates.h"
 
 namespace mongo::ce {
 
-using Cardinality = double;
-using Selectivity = double;
+using CardinalityType = cost_based_ranker::CardinalityType;
+using CardinalityEstimate = cost_based_ranker::CardinalityEstimate;
+using EstimationSource = cost_based_ranker::EstimationSource;
 
 struct EstimationResult {
-    Cardinality card;
+    double card;
     double ndv;
 
     EstimationResult operator-(const EstimationResult& other) const {
@@ -52,6 +55,19 @@ struct EstimationResult {
 };
 
 enum class EstimationType { kEqual, kLess, kLessOrEqual, kGreater, kGreaterOrEqual };
+
+/**
+ * Distinguish cardinality estimation algorithms for range queries over array values.
+ * Given an example interval a: [x, y]
+ * - kConjunctArrayCE estimates cardinality for queries that translate the interval into
+ * conjunctions during planning. e.g, [x,y] is translated into
+ * {$and: [ {a: { $lte: y }}, {a: { $gte: x }}]} i.e., (-inf, y] AND [x, +inf)
+ * This approach will estimate the number of arrays that values collectively satisfy the
+ * conjunction i.e., at least on that satisfies (-inf, y] and at least one that satisfies [x, +inf).
+ * - kExactArrayCE estimates the cardinality of arrays that have at least one value that falls in
+ * the given interval.
+ */
+enum class ArrayRangeEstimationAlgo { kConjunctArrayCE, kExactArrayCE };
 
 /**
  * Checks if an interval is in descending direction.

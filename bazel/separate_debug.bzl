@@ -3,6 +3,7 @@ load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 WITH_DEBUG_SUFFIX = "_with_debug"
 CC_SHARED_LIBRARY_SUFFIX = "_shared"
 SHARED_ARCHIVE_SUFFIX = "_shared_archive"
+MAC_DEBUG_FOLDER_EXTENSION = ".dSYM"
 
 def get_inputs_and_outputs(ctx, shared_ext, static_ext, debug_ext):
     """
@@ -35,7 +36,10 @@ def get_inputs_and_outputs(ctx, shared_ext, static_ext, debug_ext):
         if shared_lib:
             basename = shared_lib.basename[:-len(WITH_DEBUG_SUFFIX + shared_ext + CC_SHARED_LIBRARY_SUFFIX)]
             if ctx.attr.enabled:
-                debug_info = ctx.actions.declare_file(basename + shared_ext + debug_ext)
+                if debug_ext == MAC_DEBUG_FOLDER_EXTENSION:
+                    debug_info = ctx.actions.declare_directory(basename + shared_ext + debug_ext)
+                else:
+                    debug_info = ctx.actions.declare_file(basename + shared_ext + debug_ext)
             else:
                 debug_info = None
             output_bin = ctx.actions.declare_file(basename + shared_ext)
@@ -49,7 +53,10 @@ def get_inputs_and_outputs(ctx, shared_ext, static_ext, debug_ext):
 
         basename = program_bin.basename[:-len(WITH_DEBUG_SUFFIX)]
         if ctx.attr.enabled:
-            debug_info = ctx.actions.declare_file(basename + debug_ext)
+            if debug_ext == MAC_DEBUG_FOLDER_EXTENSION:
+                debug_info = ctx.actions.declare_directory(basename + debug_ext)
+            else:
+                debug_info = ctx.actions.declare_file(basename + debug_ext)
         else:
             debug_info = None
         output_bin = ctx.actions.declare_file(basename)
@@ -124,17 +131,42 @@ def create_new_ccinfo_library(ctx, cc_toolchain, shared_lib, static_lib, cc_shar
             linker_input_deps.append(dep[CcInfo].linking_context.linker_inputs)
 
         if shared_lib or static_lib:
+            if shared_lib:
+                so_path = shared_lib.path.replace(ctx.bin_dir.path + "/", "")
+            else:
+                so_path = ""
             direct_lib = cc_common.create_library_to_link(
                 actions = ctx.actions,
                 feature_configuration = feature_configuration,
                 cc_toolchain = cc_toolchain,
                 dynamic_library = shared_lib,
+                dynamic_library_symlink_path = so_path,
                 static_library = static_lib if cc_shared_library == None else None,
+                alwayslink = True,
             )
+
+            # For some reason Bazel isn't deduplicating the user link flags, which leads to them accumulating
+            # with each layer added. Deduplicate them manually.
+            #
+            # This routine works by taking the current library's link args and searching for each of its dependency's link
+            # args present contiguously. If a matching sub list is found, it's removed from the current link line as a duplicate.
+            # This is to avoid removing positional arguments that may appear more than once.
+            #
+            # This solution may break in the case where a base dependency contains only one positional argument,
+            # but this should never happen since we will always inject at least one non positional argument globally.
+            cur_flags = ctx.attr.binary_with_debug[CcInfo].linking_context.linker_inputs.to_list()[0].user_link_flags
+            for dep in ctx.attr.binary_with_debug[CcInfo].linking_context.linker_inputs.to_list()[1:]:
+                for i in range(len(cur_flags)):
+                    dep_flags = dep.user_link_flags
+                    if dep_flags and cur_flags:
+                        if cur_flags[i] == dep_flags[0] and cur_flags[i:i + len(dep_flags)] == dep_flags:
+                            cur_flags = cur_flags[:i] + cur_flags[i + len(dep_flags):]
+                            break
+
             linker_input = cc_common.create_linker_input(
                 owner = ctx.label,
                 libraries = depset(direct = [direct_lib]),
-                user_link_flags = ctx.attr.binary_with_debug[CcInfo].linking_context.linker_inputs.to_list()[0].user_link_flags,
+                user_link_flags = cur_flags,
             )
             linking_context = cc_common.create_linking_context(linker_inputs = depset(direct = [linker_input], transitive = linker_input_deps))
 
@@ -194,6 +226,7 @@ def create_new_cc_shared_library_info(ctx, cc_toolchain, output_shared_lib, orig
             cc_toolchain = cc_toolchain,
             # Replace reference to dynamic library with final name
             dynamic_library = output_shared_lib,
+            dynamic_library_symlink_path = output_shared_lib.path.replace(ctx.bin_dir.path + "/", ""),
             # Omit reference to static library
         )
         linker_input = cc_common.create_linker_input(
@@ -270,12 +303,16 @@ def linux_extraction(ctx, cc_toolchain, inputs):
     # The final program binary depends on the existence of the dependent dynamic library files. With
     # build-without-the-bytes enabled, these aren't downloaded. Manually collect them and add them to the
     # output set.
+    dynamic_deps_runfiles = ctx.runfiles(files = [])
     if ctx.attr.type == "program":
-        outputs.extend(get_transitive_dyn_libs(ctx.attr.deps))
+        dynamic_deps = get_transitive_dyn_libs(ctx.attr.deps)
+        dynamic_deps_runfiles = ctx.attr.binary_with_debug[DefaultInfo].data_runfiles.merge(ctx.runfiles(files = get_transitive_dyn_libs(ctx.attr.deps)))
+        outputs.extend(dynamic_deps)
 
     provided_info = [
         DefaultInfo(
             files = depset(outputs),
+            runfiles = dynamic_deps_runfiles,
             executable = output_bin if ctx.attr.type == "program" else None,
         ),
         create_new_ccinfo_library(ctx, cc_toolchain, output_bin, unstripped_static_bin, ctx.attr.cc_shared_library),
@@ -291,7 +328,7 @@ def linux_extraction(ctx, cc_toolchain, inputs):
 def macos_extraction(ctx, cc_toolchain, inputs):
     outputs = []
     unstripped_static_bin = None
-    input_bin, output_bin, debug_info, static_lib = get_inputs_and_outputs(ctx, ".dylib", ".a", ".dSYM")
+    input_bin, output_bin, debug_info, static_lib = get_inputs_and_outputs(ctx, ".dylib", ".a", MAC_DEBUG_FOLDER_EXTENSION)
     input_file = ctx.attr.binary_with_debug.files.to_list()
 
     if input_bin:
@@ -342,8 +379,11 @@ def macos_extraction(ctx, cc_toolchain, inputs):
     # The final program binary depends on the existence of the dependent dynamic library files. With
     # build-without-the-bytes enabled, these aren't downloaded. Manually collect them and add them to the
     # output set.
+    dynamic_deps_runfiles = ctx.runfiles(files = [])
     if ctx.attr.type == "program":
-        outputs.extend(get_transitive_dyn_libs(ctx.attr.deps))
+        dynamic_deps = get_transitive_dyn_libs(ctx.attr.deps)
+        dynamic_deps_runfiles = ctx.attr.binary_with_debug[DefaultInfo].data_runfiles.merge(ctx.runfiles(files = get_transitive_dyn_libs(ctx.attr.deps)))
+        outputs.extend(dynamic_deps)
 
     provided_info = [
         DefaultInfo(
@@ -417,6 +457,7 @@ def windows_extraction(ctx, cc_toolchain, inputs):
         DefaultInfo(
             files = depset(outputs),
             executable = output if ctx.attr.type == "program" else None,
+            runfiles = ctx.attr.binary_with_debug[DefaultInfo].data_runfiles,
         ),
         create_new_ccinfo_library(ctx, cc_toolchain, output_dynamic_library, output_library, ctx.attr.cc_shared_library),
     ]

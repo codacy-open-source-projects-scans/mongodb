@@ -69,7 +69,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/write_ops/insert.h"
@@ -101,6 +101,9 @@
 
 
 namespace mongo {
+namespace {
+static constexpr auto clonerAppName = "Cloner";
+}  // namespace
 
 using IndexVersion = IndexDescriptor::IndexVersion;
 
@@ -504,12 +507,12 @@ Status DefaultClonerImpl::setupConn(OperationContext* opCtx, const std::string& 
     }
 
     // Set up connection.
-    auto swConn = cs.connect(StringData());
+    auto swConn = cs.connect(clonerAppName);
     if (!swConn.isOK()) {
         return swConn.getStatus();
     }
 
-    _conn = std::make_unique<ScopedDbConnection>(cs);
+    _conn = std::move(swConn.getValue());
 
     if (auth::isInternalAuthSet()) {
         try {

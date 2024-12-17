@@ -45,12 +45,11 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/health_log_gen.h"
 #include "mongo/db/catalog/health_log_interface.h"
-#include "mongo/db/catalog/validate_results.h"
+#include "mongo/db/catalog/validate/validate_options.h"
+#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -78,7 +77,6 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_data.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
@@ -161,15 +159,6 @@ std::size_t computeRecordIdSize(const RecordId& id) {
     return id.isStr() ? id.getStr().size() : 0;
 }
 
-boost::optional<NamespaceString> namespaceForUUID(OperationContext* opCtx,
-                                                  const boost::optional<UUID>& uuid) {
-    if (!uuid)
-        return boost::none;
-
-    // TODO SERVER-73111: Remove the dependency on CollectionCatalog
-    return CollectionCatalog::get(opCtx)->lookupNSSByUUID(opCtx, *uuid);
-}
-
 RecordId getKey(WT_CURSOR* cursor, KeyFormat keyFormat) {
     if (keyFormat == KeyFormat::String) {
         WT_ITEM item;
@@ -196,8 +185,6 @@ void setKey(WT_CURSOR* cursor, const WiredTigerRecordStore::CursorKey* key) {
         cursor->set_key(cursor, *longPtr);
     }
 }
-
-auto& boundRetries = *MetricBuilder<Counter64>("wiredTiger.recordStoreCursorBoundRetries");
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(WTCompactRecordStoreEBUSY);
@@ -207,7 +194,7 @@ MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForReads);
 
 StatusWith<std::string> WiredTigerRecordStore::parseOptionsField(const BSONObj options) {
     StringBuilder ss;
-    BSONForEach(elem, options) {
+    for (auto&& elem : options) {
         if (elem.fieldNameStringData() == WiredTigerUtil::kConfigStringField) {
             Status status = WiredTigerUtil::checkTableCreationOptions(elem);
             if (!status.isOK()) {
@@ -347,12 +334,13 @@ private:
 // static
 StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     const std::string& engineName,
-    const NamespaceString& nss,
+    StringData tableName,
     StringData ident,
     const CollectionOptions& options,
     StringData extraStrings,
     KeyFormat keyFormat,
-    bool loggingEnabled) {
+    bool loggingEnabled,
+    bool isOplog) {
 
     // Separate out a prefix and suffix in the default string. User configuration will
     // override values in the prefix, but not values in the suffix.
@@ -382,7 +370,7 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
     ss << ",";
 
     ss << WiredTigerCustomizationHooks::get(getGlobalServiceContext())
-              ->getTableCreateConfig(NamespaceStringUtil::serializeForCatalog(nss));
+              ->getTableCreateConfig(tableName);
 
     ss << extraStrings << ",";
 
@@ -393,7 +381,7 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
 
     ss << customOptions.getValue();
 
-    if (nss.isOplog()) {
+    if (isOplog) {
         // force file for oplog
         ss << "type=file,";
         // Tune down to 10m.  See SERVER-16247
@@ -421,7 +409,7 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
 
     // Record store metadata
     ss << ",app_metadata=(formatVersion=" << kCurrentRecordStoreVersion;
-    if (nss.isOplog()) {
+    if (isOplog) {
         ss << ",oplogKeyExtractionVersion=1";
     }
     ss << ")";
@@ -438,21 +426,19 @@ StatusWith<std::string> WiredTigerRecordStore::generateCreateString(
 WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
                                              WiredTigerRecoveryUnit& ru,
                                              Params params)
-    : RecordStore(params.uuid, params.ident, params.isCapped),
+    : RecordStoreBase(params.uuid, params.ident),
       _uri(WiredTigerKVEngine::kTableUriPrefix + params.ident),
       _tableId(WiredTigerSession::genTableId()),
       _engineName(params.engineName),
-      _isCapped(params.isCapped),
       _keyFormat(params.keyFormat),
       _overwrite(params.overwrite),
       _isEphemeral(params.isEphemeral),
       _isLogged(params.isLogged),
-      _isChangeCollection(params.nss.isChangeCollection()),
+      _isChangeCollection(params.isChangeCollection),
       _forceUpdateWithFullDocument(params.forceUpdateWithFullDocument),
       _sizeStorer(params.sizeStorer),
       _tracksSizeAdjustments(params.tracksSizeAdjustments),
-      _kvEngine(kvEngine),
-      _oplog(params.nss.isOplog() ? std::make_unique<WiredTigerOplogData>(params) : nullptr) {
+      _kvEngine(kvEngine) {
     invariant(getIdent().size() > 0);
 
     if (kDebugBuild && _keyFormat == KeyFormat::String) {
@@ -473,7 +459,7 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
         LOGV2_ERROR(7887900,
                     "Metadata format version check failed.",
                     "uri"_attr = _uri,
-                    "namespace"_attr = params.nss.toStringForErrorMsg(),
+                    "uuid"_attr = uuid(),
                     "version"_attr = versionStatus.reason());
         if (versionStatus.code() == ErrorCodes::FailedToParse) {
             uasserted(28548, versionStatus.reason());
@@ -483,15 +469,6 @@ WiredTigerRecordStore::WiredTigerRecordStore(WiredTigerKVEngine* kvEngine,
     }
 
     uassertStatusOK(WiredTigerUtil::setTableLogging(ru, _uri, _isLogged));
-
-    if (_oplog) {
-        invariant(_keyFormat == KeyFormat::Long);
-        checkOplogFormatVersion(ru, _uri);
-        // The oplog always needs to be marked for size adjustment since it is journaled and also
-        // may change during replication recovery (if truncated).
-        sizeRecoveryState(getGlobalServiceContext())
-            .markCollectionAsAlwaysNeedsSizeAdjustment(getIdent());
-    }
 
     // If no SizeStorer is in use, start counting at zero. In practice, this will only ever be the
     // case for temporary RecordStores (those not associated with any collection) and in unit
@@ -511,20 +488,6 @@ WiredTigerRecordStore::~WiredTigerRecordStore() {
                     "~WiredTigerRecordStore for temporary ident: {getIdent}",
                     "getIdent"_attr = getIdent());
     }
-
-    if (_oplog) {
-        if (_oplog->getTruncateMarkers()) {
-            _oplog->getTruncateMarkers()->kill();
-        }
-        // Delete oplog visibility manager on KV engine.
-        _kvEngine->haltOplogManager(this, /*shuttingDown=*/false);
-    }
-}
-
-NamespaceString WiredTigerRecordStore::ns(OperationContext* opCtx) const {
-    auto nss = namespaceForUUID(opCtx, _uuid);
-
-    return nss ? *nss : NamespaceString::kEmpty;
 }
 
 void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
@@ -544,10 +507,8 @@ void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
         LOGV2_FOR_RECOVERY(23983,
                            2,
                            "Record store was empty; setting count metadata to zero but marking "
-                           "record store as needing size adjustment during recovery. ns: "
-                           "{isTemp_temp_ns}, ident: {ident}",
-                           "isTemp_temp_ns"_attr =
-                               (isTemp() ? "(temp)" : toStringForLogging(ns(opCtx))),
+                           "record store as needing size adjustment during recovery",
+                           "uuid"_attr = uuid(),
                            "ident"_attr = getIdent());
         sizeRecoveryState(getGlobalServiceContext())
             .markCollectionAsAlwaysNeedsSizeAdjustment(getIdent());
@@ -559,28 +520,6 @@ void WiredTigerRecordStore::checkSize(OperationContext* opCtx) {
         _sizeStorer->store(_uri, _sizeInfo);
 }
 
-void WiredTigerRecordStore::postConstructorInit(OperationContext* opCtx,
-                                                const NamespaceString& ns) {
-    if (_oplog) {
-        // If the server was started in read-only mode or if we are restoring the node, skip
-        // calculating the oplog truncate markers. The OplogCapMaintainerThread does not get started
-        // in this instance.
-        if (opCtx->getServiceContext()->userWritesAllowed() && !storageGlobalParams.repair &&
-            !storageGlobalParams.restore && !storageGlobalParams.magicRestore) {
-            invariant(_isCapped);
-            _oplog->setTruncateMarkers(
-                WiredTigerOplogTruncateMarkers::createOplogTruncateMarkers(opCtx, this, ns));
-        }
-        invariant(_kvEngine);
-        _kvEngine->startOplogManager(opCtx, this);
-    }
-}
-
-void WiredTigerRecordStore::getOplogTruncateStats(BSONObjBuilder& builder) const {
-    invariant(_oplog);
-    _oplog->getTruncateStats(builder);
-}
-
 const char* WiredTigerRecordStore::name() const {
     return _engineName.c_str();
 }
@@ -589,50 +528,48 @@ KeyFormat WiredTigerRecordStore::keyFormat() const {
     return _keyFormat;
 }
 
-long long WiredTigerRecordStore::dataSize(OperationContext* opCtx) const {
+long long WiredTigerRecordStore::dataSize() const {
     auto dataSize = _sizeInfo->dataSize.load();
     return dataSize > 0 ? dataSize : 0;
 }
 
-long long WiredTigerRecordStore::numRecords(OperationContext* opCtx) const {
+long long WiredTigerRecordStore::numRecords() const {
     auto numRecords = _sizeInfo->numRecords.load();
     return numRecords > 0 ? numRecords : 0;
 }
 
-int64_t WiredTigerRecordStore::storageSize(OperationContext* opCtx,
+int64_t WiredTigerRecordStore::storageSize(RecoveryUnit& ru,
                                            BSONObjBuilder* extraInfo,
                                            int infoLevel) const {
     if (_isEphemeral) {
-        return dataSize(opCtx);
+        return dataSize();
     }
-    WiredTigerSession* session =
-        WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSessionNoTxn();
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
     auto result = WiredTigerUtil::getStatisticsValue(session->getSession(),
                                                      "statistics:" + getURI(),
                                                      "statistics=(size)",
                                                      WT_STAT_DSRC_BLOCK_SIZE);
     uassertStatusOK(result.getStatus());
 
-    int64_t size = result.getValue();
-
-    if (size == 0 && _isCapped) {
-        // Many things assume an empty capped collection still takes up space.
-        return 1;
-    }
-    return size;
+    return result.getValue();
 }
 
-int64_t WiredTigerRecordStore::freeStorageSize(OperationContext* opCtx) const {
-    WiredTigerSession* session =
-        WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSessionNoTxn();
+int64_t WiredTigerRecordStore::Capped::storageSize(RecoveryUnit& ru,
+                                                   BSONObjBuilder* extraInfo,
+                                                   int infoLevel) const {
+    // Many things assume an empty capped collection still takes up space.
+    return std::max(WiredTigerRecordStore::storageSize(ru, extraInfo, infoLevel), int64_t{1});
+}
+
+int64_t WiredTigerRecordStore::freeStorageSize(RecoveryUnit& ru) const {
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
     return WiredTigerUtil::getIdentReuseSize(session->getSession(), getURI());
 }
 
 void WiredTigerRecordStore::_updateLargestRecordId(OperationContext* opCtx, long long largestSeen) {
     invariant(_keyFormat == KeyFormat::Long);
-    invariant(!_oplog);
 
-    // Make sure to inialize first; otherwise the compareAndSwap can succeed trivially.
+    // Make sure to initialize first; otherwise the compareAndSwap can succeed trivially.
     _initNextIdIfNeeded(opCtx);
 
     // Since the 'largestSeen' is the largest we've seen, we need to set the _nextIdNum to one
@@ -645,14 +582,7 @@ void WiredTigerRecordStore::_updateLargestRecordId(OperationContext* opCtx, long
     }
 }
 
-// Retrieve the value from a positioned cursor.
-RecordData WiredTigerRecordStore::_getData(const WiredTigerCursor& cursor) const {
-    WT_ITEM value;
-    invariantWTOK(cursor->get_value(cursor.get(), &value), cursor->session);
-    return RecordData(static_cast<const char*>(value.data), value.size).getOwned();
-}
-
-void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const RecordId& id) {
+void WiredTigerRecordStore::_deleteRecord(OperationContext* opCtx, const RecordId& id) {
     invariant(shard_role_details::getRecoveryUnit(opCtx)->inUnitOfWork());
 
     // SERVER-48453: Initialize the next record id counter before deleting. This ensures we won't
@@ -661,20 +591,17 @@ void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const Record
         _initNextIdIfNeeded(opCtx);
     }
 
-    WiredTigerCursor cursor(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _tableId,
-        true);
+    auto& wtRu = WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx));
+
+    WiredTigerCursor cursor(wtRu, _uri, _tableId, true);
     cursor.assertInActiveTxn();
     WT_CURSOR* c = cursor.get();
     CursorKey key = makeCursorKey(id, _keyFormat);
     setKey(c, &key);
-    int ret = wiredTigerPrepareConflictRetry(
-        opCtx, *shard_role_details::getRecoveryUnit(opCtx), [&] { return c->search(c); });
+    int ret = wiredTigerPrepareConflictRetry(opCtx, wtRu, [&] { return c->search(c); });
     if (ret == WT_NOTFOUND) {
         HealthLogEntry entry;
-        entry.setNss(namespaceForUUID(opCtx, _uuid));
+        entry.setCollectionUUID(uuid());
         entry.setTimestamp(Date_t::now());
         entry.setSeverity(SeverityEnum::Error);
         entry.setScope(ScopeEnum::Collection);
@@ -692,13 +619,13 @@ void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const Record
         if (TestingProctor::instance().isEnabled()) {
             LOGV2_FATAL(9099700,
                         "Record to be deleted not found",
-                        "nss"_attr = namespaceForUUID(opCtx, _uuid),
+                        "uuid"_attr = uuid(),
                         "RecordId"_attr = id);
         } else {
             // Return early without crash if in production.
             LOGV2_ERROR(9099701,
                         "Record to be deleted not found",
-                        "nss"_attr = namespaceForUUID(opCtx, _uuid),
+                        "uuid"_attr = uuid(),
                         "RecordId"_attr = id);
             printStackTrace();
             return;
@@ -720,208 +647,51 @@ void WiredTigerRecordStore::doDeleteRecord(OperationContext* opCtx, const Record
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
     metricsCollector.incrementOneDocWritten(_uri, old_length + keyLength);
 
-    _changeNumRecordsAndDataSize(opCtx, -1, -old_length);
+    _changeNumRecordsAndDataSize(wtRu, -1, -old_length);
 }
 
 Timestamp WiredTigerRecordStore::getPinnedOplog() const {
     return _kvEngine->getPinnedOplog();
 }
 
-int64_t WiredTigerRecordStore::getOplogMaxSize() const {
-    // TODO make TruncateMarkers depend on OplogData (not RecrodStore), then move this method.
-    return _oplog->getMaxSize();
-}
-
-std::shared_ptr<CollectionTruncateMarkers> WiredTigerRecordStore::getCollectionTruncateMarkers() {
-    return _oplog->getTruncateMarkers();
-}
-
-void WiredTigerRecordStore::reclaimOplog(OperationContext* opCtx) {
-    auto mayTruncateUpTo = _kvEngine->getPinnedOplog();
-    invariant(_keyFormat == KeyFormat::Long);
-    invariant(_oplog);
-
-    Timer timer;
-    for (auto getNextMarker = true; getNextMarker;) {
-        auto truncateMarker = _oplog->getTruncateMarkers()->peekOldestMarkerIfNeeded(opCtx);
-        if (!truncateMarker) {
-            break;
-        }
-        invariant(truncateMarker->lastRecord.isValid());
-
-        LOGV2_DEBUG(7420100,
-                    1,
-                    "Truncating the oplog",
-                    "firstRecord"_attr = _oplog->getTruncateMarkers()->firstRecord,
-                    "lastRecord"_attr = truncateMarker->lastRecord,
-                    "numRecords"_attr = truncateMarker->records,
-                    "numBytes"_attr = truncateMarker->bytes);
-
-        getNextMarker =
-            writeConflictRetry(opCtx, "reclaimOplog", NamespaceString::kRsOplogNamespace, [&] {
-                WriteUnitOfWork wuow(opCtx);
-
-                auto seekableCursor =
-                    std::make_unique<WiredTigerRecordStoreCursor>(opCtx, *this, true);
-                auto firstRecordSeekable = seekableCursor->next();
-                if (!firstRecordSeekable) {
-                    LOGV2_WARNING(8841100, "The oplog is empty, there is nothing to truncate");
-                    return false;
-                }
-                auto firstRecordId = firstRecordSeekable.get().id;
-
-                // The first record in the oplog should be within the truncate range.
-                if (firstRecordId < _oplog->getTruncateMarkers()->firstRecord ||
-                    firstRecordId > truncateMarker->lastRecord) {
-                    LOGV2_WARNING(7420101,
-                                  "First oplog record is not in truncation range",
-                                  "firstRecord"_attr = firstRecordId,
-                                  "truncateRangeFirstRecord"_attr =
-                                      _oplog->getTruncateMarkers()->firstRecord,
-                                  "truncateRangeLastRecord"_attr = truncateMarker->lastRecord);
-                }
-
-                // It is necessary that there exists a record after the truncate marker but before
-                // or including the mayTruncateUpTo point.  Since the mayTruncateUpTo point may fall
-                // between records, the truncate marker check is not sufficient.
-                auto nextRecordAfterTruncateMarker = seekableCursor->seek(
-                    truncateMarker->lastRecord, SeekableRecordCursor::BoundInclusion::kExclude);
-                if (!nextRecordAfterTruncateMarker) {
-                    LOGV2_DEBUG(5140900, 0, "Will not truncate entire oplog");
-                    return false;
-                }
-
-                if (static_cast<std::uint64_t>(nextRecordAfterTruncateMarker->id.getLong()) >
-                    mayTruncateUpTo.asULL()) {
-                    LOGV2_DEBUG(5140901,
-                                0,
-                                "Cannot truncate as there are no oplog entries after the truncate "
-                                "marker but "
-                                "before the truncate-up-to point",
-                                "nextRecord"_attr =
-                                    Timestamp(nextRecordAfterTruncateMarker->id.getLong()),
-                                "mayTruncateUpTo"_attr = mayTruncateUpTo);
-                    return false;
-                }
-
-                auto status = WiredTigerRecordStore::doRangeTruncate(opCtx,
-                                                                     RecordId(),
-                                                                     truncateMarker->lastRecord,
-                                                                     -truncateMarker->bytes,
-                                                                     -truncateMarker->records);
-
-                if (!status.isOK()) {
-                    LOGV2_WARNING(8841101,
-                                  "Did not successfully perform range truncation ",
-                                  "truncateMarkerLastRecord"_attr =
-                                      truncateMarker->lastRecord.getLong(),
-                                  "error"_attr = status);
-                    return false;
-                }
-                wuow.commit();
-
-                // Remove the truncate marker after a successful truncation.
-                _oplog->getTruncateMarkers()->popOldestMarker();
-
-                // Stash the truncate point for next time to cleanly skip over tombstones, etc.
-                _oplog->getTruncateMarkers()->firstRecord = truncateMarker->lastRecord;
-                Timestamp firstRecordTimestamp{
-                    static_cast<uint64_t>(truncateMarker->lastRecord.getLong())};
-                _oplog->getFirstRecordTimestamp().store(firstRecordTimestamp);
-                return true;
-            });
-    }
-
-    auto elapsedMicros = timer.micros();
-    auto elapsedMillis = elapsedMicros / 1000;
-    _oplog->trackTruncateCompletion(elapsedMicros);
-    LOGV2(22402,
-          "WiredTiger record store oplog truncation finished",
-          "pinnedOplogTimestamp"_attr = mayTruncateUpTo,
-          "numRecords"_attr = _sizeInfo->numRecords.load(),
-          "dataSize"_attr = _sizeInfo->dataSize.load(),
-          "duration"_attr = Milliseconds(elapsedMillis));
-}
-
-Status WiredTigerRecordStore::doInsertRecords(OperationContext* opCtx,
-                                              std::vector<Record>* records,
-                                              const std::vector<Timestamp>& timestamps) {
-    return _insertRecords(opCtx, records->data(), timestamps.data(), records->size());
-}
-
 Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
-                                             Record* records,
-                                             const Timestamp* timestamps,
-                                             size_t nRecords) {
+                                             std::vector<Record>* records,
+                                             const std::vector<Timestamp>& timestamps) {
     invariant(shard_role_details::getRecoveryUnit(opCtx)->inUnitOfWork());
 
-    WiredTigerCursor curwrap(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _tableId,
-        _overwrite);
+    auto& wtRu = WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx));
+
+    WiredTigerCursor curwrap(wtRu, _uri, _tableId, _overwrite);
     curwrap.assertInActiveTxn();
     WT_CURSOR* c = curwrap.get();
     invariant(c);
 
+    auto nRecords = records->size();
     invariant(nRecords != 0);
 
     if (_keyFormat == KeyFormat::Long) {
-        bool areRecordIdsProvided = !records->id.isNull() && !_oplog;
+        bool areRecordIdsProvided = !records->front().id.isNull();
         RecordId highestRecordIdProvided;
 
-        long long nextId = (_oplog || areRecordIdsProvided) ? 0 : _reserveIdBlock(opCtx, nRecords);
+        long long nextId = areRecordIdsProvided ? 0 : _reserveIdBlock(opCtx, nRecords);
 
         // Non-clustered record stores will extract the RecordId key for the oplog and generate
         // unique int64_t RecordIds if RecordIds are not set.
         for (size_t i = 0; i < nRecords; i++) {
-            auto& record = records[i];
-            if (_oplog) {
-                auto swRecordId = record_id_helpers::keyForOptime(timestamps[i], KeyFormat::Long);
-                if (!swRecordId.isOK())
-                    return swRecordId.getStatus();
-
-                // In the normal write paths, a timestamp is always set. It is only in unusual cases
-                // like inserting the oplog seed document where the caller does not provide a
-                // timestamp.
-                if (MONGO_unlikely(timestamps[i].isNull() || kDebugBuild)) {
-                    auto swRecordIdFromBSON =
-                        record_id_helpers::extractKeyOptime(record.data.data(), record.data.size());
-                    if (!swRecordIdFromBSON.isOK())
-                        return swRecordIdFromBSON.getStatus();
-
-                    // Double-check that the 'ts' field in the oplog entry matches the assigned
-                    // timestamp, if it was provided.
-                    dassert(timestamps[i].isNull() ||
-                                swRecordIdFromBSON.getValue() == swRecordId.getValue(),
-                            fmt::format(
-                                "ts field in oplog entry {} does not equal assigned timestamp {}",
-                                swRecordIdFromBSON.getValue().toString(),
-                                swRecordId.getValue().toString()));
-
-                    record.id = std::move(swRecordIdFromBSON.getValue());
-                } else {
-                    record.id = std::move(swRecordId.getValue());
-                }
-                // The records being inserted into the oplog must have increasing
-                // recordId. Therefore the last record has the highest recordId.
-                dassert(i == 0 || records[i].id > records[i - 1].id);
+            auto& record = (*records)[i];
+            // Some RecordStores, like TemporaryRecordStores, may want to set their own RecordIds.
+            if (!areRecordIdsProvided) {
+                // Since a recordId wasn't provided for the first record, the recordId shouldn't
+                // have been provided for any record.
+                invariant(record.id.isNull());
+                record.id = RecordId(nextId++);
+                invariant(record.id.isValid());
             } else {
-                // Some RecordStores, like TemporaryRecordStores, may want to set their own
-                // RecordIds.
-                if (!areRecordIdsProvided) {
-                    // Since a recordId wasn't provided for the first record, the recordId
-                    // shouldn't have been provided for any record.
-                    invariant(record.id.isNull());
-                    record.id = RecordId(nextId++);
-                    invariant(record.id.isValid());
-                } else {
-                    // Since a recordId was provided for the first record, the recordId
-                    // should have been provided for all records.
-                    invariant(!record.id.isNull());
-                    if (record.id > highestRecordIdProvided) {
-                        highestRecordIdProvided = record.id;
-                    }
+                // Since a recordId was provided for the first record, the recordId should have been
+                // provided for all records.
+                invariant(!record.id.isNull());
+                if (record.id > highestRecordIdProvided) {
+                    highestRecordIdProvided = record.id;
                 }
             }
         }
@@ -939,35 +709,20 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
 
     int64_t totalLength = 0;
     for (size_t i = 0; i < nRecords; i++) {
-        auto& record = records[i];
+        auto& record = (*records)[i];
         totalLength += record.data.size();
         invariant(!record.id.isNull());
         invariant(!record_id_helpers::isReserved(record.id));
         Timestamp ts = timestamps[i];
-        if (_oplog) {
-            // Setting this transaction to be unordered will trigger a journal flush. Because these
-            // are direct writes into the oplog, the machinery to trigger a journal flush is
-            // bypassed. A followup oplog read will require a fres value to make progress.
-            shard_role_details::getRecoveryUnit(opCtx)->setOrderedCommit(false);
-            auto oplogKeyTs = Timestamp(record.id.getLong());
-            if (!ts.isNull()) {
-                invariant(oplogKeyTs == ts);
-            }
-            if (!shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull()) {
-                invariant(oplogKeyTs ==
-                          shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp());
-            }
-        }
         if (!ts.isNull()) {
             LOGV2_DEBUG(22403, 4, "inserting record with timestamp {ts}", "ts"_attr = ts);
-            fassert(39001, shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(ts));
+            fassert(39001, wtRu.setTimestamp(ts));
         }
         CursorKey key = makeCursorKey(record.id, _keyFormat);
         setKey(c, &key);
         WiredTigerItem value(record.data.data(), record.data.size());
         c->set_value(c, value.Get());
-        int ret = WT_OP_CHECK(wiredTigerCursorInsert(
-            *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), c));
+        int ret = WT_OP_CHECK(wiredTigerCursorInsert(wtRu, c));
 
         if (ret == WT_DUPLICATE_KEY) {
             invariant(!_overwrite);
@@ -993,148 +748,38 @@ Status WiredTigerRecordStore::_insertRecords(OperationContext* opCtx,
 
         // Increment metrics for each insert separately, as opposed to outside of the loop. The API
         // requires that each record be accounted for separately.
-        if (!_oplog && !_isChangeCollection) {
+        if (!_isChangeCollection) {
             auto keyLength = computeRecordIdSize(record.id);
             metricsCollector.incrementOneDocWritten(_uri, value.size + keyLength);
         }
     }
-    _changeNumRecordsAndDataSize(opCtx, nRecords, totalLength);
-
-    if (_oplog && _oplog->getTruncateMarkers()) {
-        // records[nRecords - 1] is the record in the oplog with the highest recordId.
-        auto wall = [&] {
-            BSONObj obj = records[nRecords - 1].data.toBson();
-            BSONElement ele = obj[repl::DurableOplogEntry::kWallClockTimeFieldName];
-            if (!ele) {
-                // This shouldn't happen in normal cases, but this is needed because some tests do
-                // not add wall clock times. Note that, with this addition, it's possible that the
-                // oplog may grow larger than expected if --oplogMinRetentionHours is set.
-                return Date_t::now();
-            } else {
-                return ele.Date();
-            }
-        }();
-        _oplog->getTruncateMarkers()->updateCurrentMarkerAfterInsertOnCommit(
-            opCtx, totalLength, records[nRecords - 1].id, wall, nRecords);
-    }
+    _changeNumRecordsAndDataSize(wtRu, nRecords, totalLength);
 
     return Status::OK();
 }
 
-bool WiredTigerRecordStore::isOpHidden_forTest(const RecordId& id) const {
-    invariant(_oplog);
-    invariant(id.getLong() > 0);
-    invariant(_kvEngine->getOplogManager()->isRunning());
-    return _kvEngine->getOplogManager()->getOplogReadTimestamp() <
-        static_cast<std::uint64_t>(id.getLong());
-}
+Status WiredTigerRecordStore::_updateRecord(OperationContext* opCtx,
+                                            const RecordId& id,
+                                            const char* data,
+                                            int len) {
+    auto& wtRu = WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx));
 
-WiredTigerOplogTruncateMarkers* WiredTigerRecordStore::oplogTruncateMarkers() {
-    return _oplog ? _oplog->getTruncateMarkers().get() : nullptr;
-};
+    invariant(wtRu.inUnitOfWork());
 
-StatusWith<Timestamp> WiredTigerRecordStore::getLatestOplogTimestamp(
-    OperationContext* opCtx) const {
-    invariant(_oplog);
-    invariant(_keyFormat == KeyFormat::Long);
-
-    // Using this function inside a UOW is not supported because the main reason to call it is to
-    // synchronize to the last op before waiting for write concern, so it makes little sense to do
-    // so in a UOW. This also ensures we do not return uncommited entries.
-    invariant(!shard_role_details::getRecoveryUnit(opCtx)->inUnitOfWork());
-
-    auto wtRu = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx));
-    bool ruWasActive = wtRu->isActive();
-
-    // getSession will open a txn if there was no txn active.
-    auto session = wtRu->getSession();
-
-    ON_BLOCK_EXIT([&] {
-        if (!ruWasActive) {
-            // In case the RU was inactive, leave it in that state.
-            wtRu->abandonSnapshot();
-        }
-    });
-
-    WT_CURSOR* cursor = writeConflictRetry(
-        opCtx, "getLatestOplogTimestamp", NamespaceString::kRsOplogNamespace, [&] {
-            auto cachedCursor = session->getCachedCursor(_tableId, "");
-            return cachedCursor ? cachedCursor : session->getNewCursor(_uri);
-        });
-    ON_BLOCK_EXIT([&] { session->releaseCursor(_tableId, cursor, ""); });
-    int ret = cursor->prev(cursor);
-    if (ret == WT_NOTFOUND) {
-        return Status(ErrorCodes::CollectionIsEmpty, "oplog is empty");
-    }
-    invariantWTOK(ret, cursor->session);
-
-    RecordId recordId = getKey(cursor, _keyFormat);
-
-    return {Timestamp(static_cast<unsigned long long>(recordId.getLong()))};
-}
-
-StatusWith<Timestamp> WiredTigerRecordStore::getEarliestOplogTimestamp(OperationContext* opCtx) {
-    invariant(_oplog);
-    invariant(_keyFormat == KeyFormat::Long);
-
-    // Using relaxed loads is fine here. The returned timestamp can be from a deleted oplog entry by
-    // the time we return from the method. Additionally we perform initialisation that uses strong
-    // memory ordering so initialisation will only work if we've actually never initialised the
-    // timestamp.
-    auto firstRecordTimestamp = _oplog->getFirstRecordTimestamp().loadRelaxed();
-    if (firstRecordTimestamp == Timestamp()) {
-        WiredTigerSessionCache* cache =
-            WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))
-                ->getSessionCache();
-        auto sessRaii = cache->getSession();
-        WT_CURSOR* cursor = writeConflictRetry(
-            opCtx, "getEarliestOplogTimestamp", NamespaceString::kRsOplogNamespace, [&] {
-                auto cachedCursor = sessRaii->getCachedCursor(_tableId, "");
-                return cachedCursor ? cachedCursor : sessRaii->getNewCursor(_uri);
-            });
-        ON_BLOCK_EXIT([&] { sessRaii->releaseCursor(_tableId, cursor, ""); });
-        auto ret = cursor->next(cursor);
-        if (ret == WT_NOTFOUND) {
-            return Status(ErrorCodes::CollectionIsEmpty, "oplog is empty");
-        }
-        invariantWTOK(ret, cursor->session);
-
-        Timestamp ts{static_cast<uint64_t>(getKey(cursor, KeyFormat::Long).getLong())};
-        if (_oplog->getFirstRecordTimestamp().compareAndSwap(&firstRecordTimestamp, ts)) {
-            firstRecordTimestamp = ts;
-        }
-    }
-
-    return firstRecordTimestamp;
-}
-
-Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
-                                             const RecordId& id,
-                                             const char* data,
-                                             int len) {
-    invariant(shard_role_details::getRecoveryUnit(opCtx)->inUnitOfWork());
-
-    WiredTigerCursor curwrap(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _tableId,
-        true);
+    WiredTigerCursor curwrap(wtRu, _uri, _tableId, true);
     curwrap.assertInActiveTxn();
     WT_CURSOR* c = curwrap.get();
     invariant(c);
-    CursorKey key = makeCursorKey(id, _keyFormat);
+    auto key = makeCursorKey(id, _keyFormat);
     setKey(c, &key);
-    int ret = wiredTigerPrepareConflictRetry(
-        opCtx, *shard_role_details::getRecoveryUnit(opCtx), [&] { return c->search(c); });
+    int ret = wiredTigerPrepareConflictRetry(opCtx, wtRu, [&] { return c->search(c); });
 
-    invariantWTOK(ret,
-                  c->session,
-                  str::stream() << "Namespace: " << ns(opCtx).toStringForErrorMsg()
-                                << "; Key: " << getKey(c, _keyFormat) << "; Read Timestamp: "
-                                << shard_role_details::getRecoveryUnit(opCtx)
-                                       ->getPointInTimeReadTimestamp()
-                                       .value_or(Timestamp{})
-                                       .toString());
+    invariantWTOK(
+        ret,
+        c->session,
+        str::stream() << "UUID: " << (uuid() ? uuid()->toString() : std::string{})
+                      << "; Key: " << getKey(c, _keyFormat) << "; Read Timestamp: "
+                      << wtRu.getPointInTimeReadTimestamp().value_or(Timestamp{}).toString());
 
     WT_ITEM old_value;
     ret = c->get_value(c, &old_value);
@@ -1142,8 +787,9 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
 
     int64_t old_length = old_value.size;
 
-    if (_oplog && _oplog->getTruncateMarkers() && len != old_length) {
-        return {ErrorCodes::IllegalOperation, "Cannot change the size of a document in the oplog"};
+    auto canChangeSize = _checkUpdateSize(old_length, len);
+    if (!canChangeSize.isOK()) {
+        return canChangeSize;
     }
 
     WiredTigerItem value(data, len);
@@ -1166,14 +812,9 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
         if ((ret = wiredtiger_calc_modify(
                  c->session, &old_value, value.Get(), kMaxDiffBytes, entries.data(), &nentries)) ==
             0) {
-            invariantWTOK(WT_OP_CHECK(nentries == 0
-                                          ? c->reserve(c)
-                                          : wiredTigerCursorModify(
-                                                *WiredTigerRecoveryUnit::get(
-                                                    shard_role_details::getRecoveryUnit(opCtx)),
-                                                c,
-                                                entries.data(),
-                                                nentries)),
+            invariantWTOK(WT_OP_CHECK(nentries == 0 ? c->reserve(c)
+                                                    : wiredTigerCursorModify(
+                                                          wtRu, c, entries.data(), nentries)),
                           c->session);
 
             WT_ITEM new_value;
@@ -1188,8 +829,7 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
 
     if (!skip_update) {
         c->set_value(c, value.Get());
-        ret = WT_OP_CHECK(wiredTigerCursorInsert(
-            *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), c));
+        ret = WT_OP_CHECK(wiredTigerCursorInsert(wtRu, c));
     }
     invariantWTOK(ret, c->session);
 
@@ -1199,20 +839,29 @@ Status WiredTigerRecordStore::doUpdateRecord(OperationContext* opCtx,
     // just attribute them as 1-byte modifications for simplicity.
     auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
     metricsCollector.incrementOneDocWritten(_uri, std::max((int64_t)1, std::abs(sizeDiff)));
-    _changeNumRecordsAndDataSize(opCtx, 0, sizeDiff);
+    _changeNumRecordsAndDataSize(wtRu, 0, sizeDiff);
     return Status::OK();
+}
+
+Status WiredTigerRecordStore::_checkUpdateSize(int64_t oldSize, int64_t newSize) {
+    return Status::OK();
+}
+
+Status WiredTigerRecordStore::Oplog::_checkUpdateSize(int64_t oldSize, int64_t newSize) {
+    return _oplog->getTruncateMarkers() && oldSize != newSize
+        ? Status{ErrorCodes::IllegalOperation, "Cannot change the size of a document in the oplog"}
+        : Status::OK();
 }
 
 bool WiredTigerRecordStore::updateWithDamagesSupported() const {
     return true;
 }
 
-StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(OperationContext* opCtx,
-                                                                  const RecordId& id,
-                                                                  const RecordData& oldRec,
-                                                                  const char* damageSource,
-                                                                  const DamageVector& damages) {
-
+StatusWith<RecordData> WiredTigerRecordStore::_updateWithDamages(OperationContext* opCtx,
+                                                                 const RecordId& id,
+                                                                 const RecordData& oldRec,
+                                                                 const char* damageSource,
+                                                                 const DamageVector& damages) {
     const int nentries = damages.size();
     DamageVector::const_iterator where = damages.begin();
     const DamageVector::const_iterator end = damages.cend();
@@ -1224,11 +873,8 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(OperationConte
         entries[i].size = where->targetSize;
     }
 
-    WiredTigerCursor curwrap(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _tableId,
-        true);
+    auto& wtRu = WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx));
+    WiredTigerCursor curwrap(wtRu, _uri, _tableId, true);
     curwrap.assertInActiveTxn();
     WT_CURSOR* c = curwrap.get();
     invariant(c);
@@ -1239,11 +885,7 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(OperationConte
     if (nentries == 0)
         invariantWTOK(WT_OP_CHECK(c->search(c)), c->session);
     else
-        invariantWTOK(WT_OP_CHECK(wiredTigerCursorModify(
-                          *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-                          c,
-                          entries.data(),
-                          nentries)),
+        invariantWTOK(WT_OP_CHECK(wiredTigerCursorModify(wtRu, c, entries.data(), nentries)),
                       c->session);
 
 
@@ -1256,13 +898,12 @@ StatusWith<RecordData> WiredTigerRecordStore::doUpdateWithDamages(OperationConte
     // For updates that don't modify the document size, they should count as at least one unit, so
     // just attribute them as 1-byte modifications for simplicity.
     metricsCollector.incrementOneDocWritten(_uri, std::max((int64_t)1, std::abs(sizeDiff)));
-    _changeNumRecordsAndDataSize(opCtx, 0, sizeDiff);
+    _changeNumRecordsAndDataSize(wtRu, 0, sizeDiff);
 
     return RecordData(static_cast<const char*>(value.data), value.size).getOwned();
 }
 
-void WiredTigerRecordStore::printRecordMetadata(OperationContext* opCtx,
-                                                const RecordId& recordId,
+void WiredTigerRecordStore::printRecordMetadata(const RecordId& recordId,
                                                 std::set<Timestamp>* recordTimestamps) const {
     // Printing the record metadata requires a new session. We cannot open other cursors when there
     // are open history store cursors in the session.
@@ -1346,48 +987,34 @@ std::unique_ptr<RecordCursor> WiredTigerRecordStore::getRandomCursor(
     return std::make_unique<RandomCursor>(opCtx, *this, "");
 }
 
-Status WiredTigerRecordStore::doTruncate(OperationContext* opCtx) {
-    WiredTigerCursor startWrap(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _tableId,
-        true);
+Status WiredTigerRecordStore::_truncate(OperationContext* opCtx) {
+    auto& wtRu = WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx));
+    WiredTigerCursor startWrap(wtRu, _uri, _tableId, true);
     WT_CURSOR* start = startWrap.get();
-    int ret = wiredTigerPrepareConflictRetry(
-        opCtx, *shard_role_details::getRecoveryUnit(opCtx), [&] { return start->next(start); });
+    int ret = wiredTigerPrepareConflictRetry(opCtx, wtRu, [&] { return start->next(start); });
     // Empty collections don't have anything to truncate.
     if (ret == WT_NOTFOUND) {
         return Status::OK();
     }
     invariantWTOK(ret, start->session);
 
-    WT_SESSION* session = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))
-                              ->getSession()
-                              ->getSession();
+    WT_SESSION* session = wtRu.getSession()->getSession();
     invariantWTOK(WT_OP_CHECK(session->truncate(session, nullptr, start, nullptr, nullptr)),
                   session);
-    _changeNumRecordsAndDataSize(opCtx, -numRecords(opCtx), -dataSize(opCtx));
-
-    if (_oplog && _oplog->getTruncateMarkers()) {
-        _oplog->getTruncateMarkers()->clearMarkersOnCommit(opCtx);
-    }
+    _changeNumRecordsAndDataSize(wtRu, -numRecords(), -dataSize());
 
     return Status::OK();
 }
 
-Status WiredTigerRecordStore::doRangeTruncate(OperationContext* opCtx,
-                                              const RecordId& minRecordId,
-                                              const RecordId& maxRecordId,
-                                              int64_t hintDataSizeDiff,
-                                              int64_t hintNumRecordsDiff) {
-    WiredTigerCursor startWrap(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _tableId,
-        true);
+Status WiredTigerRecordStore::_rangeTruncate(OperationContext* opCtx,
+                                             const RecordId& minRecordId,
+                                             const RecordId& maxRecordId,
+                                             int64_t hintDataSizeDiff,
+                                             int64_t hintNumRecordsDiff) {
+    auto& wtRu = WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx));
+    WiredTigerCursor startWrap(wtRu, _uri, _tableId, true);
     WT_CURSOR* start = startWrap.get();
-    int ret = wiredTigerPrepareConflictRetry(
-        opCtx, *shard_role_details::getRecoveryUnit(opCtx), [&] { return start->next(start); });
+    int ret = wiredTigerPrepareConflictRetry(opCtx, wtRu, [&] { return start->next(start); });
     // Empty collections don't have anything to truncate.
     if (ret == WT_NOTFOUND) {
         return Status::OK();
@@ -1403,11 +1030,7 @@ Status WiredTigerRecordStore::doRangeTruncate(OperationContext* opCtx,
     } else {
         start = nullptr;
     }
-    WiredTigerCursor endWrap(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _tableId,
-        true);
+    WiredTigerCursor endWrap(wtRu, _uri, _tableId, true);
     boost::optional<CursorKey> endKey;
     WT_CURSOR* finish = [&]() -> WT_CURSOR* {
         if (maxRecordId == RecordId()) {
@@ -1418,18 +1041,15 @@ Status WiredTigerRecordStore::doRangeTruncate(OperationContext* opCtx,
         return endWrap.get();
     }();
 
-    WT_SESSION* session = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))
-                              ->getSession()
-                              ->getSession();
+    WT_SESSION* session = wtRu.getSession()->getSession();
     invariantWTOK(WT_OP_CHECK(session->truncate(session, nullptr, start, finish, nullptr)),
                   session);
-    _changeNumRecordsAndDataSize(opCtx, hintNumRecordsDiff, hintDataSizeDiff);
-
+    _changeNumRecordsAndDataSize(wtRu, hintNumRecordsDiff, hintDataSizeDiff);
     return Status::OK();
 }
 
-StatusWith<int64_t> WiredTigerRecordStore::doCompact(OperationContext* opCtx,
-                                                     const CompactOptions& options) {
+StatusWith<int64_t> WiredTigerRecordStore::_compact(OperationContext* opCtx,
+                                                    const CompactOptions& options) {
     WiredTigerSessionCache* cache =
         WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSessionCache();
     if (cache->isEphemeral()) {
@@ -1473,31 +1093,25 @@ StatusWith<int64_t> WiredTigerRecordStore::doCompact(OperationContext* opCtx,
     return options.dryRun ? WiredTigerUtil::getIdentCompactRewrittenExpectedSize(s, uri) : 0;
 }
 
-void WiredTigerRecordStore::validate(OperationContext* opCtx, bool full, ValidateResults* results) {
+void WiredTigerRecordStore::validate(RecoveryUnit& ru,
+                                     const CollectionValidation::ValidationOptions& options,
+                                     ValidateResults* results) {
     if (_isEphemeral) {
         return;
     }
 
     WiredTigerUtil::validateTableLogging(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        _isLogged,
-        boost::none,
-        *results);
+        WiredTigerRecoveryUnit::get(ru), _uri, _isLogged, boost::none, *results);
 
-    if (!full) {
+    if (!options.isFullValidation()) {
+        invariant(!options.verifyConfigurationOverride().has_value());
         return;
     }
 
-    if (_oplog) {
-        results->addWarning("Skipping verification of the WiredTiger table for the oplog.");
-        return;
-    }
-
-    int err = WiredTigerUtil::verifyTable(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        results->getErrorsUnsafe());
+    int err = WiredTigerUtil::verifyTable(WiredTigerRecoveryUnit::get(ru),
+                                          _uri,
+                                          options.verifyConfigurationOverride(),
+                                          results->getErrorsUnsafe());
     if (!err) {
         return;
     }
@@ -1508,10 +1122,11 @@ void WiredTigerRecordStore::validate(OperationContext* opCtx, bool full, Validat
             << "This is a transient issue as the collection was actively "
                "in use by other operations.";
 
-        LOGV2_WARNING(22408,
-                      "Could not complete validation, This is a transient issue as the collection "
-                      "was actively in use by other operations",
-                      "uri"_attr = _uri);
+        LOGV2_PROD_ONLY(
+            22408,
+            "Could not complete validation, This is a transient issue as the collection "
+            "was actively in use by other operations",
+            "uri"_attr = _uri);
         results->addWarning(msg);
         return;
     }
@@ -1527,11 +1142,10 @@ void WiredTigerRecordStore::validate(OperationContext* opCtx, bool full, Validat
     results->addError(msg);
 }
 
-void WiredTigerRecordStore::appendNumericCustomStats(OperationContext* opCtx,
+void WiredTigerRecordStore::appendNumericCustomStats(RecoveryUnit& ru,
                                                      BSONObjBuilder* result,
                                                      double scale) const {
-    WiredTigerSession* session =
-        WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSessionNoTxn();
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
     WT_SESSION* s = session->getSession();
 
     BSONObjBuilder bob(result->subobjStart(_engineName));
@@ -1539,19 +1153,16 @@ void WiredTigerRecordStore::appendNumericCustomStats(OperationContext* opCtx,
     appendNumericStats(s, getURI(), bob);
 }
 
-void WiredTigerRecordStore::appendAllCustomStats(OperationContext* opCtx,
+void WiredTigerRecordStore::appendAllCustomStats(RecoveryUnit& ru,
                                                  BSONObjBuilder* result,
                                                  double scale) const {
-    WiredTigerSession* session =
-        WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))->getSessionNoTxn();
+    WiredTigerSession* session = WiredTigerRecoveryUnit::get(ru).getSessionNoTxn();
     WT_SESSION* s = session->getSession();
     BSONObjBuilder bob(result->subobjStart(_engineName));
     {
         BSONObjBuilder metadata(bob.subobjStart("metadata"));
         Status status = WiredTigerUtil::getApplicationMetadata(
-            *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-            getURI(),
-            &metadata);
+            WiredTigerRecoveryUnit::get(ru), getURI(), &metadata);
         if (!status.isOK()) {
             metadata.append("error", "unable to retrieve metadata");
             metadata.append("code", static_cast<int>(status.code()));
@@ -1560,13 +1171,9 @@ void WiredTigerRecordStore::appendAllCustomStats(OperationContext* opCtx,
     }
 
     std::string type, sourceURI;
-    WiredTigerUtil::fetchTypeAndSourceURI(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        _uri,
-        &type,
-        &sourceURI);
-    StatusWith<std::string> metadataResult = WiredTigerUtil::getMetadataCreate(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), sourceURI);
+    WiredTigerUtil::fetchTypeAndSourceURI(WiredTigerRecoveryUnit::get(ru), _uri, &type, &sourceURI);
+    StatusWith<std::string> metadataResult =
+        WiredTigerUtil::getMetadataCreate(WiredTigerRecoveryUnit::get(ru), sourceURI);
     StringData creationStringName("creationString");
     if (!metadataResult.isOK()) {
         BSONObjBuilder creationString(bob.subobjStart(creationStringName));
@@ -1582,9 +1189,7 @@ void WiredTigerRecordStore::appendAllCustomStats(OperationContext* opCtx,
     appendNumericStats(s, getURI(), bob);
 }
 
-void WiredTigerRecordStore::updateStatsAfterRepair(OperationContext* opCtx,
-                                                   long long numRecords,
-                                                   long long dataSize) {
+void WiredTigerRecordStore::updateStatsAfterRepair(long long numRecords, long long dataSize) {
     // We're correcting the size as of now, future writes should be tracked.
     sizeRecoveryState(getGlobalServiceContext())
         .markCollectionAsAlwaysNeedsSizeAdjustment(getIdent());
@@ -1660,7 +1265,7 @@ RecordId WiredTigerRecordStore::getLargestKey(OperationContext* opCtx) const {
         rollbackReason = rollbackReason ? rollbackReason : "undefined";
         throwWriteConflictException(
             fmt::format("Rollback ocurred while performing initial write to '{}'. Reason: '{}'",
-                        ns(opCtx).toStringForErrorMsg(),
+                        uuid() ? uuid()->toString() : std::string{},
                         rollbackReason));
     } else if (ret != WT_NOTFOUND) {
         if (ret == ENOTSUP) {
@@ -1670,7 +1275,7 @@ RecordId WiredTigerRecordStore::getLargestKey(OperationContext* opCtx) const {
                     6627200,
                     "WiredTiger tables using 'type=lsm' (Log-Structured Merge Tree) are not "
                     "supported.",
-                    "namespace"_attr = ns(opCtx),
+                    "uuid"_attr = uuid(),
                     "metadata"_attr = redact(creationMetadata));
             }
         }
@@ -1694,12 +1299,11 @@ long long WiredTigerRecordStore::_reserveIdBlock(OperationContext* opCtx, size_t
     // Clustered record stores do not automatically generate int64 RecordIds. RecordIds are instead
     // constructed as binary strings, KeyFormat::String, from the user-defined cluster key.
     invariant(_keyFormat == KeyFormat::Long);
-    invariant(!_oplog);
     _initNextIdIfNeeded(opCtx);
     return _nextIdNum.fetchAndAdd(nRecords);
 }
 
-void WiredTigerRecordStore::_changeNumRecordsAndDataSize(OperationContext* opCtx,
+void WiredTigerRecordStore::_changeNumRecordsAndDataSize(RecoveryUnit& ru,
                                                          int64_t numRecordDiff,
                                                          int64_t dataSizeDiff) {
     if (numRecordDiff == 0 && dataSizeDiff == 0) {
@@ -1724,15 +1328,14 @@ void WiredTigerRecordStore::_changeNumRecordsAndDataSize(OperationContext* opCtx
             _sizeStorer->store(_uri, _sizeInfo);
     };
 
-    shard_role_details::getRecoveryUnit(opCtx)->onRollback(
-        [updateAndStoreSizeInfo, numRecordDiff, dataSizeDiff](OperationContext*) {
-            LOGV2_DEBUG(7105300,
-                        3,
-                        "WiredTigerRecordStore: rolling back change to numRecords and dataSize",
-                        "numRecordDiff"_attr = -numRecordDiff,
-                        "dataSizeDiff"_attr = -dataSizeDiff);
-            updateAndStoreSizeInfo(-numRecordDiff, -dataSizeDiff);
-        });
+    ru.onRollback([updateAndStoreSizeInfo, numRecordDiff, dataSizeDiff](auto _) {
+        LOGV2_DEBUG(7105300,
+                    2,
+                    "WiredTigerRecordStore: rolling back change to numRecords and dataSize",
+                    "numRecordDiff"_attr = -numRecordDiff,
+                    "dataSizeDiff"_attr = -dataSizeDiff);
+        updateAndStoreSizeInfo(-numRecordDiff, -dataSizeDiff);
+    });
     updateAndStoreSizeInfo(numRecordDiff, dataSizeDiff);
 }
 
@@ -1762,7 +1365,42 @@ void WiredTigerRecordStore::setDataSize(long long dataSize) {
     _sizeStorer->flush(syncToDisk);
 }
 
-void WiredTigerRecordStore::doCappedTruncateAfter(
+std::unique_ptr<SeekableRecordCursor> WiredTigerRecordStore::getCursor(OperationContext* opCtx,
+                                                                       bool forward) const {
+    return std::make_unique<WiredTigerRecordStoreCursor>(opCtx, *this, forward);
+}
+
+RecordStore::Capped* WiredTigerRecordStore::capped() {
+    return nullptr;
+}
+
+RecordStore::Capped* WiredTigerRecordStore::Capped::capped() {
+    return this;
+}
+
+RecordStore::Capped* WiredTigerRecordStore::Oplog::capped() {
+    return this;
+}
+
+RecordStore::Oplog* WiredTigerRecordStore::oplog() {
+    return nullptr;
+}
+
+RecordStore::Oplog* WiredTigerRecordStore::Oplog::oplog() {
+    return this;
+}
+
+WiredTigerRecordStore::Capped::Capped(WiredTigerKVEngine* engine,
+                                      WiredTigerRecoveryUnit& ru,
+                                      Params params)
+    : WiredTigerRecordStore(engine, ru, params) {}
+
+std::unique_ptr<SeekableRecordCursor> WiredTigerRecordStore::Capped::getCursor(
+    OperationContext* opCtx, bool forward) const {
+    return std::make_unique<WiredTigerStandardCappedCursor>(opCtx, *this, forward);
+}
+
+void WiredTigerRecordStore::Capped::_truncateAfter(
     OperationContext* opCtx,
     const RecordId& end,
     bool inclusive,
@@ -1794,7 +1432,8 @@ void WiredTigerRecordStore::doCappedTruncateAfter(
         firstRemovedId = record->id;
     }
 
-    WriteUnitOfWork wuow(opCtx);
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    StorageWriteTransaction txn(ru);
 
     // Compute the number and associated sizes of the records to delete.
     {
@@ -1816,7 +1455,7 @@ void WiredTigerRecordStore::doCappedTruncateAfter(
         _tableId,
         true);
     WT_CURSOR* start = startwrap.get();
-    CursorKey key = makeCursorKey(firstRemovedId, _keyFormat);
+    auto key = makeCursorKey(firstRemovedId, _keyFormat);
     setKey(start, &key);
 
     WT_SESSION* session = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))
@@ -1824,44 +1463,296 @@ void WiredTigerRecordStore::doCappedTruncateAfter(
                               ->getSession();
     invariantWTOK(session->truncate(session, nullptr, start, nullptr, nullptr), session);
 
-    _changeNumRecordsAndDataSize(opCtx, -recordsRemoved, -bytesRemoved);
+    _changeNumRecordsAndDataSize(ru, -recordsRemoved, -bytesRemoved);
 
-    wuow.commit();
+    txn.commit();
 
-    if (_oplog) {
-        // Immediately rewind visibility to our truncation point, to prevent new
-        // transactions from appearing.
-        Timestamp truncTs(lastKeptId.getLong());
+    _handleTruncateAfter(*WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
+                         session,
+                         lastKeptId,
+                         firstRemovedId,
+                         recordsRemoved,
+                         bytesRemoved);
+}
 
-        auto conn = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx))
-                        ->getSessionCache()
-                        ->conn();
-        auto durableTSConfigString = "durable_timestamp={:x}"_format(truncTs.asULL());
-        invariantWTOK(conn->set_timestamp(conn, durableTSConfigString.c_str()), session);
+void WiredTigerRecordStore::Capped::_handleTruncateAfter(WiredTigerRecoveryUnit&,
+                                                         WT_SESSION*,
+                                                         const RecordId& lastKeptId,
+                                                         const RecordId& firstRemovedId,
+                                                         int64_t recordsRemoved,
+                                                         int64_t bytesRemoved) {}
 
-        _kvEngine->getOplogManager()->setOplogReadTimestamp(truncTs);
-        LOGV2_DEBUG(22405, 1, "truncation new read timestamp: {truncTs}", "truncTs"_attr = truncTs);
+void WiredTigerRecordStore::Oplog::_handleTruncateAfter(WiredTigerRecoveryUnit& ru,
+                                                        WT_SESSION* session,
+                                                        const RecordId& lastKeptId,
+                                                        const RecordId& firstRemovedId,
+                                                        int64_t recordsRemoved,
+                                                        int64_t bytesRemoved) {
+    // Immediately rewind visibility to our truncation point, to prevent new
+    // transactions from appearing.
+    Timestamp truncTs(lastKeptId.getLong());
 
-        if (_oplog->getTruncateMarkers()) {
-            _oplog->getTruncateMarkers()->updateMarkersAfterCappedTruncateAfter(
-                recordsRemoved, bytesRemoved, firstRemovedId);
-        }
+    auto conn = ru.getSessionCache()->conn();
+    auto durableTSConfigString = "durable_timestamp={:x}"_format(truncTs.asULL());
+    invariantWTOK(conn->set_timestamp(conn, durableTSConfigString.c_str()), session);
+
+    _kvEngine->getOplogManager()->setOplogReadTimestamp(truncTs);
+    LOGV2_DEBUG(22405, 1, "Truncation new read timestamp", "ts"_attr = truncTs);
+
+    if (_oplog->getTruncateMarkers()) {
+        _oplog->getTruncateMarkers()->updateMarkersAfterCappedTruncateAfter(
+            recordsRemoved, bytesRemoved, firstRemovedId);
     }
 }
 
-std::unique_ptr<SeekableRecordCursor> WiredTigerRecordStore::getCursor(OperationContext* opCtx,
-                                                                       bool forward) const {
-    if (_oplog) {
-        return std::make_unique<WiredTigerOplogCursor>(opCtx, *this, forward);
-    } else if (_isCapped) {
-        return std::make_unique<WiredTigerStandardCappedCursor>(opCtx, *this, forward);
-    }
+WiredTigerRecordStore::Oplog::Oplog(WiredTigerKVEngine* engine,
+                                    WiredTigerRecoveryUnit& ru,
+                                    Params oplogParams)
+    : Capped(engine,
+             ru,
+             {.uuid = oplogParams.uuid,
+              .ident = oplogParams.ident,
+              .engineName = oplogParams.engineName,
+              .keyFormat = KeyFormat::Long,
+              .overwrite = true,
+              .isEphemeral = oplogParams.isEphemeral,
+              .isLogged = true,
+              .isChangeCollection = false,
+              .sizeStorer = oplogParams.sizeStorer,
+              .tracksSizeAdjustments = oplogParams.tracksSizeAdjustments,
+              .forceUpdateWithFullDocument = oplogParams.forceUpdateWithFullDocument}),
+      _oplog(std::make_unique<WiredTigerOplogData>(oplogParams)) {
+    invariant(WiredTigerRecordStore::keyFormat() == KeyFormat::Long);
+    checkOplogFormatVersion(ru, getURI());
+    // The oplog always needs to be marked for size adjustment since it is journaled and also
+    // may change during replication recovery (if truncated).
+    sizeRecoveryState(getGlobalServiceContext())
+        .markCollectionAsAlwaysNeedsSizeAdjustment(WiredTigerRecordStore::getIdent());
+}
+
+std::unique_ptr<SeekableRecordCursor> WiredTigerRecordStore::Oplog::getRawCursor(
+    OperationContext* opCtx, bool forward) const {
     return std::make_unique<WiredTigerRecordStoreCursor>(opCtx, *this, forward);
 }
 
-Status WiredTigerRecordStore::updateOplogSize(OperationContext* opCtx, long long newOplogSize) {
-    invariant(_oplog);
-    return _oplog->updateSize(opCtx, newOplogSize);
+WiredTigerRecordStore::Oplog::~Oplog() {
+    if (_oplog->getTruncateMarkers()) {
+        _oplog->getTruncateMarkers()->kill();
+    }
+}
+
+std::unique_ptr<SeekableRecordCursor> WiredTigerRecordStore::Oplog::getCursor(
+    OperationContext* opCtx, bool forward) const {
+    return std::make_unique<WiredTigerOplogCursor>(opCtx, *this, forward);
+}
+
+void WiredTigerRecordStore::Oplog::validate(RecoveryUnit& ru,
+                                            const CollectionValidation::ValidationOptions& options,
+                                            ValidateResults* results) {
+    if (_isEphemeral) {
+        return;
+    }
+
+    WiredTigerUtil::validateTableLogging(
+        WiredTigerRecoveryUnit::get(ru), getURI(), _isLogged, boost::none, *results);
+
+    if (!options.isFullValidation()) {
+        invariant(!options.verifyConfigurationOverride().has_value());
+        return;
+    }
+
+    results->addWarning("Skipping verification of the WiredTiger table for the oplog.");
+}
+
+bool WiredTigerRecordStore::Oplog::selfManagedTruncation() const {
+    return true;
+}
+
+std::shared_ptr<CollectionTruncateMarkers>
+WiredTigerRecordStore::Oplog::getCollectionTruncateMarkers() {
+    return _oplog->getTruncateMarkers();
+}
+
+Status WiredTigerRecordStore::Oplog::updateSize(long long newOplogSize) {
+    return _oplog->updateSize(newOplogSize);
+}
+
+StatusWith<Timestamp> WiredTigerRecordStore::Oplog::getLatestTimestamp(RecoveryUnit& ru) const {
+    // Using this function inside a UOW is not supported because the main reason to call it is to
+    // synchronize to the last op before waiting for write concern, so it makes little sense to do
+    // so in a UOW. This also ensures we do not return uncommited entries.
+    invariant(!ru.inUnitOfWork());
+
+    auto& wtRu = WiredTigerRecoveryUnit::get(ru);
+    bool ruWasActive = wtRu.isActive();
+
+    // getSession will open a txn if there was no txn active.
+    auto session = wtRu.getSession();
+
+    ON_BLOCK_EXIT([&] {
+        if (!ruWasActive) {
+            // In case the RU was inactive, leave it in that state.
+            wtRu.abandonSnapshot();
+        }
+    });
+
+    auto cachedCursor = session->getCachedCursor(_tableId, "");
+    auto cursor = cachedCursor ? cachedCursor : session->getNewCursor(_uri);
+    ON_BLOCK_EXIT([&] { session->releaseCursor(_tableId, cursor, ""); });
+    int ret = cursor->prev(cursor);
+    if (ret == WT_NOTFOUND) {
+        return Status(ErrorCodes::CollectionIsEmpty, "oplog is empty");
+    }
+    invariantWTOK(ret, cursor->session);
+
+    RecordId recordId = getKey(cursor, _keyFormat);
+
+    return {Timestamp(static_cast<unsigned long long>(recordId.getLong()))};
+}
+
+StatusWith<Timestamp> WiredTigerRecordStore::Oplog::getEarliestTimestamp(RecoveryUnit& ru) {
+    auto& wtRu = WiredTigerRecoveryUnit::get(ru);
+
+    WiredTigerCursor curwrap(wtRu, _uri, _tableId, true);
+    auto cursor = curwrap.get();
+    auto ret = cursor->next(cursor);
+    if (ret == WT_NOTFOUND) {
+        return Status(ErrorCodes::CollectionIsEmpty, "oplog is empty");
+    }
+    invariantWTOK(ret, cursor->session);
+
+    auto firstRecord = getKey(cursor, KeyFormat::Long);
+    return Timestamp(static_cast<uint64_t>(firstRecord.getLong()));
+}
+
+int64_t WiredTigerRecordStore::Oplog::getMaxSize() const {
+    // TODO make TruncateMarkers depend on OplogData (not RecrodStore), then move this method.
+    return _oplog->getMaxSize();
+}
+
+void WiredTigerRecordStore::Oplog::setTruncateMarkers(
+    std::shared_ptr<WiredTigerOplogTruncateMarkers> markers) {
+    _oplog->setTruncateMarkers(markers);
+}
+
+Status WiredTigerRecordStore::Oplog::_insertRecords(OperationContext* opCtx,
+                                                    std::vector<Record>* records,
+                                                    const std::vector<Timestamp>& timestamps) {
+    invariant(shard_role_details::getRecoveryUnit(opCtx)->inUnitOfWork());
+
+    auto& wtRu = WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx));
+
+    WiredTigerCursor curwrap(wtRu, _uri, _tableId, _overwrite);
+    curwrap.assertInActiveTxn();
+    WT_CURSOR* c = curwrap.get();
+    invariant(c);
+
+    invariant(!records->empty());
+    auto nRecords = records->size();
+
+    // Non-clustered record stores will extract the RecordId key for the oplog and generate
+    // unique int64_t RecordIds if RecordIds are not set.
+    for (size_t i = 0; i < nRecords; i++) {
+        auto& record = (*records)[i];
+        auto swRecordId = record_id_helpers::keyForOptime(timestamps[i], KeyFormat::Long);
+        if (!swRecordId.isOK())
+            return swRecordId.getStatus();
+
+        // In the normal write paths, a timestamp is always set. It is only in unusual cases
+        // like inserting the oplog seed document where the caller does not provide a
+        // timestamp.
+        if (MONGO_unlikely(timestamps[i].isNull() || kDebugBuild)) {
+            auto swRecordIdFromBSON =
+                record_id_helpers::extractKeyOptime(record.data.data(), record.data.size());
+            if (!swRecordIdFromBSON.isOK())
+                return swRecordIdFromBSON.getStatus();
+
+            // Double-check that the 'ts' field in the oplog entry matches the assigned
+            // timestamp, if it was provided.
+            dassert(timestamps[i].isNull() ||
+                        swRecordIdFromBSON.getValue() == swRecordId.getValue(),
+                    fmt::format("ts field in oplog entry {} does not equal assigned timestamp {}",
+                                swRecordIdFromBSON.getValue().toString(),
+                                swRecordId.getValue().toString()));
+
+            record.id = std::move(swRecordIdFromBSON.getValue());
+        } else {
+            record.id = std::move(swRecordId.getValue());
+        }
+        // The records being inserted into the oplog must have increasing
+        // recordId. Therefore the last record has the highest recordId.
+        dassert(i == 0 || (*records)[i].id > (*records)[i - 1].id);
+    }
+
+    int64_t totalLength = 0;
+    for (size_t i = 0; i < nRecords; i++) {
+        auto& record = (*records)[i];
+        totalLength += record.data.size();
+        invariant(!record.id.isNull());
+        invariant(!record_id_helpers::isReserved(record.id));
+        Timestamp ts = timestamps[i];
+
+        // Setting this transaction to be unordered will trigger a journal flush. Because these
+        // are direct writes into the oplog, the machinery to trigger a journal flush is
+        // bypassed. A followup oplog read will require a fres value to make progress.
+        shard_role_details::getRecoveryUnit(opCtx)->setOrderedCommit(false);
+        auto oplogKeyTs = Timestamp(record.id.getLong());
+        if (!ts.isNull()) {
+            invariant(oplogKeyTs == ts);
+        }
+        if (!shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull()) {
+            invariant(oplogKeyTs ==
+                      shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp());
+        }
+
+        if (!ts.isNull()) {
+            LOGV2_DEBUG(4017300, 4, "Inserting oplog record with timestamp", "ts"_attr = ts);
+            fassert(4017301, shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(ts));
+        }
+        CursorKey key = makeCursorKey(record.id, WiredTigerRecordStore::keyFormat());
+        setKey(c, &key);
+        WiredTigerItem value(record.data.data(), record.data.size());
+        c->set_value(c, value.Get());
+        int ret = WT_OP_CHECK(wiredTigerCursorInsert(
+            *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)), c));
+        invariant(ret != WT_DUPLICATE_KEY);
+        if (ret)
+            return wtRCToStatus(ret, c->session, "WiredTigerRecordStore::insertRecord");
+    }
+    _changeNumRecordsAndDataSize(wtRu, nRecords, totalLength);
+
+    if (_oplog->getTruncateMarkers()) {
+        // records[nRecords - 1] is the record in the oplog with the highest recordId.
+        auto wall = [&] {
+            BSONObj obj = (*records)[nRecords - 1].data.toBson();
+            BSONElement ele = obj[repl::DurableOplogEntry::kWallClockTimeFieldName];
+            if (!ele) {
+                // This shouldn't happen in normal cases, but this is needed because some tests do
+                // not add wall clock times. Note that, with this addition, it's possible that the
+                // oplog may grow larger than expected if --oplogMinRetentionHours is set.
+                return Date_t::now();
+            } else {
+                return ele.Date();
+            }
+        }();
+        _oplog->getTruncateMarkers()->updateCurrentMarkerAfterInsertOnCommit(
+            opCtx, totalLength, (*records)[nRecords - 1].id, wall, nRecords);
+    }
+
+    return Status::OK();
+}
+
+Status WiredTigerRecordStore::Oplog::_truncate(OperationContext* opCtx) {
+    auto status = WiredTigerRecordStore::_truncate(opCtx);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    if (_oplog->getTruncateMarkers()) {
+        _oplog->getTruncateMarkers()->clearMarkersOnCommit(opCtx);
+    }
+
+    return Status::OK();
 }
 
 WiredTigerRecordStoreCursor::WiredTigerRecordStoreCursor(OperationContext* opCtx,
@@ -1939,7 +1830,7 @@ RecordId WiredTigerRecordStoreCursor::nextIdCommon() {
 void WiredTigerRecordStoreCursor::reportOutOfOrderRead(const RecordId& id,
                                                        bool failWithOutOfOrderForTest) const {
     HealthLogEntry entry;
-    entry.setNss(namespaceForUUID(_opCtx, _uuid));
+    entry.setCollectionUUID(_uuid);
     entry.setTimestamp(Date_t::now());
     entry.setSeverity(SeverityEnum::Error);
     entry.setScope(ScopeEnum::Collection);
@@ -1979,7 +1870,7 @@ void WiredTigerRecordStoreCursor::reportOutOfOrderRead(const RecordId& id,
                         "next"_attr = id,
                         "last"_attr = _lastReturnedId,
                         "ident"_attr = _ident,
-                        "ns"_attr = namespaceForUUID(_opCtx, _uuid));
+                        "uuid"_attr = _uuid);
 }
 
 void WiredTigerRecordStoreCursor::checkOrder(const RecordId& id) const {

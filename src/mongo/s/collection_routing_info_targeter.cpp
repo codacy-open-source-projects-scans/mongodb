@@ -48,7 +48,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/query/canonical_query.h"
@@ -98,12 +97,6 @@ constexpr auto kIdFieldName = "_id"_sd;
 const ShardKeyPattern kVirtualIdShardKey(BSON(kIdFieldName << 1));
 
 using UpdateType = write_ops::UpdateModification::Type;
-using shard_key_pattern_query_util::QueryTargetingInfo;
-
-// Tracks the number of {multi:false} updates with an exact match on _id that are broadcasted to
-// multiple shards.
-auto& updateOneOpStyleBroadcastWithExactIDCount =
-    *MetricBuilder<Counter64>("query.updateOneOpStyleBroadcastWithExactIDCount");
 
 /**
  * Update expressions are bucketed into one of two types for the purposes of shard targeting:
@@ -232,24 +225,14 @@ CollectionRoutingInfoTargeter::CollectionRoutingInfoTargeter(OperationContext* o
                                                              const NamespaceString& nss,
                                                              boost::optional<OID> targetEpoch)
     : _nss(nss), _targetEpoch(std::move(targetEpoch)), _cri(_init(opCtx, false)) {
-    _isUpdateOneWithIdWithoutShardKeyEnabled =
-        feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-    _isUpdateOneWithoutShardKeyEnabled =
-        feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabledUseLastLTSFCVWhenUninitialized(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    _isUpdateOneWithIdWithoutShardKeyEnabled = true;
 }
 
 CollectionRoutingInfoTargeter::CollectionRoutingInfoTargeter(const NamespaceString& nss,
                                                              const CollectionRoutingInfo& cri)
     : _nss(nss), _cri(cri) {
     invariant(!cri.cm.hasRoutingTable() || cri.cm.getNss() == nss);
-    _isUpdateOneWithIdWithoutShardKeyEnabled =
-        feature_flags::gUpdateOneWithIdWithoutShardKey.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-    _isUpdateOneWithoutShardKeyEnabled =
-        feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabledUseLastLTSFCVWhenUninitialized(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    _isUpdateOneWithIdWithoutShardKeyEnabled = true;
 }
 
 /**
@@ -268,9 +251,8 @@ CollectionRoutingInfo CollectionRoutingInfoTargeter::_init(OperationContext* opC
                 cluster::createDatabase(opCtx, nss.dbName());
 
                 if (refresh) {
-                    uassertStatusOK(
-                        Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfoWithRefresh(opCtx,
-                                                                                              nss));
+                    Grid::get(opCtx)->catalogCache()->onStaleCollectionVersion(
+                        nss, boost::none /* wantedVersion */);
                 }
 
                 if (MONGO_unlikely(waitForDatabaseToBeDropped.shouldFail())) {
@@ -411,7 +393,7 @@ bool CollectionRoutingInfoTargeter::isExactIdQuery(OperationContext* opCtx,
     }
 
     auto cq = CanonicalQuery::make({
-        .expCtx = makeExpressionContext(opCtx, *findCommand),
+        .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx, *findCommand).build(),
         .parsedFind = ParsedFindCommandParams{.findCommand = std::move(findCommand),
                                               .allowedFeatures =
                                                   MatchExpressionParser::kAllowAllSpecialFeatures},
@@ -463,10 +445,6 @@ bool CollectionRoutingInfoTargeter::isUpdateOneWithIdWithoutShardKeyEnabled() co
     return _isUpdateOneWithIdWithoutShardKeyEnabled;
 }
 
-bool CollectionRoutingInfoTargeter::isUpdateOneWithoutShardKeyEnabled() const {
-    return _isUpdateOneWithoutShardKeyEnabled;
-}
-
 bool isRetryableWrite(OperationContext* opCtx) {
     return opCtx->getTxnNumber() && !opCtx->inMultiDocumentTransaction();
 }
@@ -475,8 +453,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
     OperationContext* opCtx,
     const BatchItemRef& itemRef,
     bool* useTwoPhaseWriteProtocol,
-    bool* isNonTargetedWriteWithoutShardKeyWithExactId,
-    std::set<ChunkRange>* chunkRanges) const {
+    bool* isNonTargetedWriteWithoutShardKeyWithExactId) const {
     // If the update is replacement-style:
     // 1. Attempt to target using the query. If this fails, AND the query targets more than one
     //    shard,
@@ -495,12 +472,12 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
     const bool isMulti = updateOp.getMulti();
 
     if (isMulti) {
-        updateManyCount.increment(1);
+        getQueryCounters(opCtx).updateManyCount.increment(1);
     }
 
     if (!_cri.cm.isSharded()) {
         if (!isMulti) {
-            updateOneUnshardedCount.increment(1);
+            getQueryCounters(opCtx).updateOneUnshardedCount.increment(1);
         }
 
         return {targetUnshardedCollection(_nss, _cri)};
@@ -554,15 +531,15 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
         getUpdateExprForTargeting(expCtx, shardKeyPattern, query, updateOp.getUpdateMods());
 
     // Utility function to target an update by shard key, and to handle any potential error results.
-    auto targetByShardKey = [this, &collation, &chunkRanges, isUpsert, isMulti](
-                                StatusWith<BSONObj> swShardKey, std::string msg) {
+    auto targetByShardKey = [this, &collation, isUpsert, isMulti](StatusWith<BSONObj> swShardKey,
+                                                                  std::string msg) {
         const auto& shardKey = uassertStatusOKWithContext(std::move(swShardKey), msg);
         if (shardKey.isEmpty()) {
             uasserted(ErrorCodes::ShardKeyNotFound,
                       str::stream() << msg << " :: could not extract exact shard key");
         } else {
             return std::vector{
-                uassertStatusOKWithContext(_targetShardKey(shardKey, collation, chunkRanges), msg)};
+                uassertStatusOKWithContext(_targetShardKey(shardKey, collation), msg)};
         }
     };
 
@@ -571,11 +548,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
         uassertStatusOKWithContext(_canonicalize(opCtx, expCtx, _nss, query, collation, _cri.cm),
                                    str::stream() << "Could not parse update query " << query);
 
-    // With the introduction of PM-1632, we can use the two phase write protocol to successfully
-    // target an upsert without the full shard key. Else, the query must contain an exact match
-    // on the shard key. If we were to target based on the replacement doc, it could result in an
-    // insertion even if a document matching the query exists on another shard.
-    if ((!isUpdateOneWithoutShardKeyEnabled() || updateOp.getMulti()) && isUpsert) {
+    if (updateOp.getMulti() && isUpsert) {
         return targetByShardKey(extractShardKeyFromQuery(shardKeyPattern, *cq),
                                 "Failed to target upsert by query");
     }
@@ -584,7 +557,7 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
 
     // We first try to target based on the update's query. It is always valid to forward any update
     // or upsert to a single shard, so return immediately if we are able to target a single shard.
-    auto endPoints = uassertStatusOK(_targetQuery(*cq, chunkRanges));
+    auto endPoints = uassertStatusOK(_targetQuery(*cq));
     if (endPoints.size() == 1) {
         // The check is structured in this way to check if the query does not contain a shard key,
         // but is still targetable to a single shard. We don't explicitly use the result of
@@ -599,60 +572,38 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetUpdate(
                 *useTwoPhaseWriteProtocol = true;
             }
         }
-        updateOneTargetedShardedCount.increment(1);
+        getQueryCounters(opCtx).updateOneTargetedShardedCount.increment(1);
         return endPoints;
     }
 
-    // Targeting by replacement document is no longer necessary when an updateOne without shard key
-    // is allowed, since we're able to decisively select a document to modify with the two phase
-    // write without shard key protocol.
-    if (!isUpdateOneWithoutShardKeyEnabled() || isExactId) {
+    if (isExactId) {
         // Replacement-style updates must always target a single shard. If we were unable to do so
         // using the query, we attempt to extract the shard key from the replacement and target
         // based on it.
         if (updateOp.getUpdateMods().type() == write_ops::UpdateModification::Type::kReplacement) {
-            if (chunkRanges) {
-                chunkRanges->clear();
-            }
             return targetByShardKey(shardKeyPattern.extractShardKeyFromDoc(updateExpr),
                                     "Failed to target update by replacement document");
         }
     }
-
-    // If we are here then this is an op-style update, and we were not able to target a single
-    // shard. Non-multi updates must target a single shard or an exact _id. Time-series single
-    // updates must target a single shard.
-    uassert(
-        ErrorCodes::InvalidOptions,
-        fmt::format("A {{multi:false}} update on a sharded {} contain the shard key (and have the "
-                    "simple collation), but this update targeted {} shards. Update request: {}, "
-                    "shard key pattern: {}",
-                    _isRequestOnTimeseriesViewNamespace
-                        ? "time-series collection must"
-                        : "collection must contain an exact match on _id (and have the "
-                          "collection default collation) or",
-                    endPoints.size(),
-                    updateOp.toBSON().toString(),
-                    shardKeyPattern.toString()),
-        isMulti || isExactId || isUpdateOneWithoutShardKeyEnabled());
 
     if (!isMulti) {
         // If the request is {multi:false} and it's not a write without shard key, then this is a
         // single op-style update which we are broadcasting to multiple shards by exact _id. Record
         // this event in our serverStatus metrics. If the query requests an upsert, then we will use
         // the two phase write protocol anyway.
-        updateOneNonTargetedShardedCount.increment(1);
+        getQueryCounters(opCtx).updateOneNonTargetedShardedCount.increment(1);
         if (isExactId) {
-            updateOneOpStyleBroadcastWithExactIDCount.increment(1);
+            getQueryCounters(opCtx).updateOneOpStyleBroadcastWithExactIDCount.increment(1);
             if (isUpsert && useTwoPhaseWriteProtocol) {
                 *useTwoPhaseWriteProtocol = true;
             } else if (!isUpsert && isNonTargetedWriteWithoutShardKeyWithExactId &&
                        isUpdateOneWithIdWithoutShardKeyEnabled()) {
                 if (isRetryableWrite(opCtx)) {
-                    updateOneWithoutShardKeyWithIdCount.increment(1);
+                    getQueryCounters(opCtx).updateOneWithoutShardKeyWithIdCount.increment(1);
                     *isNonTargetedWriteWithoutShardKeyWithExactId = true;
                 } else {
-                    nonRetryableUpdateOneWithoutShardKeyWithIdCount.increment(1);
+                    getQueryCounters(opCtx)
+                        .nonRetryableUpdateOneWithoutShardKeyWithIdCount.increment(1);
                 }
             }
         } else {
@@ -670,19 +621,18 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
     OperationContext* opCtx,
     const BatchItemRef& itemRef,
     bool* useTwoPhaseWriteProtocol,
-    bool* isNonTargetedWriteWithoutShardKeyWithExactId,
-    std::set<ChunkRange>* chunkRanges) const {
+    bool* isNonTargetedWriteWithoutShardKeyWithExactId) const {
     const auto& deleteOp = itemRef.getDeleteRef();
     const bool isMulti = deleteOp.getMulti();
     const auto collation = write_ops::collationOf(deleteOp);
 
     if (isMulti) {
-        deleteManyCount.increment(1);
+        getQueryCounters(opCtx).deleteManyCount.increment(1);
     }
 
     if (!_cri.cm.isSharded()) {
         if (!isMulti) {
-            deleteOneUnshardedCount.increment(1);
+            getQueryCounters(opCtx).deleteOneUnshardedCount.increment(1);
         }
         return {targetUnshardedCollection(_nss, _cri)};
     }
@@ -729,40 +679,27 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetDelete(
 
     // We first try to target based on the delete's query. It is always valid to forward any delete
     // to a single shard, so return immediately if we are able to target a single shard.
-    auto endpoints = uassertStatusOK(_targetQuery(*cq, chunkRanges));
+    auto endpoints = uassertStatusOK(_targetQuery(*cq));
     if (endpoints.size() == 1) {
         if (!deleteOp.getMulti()) {
-            deleteOneTargetedShardedCount.increment(1);
+            getQueryCounters(opCtx).deleteOneTargetedShardedCount.increment(1);
         }
         return endpoints;
     }
 
-    // We failed to target a single shard.
-
-    // Regular single deletes must target a single shard or be exact-ID.
-    // Time-series single deletes must target a single shard.
     auto isExactId = _isExactIdQuery(*cq, _cri.cm) && !_isRequestOnTimeseriesViewNamespace;
-    uassert(ErrorCodes::ShardKeyNotFound,
-            fmt::format("A single delete on a sharded {} contain the shard key (and have the "
-                        "simple collation). Delete request: {}, shard key pattern: {}",
-                        _isRequestOnTimeseriesViewNamespace
-                            ? "time-series collection must"
-                            : "collection must contain an exact match on _id (and have the "
-                              "collection default collation) or",
-                        deleteOp.toBSON().toString(),
-                        _cri.cm.getShardKeyPattern().toString()),
-            isMulti || isExactId || isUpdateOneWithoutShardKeyEnabled());
 
     if (!isMulti) {
-        deleteOneNonTargetedShardedCount.increment(1);
+        getQueryCounters(opCtx).deleteOneNonTargetedShardedCount.increment(1);
         if (isExactId) {
             if (isNonTargetedWriteWithoutShardKeyWithExactId &&
                 isUpdateOneWithIdWithoutShardKeyEnabled()) {
                 if (isRetryableWrite(opCtx)) {
                     *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-                    deleteOneWithoutShardKeyWithIdCount.increment(1);
+                    getQueryCounters(opCtx).deleteOneWithoutShardKeyWithIdCount.increment(1);
                 } else {
-                    nonRetryableDeleteOneWithoutShardKeyWithIdCount.increment(1);
+                    getQueryCounters(opCtx)
+                        .nonRetryableDeleteOneWithoutShardKeyWithIdCount.increment(1);
                 }
             }
         } else {
@@ -786,7 +723,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CollectionRoutingInfoTargeter::_cano
     // Parse query.
     auto findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setFilter(query);
-    expCtx->uuid = cm.getUUID();
+    expCtx->setUUID(cm.getUUID());
 
     if (!collation.isEmpty()) {
         findCommand->setCollation(collation.getOwned());
@@ -804,17 +741,11 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CollectionRoutingInfoTargeter::_cano
 }
 
 StatusWith<std::vector<ShardEndpoint>> CollectionRoutingInfoTargeter::_targetQuery(
-    const CanonicalQuery& query, std::set<ChunkRange>* chunkRanges) const {
+    const CanonicalQuery& query) const {
 
     std::set<ShardId> shardIds;
     try {
-        if (chunkRanges) {
-            QueryTargetingInfo info;
-            getShardIdsForCanonicalQuery(query, _cri.cm, &shardIds, &info);
-            chunkRanges->swap(info.chunkRanges);
-        } else {
-            getShardIdsForCanonicalQuery(query, _cri.cm, &shardIds, nullptr);
-        }
+        getShardIdsForCanonicalQuery(query, _cri.cm, &shardIds);
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -844,7 +775,7 @@ StatusWith<ShardEndpoint> CollectionRoutingInfoTargeter::_targetShardKey(
 }
 
 std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetAllShards(
-    OperationContext* opCtx, std::set<ChunkRange>* chunkRanges) const {
+    OperationContext* opCtx) const {
     // This function is only called if doing a multi write that targets more than one shard. This
     // implies the collection is sharded, so we should always have a chunk manager.
     invariant(_cri.cm.isSharded());
@@ -855,10 +786,6 @@ std::vector<ShardEndpoint> CollectionRoutingInfoTargeter::targetAllShards(
     for (auto&& shardId : shardIds) {
         ShardVersion shardVersion = _cri.getShardVersion(shardId);
         endpoints.emplace_back(std::move(shardId), std::move(shardVersion), boost::none);
-    }
-
-    if (chunkRanges) {
-        _cri.cm.getAllChunkRanges(chunkRanges);
     }
 
     return endpoints;

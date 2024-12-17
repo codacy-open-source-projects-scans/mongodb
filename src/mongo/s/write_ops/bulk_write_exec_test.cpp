@@ -211,12 +211,6 @@ protected:
 
     ServiceContext::UniqueOperationContext _opCtxHolder;
     OperationContext* _opCtx;
-
-    // This failpoint is to skip running the useTwoPhaseWriteProtocol check which expects the Grid
-    // to be initialized. With the feature flag on, the helper always returns false, which signifies
-    // that we have a targetable write op.
-    std::unique_ptr<FailPointEnableBlock> _skipUseTwoPhaseWriteProtocolCheck =
-        std::make_unique<FailPointEnableBlock>("skipUseTwoPhaseWriteProtocolCheck");
 };
 
 // Test targeting a single op in a bulkWrite request.
@@ -3212,7 +3206,7 @@ protected:
 
     static const inline BSONObj kBulkWriteNoMatchResponseWithWCEMultipleWriteOps = [] {
         auto wce = WriteConcernErrorDetail();
-        wce.setStatus({ErrorCodes::WriteConcernFailed, "mock wc error"});
+        wce.setStatus({ErrorCodes::WriteConcernTimeout, "mock wc error"});
         return kBulkWriteNoMatchResponseMultipleWriteOps.addFields(
             BSON("writeConcernError" << wce.toBSON()));
     }();
@@ -3271,7 +3265,7 @@ protected:
 
     static const inline BSONObj kBulkWriteNoMatchResponseWithWCE = [] {
         auto wce = WriteConcernErrorDetail();
-        wce.setStatus({ErrorCodes::WriteConcernFailed, "mock wc error"});
+        wce.setStatus({ErrorCodes::WriteConcernTimeout, "mock wc error"});
         return kBulkWriteNoMatchResponse.addFields(BSON("writeConcernError" << wce.toBSON()));
     }();
 
@@ -3326,13 +3320,13 @@ protected:
 
     static const inline BSONObj kBulkWriteUpdateMatchResponseWithWCE = [] {
         auto wce = WriteConcernErrorDetail();
-        wce.setStatus({ErrorCodes::WriteConcernFailed, "mock wc error"});
+        wce.setStatus({ErrorCodes::WriteConcernTimeout, "mock wc error"});
         return kBulkWriteUpdateMatchResponse.addFields(BSON("writeConcernError" << wce.toBSON()));
     }();
 
     static const inline BSONObj kBulkWriteUpdateMatchResponseWithWCEMultipleWriteOps = [] {
         auto wce = WriteConcernErrorDetail();
-        wce.setStatus({ErrorCodes::WriteConcernFailed, "mock wc error"});
+        wce.setStatus({ErrorCodes::WriteConcernTimeout, "mock wc error"});
         return kBulkWriteUpdateMatchResponseMultipleWriteOps.addFields(
             BSON("writeConcernError" << wce.toBSON()));
     }();
@@ -3504,8 +3498,7 @@ protected:
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{kEndpoint1, kEndpoint2, kEndpoint3};
         }
@@ -3513,8 +3506,7 @@ protected:
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{kEndpoint1, kEndpoint2, kEndpoint3};
         }
@@ -6204,7 +6196,8 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
         ASSERT_OK(reply.replyItems[1].getStatus());
         ASSERT_EQUALS(reply.summaryFields.nErrors, 0);
         LOGV2(7695404, "WriteConcernError received", "wce"_attr = reply.wcErrors->getErrmsg());
-        ASSERT_EQUALS(reply.wcErrors->getCode(), ErrorCodes::WriteConcernFailed);
+        ASSERT_TRUE(reply.wcErrors->getCode() == ErrorCodes::WriteConcernTimeout ||
+                    reply.wcErrors->getCode() == ErrorCodes::UnsatisfiableWriteConcern);
     });
 
     // ShardA response.
@@ -6233,7 +6226,8 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
         ASSERT_OK(reply.replyItems[1].getStatus());
         ASSERT_EQUALS(reply.summaryFields.nErrors, 0);
         LOGV2(7695406, "WriteConcernError received", "wce"_attr = reply.wcErrors->getErrmsg());
-        ASSERT_EQUALS(reply.wcErrors->getCode(), ErrorCodes::WriteConcernFailed);
+        ASSERT_TRUE(reply.wcErrors->getCode() == ErrorCodes::WriteConcernTimeout ||
+                    reply.wcErrors->getCode() == ErrorCodes::UnsatisfiableWriteConcern);
     });
 
     // In the unordered case it isn't clear which of these is triggered for which shard request, but
@@ -6301,8 +6295,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteWriteWithoutShardKeyWithIdAwaitsAllShard
             OperationContext* opCtx,
             const BatchItemRef& itemRef,
             bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-            std::set<ChunkRange>* chunkRange = nullptr) const override {
+            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
             *isNonTargetedWriteWithoutShardKeyWithExactId = true;
             return std::vector{
                 ShardEndpoint(kShardIdA,

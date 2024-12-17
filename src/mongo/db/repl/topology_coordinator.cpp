@@ -37,7 +37,6 @@
 
 #include "mongo/db/repl/topology_coordinator.h"
 
-#include <absl/container/node_hash_map.h>
 #include <algorithm>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
@@ -46,17 +45,16 @@
 #include <fmt/ostream.h>
 #include <limits>
 #include <ostream>
-#include <ratio>
 #include <string>
 
 #include <boost/optional/optional.hpp>
 
 #include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/repl/heartbeat_response_action.h"
 #include "mongo/db/repl/isself.h"
 #include "mongo/db/repl/member_data.h"
@@ -382,20 +380,46 @@ HostAndPort TopologyCoordinator::_chooseNearbySyncSource(Date_t now,
                        "Sync source candidate is eligible",
                        "syncSourceCandidate"_attr = syncSourceCandidate);
 
-            // Do not update 'closestIndex' if the candidate is not the closest node we've seen.
-            auto syncSourceCandidatePing = _getPing(syncSourceCandidate);
-            auto closestPing = _getPing(closestNode);
-            if (syncSourceCandidatePing > closestPing) {
-                LOGV2_INFO(3873114,
-                           "Cannot select sync source with higher latency than the best "
-                           "candidate",
+            // If the difference between the closest ping and candidate ping is within the
+            // changeSyncSourceThreshold, then we consider them to be within the same data center.
+            auto syncSourceCandidatePing =
+                durationCount<Milliseconds>(_getPing(syncSourceCandidate));
+            auto closestPing = durationCount<Milliseconds>(_getPing(closestNode));
+            const auto isWithinPingThreshold = abs(syncSourceCandidatePing - closestPing) <=
+                changeSyncSourceThresholdMillis.load();
+
+            // We want to choose the closest node sync source, with preference for the primary.
+            // So if the two nodes are in the same data center and one of them is the current
+            // primary, we will choose the primary. Otherwise, we choose the closest node.
+            const auto closerCandidate =
+                (syncSourceCandidatePing > closestPing) ? closestIndex : candidateIndex;
+            const auto isAnyCandidatePrimary = _memberData[closestIndex].getState().primary() ||
+                _memberData[candidateIndex].getState().primary();
+
+            // Nodes are within the same data center and one of them is the current primary.
+            // Choose the primary.
+            if (isWithinPingThreshold && isAnyCandidatePrimary) {
+                LOGV2_INFO(9649500,
+                           "Candidate sync source pings are within a threshold, indicating they "
+                           "are in the same data center. Prefer to select primary as sync source",
                            "syncSourceCandidate"_attr = syncSourceCandidate,
                            "syncSourceCandidatePing"_attr = syncSourceCandidatePing,
                            "closestNode"_attr = closestNode,
-                           "closestPing"_attr = closestPing);
+                           "closestPing"_attr = closestPing,
+                           "selectedNode"_attr = _currentPrimaryIndex);
+                closestIndex = _currentPrimaryIndex;
                 continue;
             }
-            closestIndex = candidateIndex;
+            // Nodes are not within the same data center or neither of them is the current primary.
+            // Choose the closer node.
+            LOGV2_INFO(9649501,
+                       "Select sync source with lowest latency",
+                       "syncSourceCandidate"_attr = syncSourceCandidate,
+                       "syncSourceCandidatePing"_attr = syncSourceCandidatePing,
+                       "closestNode"_attr = closestNode,
+                       "closestPing"_attr = closestPing,
+                       "selectedNode"_attr = closerCandidate);
+            closestIndex = closerCandidate;
         }
         if (closestIndex != -1)
             break;  // no need for second attempt
@@ -1506,18 +1530,6 @@ StatusWith<bool> TopologyCoordinator::setLastOptimeForMember(
                 "durableOpTime"_attr = args.durableOpTime);
 
     auto* memberData = _findMemberDataByMemberId(memberId.getData());
-
-    // If we are applying a splitConfig for a shard split, we may still be receiving updates for
-    // nodes that have been removed from the donor set.
-    if (_rsConfig.isSplitConfig() && !memberData &&
-        memberId.getData() >= _rsConfig.getNumMembers()) {
-        LOGV2(6234605,
-              "Skipping update from node",
-              "data"_attr = memberId.getData(),
-              "conf"_attr = _rsConfig);
-        // Do not advance optime
-        return false;
-    }
 
     // While we can accept replSetUpdatePosition commands across config versions, we still do not
     // allow receiving them from a node that is not in our config.

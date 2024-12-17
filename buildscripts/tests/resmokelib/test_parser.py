@@ -273,18 +273,18 @@ class TestLocalCommandLine(unittest.TestCase):
 
         self.assertEqual(cmdline, ["run", "--suites=my_suite", "--storageEngine=my_storage_engine"])
 
-    def test_removes_log_option(self):
-        cmdline = to_local_args(
-            [
-                "run",
-                "--suites=my_suite",
-                "--log=buildlogger",
-                "--buildloggerUrl=some_url",
-                "--storageEngine=my_storage_engine",
-            ]
-        )
 
-        self.assertEqual(cmdline, ["run", "--suites=my_suite", "--storageEngine=my_storage_engine"])
+def test_removes_log_option(self):
+    cmdline = to_local_args(
+        [
+            "run",
+            "--suites=my_suite",
+            "--log=evg",
+            "--storageEngine=my_storage_engine",
+        ]
+    )
+
+    self.assertEqual(cmdline, ["run", "--suites=my_suite", "--storageEngine=my_storage_engine"])
 
     def test_removes_report_file_options(self):
         cmdline = to_local_args(
@@ -402,13 +402,15 @@ class TestParseCommandLine(unittest.TestCase):
     """Unit tests for the parse_command_line() function."""
 
     def test_find_suites(self):
-        subcommand_obj = parse_command_line(["find-suites"])
+        subcommand_obj = parse_command_line(["find-suites"], should_configure_otel=False)
         self.assertTrue(hasattr(subcommand_obj, "execute"))
 
     def test_list_suites(self):
-        subcommand_obj = parse_command_line(["list-suites"])
+        subcommand_obj = parse_command_line(["list-suites"], should_configure_otel=False)
         self.assertTrue(hasattr(subcommand_obj, "execute"))
 
     def test_run(self):
-        subcommand_obj = parse_command_line(["run", "--suite=my_suite", "my_test.js"])
+        subcommand_obj = parse_command_line(
+            ["run", "--suite=my_suite", "my_test.js"], should_configure_otel=False
+        )
         self.assertTrue(hasattr(subcommand_obj, "execute"))

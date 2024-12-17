@@ -46,7 +46,6 @@
 #include "mongo/db/s/balancer/balancer_policy.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/chunks_test_util.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/framework.h"
@@ -180,12 +179,13 @@ std::pair<std::pair<ClusterStats, ShardToChunksMap>, ChunkManager> generateClust
         for (size_t i = 0; i < shardSpec.numChunks; i++, currentChunk++) {
             ChunkType chunk;
 
+            auto minKey = (currentChunk == 0 ? kShardKeyPattern.globalMin()
+                                             : BSON("x" << (long long)currentChunk));
+            auto maxKey =
+                (currentChunk == totalNumChunks - 1 ? kShardKeyPattern.globalMax()
+                                                    : BSON("x" << (long long)currentChunk + 1));
+            chunk.setRange({std::move(minKey), std::move(maxKey)});
             chunk.setCollectionUUID(collUUID());
-            chunk.setMin(currentChunk == 0 ? kShardKeyPattern.globalMin()
-                                           : BSON("x" << (long long)currentChunk));
-            chunk.setMax(currentChunk == totalNumChunks - 1
-                             ? kShardKeyPattern.globalMax()
-                             : BSON("x" << (long long)currentChunk + 1));
             chunk.setShard(shardId);
             chunk.setVersion(chunkVersion);
 

@@ -36,13 +36,11 @@
 #include <boost/optional/optional.hpp>
 
 #include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/record_store_test_harness.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
 
@@ -59,10 +57,7 @@ TEST(RecordStoreTestHarness, GetRandomIteratorEmpty) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(0, rs->numRecords());
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
@@ -80,34 +75,29 @@ TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(0, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(0, rs->numRecords());
 
     const unsigned nToInsert =
         5000;  // should be non-trivial amount, so we get multiple btree levels
     RecordId locs[nToInsert];
     for (unsigned i = 0; i < nToInsert; i++) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
             stringstream ss;
             ss << "record " << i;
             string data = ss.str();
 
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
                 rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
-            uow.commit();
+            txn.commit();
         }
     }
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQUALS(nToInsert, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQUALS(nToInsert, rs->numRecords());
 
     set<RecordId> remain(locs, locs + nToInsert);
     {
@@ -141,27 +131,22 @@ TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQ(0, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQ(0, rs->numRecords());
 
     // Insert one record.
     RecordId idToRetrieve;
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        WriteUnitOfWork uow(opCtx.get());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+        StorageWriteTransaction txn(ru);
         StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "some data", 10, Timestamp());
         ASSERT_OK(res.getStatus());
         idToRetrieve = res.getValue();
-        uow.commit();
+        txn.commit();
     }
 
     // Double-check that the record store has one record in it now.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_EQ(1, rs->numRecords(opCtx.get()));
-    }
+    ASSERT_EQ(1, rs->numRecords());
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());

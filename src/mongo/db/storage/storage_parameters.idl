@@ -196,7 +196,7 @@ server_parameters:
         redact: false
 
     allowUnsafeUntimestampedWrites:
-        description: >- 
+        description: >-
             Allows a replica set member in standalone mode to perform unsafe untimestamped writes
         set_at: [ startup ]
         cpp_varname: gAllowUnsafeUntimestampedWrites
@@ -255,12 +255,6 @@ feature_flags:
         cpp_varname: feature_flags::gTimeseriesUpdatesSupport
         default: false
         shouldBeFCVGated: true
-    featureFlagIndexBuildGracefulErrorHandling:
-        description: "Enable index build error handling improvements"
-        cpp_varname: feature_flags::gIndexBuildGracefulErrorHandling
-        default: true
-        version: 7.1
-        shouldBeFCVGated: true
     featureFlagTimeseriesAlwaysUseCompressedBuckets:
         description: >-
             Enable support to always use the compressed time-series bucket format when inserting,
@@ -274,13 +268,8 @@ feature_flags:
         cpp_varname: feature_flags::gTSBucketingParametersUnchanged
         default: false
         shouldBeFCVGated: true
-    featureFlagBlockBasedDecodingScalarAPI:
-        description: "Enable support for decompressing BSON columns using the block based scalar API"
-        cpp_varname: feature_flags::gBlockBasedDecodingScalarAPI
-        default: true
-        shouldBeFCVGated: false
-    featureFlagBlockBasedDecodingPathAPI:
-        description: "Enable support for decompressing BSON columns using the block based Path API"
-        cpp_varname: feature_flags::gBlockBasedDecodingPathAPI
-        default: true
+    featureFlagStorageEngineInterruptibility:
+        description: "Enable support for interrupting user operations in storage engines and rolling back transactions immediately that are targeted by the storage engine."
+        cpp_varname: feature_flags::gStorageEngineInterruptibility 
+        default: false
         shouldBeFCVGated: false

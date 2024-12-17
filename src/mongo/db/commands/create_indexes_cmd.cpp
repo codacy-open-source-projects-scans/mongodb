@@ -30,9 +30,7 @@
 #include <algorithm>
 #include <iterator>
 #include <memory>
-#include <set>
 #include <string>
-#include <utility>
 #include <vector>
 
 #include <boost/container/small_vector.hpp>
@@ -57,7 +55,6 @@
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
-#include "mongo/db/catalog/commit_quorum_options.h"
 #include "mongo/db/catalog/create_collection.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/index_key_validate.h"
@@ -65,7 +62,6 @@
 #include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/create_indexes_gen.h"
@@ -73,7 +69,10 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/commit_quorum_options.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/repl_index_build_state.h"
+#include "mongo/db/index_builds/two_phase_index_build_knobs_gen.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -81,7 +80,6 @@
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl_index_build_state.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/database_sharding_state.h"
 #include "mongo/db/s/operation_sharding_state.h"
@@ -92,7 +90,6 @@
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/storage/two_phase_index_build_knobs_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/catalog_helper.h"
 #include "mongo/db/timeseries/timeseries_commands_conversion_helper.h"
@@ -101,12 +98,9 @@
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/rpc/op_msg.h"
 #include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/future.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
@@ -560,13 +554,7 @@ CreateIndexesReply runCreateIndexesWithCoordinator(OperationContext* opCtx,
                           << ns.toStringForErrorMsg() << " in a multi-document transaction.",
             !opCtx->inMultiDocumentTransaction());
 
-    // We need to use isEnabledUseLastLTSFCVWhenUninitialized because it's possible for
-    // createIndexes to be sent directly to an initial sync node with uninitialized FCV if the
-    // collection is not replicated.
-    if (feature_flags::gIndexBuildGracefulErrorHandling.isEnabledUseLastLTSFCVWhenUninitialized(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        uassertStatusOK(IndexBuildsCoordinator::checkDiskSpaceSufficientToStartIndexBuild(opCtx));
-    }
+    uassertStatusOK(IndexBuildsCoordinator::checkDiskSpaceSufficientToStartIndexBuild(opCtx));
 
     // Use AutoStatsTracker to update Top.
     boost::optional<AutoStatsTracker> statsTracker;

@@ -37,7 +37,6 @@
 #include "mongo/base/status_with.h"
 #include "mongo/db/commands/query_cmd/bulk_write_crud_op.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -95,16 +94,18 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_getTarg
         return uassertStatusOK(
             CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
     }();
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx,
-        std::move(cif),
-        _getChunkManager().getNss(),
-        runtimeConstants.value_or(Variables::generateRuntimeConstants(opCtx)),
-        letParameters);
+    auto expCtx =
+        ExpressionContextBuilder{}
+            .opCtx(opCtx)
+            .collator(std::move(cif))
+            .ns(_getChunkManager().getNss())
+            .runtimeConstants(runtimeConstants.value_or(Variables::generateRuntimeConstants(opCtx)))
+            .letParameters(letParameters)
+            .build();
 
     std::set<ShardId> shardIds;  // This is not used.
     QueryTargetingInfo info;
-    getShardIdsForQuery(expCtx, filter, collation, _getChunkManager(), &shardIds, &info);
+    getShardIdsAndChunksForQuery(expCtx, filter, collation, _getChunkManager(), &shardIds, &info);
 
     return info;
 }
@@ -264,12 +265,9 @@ void WriteDistributionMetricsCalculator::_addUpdateQuery(
                 opCtx, ns, filter, collation, _getChunkManager());
         };
 
-        // Currently, targeting by replacement document is only done when an updateOne without
-        // shard key is not supported or when the query targets an exact id value.
-        if (isReplacementUpdate &&
-            (!feature_flags::gFeatureFlagUpdateOneWithoutShardKey.isEnabled(
-                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
-             isExactIdQuery())) {
+        // Currently, targeting by replacement document is only done when the query targets an exact
+        // id value.
+        if (isReplacementUpdate && isExactIdQuery()) {
             auto filter =
                 _getShardKeyPattern().extractShardKeyFromDoc(updateMod.getUpdateReplacement());
             info = _getTargetingInfoForQuery(

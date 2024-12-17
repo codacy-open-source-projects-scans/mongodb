@@ -88,30 +88,43 @@ private:
     std::unique_ptr<unittest::Barrier> _barrier;
 };
 
-TEST_F(LogRotateSignalTest, LogRotateSignal) {
+// We use a death test here because the asynchronous signal processing thread runs as detached
+// thread, so we kill the process in which it spawns so the thread doesn't live in other tests.
+DEATH_TEST_F(LogRotateSignalTest, LogRotateSignal, "Ending LogRotateSignalTest") {
     startCapturingLogMessages();
     kill(getpid(), SIGUSR1);
     waitUntilLogRotatorCalled();
     stopCapturingLogMessages();
     ASSERT(checkCapturedTextFormatLogMessagesForSubstr("Log rotation initiated"));
     ASSERT(checkCapturedTextFormatLogMessagesForSubstr("Test log rotator called"));
+    LOGV2_FATAL(9706300, "Ending LogRotateSignalTest");
 }
 
-#define TEST_SIGNAL_CLEAN_EXIT(SIGNUM)                                 \
-    DEATH_TEST(AsynchronousSignalTest, SIGNUM##_, "Received signal") { \
-        registerShutdownTask([&] { invariant(false); });               \
-        startSignalProcessingThread();                                 \
-        kill(getpid(), SIGNUM);                                        \
-        waitForShutdown();                                             \
-    }
+void doSignalShutdownTest(int sig) {
+    // We expect a clean exit for asynchronously handled signals. Clean exit calls into shutdown
+    // tasks, so we log to indicate the signal was handled as expected, and invariant to finish
+    // the DEATH_TEST.
+    registerShutdownTask([] {
+        LOGV2(9570500, "Shutdown called");
+        invariant(false);
+    });
+    startSignalProcessingThread();
+    kill(getpid(), sig);
+    waitForShutdown();
+}
 
-// TODO SERVER-95705 re-enable this test on MacOS once the MacOS signal handling bug is fixed.
-#ifndef __APPLE__
-TEST_SIGNAL_CLEAN_EXIT(SIGHUP);
-#endif
-TEST_SIGNAL_CLEAN_EXIT(SIGINT);
-TEST_SIGNAL_CLEAN_EXIT(SIGTERM);
-TEST_SIGNAL_CLEAN_EXIT(SIGXCPU);
+DEATH_TEST(AsynchronousSignalTest, ShutdownHup, "Shutdown called") {
+    doSignalShutdownTest(SIGHUP);
+}
+DEATH_TEST(AsynchronousSignalTest, ShutdownInt, "Shutdown called") {
+    doSignalShutdownTest(SIGINT);
+}
+DEATH_TEST(AsynchronousSignalTest, ShutdownTerm, "Shutdown called") {
+    doSignalShutdownTest(SIGTERM);
+}
+DEATH_TEST(AsynchronousSignalTest, ShutdownXcpu, "Shutdown called") {
+    doSignalShutdownTest(SIGXCPU);
+}
 
 }  // namespace
 }  // namespace mongo

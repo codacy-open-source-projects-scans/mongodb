@@ -136,10 +136,8 @@ void ReplCoordTest::addSelf(const HostAndPort& selfHost) {
 void ReplCoordTest::init() {
     invariant(!_repl);
     invariant(!_callShutdown);
-    {
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
-    }
+    cc().setOperationUnkillable_ForTest();
+
     auto service = getGlobalServiceContext();
     _storageInterface = new StorageInterfaceMock();
     StorageInterface::set(service, std::unique_ptr<StorageInterface>(_storageInterface));
@@ -171,7 +169,7 @@ void ReplCoordTest::init() {
 
     // The ReadWriteConcernDefaults decoration on the service context won't always be created,
     // so we should manually instantiate it to ensure it exists in our tests.
-    ReadWriteConcernDefaults::create(service, lookupMock.getFetchDefaultsFn());
+    ReadWriteConcernDefaults::create(service->getService(), lookupMock.getFetchDefaultsFn());
 
     TopologyCoordinator::Options settings;
     auto topo = std::make_unique<TopologyCoordinator>(settings);
@@ -182,10 +180,10 @@ void ReplCoordTest::init() {
     _externalState = externalState.get();
     executor::ThreadPoolMock::Options tpOptions;
     tpOptions.onCreateThread = []() {
-        Client::initThread("replexec", getGlobalServiceContext()->getService());
-
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
+        Client::initThread("replexec",
+                           getGlobalServiceContext()->getService(),
+                           Client::noSession(),
+                           ClientOperationKillableByStepdown{false});
     };
     auto pool = std::make_unique<executor::ThreadPoolMock>(_net, seed, tpOptions);
     auto replExec = executor::ThreadPoolTaskExecutor::create(std::move(pool), std::move(net));
@@ -215,14 +213,10 @@ void ReplCoordTest::start() {
     // construct ServiceEntryPoint and this causes a segmentation fault when
     // reconstructPreparedTransactions uses DBDirectClient to call into ServiceEntryPoint.
     FailPointEnableBlock skipReconstructPreparedTransactions("skipReconstructPreparedTransactions");
-    // Skip recovering tenant migration access blockers for the same reason as the above.
-    FailPointEnableBlock skipRecoverTenantMigrationAccessBlockers(
-        "skipRecoverTenantMigrationAccessBlockers");
     // Skip recovering user writes critical sections for the same reason as the above.
     FailPointEnableBlock skipRecoverUserWriteCriticalSections(
         "skipRecoverUserWriteCriticalSections");
     // Skip recovering of serverless mutual exclusion locks for the same reason as the above.
-    FailPointEnableBlock skipRecoverServerlessOperationLock("skipRecoverServerlessOperationLock");
     invariant(!_callShutdown);
     // if we haven't initialized yet, do that first.
     if (!_repl) {
@@ -567,7 +561,7 @@ void ReplCoordTest::disableSnapshots() {
 void ReplCoordTest::simulateCatchUpAbort() {
     NetworkInterfaceMock* net = getNet();
     auto heartbeatTimeoutWhen =
-        net->now() + getReplCoord()->getConfigHeartbeatTimeoutPeriodMillis();
+        net->now() + getReplCoord()->getConfig().getHeartbeatTimeoutPeriodMillis();
     bool hasRequest = false;
     net->enterNetwork();
     if (net->now() < heartbeatTimeoutWhen) {

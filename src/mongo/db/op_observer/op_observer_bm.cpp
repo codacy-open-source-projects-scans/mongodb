@@ -44,8 +44,6 @@
 #include "mongo/db/op_observer/user_write_block_mode_op_observer.h"
 #include "mongo/db/repl/primary_only_service_op_observer.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/repl/tenant_migration_donor_op_observer.h"
-#include "mongo/db/repl/tenant_migration_recipient_op_observer.h"
 #include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/query_analysis_op_observer_configsvr.h"
@@ -56,6 +54,7 @@
 #include "mongo/db/timeseries/timeseries_op_observer.h"
 #include "mongo/idl/cluster_server_parameter_op_observer.h"
 #include "mongo/logv2/log_domain_global.h"
+#include "mongo/platform/compiler.h"
 
 namespace mongo {
 namespace {
@@ -94,12 +93,7 @@ void setUpObservers(ServiceContext* serviceContext,
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
-        if (isServerless) {
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationDonorOpObserver>());
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        }
+
         if (!gMultitenancySupport) {
             opObserverRegistry->addObserver(
                 std::make_unique<analyze_shard_key::QueryAnalysisOpObserverShardSvr>());
@@ -121,12 +115,7 @@ void setUpObservers(ServiceContext* serviceContext,
         opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
-        if (isServerless) {
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationDonorOpObserver>());
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        }
+
         if (!gMultitenancySupport) {  // && replCoord && replCoord->getSettings().isReplSet()) {
             opObserverRegistry->addObserver(
                 std::make_unique<analyze_shard_key::QueryAnalysisOpObserverRS>());
@@ -194,11 +183,14 @@ BENCHMARK(BM_OnUpdate_System)->MinTime(10.0);
 void BM_OnInserts(benchmark::State& state, const char* nss) {
     CollectionMock coll(NamespaceString::createNamespaceString_forTest(nss));
     CollectionPtr collptr(&coll);
+    MONGO_COMPILER_DIAGNOSTIC_PUSH
+    MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wuninitialized")
     std::vector<InsertStatement> statements(1,
                                             InsertStatement(BSON("_id"
                                                                  << "whatever"
                                                                  << "key"
                                                                  << "value")));
+    MONGO_COMPILER_DIAGNOSTIC_POP
     OpObserverRegistry registry;
     auto* serviceContext = setupServiceContext();
     repl::ReplSettings replSettings;

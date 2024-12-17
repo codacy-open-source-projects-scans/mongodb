@@ -23,7 +23,7 @@ conf.members[2].priority = 0;
 conf.settings = conf.settings || {};
 conf.settings.chainingAllowed = false;
 conf.settings.catchUpTimeoutMillis = 0;
-replSet.initiate(conf);
+replSet.initiate(conf, null, {initiateWithDefaultElectionTimeout: true});
 
 var primary = replSet.getPrimary();
 var secondary = replSet.getSecondary();
@@ -132,7 +132,7 @@ jsTest.log("allowing heartbeat stepdown " + secondary.host);
 blockHeartbeatStepdownFailPoint.off();
 
 jsTestLog("Checking that node successfully stepped down");
-replSet.waitForState(secondary, ReplSetTest.State.SECONDARY);
+replSet.awaitSecondaryNodes(null, [secondary]);
 assert(!secondary.adminCommand('hello').isWritablePrimary);
 
 // Now ensure that the node can successfully become primary again.

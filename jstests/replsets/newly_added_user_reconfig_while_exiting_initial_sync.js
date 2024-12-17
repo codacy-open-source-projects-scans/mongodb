@@ -25,7 +25,7 @@ const rst = new ReplSetTest({
     settings: {chainingAllowed: false},
 });
 rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 const primary = rst.getPrimary();
 const primaryDb = primary.getDB(dbName);
@@ -79,7 +79,7 @@ assert.commandWorked(
 waitForUserReconfig();
 
 jsTestLog("Waiting for 'newlyAdded' field to be removed");
-rst.waitForState(secondary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [secondary]);
 waitForNewlyAddedRemovalForNodeToBeCommitted(primary, 1);
 assertVoteCount(primary, {
     votingMembersCount: 2,

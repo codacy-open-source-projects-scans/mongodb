@@ -96,6 +96,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/bson_formatter.h"
 #include "mongo/logv2/component_settings_filter.h"
@@ -2446,6 +2447,88 @@ TEST_F(UnstructuredLoggingTest, MapBSON) {
         ASSERT_EQUALS(obj.getField(kMessageFieldName).String(),
                       "(key1: {\"str1\":\"str2\"}, key2: {\"str3\":\"str4\"})");
     });
+}
+
+
+// Tests for the `LogSeverity::ProdOnly()` level. In a testing environment, this should behave like
+// a debug-1 log but in a production environment like a default (debug-0) log.
+class ProdOnlySeverityTest : public LogV2Test {
+public:
+    using LogV2Test::LogV2Test;
+
+    // Returns the most severe severity for which the log appears. The log will appear at all
+    // severities below this one as well.
+    boost::optional<LogSeverity> findFirstSeverityLogged(bool options) {
+        LogSeverity severity = LogSeverity::Log();
+
+        while (severity.toInt() < 6) {
+            // The logLevel server parameter accepts an integer 0 ('LogSeverity::Log()') to 5
+            // ('LogSeverity::Debug(5)') as it's argument.
+            RAIIServerParameterControllerForTest logVerbosityController{"logLevel",
+                                                                        severity.toInt()};
+            if (options) {
+                LOGV2_PROD_ONLY_OPTIONS(9757701, {LogTag::kNone}, "test");
+            } else {
+                LOGV2_PROD_ONLY(9757700, "test");
+            }
+            if (lines->size() != 0) {
+                return severity;
+            }
+            severity = severity.lessSevere();
+        }
+        return boost::none;
+    }
+
+    std::unique_ptr<LineCapture> lines = makeLineCapture(PlainFormatter());
+};
+
+// Tests that '_suppressProdOnly' is configured with the enableTestCommands parameter.
+TEST_F(ProdOnlySeverityTest, SuppressProdOnlyTrueWhenEnableTestCommandsTrue) {
+    RAIIServerParameterControllerForTest enableTestCommandsController{"enableTestCommands", false};
+    ASSERT_EQUALS(LogSeverity::getSuppressProdOnly(), false);
+}
+
+// Tests that '_suppressProdOnly' is configured with the enableTestCommands parameter.
+TEST_F(ProdOnlySeverityTest, SuppressProdOnlyFalseWhenEnableTestCommandsFalse) {
+    RAIIServerParameterControllerForTest enableTestCommandsController{"enableTestCommands", true};
+    ASSERT_EQUALS(LogSeverity::getSuppressProdOnly(), true);
+}
+
+// Tests that LogSeverity::ProdOnly() returns correct severity in production.
+TEST_F(ProdOnlySeverityTest, ProdOnlySeverityIsZeroInProd) {
+    LogSeverity::suppressProdOnly_forTest(false);
+    ASSERT_EQUALS(LogSeverity::ProdOnly(), LogSeverity::Log());
+}
+
+// Tests that LogSeverty::ProdOnly() returns correct severity in testing.
+TEST_F(ProdOnlySeverityTest, ProdOnlySeveritIsOneInTest) {
+    LogSeverity::suppressProdOnly_forTest(true);
+    ASSERT_EQUALS(LogSeverity::ProdOnly(), LogSeverity::Debug(1));
+}
+
+// In production we expect to first see the message at the default level 0 for 'LOGV2_PROD_ONLY'.
+TEST_F(ProdOnlySeverityTest, LogAtDefaultInProd) {
+    LogSeverity::suppressProdOnly_forTest(false);
+    ASSERT_EQUALS(findFirstSeverityLogged(false), LogSeverity::Log());
+}
+
+// In testing we expect to first see the message at the debug -1 for 'LOGV2_PROD_ONLY'.
+TEST_F(ProdOnlySeverityTest, LogAtDebug1InTest) {
+    LogSeverity::suppressProdOnly_forTest(true);
+    ASSERT_EQUALS(findFirstSeverityLogged(false), LogSeverity::Debug(1));
+}
+
+// In production we expect to first see the message at the default level 0 for
+// 'LOGV2_PROD_ONLY_OPTIONS'.
+TEST_F(ProdOnlySeverityTest, LogOptionsAtDefaultInProd) {
+    LogSeverity::suppressProdOnly_forTest(false);
+    ASSERT_EQUALS(findFirstSeverityLogged(true), LogSeverity::Log());
+}
+
+// In testing we expect to first see the message at the debug-1 for 'LOGV2_PROD_ONLY_OPTIONS'.
+TEST_F(ProdOnlySeverityTest, LogOptionsAtDebug1InTest) {
+    LogSeverity::suppressProdOnly_forTest(true);
+    ASSERT_EQUALS(findFirstSeverityLogged(true), LogSeverity::Debug(1));
 }
 
 }  // namespace

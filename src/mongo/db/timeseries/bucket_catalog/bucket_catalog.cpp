@@ -31,8 +31,6 @@
 #include <absl/meta/type_traits.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
-#include <iterator>
-#include <string>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
@@ -40,32 +38,22 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/column/bsoncolumnbuilder.h"
+#include "mongo/bson/oid.h"
 #include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
-#include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
-#include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/debug_util.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/future.h"
-#include "mongo/util/string_map.h"
-#include "mongo/util/tracking_context.h"
+#include "mongo/util/tracking/context.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo::timeseries::bucket_catalog {
 namespace {
-MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeWriteConflict);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationAfterStart);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesDirectModificationBeforeFinish);
 MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeReopeningBucket);
@@ -77,7 +65,8 @@ MONGO_FAIL_POINT_DEFINE(hangTimeseriesInsertBeforeReopeningBucket);
  */
 void prepareWriteBatchForCommit(TrackingContexts& trackingContexts,
                                 WriteBatch& batch,
-                                Bucket& bucket) {
+                                Bucket& bucket,
+                                const StringDataComparator* comparator) {
     invariant(batch.commitRights.load());
     batch.numPreviouslyCommittedMeasurements = bucket.numCommittedMeasurements;
 
@@ -85,7 +74,7 @@ void prepareWriteBatchForCommit(TrackingContexts& trackingContexts,
     // by someone else.
     for (auto it = batch.newFieldNamesToBeInserted.begin();
          it != batch.newFieldNamesToBeInserted.end();) {
-        TrackedStringMapHashedKey fieldName(
+        tracking::StringMapHashedKey fieldName(
             getTrackingContext(trackingContexts, TrackingScope::kMiscellaneous),
             it->first,
             it->second);
@@ -100,8 +89,7 @@ void prepareWriteBatchForCommit(TrackingContexts& trackingContexts,
     }
 
     for (const auto& doc : batch.measurements) {
-        bucket.minmax.update(
-            doc, bucket.key.metadata.getMetaField(), bucket.key.metadata.getComparator());
+        bucket.minmax.update(doc, bucket.key.metadata.getMetaField(), comparator);
     }
 
     const bool isUpdate = batch.numPreviouslyCommittedMeasurements > 0;
@@ -117,7 +105,6 @@ void prepareWriteBatchForCommit(TrackingContexts& trackingContexts,
     // See corollary in finish().
     batch.measurementMap = std::move(bucket.measurementMap);
     batch.bucketIsSortedByTime = bucket.bucketIsSortedByTime;
-    batch.generateCompressedDiff = bucket.usingAlwaysCompressedBuckets;
     batch.isReopened = bucket.isReopened;
 }
 
@@ -159,21 +146,23 @@ SuccessfulInsertion::SuccessfulInsertion(std::shared_ptr<WriteBatch>&& b, Closed
 
 Stripe::Stripe(TrackingContexts& trackingContexts)
     : openBucketsById(
-          make_tracked_unordered_map<BucketId, unique_tracked_ptr<Bucket>, BucketHasher>(
+          tracking::make_unordered_map<BucketId, tracking::unique_ptr<Bucket>, BucketHasher>(
               getTrackingContext(trackingContexts, TrackingScope::kOpenBucketsById))),
-      openBucketsByKey(make_tracked_unordered_map<BucketKey, tracked_set<Bucket*>, BucketHasher>(
-          getTrackingContext(trackingContexts, TrackingScope::kOpenBucketsByKey))),
-      idleBuckets(make_tracked_list<Bucket*>(
+      openBucketsByKey(
+          tracking::make_unordered_map<BucketKey, tracking::flat_hash_set<Bucket*>, BucketHasher>(
+              getTrackingContext(trackingContexts, TrackingScope::kOpenBucketsByKey))),
+      idleBuckets(tracking::make_list<Bucket*>(
           getTrackingContext(trackingContexts, TrackingScope::kIdleBuckets))),
       archivedBuckets(
-          make_tracked_btree_map<ArchivedKey, ArchivedBucket, std::greater<ArchivedKey>>(
+          tracking::make_btree_map<ArchivedKey, ArchivedBucket, std::greater<ArchivedKey>>(
               getTrackingContext(trackingContexts, TrackingScope::kArchivedBuckets))),
-      collectionTimeFields(make_tracked_unordered_map<UUID, std::tuple<tracked_string, int64_t>>(
-          getTrackingContext(trackingContexts, TrackingScope::kArchivedBuckets))),
+      collectionTimeFields(
+          tracking::make_unordered_map<UUID, std::tuple<tracking::string, int64_t>>(
+              getTrackingContext(trackingContexts, TrackingScope::kArchivedBuckets))),
       outstandingReopeningRequests(
-          make_tracked_unordered_map<
+          tracking::make_unordered_map<
               BucketKey,
-              tracked_inlined_vector<shared_tracked_ptr<ReopeningRequest>, kInlinedVectorSize>,
+              tracking::inlined_vector<tracking::shared_ptr<ReopeningRequest>, kInlinedVectorSize>,
               BucketHasher>(
               getTrackingContext(trackingContexts, TrackingScope::kReopeningRequests))) {}
 
@@ -181,14 +170,14 @@ BucketCatalog::BucketCatalog(size_t numberOfStripes, std::function<uint64_t()> m
     : bucketStateRegistry(
           getTrackingContext(trackingContexts, TrackingScope::kBucketStateRegistry)),
       numberOfStripes(numberOfStripes),
-      stripes(make_tracked_vector<unique_tracked_ptr<Stripe>>(
+      stripes(tracking::make_vector<tracking::unique_ptr<Stripe>>(
           getTrackingContext(trackingContexts, TrackingScope::kMiscellaneous))),
-      executionStats(make_tracked_unordered_map<UUID, shared_tracked_ptr<ExecutionStats>>(
+      executionStats(tracking::make_unordered_map<UUID, tracking::shared_ptr<ExecutionStats>>(
           getTrackingContext(trackingContexts, TrackingScope::kStats))),
       memoryUsageThreshold(memoryUsageThreshold) {
     stripes.reserve(numberOfStripes);
     std::generate_n(std::back_inserter(stripes), numberOfStripes, [&]() {
-        return make_unique_tracked<Stripe>(
+        return tracking::make_unique<Stripe>(
             getTrackingContext(trackingContexts, TrackingScope::kMiscellaneous), trackingContexts);
     });
 }
@@ -262,10 +251,9 @@ StatusWith<InsertResult> tryInsert(BucketCatalog& catalog,
                                    const StringDataComparator* comparator,
                                    const BSONObj& doc,
                                    OperationId opId,
-                                   CombineWithInsertsFromOtherClients combine,
                                    InsertContext& insertContext,
                                    const Date_t& time,
-                                   uint64_t storageCacheSize) {
+                                   uint64_t storageCacheSizeBytes) {
     // Save the catalog era value from before we make any further checks. This guarantees that we
     // don't miss a direct write that happens sometime in between our decision to potentially reopen
     // a bucket below, and actually reopening it in a subsequent reentrant call. Any direct write
@@ -278,8 +266,13 @@ StatusWith<InsertResult> tryInsert(BucketCatalog& catalog,
     auto& stripe = *catalog.stripes[insertContext.stripeNumber];
     stdx::lock_guard stripeLock{stripe.mutex};
 
-    Bucket* bucket = internal::useBucket(
-        catalog, stripe, stripeLock, insertContext, internal::AllowBucketCreation::kNo, time);
+    Bucket* bucket = internal::useBucket(catalog,
+                                         stripe,
+                                         stripeLock,
+                                         insertContext,
+                                         internal::AllowBucketCreation::kNo,
+                                         time,
+                                         comparator);
     // If there are no open buckets for our measurement that we can use, we return a
     // reopeningContext to try reopening a closed bucket from disk.
     if (!bucket) {
@@ -290,7 +283,7 @@ StatusWith<InsertResult> tryInsert(BucketCatalog& catalog,
                                    catalogEra,
                                    internal::AllowQueryBasedReopening::kAllow,
                                    time,
-                                   storageCacheSize);
+                                   storageCacheSizeBytes);
     }
 
     auto insertionResult = insertIntoBucket(catalog,
@@ -298,12 +291,12 @@ StatusWith<InsertResult> tryInsert(BucketCatalog& catalog,
                                             stripeLock,
                                             doc,
                                             opId,
-                                            combine,
                                             internal::AllowBucketCreation::kNo,
                                             insertContext,
                                             *bucket,
                                             time,
-                                            storageCacheSize);
+                                            storageCacheSizeBytes,
+                                            comparator);
     // If our insert was successful, return a SuccessfulInsertion with our
     // WriteBatch.
     if (auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult)) {
@@ -326,12 +319,16 @@ StatusWith<InsertResult> tryInsert(BucketCatalog& catalog,
                                                stripeLock,
                                                doc,
                                                opId,
-                                               combine,
                                                internal::AllowBucketCreation::kNo,
                                                insertContext,
                                                *alternate,
                                                time,
-                                               storageCacheSize);
+                                               storageCacheSizeBytes,
+                                               comparator,
+                                               bucket,
+                                               *reason == RolloverReason::kTimeBackward
+                                                   ? RolloverAction::kArchive
+                                                   : RolloverAction::kSoftClose);
             if (auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult)) {
                 return SuccessfulInsertion{std::move(*batch),
                                            std::move(insertContext.closedBuckets)};
@@ -351,18 +348,17 @@ StatusWith<InsertResult> tryInsert(BucketCatalog& catalog,
                                    ? internal::AllowQueryBasedReopening::kAllow
                                    : internal::AllowQueryBasedReopening::kDisallow,
                                time,
-                               storageCacheSize);
+                               storageCacheSizeBytes);
 }
 
 StatusWith<InsertResult> insertWithReopeningContext(BucketCatalog& catalog,
                                                     const StringDataComparator* comparator,
                                                     const BSONObj& doc,
                                                     OperationId opId,
-                                                    CombineWithInsertsFromOtherClients combine,
                                                     ReopeningContext& reopeningContext,
                                                     InsertContext& insertContext,
                                                     const Date_t& time,
-                                                    uint64_t storageCacheSize) {
+                                                    uint64_t storageCacheSizeBytes) {
     updateBucketFetchAndQueryStats(reopeningContext, insertContext.stats);
 
     // We try to create a bucket in-memory from one on disk that we can potentially insert our
@@ -376,7 +372,7 @@ StatusWith<InsertResult> insertWithReopeningContext(BucketCatalog& catalog,
                                     reopeningContext.bucketToReopen.value(),
                                     reopeningContext.catalogEra,
                                     &insertContext.key)
-        : StatusWith<unique_tracked_ptr<Bucket>>{ErrorCodes::BadValue, "No bucket to rehydrate"};
+        : StatusWith<tracking::unique_ptr<Bucket>>{ErrorCodes::BadValue, "No bucket to rehydrate"};
     if (rehydratedBucket.getStatus().code() == ErrorCodes::WriteConflict) {
         return rehydratedBucket.getStatus();
     }
@@ -423,12 +419,12 @@ StatusWith<InsertResult> insertWithReopeningContext(BucketCatalog& catalog,
                                                     stripeLock,
                                                     doc,
                                                     opId,
-                                                    combine,
                                                     internal::AllowBucketCreation::kYes,
                                                     insertContext,
                                                     bucket,
                                                     time,
-                                                    storageCacheSize);
+                                                    storageCacheSizeBytes,
+                                                    comparator);
             auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult);
             invariant(batch);
             return SuccessfulInsertion{std::move(*batch), std::move(insertContext.closedBuckets)};
@@ -442,8 +438,13 @@ StatusWith<InsertResult> insertWithReopeningContext(BucketCatalog& catalog,
         }
     }
 
-    Bucket* bucket = useBucket(
-        catalog, stripe, stripeLock, insertContext, internal::AllowBucketCreation::kYes, time);
+    Bucket* bucket = useBucket(catalog,
+                               stripe,
+                               stripeLock,
+                               insertContext,
+                               internal::AllowBucketCreation::kYes,
+                               time,
+                               comparator);
     invariant(bucket);
 
     auto insertionResult = insertIntoBucket(catalog,
@@ -451,12 +452,12 @@ StatusWith<InsertResult> insertWithReopeningContext(BucketCatalog& catalog,
                                             stripeLock,
                                             doc,
                                             opId,
-                                            combine,
                                             internal::AllowBucketCreation::kYes,
                                             insertContext,
                                             *bucket,
                                             time,
-                                            storageCacheSize);
+                                            storageCacheSizeBytes,
+                                            comparator);
     auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult);
     invariant(batch);
     return SuccessfulInsertion{std::move(*batch), std::move(insertContext.closedBuckets)};
@@ -466,15 +467,19 @@ StatusWith<InsertResult> insert(BucketCatalog& catalog,
                                 const StringDataComparator* comparator,
                                 const BSONObj& doc,
                                 OperationId opId,
-                                CombineWithInsertsFromOtherClients combine,
                                 InsertContext& insertContext,
                                 const Date_t& time,
-                                uint64_t storageCacheSize) {
+                                uint64_t storageCacheSizeBytes) {
     auto& stripe = *catalog.stripes[insertContext.stripeNumber];
     stdx::lock_guard stripeLock{stripe.mutex};
 
-    Bucket* bucket = useBucket(
-        catalog, stripe, stripeLock, insertContext, internal::AllowBucketCreation::kYes, time);
+    Bucket* bucket = useBucket(catalog,
+                               stripe,
+                               stripeLock,
+                               insertContext,
+                               internal::AllowBucketCreation::kYes,
+                               time,
+                               comparator);
     invariant(bucket);
 
     auto insertionResult = insertIntoBucket(catalog,
@@ -482,12 +487,12 @@ StatusWith<InsertResult> insert(BucketCatalog& catalog,
                                             stripeLock,
                                             doc,
                                             opId,
-                                            combine,
                                             internal::AllowBucketCreation::kYes,
                                             insertContext,
                                             *bucket,
                                             time,
-                                            storageCacheSize);
+                                            storageCacheSizeBytes,
+                                            comparator);
 
     auto* batch = get_if<std::shared_ptr<WriteBatch>>(&insertionResult);
     invariant(batch);
@@ -502,7 +507,9 @@ void waitToInsert(InsertWaiter* waiter) {
     }
 }
 
-Status prepareCommit(BucketCatalog& catalog, std::shared_ptr<WriteBatch> batch) {
+Status prepareCommit(BucketCatalog& catalog,
+                     std::shared_ptr<WriteBatch> batch,
+                     const StringDataComparator* comparator) {
     auto getBatchStatus = [&] {
         return batch->promise.getFuture().getNoThrow().getStatus();
     };
@@ -540,7 +547,7 @@ Status prepareCommit(BucketCatalog& catalog, std::shared_ptr<WriteBatch> batch) 
         return getBatchStatus();
     }
 
-    prepareWriteBatchForCommit(catalog.trackingContexts, *batch, *bucket);
+    prepareWriteBatchForCommit(catalog.trackingContexts, *batch, *bucket, comparator);
 
     return Status::OK();
 }
@@ -582,10 +589,8 @@ boost::optional<ClosedBucket> finish(
         // See corollary in prepareWriteBatchForCommit().
         bucket->bucketIsSortedByTime = batch->bucketIsSortedByTime;
 
-        if (bucket->usingAlwaysCompressedBuckets) {
-            bucket->size -= batch->sizes.uncommittedMeasurementEstimate;
-            bucket->size += batch->sizes.uncommittedVerifiedSize;
-        }
+        bucket->size -= batch->sizes.uncommittedMeasurementEstimate;
+        bucket->size += batch->sizes.uncommittedVerifiedSize;
         bucket->measurementMap = std::move(batch->measurementMap);
         bucket->preparedBatch.reset();
     }
@@ -681,7 +686,6 @@ void directWriteStart(BucketStateRegistry& registry, const BucketId& bucketId) {
 
     // We cannot perform direct writes on prepared buckets.
     invariant(isBucketStatePrepared(state));
-    hangTimeseriesDirectModificationBeforeWriteConflict.pauseWhileSet();
     throwWriteConflictException("Prepared bucket can no longer be inserted into.");
 }
 
@@ -690,7 +694,7 @@ void directWriteFinish(BucketStateRegistry& registry, const BucketId& bucketId) 
     removeDirectWrite(registry, bucketId);
 }
 
-void drop(BucketCatalog& catalog, tracked_vector<UUID> clearedCollectionUUIDs) {
+void drop(BucketCatalog& catalog, tracking::vector<UUID> clearedCollectionUUIDs) {
     auto stats = internal::releaseExecutionStatsFromBucketCatalog(catalog, clearedCollectionUUIDs);
     clearSetOfBuckets(catalog.bucketStateRegistry, std::move(clearedCollectionUUIDs));
 
@@ -710,7 +714,7 @@ void drop(BucketCatalog& catalog, const UUID& collectionUUID) {
 }
 
 void clear(BucketCatalog& catalog, const UUID& collectionUUID) {
-    tracked_vector<UUID> clearedCollectionUUIDs = make_tracked_vector<UUID>(
+    tracking::vector<UUID> clearedCollectionUUIDs = tracking::make_vector<UUID>(
         getTrackingContext(catalog.trackingContexts, TrackingScope::kBucketStateRegistry));
     clearedCollectionUUIDs.push_back(collectionUUID);
     clearSetOfBuckets(catalog.bucketStateRegistry, std::move(clearedCollectionUUIDs));
@@ -740,7 +744,6 @@ BucketId extractBucketId(BucketCatalog& bucketCatalog,
                         BucketMetadata{getTrackingContext(bucketCatalog.trackingContexts,
                                                           TrackingScope::kOpenBucketsByKey),
                                        metadata,
-                                       comparator,
                                        options.getMetaField()}};
     return {collectionUUID, bucketOID, key.signature()};
 }
@@ -749,12 +752,11 @@ BucketKey::Signature getKeySignature(const TimeseriesOptions& options,
                                      const StringDataComparator* comparator,
                                      const UUID& collectionUUID,
                                      const BSONObj& metadataObj) {
-    TrackingContext trackingContext;
+    tracking::Context trackingContext;
     auto metaField = options.getMetaField();
     const BSONElement metadata = metaField ? metadataObj[metaField.value()] : BSONElement();
-    const BucketKey key{
-        collectionUUID,
-        BucketMetadata{trackingContext, metadata, comparator, options.getMetaField()}};
+    const BucketKey key{collectionUUID,
+                        BucketMetadata{trackingContext, metadata, options.getMetaField()}};
     return key.signature();
 }
 
@@ -765,31 +767,24 @@ void resetBucketOIDCounter() {
 void appendExecutionStats(const BucketCatalog& catalog,
                           const UUID& collectionUUID,
                           BSONObjBuilder& builder) {
-    const shared_tracked_ptr<ExecutionStats> stats =
+    const tracking::shared_ptr<ExecutionStats> stats =
         internal::getCollectionExecutionStats(catalog, collectionUUID);
     if (stats) {
         appendExecutionStatsToBuilder(*stats, builder);
     }
 }
 
-void reportMeasurementsGroupCommitted(BucketCatalog& catalog,
-                                      const UUID& collectionUUID,
-                                      int64_t count) {
-    auto stats = internal::getOrInitializeExecutionStats(catalog, collectionUUID);
-    stats.incNumMeasurementsGroupCommitted(count);
-}
-
 StatusWith<std::tuple<InsertContext, Date_t>> prepareInsert(BucketCatalog& catalog,
                                                             const UUID& collectionUUID,
                                                             const StringDataComparator* comparator,
                                                             const TimeseriesOptions& options,
-                                                            const BSONObj& doc) {
+                                                            const BSONObj& measurementDoc) {
     auto res = internal::extractBucketingParameters(
         getTrackingContext(catalog.trackingContexts, TrackingScope::kOpenBucketsByKey),
         collectionUUID,
         comparator,
         options,
-        doc);
+        measurementDoc);
     if (!res.isOK()) {
         return res.getStatus();
     }

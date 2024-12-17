@@ -36,7 +36,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string/key_string.h"
@@ -140,8 +139,7 @@ StringData IndexEntryComparison::makeKeyStringFromSeekPointForSeek(const IndexSe
     size_t end = seekPoint.firstExclusive >= 0 ? static_cast<size_t>(seekPoint.firstExclusive + 1)
                                                : seekPoint.keySuffix.size();
     for (size_t i = seekPoint.prefixLen; i < end; i++) {
-        invariant(seekPoint.keySuffix[i]);
-        builder.appendBSONElement(*seekPoint.keySuffix[i]);
+        builder.appendBSONElement(seekPoint.keySuffix[i]);
     }
 
     return builder.finishAndGetBuffer(discriminator);

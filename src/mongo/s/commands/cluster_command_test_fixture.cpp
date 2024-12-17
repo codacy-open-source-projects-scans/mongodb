@@ -67,7 +67,6 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/tick_source.h"
-#include "mongo/util/tick_source_mock.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -95,9 +94,9 @@ void ClusterCommandTestFixture::setUp() {
     LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
 
     // Set up a tick source for transaction metrics.
-    auto tickSource = std::make_unique<TickSourceMock<Microseconds>>();
+    auto tickSource =
+        checked_cast<TickSourceMock<Microseconds>*>(getServiceContext()->getTickSource());
     tickSource->reset(1);
-    getServiceContext()->setTickSource(std::move(tickSource));
 
     loadRoutingTableWithTwoChunksAndTwoShards(kNss);
 
@@ -106,7 +105,7 @@ void ClusterCommandTestFixture::setUp() {
 
     // The ReadWriteConcernDefaults decoration on the service context won't always be created,
     // so we should manually instantiate it to ensure it exists in our tests.
-    ReadWriteConcernDefaults::create(getServiceContext(), _lookupMock.getFetchDefaultsFn());
+    ReadWriteConcernDefaults::create(getService(), _lookupMock.getFetchDefaultsFn());
 }
 
 BSONObj ClusterCommandTestFixture::_makeCmd(BSONObj cmdObj, bool includeAfterClusterTime) {
@@ -419,9 +418,9 @@ void ClusterCommandTestFixture::testIncludeQueryStatsMetrics(BSONObj cmd, bool i
 }
 
 void ClusterCommandTestFixture::testOpcountersAreCorrect(BSONObj cmd, BSONObj expectedMetrics) {
-    globalOpCounters.resetForTest();
+    serviceOpCounters(ClusterRole::RouterServer).resetForTest();
     testNoErrors(cmd);
-    ASSERT_BSONOBJ_EQ(globalOpCounters.getObj(), expectedMetrics);
+    ASSERT_BSONOBJ_EQ(serviceOpCounters(ClusterRole::RouterServer).getObj(), expectedMetrics);
 }
 
 void ClusterCommandTestFixture::appendTxnResponseMetadata(BSONObjBuilder& bob) {

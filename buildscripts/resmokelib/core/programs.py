@@ -385,8 +385,6 @@ def mongo_shell_program(
     test_data["setParametersMongos"] = mongos_set_parameters
     test_data["setParametersMongocryptd"] = mongocryptd_set_parameters
 
-    test_data["undoRecorderPath"] = config.UNDO_RECORDER_PATH
-
     if "configShard" not in test_data and config.CONFIG_SHARD is not None:
         test_data["configShard"] = True
 
@@ -493,6 +491,11 @@ def mongo_shell_program(
 
         if "host" in kwargs:
             kwargs.pop("host")
+
+    # if featureFlagQETextSearchPreview is enabled in setParameter, enable it in the shell also
+    # TODO: SERVER-94394 remove once FF is enabled by default
+    if mongod_set_parameters.get("featureFlagQETextSearchPreview"):
+        args.append("--setShellParameter=featureFlagQETextSearchPreview=true")
 
     # Apply the rest of the command line arguments.
     _apply_kwargs(args, kwargs)

@@ -8,9 +8,9 @@
  * Shard targeting logic for $lookup changed in 7.3 and may not match the expected behavior in a
  * multiversion environment.
  * @tags: [
- *   requires_fcv_73,
- *    # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
+ *    requires_fcv_81,
  * ]
  */
 
@@ -123,7 +123,7 @@ function assertLookupExecution(pipeline, opts, expected) {
                 filter: {
                     "command.aggregate": reviewsColl.getName(),
                     "command.comment": opts.comment,
-                    "command.fromMongos": expected.mongosMerger === true,
+                    "command.fromRouter": expected.mongosMerger === true,
                     "errName": {$ne: "StaleConfig"}
                 },
                 numExpectedMatches: expected.subpipelineExec[i]
@@ -145,7 +145,7 @@ function assertLookupExecution(pipeline, opts, expected) {
                     filter: {
                         "command.aggregate": reviewsColl.getName(),
                         "command.comment": opts.comment,
-                        "command.fromMongos": expected.mongosMerger === true,
+                        "command.fromRouter": expected.mongosMerger === true,
                         "errName": {$ne: "StaleConfig"}
                     },
                     numExpectedMatches: expected.subpipelineExec[i]
@@ -510,7 +510,7 @@ st.shardColl(
 pipeline = [
     {$match: {customer: "Alice"}},
     {$unwind: "$products"},
-    {$group: {_id: "$_id", products: {$push: {_id: "$products._id"}}}},
+    {$group: {_id: {$add: ["$_id", 42]}, products: {$push: {_id: "$products._id"}}}},
     {$unwind: "$products"},
     {$project: {_id: "$products._id"}},
     {$lookup: {

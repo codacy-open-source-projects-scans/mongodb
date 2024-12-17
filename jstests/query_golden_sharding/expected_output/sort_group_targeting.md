@@ -102,7 +102,7 @@
 ### Summarized explain
 ```json
 {
-	"mergeType" : "mongos",
+	"mergeType" : "router",
 	"mergerPart" : [
 		{
 			"$mergeCursors" : {
@@ -112,12 +112,6 @@
 				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
-			}
-		},
-		{
-			"$group" : {
-				"$doingMerge" : true,
-				"_id" : "$$ROOT._id"
 			}
 		}
 	],
@@ -131,6 +125,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$shardKey"
 			}
 		}
@@ -151,9 +146,6 @@
 						"stage" : "SORT_KEY_GENERATOR"
 					},
 					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
 						"direction" : "forward",
 						"indexBounds" : {
 							"shardKey" : [
@@ -161,8 +153,10 @@
 							]
 						},
 						"indexName" : "shardKey_1",
+						"isFetching" : false,
 						"isMultiKey" : false,
 						"isPartial" : false,
+						"isShardFiltering" : true,
 						"isSparse" : false,
 						"isUnique" : false,
 						"keyPattern" : {
@@ -171,13 +165,14 @@
 						"multiKeyPaths" : {
 							"shardKey" : [ ]
 						},
-						"stage" : "IXSCAN"
+						"stage" : "DISTINCT_SCAN"
 					}
 				]
 			}
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$shardKey"
 			}
 		}
@@ -198,9 +193,6 @@
 						"stage" : "SORT_KEY_GENERATOR"
 					},
 					{
-						"stage" : "SHARDING_FILTER"
-					},
-					{
 						"direction" : "forward",
 						"indexBounds" : {
 							"shardKey" : [
@@ -208,8 +200,10 @@
 							]
 						},
 						"indexName" : "shardKey_1",
+						"isFetching" : false,
 						"isMultiKey" : false,
 						"isPartial" : false,
+						"isShardFiltering" : true,
 						"isSparse" : false,
 						"isUnique" : false,
 						"keyPattern" : {
@@ -218,13 +212,14 @@
 						"multiKeyPaths" : {
 							"shardKey" : [ ]
 						},
-						"stage" : "IXSCAN"
+						"stage" : "DISTINCT_SCAN"
 					}
 				]
 			}
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$shardKey"
 			}
 		}
@@ -262,7 +257,7 @@
 ### Summarized explain
 ```json
 {
-	"mergeType" : "mongos",
+	"mergeType" : "router",
 	"mergerPart" : [
 		{
 			"$mergeCursors" : {
@@ -272,15 +267,6 @@
 				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
-			}
-		},
-		{
-			"$group" : {
-				"$doingMerge" : true,
-				"_id" : "$$ROOT._id",
-				"first" : {
-					"$first" : "$$ROOT.first"
-				}
 			}
 		}
 	],
@@ -294,6 +280,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$shardKey",
 				"first" : {
 					"$first" : "$otherField"
@@ -307,21 +294,7 @@
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
 					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"otherField" : 1,
-							"shardKey" : 1
-						}
-					},
-					{
 						"stage" : "SORT_KEY_GENERATOR"
-					},
-					{
-						"stage" : "FETCH"
-					},
-					{
-						"stage" : "SHARDING_FILTER"
 					},
 					{
 						"direction" : "forward",
@@ -331,8 +304,10 @@
 							]
 						},
 						"indexName" : "shardKey_1",
+						"isFetching" : true,
 						"isMultiKey" : false,
 						"isPartial" : false,
+						"isShardFiltering" : true,
 						"isSparse" : false,
 						"isUnique" : false,
 						"keyPattern" : {
@@ -341,13 +316,14 @@
 						"multiKeyPaths" : {
 							"shardKey" : [ ]
 						},
-						"stage" : "IXSCAN"
+						"stage" : "DISTINCT_SCAN"
 					}
 				]
 			}
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$shardKey",
 				"first" : {
 					"$first" : "$otherField"
@@ -361,21 +337,7 @@
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
 					{
-						"stage" : "PROJECTION_SIMPLE",
-						"transformBy" : {
-							"_id" : 0,
-							"otherField" : 1,
-							"shardKey" : 1
-						}
-					},
-					{
 						"stage" : "SORT_KEY_GENERATOR"
-					},
-					{
-						"stage" : "FETCH"
-					},
-					{
-						"stage" : "SHARDING_FILTER"
 					},
 					{
 						"direction" : "forward",
@@ -385,8 +347,10 @@
 							]
 						},
 						"indexName" : "shardKey_1",
+						"isFetching" : true,
 						"isMultiKey" : false,
 						"isPartial" : false,
+						"isShardFiltering" : true,
 						"isSparse" : false,
 						"isUnique" : false,
 						"keyPattern" : {
@@ -395,13 +359,14 @@
 						"multiKeyPaths" : {
 							"shardKey" : [ ]
 						},
-						"stage" : "IXSCAN"
+						"stage" : "DISTINCT_SCAN"
 					}
 				]
 			}
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$shardKey",
 				"first" : {
 					"$first" : "$otherField"
@@ -453,7 +418,7 @@
 ### Summarized explain
 ```json
 {
-	"mergeType" : "mongos",
+	"mergeType" : "router",
 	"mergerPart" : [
 		{
 			"$mergeCursors" : {
@@ -463,15 +428,6 @@
 				"recordRemoteOpWaitTime" : false,
 				"requestQueryStatsFromRemotes" : false,
 				"tailableMode" : "normal"
-			}
-		},
-		{
-			"$group" : {
-				"$doingMerge" : true,
-				"_id" : "$$ROOT._id",
-				"last" : {
-					"$last" : "$$ROOT.last"
-				}
 			}
 		}
 	],
@@ -499,6 +455,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$renamedShardKey",
 				"last" : {
 					"$last" : "$otherField"
@@ -557,6 +514,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$renamedShardKey",
 				"last" : {
 					"$last" : "$otherField"
@@ -615,6 +573,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$renamedShardKey",
 				"last" : {
 					"$last" : "$otherField"
@@ -650,7 +609,7 @@
 ### Summarized explain
 ```json
 {
-	"mergeType" : "mongos",
+	"mergeType" : "router",
 	"mergerPart" : [
 		{
 			"$mergeCursors" : {
@@ -667,6 +626,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$otherField"
 			}
 		}
@@ -801,7 +761,7 @@
 ### Summarized explain
 ```json
 {
-	"mergeType" : "mongos",
+	"mergeType" : "router",
 	"mergerPart" : [
 		{
 			"$mergeCursors" : {
@@ -818,6 +778,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$shardKey"
 			}
 		}
@@ -854,6 +815,9 @@
 					},
 					{
 						"direction" : "forward",
+						"filter" : {
+							
+						},
 						"stage" : "COLLSCAN"
 					}
 				]
@@ -884,6 +848,9 @@
 					},
 					{
 						"direction" : "forward",
+						"filter" : {
+							
+						},
 						"stage" : "COLLSCAN"
 					}
 				]

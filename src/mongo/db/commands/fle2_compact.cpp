@@ -158,7 +158,7 @@ FLEEdgeCountInfo fetchEdgeCountInfo(FLEQueryInterface* queryImpl,
                                     FLEQueryInterface::TagQueryType queryType,
                                     const StringData queryTypeStr) {
     std::vector<std::vector<FLEEdgePrfBlock>> tags;
-    tags.emplace_back().push_back(FLEEdgePrfBlock{token.data, boost::none});
+    tags.emplace_back().push_back(FLEEdgePrfBlock{token.asPrfBlock(), boost::none});
     auto countInfoSets = queryImpl->getTags(escNss, tags, queryType);
     uassert(7517100,
             str::stream() << "getQueryableEncryptionCountInfo for " << queryTypeStr
@@ -351,7 +351,7 @@ stdx::unordered_set<ECOCCompactionDocumentV2> getUniqueCompactionDocuments(
         stats.addReads(docs.size());
 
         for (auto& doc : docs) {
-            auto ecocDoc = ECOCCollection::parseAndDecryptV2(doc, compactionToken.token);
+            auto ecocDoc = ECOCCompactionDocumentV2::parseAndDecrypt(doc, compactionToken.token);
             uassert(
                 8574701,
                 "Compaction token for field '{}' is of type '{}', but ECOCDocument is of type '{}'"_format(

@@ -56,7 +56,8 @@ double testEvaluateSigmoid(double score) {
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsIfNoScoreField) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest prerequisitesController("featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
         }
@@ -68,7 +69,8 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfNoScoreField) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckNoOptionalArgsIncluded) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest prerequisitesController("featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore"
@@ -83,7 +85,8 @@ TEST_F(DocumentSourceScoreTest, CheckNoOptionalArgsIncluded) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckAllOptionalArgsIncluded) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest prerequisitesController("featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "expression",
@@ -96,7 +99,8 @@ TEST_F(DocumentSourceScoreTest, CheckAllOptionalArgsIncluded) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckOnlyNormalizeFunctionSpecified) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest prerequisitesController("featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "expression",
@@ -108,7 +112,8 @@ TEST_F(DocumentSourceScoreTest, CheckOnlyNormalizeFunctionSpecified) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckOnlyWeightSpecified) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest prerequisitesController("featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -124,7 +129,8 @@ TEST_F(DocumentSourceScoreTest, CheckOnlyWeightSpecified) {
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsIfWrongNormalizeFunctionType) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest prerequisitesController("featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "expression",
@@ -138,7 +144,9 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfWrongNormalizeFunctionType) {
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsIfWrongWeightType) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "expression",
@@ -152,7 +160,9 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfWrongWeightType) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckIntScoreMetadataUpdated) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -174,7 +184,9 @@ TEST_F(DocumentSourceScoreTest, CheckIntScoreMetadataUpdated) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckDoubleScoreMetadataUpdated) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -196,7 +208,9 @@ TEST_F(DocumentSourceScoreTest, CheckDoubleScoreMetadataUpdated) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckLengthyDocScoreMetadataUpdated) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -218,7 +232,9 @@ TEST_F(DocumentSourceScoreTest, CheckLengthyDocScoreMetadataUpdated) {
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsIfScoreNotDouble) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -233,11 +249,13 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfScoreNotDouble) {
     docSourceScore->setSource(mock.get());
 
     // Assert cannot evaluate expression into double
-    ASSERT_THROWS_CODE(docSourceScore->getNext(), AssertionException, 9484101);
+    ASSERT_THROWS_CODE(docSourceScore->getNext(), AssertionException, ErrorCodes::TypeMismatch);
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsIfExpressionFieldPathDoesNotExist) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -251,11 +269,13 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfExpressionFieldPathDoesNotExist) {
     docSourceScore->setSource(mock.get());
 
     // Assert cannot evaluate expression into double
-    ASSERT_THROWS_CODE(docSourceScore->getNext(), AssertionException, 9484101);
+    ASSERT_THROWS_CODE(docSourceScore->getNext(), AssertionException, ErrorCodes::TypeMismatch);
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsIfScoreInvalidExpression) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: { $ad: ['$myScore', '$otherScore'] },
@@ -272,7 +292,9 @@ TEST_F(DocumentSourceScoreTest, ErrorsIfScoreInvalidExpression) {
 }
 
 TEST_F(DocumentSourceScoreTest, ChecksScoreMetadatUpdatedValidExpression) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: { $add: ['$myScore', '$otherScore'] },
@@ -294,7 +316,9 @@ TEST_F(DocumentSourceScoreTest, ChecksScoreMetadatUpdatedValidExpression) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckNormFuncSigmoidScoreMetadataUpdated) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -320,7 +344,9 @@ TEST_F(DocumentSourceScoreTest, CheckNormFuncSigmoidScoreMetadataUpdated) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckNormFuncSigmoidWeightScoreMetadataUpdated) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -347,7 +373,9 @@ TEST_F(DocumentSourceScoreTest, CheckNormFuncSigmoidWeightScoreMetadataUpdated) 
 }
 
 TEST_F(DocumentSourceScoreTest, CheckWeightScoreMetadataUpdated) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -373,7 +401,9 @@ TEST_F(DocumentSourceScoreTest, CheckWeightScoreMetadataUpdated) {
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsNormFuncSigmoidInvalidWeight) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -388,7 +418,9 @@ TEST_F(DocumentSourceScoreTest, ErrorsNormFuncSigmoidInvalidWeight) {
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsInvalidWeight) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -402,7 +434,9 @@ TEST_F(DocumentSourceScoreTest, ErrorsInvalidWeight) {
 }
 
 TEST_F(DocumentSourceScoreTest, ErrorsInvalidNormalizeFunction) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -417,7 +451,9 @@ TEST_F(DocumentSourceScoreTest, ErrorsInvalidNormalizeFunction) {
 }
 
 TEST_F(DocumentSourceScoreTest, CheckNormFuncNoneWeightScoreZeroMetadataUpdated) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
+        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $score: {
             score: "$myScore",
@@ -441,6 +477,229 @@ TEST_F(DocumentSourceScoreTest, CheckNormFuncNoneWeightScoreZeroMetadataUpdated)
 
     // Assert inputDoc's score metadata is (0 * 5.3)
     ASSERT_EQ(next.releaseDocument().metadata().getScore(), sigmoidDbl);
+}
+
+
+TEST_F(DocumentSourceScoreTest, QueryShapeDebugString) {
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
+
+    SerializationOptions opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
+
+    {
+        BSONObj spec = fromjson("{$score: {score: \"$myScore\", normalizeFunction: \"none\"}}");
+        auto score = DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
+        std::vector<Value> output;
+        score->serializeToArray(output, opts);
+        ASSERT_EQ(output.size(), 1);
+        ASSERT_BSONOBJ_EQ_AUTO(
+            R"({
+                $setMetadata: {
+                    score: "$HASH<myScore>"
+                }
+            })",
+            output.front().getDocument().toBson());
+    }
+
+    {
+        BSONObj spec = fromjson(R"({
+            $score: {
+                score: "$myScore",
+                normalizeFunction: "sigmoid",
+                weight: 0.5
+            }
+        })");
+        auto score = DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
+        std::vector<Value> output;
+        score->serializeToArray(output, opts);
+        ASSERT_EQ(output.size(), 1);
+        ASSERT_BSONOBJ_EQ_AUTO(
+            R"({
+            "$setMetadata": {
+                "score": {
+                    "$multiply": [
+                        {
+                            "$divide": [
+                                "?number",
+                                {
+                                    "$add": [
+                                        "?number",
+                                        {
+                                            "$exp": [
+                                                {
+                                                    "$multiply": [
+                                                        "?number",
+                                                        "$HASH<myScore>"
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        "?number"
+                    ]
+                }
+            }
+        })",
+            output.front().getDocument().toBson());
+    }
+
+    {
+        BSONObj spec = fromjson(R"({
+            $score: {
+                score: {$divide: ["$myScore", "$otherScore"]},
+                normalizeFunction: "sigmoid",
+                weight: 1
+            }
+        })");
+        auto score = DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
+        std::vector<Value> output;
+        score->serializeToArray(output, opts);
+        ASSERT_EQ(output.size(), 1);
+        ASSERT_BSONOBJ_EQ_AUTO(
+            R"({
+            "$setMetadata": {
+                "score": {
+                    "$divide": [
+                        "?number",
+                        {
+                            "$add": [
+                                "?number",
+                                {
+                                    "$exp": [
+                                        {
+                                            "$multiply": [
+                                                "?number",
+                                                {
+                                                    "$divide": [
+                                                        "$HASH<myScore>",
+                                                        "$HASH<otherScore>"
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        })",
+            output.front().getDocument().toBson());
+    }
+}
+
+TEST_F(DocumentSourceScoreTest, RepresentativeQueryShape) {
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
+
+    SerializationOptions opts = SerializationOptions::kRepresentativeQueryShapeSerializeOptions;
+
+    {
+        BSONObj spec = fromjson("{$score: {score: \"$myScore\", normalizeFunction: \"none\"}}");
+        auto score = DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
+        std::vector<Value> output;
+        score->serializeToArray(output, opts);
+        ASSERT_EQ(output.size(), 1);
+        ASSERT_BSONOBJ_EQ_AUTO(
+            R"({
+                $setMetadata: {
+                    score: "$myScore"
+                }
+            })",
+            output.front().getDocument().toBson());
+    }
+
+    {
+        BSONObj spec = fromjson(R"({
+            $score: {
+                score: "$myScore",
+                normalizeFunction: "sigmoid",
+                weight: 0.5
+            }
+        })");
+        auto score = DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
+        std::vector<Value> output;
+        score->serializeToArray(output, opts);
+        ASSERT_EQ(output.size(), 1);
+        ASSERT_BSONOBJ_EQ_AUTO(
+            R"({
+            "$setMetadata": {
+                "score": {
+                    "$multiply": [
+                        {
+                            "$divide": [
+                                1,
+                                {
+                                    "$add": [
+                                        1,
+                                        {
+                                            "$exp": [
+                                                {
+                                                    "$multiply": [
+                                                        1,
+                                                        "$myScore"
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        },
+                        1
+                    ]
+                }
+            }
+        })",
+            output.front().getDocument().toBson());
+    }
+
+    {
+        BSONObj spec = fromjson(R"({
+            $score: {
+                score: {$divide: ["$myScore", 0.5]},
+                normalizeFunction: "sigmoid",
+                weight: 1
+            }
+        })");
+        auto score = DocumentSourceScore::createFromBson(spec.firstElement(), getExpCtx());
+        std::vector<Value> output;
+        score->serializeToArray(output, opts);
+        ASSERT_EQ(output.size(), 1);
+        ASSERT_BSONOBJ_EQ_AUTO(
+            R"({
+            "$setMetadata": {
+                "score": {
+                    "$divide": [
+                        1,
+                        {
+                            "$add": [
+                                1,
+                                {
+                                    "$exp": [
+                                        {
+                                            "$multiply": [
+                                                1,
+                                                {
+                                                    "$divide": [
+                                                        "$myScore",
+                                                        1
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        })",
+            output.front().getDocument().toBson());
+    }
 }
 
 // TODO SERVER-94600: Add minMaxScaler Testcases

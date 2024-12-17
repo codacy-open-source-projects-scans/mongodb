@@ -33,7 +33,6 @@
 
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
-#include "mongo/db/repl/tenant_migration_decoration.h"
 #include "mongo/db/transaction_resources.h"
 
 namespace mongo {
@@ -44,16 +43,9 @@ namespace {
  * Inserts the document into the pre-images collection. The document is inserted into the
  * tenant's pre-images collection if the 'tenantId' is specified.
  */
-void writeChangeStreamPreImageEntry(
-    OperationContext* opCtx,
-    // Skip the pre-image insert if we are in the middle of a tenant migration. Pre-image inserts
-    // for writes during the oplog catchup phase are handled in the oplog application code.
-    boost::optional<TenantId> tenantId,
-    const ChangeStreamPreImage& preImage) {
-    if (repl::tenantMigrationInfo(opCtx)) {
-        return;
-    }
-
+void writeChangeStreamPreImageEntry(OperationContext* opCtx,
+                                    boost::optional<TenantId> tenantId,
+                                    const ChangeStreamPreImage& preImage) {
     ChangeStreamPreImagesCollectionManager::get(opCtx).insertPreImage(opCtx, tenantId, preImage);
 }
 

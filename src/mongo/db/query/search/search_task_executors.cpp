@@ -52,6 +52,7 @@ namespace executor {
 namespace {
 
 ConnectionPool::Options makeMongotConnPoolOptions() {
+    // TODO SERVER-97158: Set singleUseConnections flag if using egress grpc
     ConnectionPool::Options mongotOptions;
     mongotOptions.skipAuthentication = globalMongotParams.skipAuthToMongot;
     mongotOptions.controllerFactory = [] {
@@ -64,21 +65,30 @@ ConnectionPool::Options makeMongotConnPoolOptions() {
 }
 
 struct State {
-    State() : mongotExecStarted(false), searchIndexMgmtExecStarted(false) {
+    State() {
+        transport::TransportProtocol protocol = globalMongotParams.useGRPC
+            ? transport::TransportProtocol::GRPC
+            : transport::TransportProtocol::MongoRPC;
+
         // Make the MongotExecutor and associated NetworkInterface.
-        auto mongotExecutorNetworkInterface =
-            makeNetworkInterface("MongotExecutor", nullptr, nullptr, makeMongotConnPoolOptions());
+        auto mongotExecutorNetworkInterface = makeNetworkInterface(
+            "MongotExecutor", nullptr, nullptr, makeMongotConnPoolOptions(), protocol);
         auto mongotThreadPool =
             std::make_unique<NetworkInterfaceThreadPool>(mongotExecutorNetworkInterface.get());
         mongotExecutor = ThreadPoolTaskExecutor::create(std::move(mongotThreadPool),
                                                         std::move(mongotExecutorNetworkInterface));
 
         // Make a separate searchIndexMgmtExecutor that's independently configurable.
+        // TODO SERVER-97158: Set singleUseConnections flag if using egress grpc
         ConnectionPool::Options searchIndexPoolOptions;
         searchIndexPoolOptions.skipAuthentication =
             globalSearchIndexParams.skipAuthToSearchIndexServer;
-        std::shared_ptr<NetworkInterface> searchIdxNI = makeNetworkInterface(
-            "SearchIndexMgmtExecutor", nullptr, nullptr, std::move(searchIndexPoolOptions));
+        std::shared_ptr<NetworkInterface> searchIdxNI =
+            makeNetworkInterface("SearchIndexMgmtExecutor",
+                                 nullptr,
+                                 nullptr,
+                                 std::move(searchIndexPoolOptions),
+                                 protocol);
         auto searchIndexThreadPool =
             std::make_unique<NetworkInterfaceThreadPool>(searchIdxNI.get());
         searchIndexMgmtExecutor = ThreadPoolTaskExecutor::create(std::move(searchIndexThreadPool),
@@ -87,26 +97,15 @@ struct State {
 
     auto getMongotExecutorPtr() {
         invariant(mongotExecutor);
-
-        if (!mongotExecStarted.load() && !mongotExecStarted.swap(true)) {
-            mongotExecutor->startup();
-        }
         return mongotExecutor;
     }
 
     auto getSearchIndexMgmtExecutorPtr() {
         invariant(searchIndexMgmtExecutor);
-
-        if (!searchIndexMgmtExecStarted.load() && !searchIndexMgmtExecStarted.swap(true)) {
-            searchIndexMgmtExecutor->startup();
-        }
         return searchIndexMgmtExecutor;
     }
 
-    AtomicWord<bool> mongotExecStarted;
     std::shared_ptr<TaskExecutor> mongotExecutor;
-
-    AtomicWord<bool> searchIndexMgmtExecStarted;
     std::shared_ptr<TaskExecutor> searchIndexMgmtExecutor;
 };
 
@@ -133,6 +132,18 @@ std::shared_ptr<TaskExecutor> getSearchIndexManagementTaskExecutor(ServiceContex
     auto& state = getExecutorHolder(svc);
     invariant(state.searchIndexMgmtExecutor);
     return state.getSearchIndexMgmtExecutorPtr();
+}
+
+void startupSearchExecutorsIfNeeded(ServiceContext* svc) {
+    if (!globalMongotParams.host.empty()) {
+        LOGV2_INFO(8267400, "Starting up mongot task executor.");
+        getMongotTaskExecutor(svc)->startup();
+    }
+
+    if (!globalSearchIndexParams.host.empty()) {
+        LOGV2_INFO(8267401, "Starting up search index management task executor.");
+        getSearchIndexManagementTaskExecutor(svc)->startup();
+    }
 }
 
 }  // namespace executor

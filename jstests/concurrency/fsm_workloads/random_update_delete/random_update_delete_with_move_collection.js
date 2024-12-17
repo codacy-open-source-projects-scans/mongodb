@@ -39,14 +39,6 @@ const $baseConfig = {
             });
         }
 
-        // Increase yielding so that moveCollection more often commits in the middle of a
-        // multi-write.
-        cluster.executeOnMongodNodes((db) => {
-            const res = assert.commandWorked(
-                db.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 50}));
-            this.internalQueryExecYieldIterationsDefault = res.was;
-        });
-
         // The runner will implicitly shard the collection if we are in a sharded cluster, so
         // unshard it.
         assert.commandWorked(db.adminCommand({unshardCollection: `${db}.${collName}`}));
@@ -63,13 +55,6 @@ const $baseConfig = {
                     setParameter: 1,
                     reshardingMinimumOperationDurationMillis:
                         this.originalReshardingMinimumOperationDurationMillis
-                }));
-            });
-
-            cluster.executeOnMongodNodes((db) => {
-                const res = assert.commandWorked(db.adminCommand({
-                    setParameter: 1,
-                    internalQueryExecYieldIterations: this.internalQueryExecYieldIterationsDefault
                 }));
             });
         }
@@ -109,17 +94,53 @@ export const $config = extendWorkload($partialConfig, function($config, $super) 
         const toShard = shardNames[Random.randInt(shardNames.length)];
         const namespace = `${db}.${collName}`;
         jsTestLog(`Attempting to move collection ${namespace} to shard ${toShard}`);
-        const result = assert.commandWorked(db.adminCommand({moveCollection: namespace, toShard}));
+        const result = db.adminCommand({moveCollection: namespace, toShard});
+
+        if (!result.ok) {
+            if (result.code === ErrorCodes.NamespaceNotFound) {
+                jsTestLog(`Move collection result for ${namespace} to shard ${toShard}: ${
+                    tojson(result)}`);
+                return;
+            }
+        }
+
+        assert.commandWorked(result);
         jsTestLog(`Move collection result for ${namespace} to shard ${toShard}: ${tojson(result)}`);
         this.moveCollectionsPerformed++;
     };
 
-    const weights = {moveCollection: 0.1, performUpdates: 0.45, performDeletes: 0.45};
+    $config.states.untrackUnshardedCollection = function untrackUnshardedCollection(
+        db, collName, connCache) {
+        const namespace = `${db}.${collName}`;
+        jsTestLog(`Attempting to untrack collection ${namespace}`);
+        const res = db.adminCommand({untrackUnshardedCollection: namespace});
+        if (!res.ok) {
+            if (res.code === ErrorCodes.OperationFailed ||
+                res.code === ErrorCodes.InvalidNamespace) {
+                jsTestLog(`Untrack collection result for ${namespace}: ${tojson(res)}`);
+                return;
+            }
+            //  TODO (SERVER-96072) remove this error once the command is backported.
+            if (res.code === ErrorCodes.CommandNotFound) {
+                return;
+            }
+        }
+        assert.commandWorked(res);
+        jsTestLog(`Untrack collection worked`);
+    };
+
+    const weights = {
+        moveCollection: 0.1,
+        untrackUnshardedCollection: 0.1,
+        performUpdates: 0.35,
+        performDeletes: 0.35
+    };
     $config.transitions = {
         init: weights,
         moveCollection: weights,
         performUpdates: weights,
         performDeletes: weights,
+        untrackUnshardedCollection: weights,
     };
 
     return $config;

@@ -59,6 +59,7 @@ public:
         Options() : Options(ServerGlobalParams()) {}
 
         bool enableEgress = false;
+        bool enableIngress = true;
         std::vector<std::string> bindIpList;
         /**
          * If set to 0, the transport layer will bind to an arbitrary unused port.
@@ -83,6 +84,7 @@ public:
 
     virtual StatusWith<std::shared_ptr<Session>> connectWithAuthToken(
         HostAndPort peer,
+        ConnectSSLMode sslMode,
         Milliseconds timeout,
         boost::optional<std::string> authToken = boost::none) = 0;
 
@@ -104,11 +106,8 @@ public:
         return "gRPC"_sd;
     }
 
-    /**
-     * Not applicable to gRPC networking.
-     */
-    ReactorHandle getReactor(WhichReactor) override {
-        MONGO_UNIMPLEMENTED;
+    TransportProtocol getTransportProtocol() const override {
+        return TransportProtocol::GRPC;
     }
 
     /**

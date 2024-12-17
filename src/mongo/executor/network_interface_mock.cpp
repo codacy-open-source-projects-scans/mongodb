@@ -389,12 +389,11 @@ NetworkInterfaceMock::NetworkOperationIterator NetworkInterfaceMock::getNextRead
     return noi;
 }
 
-NetworkInterfaceMock::NetworkOperationIterator NetworkInterfaceMock::getFrontOfUnscheduledQueue() {
-    return getNthUnscheduledRequest(0);
+NetworkInterfaceMock::NetworkOperationIterator NetworkInterfaceMock::getFrontOfReadyQueue() {
+    return getNthReadyRequest(0);
 }
 
-NetworkInterfaceMock::NetworkOperationIterator NetworkInterfaceMock::getNthUnscheduledRequest(
-    size_t n) {
+NetworkInterfaceMock::NetworkOperationIterator NetworkInterfaceMock::getNthReadyRequest(size_t n) {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     invariant(_currentlyRunning == kNetworkThread);
 
@@ -534,6 +533,28 @@ void NetworkInterfaceMock::runReadyNetworkOperations() {
     _runReadyNetworkOperations_inlock(lk);
 }
 
+bool NetworkInterfaceMock::_hasUnfinishedNetworkOperations() {
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    for (auto& op : _operations) {
+        if (!op.isFinished()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void NetworkInterfaceMock::drainUnfinishedNetworkOperations() {
+    {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        invariant(_currentlyRunning == kNetworkThread);
+    }
+
+    while (_hasUnfinishedNetworkOperations()) {
+        runReadyNetworkOperations();
+    }
+}
+
 void NetworkInterfaceMock::waitForWork() {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     invariant(_currentlyRunning == kExecutorThread);
@@ -577,17 +598,21 @@ void NetworkInterfaceMock::_enqueueOperation_inlock(stdx::unique_lock<stdx::mute
     }
 
     lk.unlock();
-    token.onCancel().unsafeToInlineFuture().getAsync([this, cbh](Status status) {
-        if (!status.isOK()) {
-            return;
-        }
+    token.onCancel().unsafeToInlineFuture().getAsync(
+        [this, cbh, requestString = op.getDiagnosticString()](Status status) {
+            if (!status.isOK()) {
+                return;
+            }
 
-        stdx::unique_lock<stdx::mutex> lk(_mutex);
-        ResponseStatus rs = ResponseStatus::make_forTest(
-            Status(ErrorCodes::CallbackCanceled, "Network operation canceled"), Milliseconds(0));
+            LOGV2(9786900, "Canceling network operation", "request"_attr = requestString);
 
-        _interruptWithResponse_inlock(lk, cbh, rs);
-    });
+            stdx::unique_lock<stdx::mutex> lk(_mutex);
+            ResponseStatus rs = ResponseStatus::make_forTest(
+                Status(ErrorCodes::CallbackCanceled, "Network operation canceled"),
+                Milliseconds(0));
+
+            _interruptWithResponse_inlock(lk, cbh, rs);
+        });
     lk.lock();
 }
 

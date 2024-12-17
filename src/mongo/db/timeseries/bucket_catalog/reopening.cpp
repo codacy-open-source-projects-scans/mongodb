@@ -29,14 +29,11 @@
 
 #include "mongo/db/timeseries/bucket_catalog/reopening.h"
 
-#include <cstddef>
-
 #include <absl/container/node_hash_map.h>
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -61,14 +58,14 @@ boost::optional<OID> initializeRequest(BucketCatalog& catalog,
         // are not open yet which means they are not already being tracked.
         std::tie(it, inserted) = stripe.outstandingReopeningRequests.try_emplace(
             key,
-            make_tracked_inlined_vector<shared_tracked_ptr<ReopeningRequest>,
-                                        Stripe::kInlinedVectorSize>(
+            tracking::make_inlined_vector<tracking::shared_ptr<ReopeningRequest>,
+                                          Stripe::kInlinedVectorSize>(
                 getTrackingContext(catalog.trackingContexts, TrackingScope::kReopeningRequests)));
         invariant(inserted);
     }
     auto& list = it->second;
 
-    list.push_back(make_shared_tracked<ReopeningRequest>(
+    list.push_back(tracking::make_shared<ReopeningRequest>(
         getTrackingContext(catalog.trackingContexts, TrackingScope::kReopeningRequests),
         ExecutionStatsController{
             internal::getOrInitializeExecutionStats(catalog, key.collectionUUID)},

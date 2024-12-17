@@ -5,21 +5,19 @@ filters:
       - 10gen/server-networking-and-observability
   - "indexupdatetests.cpp":
     approvers:
-      - 10gen/server-storage-execution
+      - 10gen/server-index-builds
   - "insert_test.cpp":
     approvers:
-      - 10gen/server-storage-execution
+      - 10gen/query-optimization-parsers
   - "jsobjtests.cpp":
     approvers:
-      - 10gen/server-storage-execution
+      - 10gen/server-programmability
   - "storage_debug_util*":
     approvers:
-      - 10gen/server-storage-execution
-      - 10gen/server-rss-sydney
+      - 10gen/server-storage-engine-integration
   - "validate_tests.cpp":
     approvers:
-      - 10gen/server-storage-execution
-      - 10gen/server-rss-sydney
+      - 10gen/server-validate
   - "*plan_executor*":
     approvers:
       - 10gen/query-execution
@@ -29,15 +27,27 @@ filters:
   - "querytests.cpp":
     approvers:
       - 10gen/query-execution
+  - "counttests.cpp":
+    approvers:
+      - 10gen/query-execution
+  - "documentsourcetests.cpp":
+    approvers:
+      - 10gen/query-execution-aggregation
+  - "extensions_callback_real_test.cpp":
+    approvers:
+      - 10gen/query-integration-staff-leads
+  - "matchertests.cpp":
+    approvers:
+      - 10gen/query-execution
   - "updatetests.cpp":
     approvers:
       - 10gen/query-execution
   - "plan_ranking.cpp":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners
   - "query_stage_multiplan.cpp":
     approvers:
-      - 10gen/query-optimization
+      - 10gen/query-optimization-runtime-planners
   - "catalogtests.cpp":
     approvers:
       - 10gen/server-catalog-and-routing

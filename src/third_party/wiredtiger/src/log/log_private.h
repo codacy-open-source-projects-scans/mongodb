@@ -20,6 +20,8 @@
 #define WT_LSN_MSG(lsn, msg) \
     __wt_msg(session, "%s LSN: [%" PRIu32 "][%" PRIu32 "]", (msg), (lsn)->l.file, (lsn)->l.offset)
 
+#define WT_MAX_LSN_STRING 32
+
 /*
  * Both of the macros below need to change if the content of __wt_lsn ever changes. The value is the
  * following: txnid, record type, operation type, file id, operation key, operation value
@@ -168,7 +170,8 @@ struct __wt_myslot {
     uint32_t flags;
 };
 
-#define WT_LOG_END_HEADER log->allocsize
+#define WT_LOG_END_HEADER WT_LOG_ALIGN
+
 struct __wt_log {
     uint32_t allocsize;            /* Allocation alignment size */
     uint32_t first_record;         /* Offset of first record in file */

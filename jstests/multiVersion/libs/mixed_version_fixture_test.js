@@ -21,7 +21,7 @@ export function testPerformUpgradeDowngradeReplSet({
         ],
     });
     rst.startSet();
-    rst.initiate();
+    rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
     let primaryConnection = rst.getPrimary();
     const getAdminDB = () => primaryConnection.getDB("admin");
@@ -30,11 +30,19 @@ export function testPerformUpgradeDowngradeReplSet({
 
     whenFullyDowngraded(primaryConnection);
 
-    // Upgrade the binaries and the FCV.
+    // Upgrade the secondaries only.
+    rst.upgradeSecondaries({...latestVersion});
+    primaryConnection = rst.getPrimary();
+
+    whenSecondariesAreLatestBinary(primaryConnection = rst.getPrimary());
+
+    // Upgrade the primaries.
     rst.upgradeSet({...latestVersion});
     primaryConnection = rst.getPrimary();
+
     whenBinariesAreLatestAndFCVIsLastLTS(primaryConnection);
 
+    // Upgrade the FCV.
     assert.commandWorked(
         getAdminDB().runCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
 

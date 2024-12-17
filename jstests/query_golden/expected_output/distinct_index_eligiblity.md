@@ -24,6 +24,7 @@
 {  "_id" : [ 1, 2, 3 ],  "accum" : 5 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
 	"rejectedPlans" : [ ],
@@ -90,6 +91,7 @@
 {  "_id" : 1,  "accum" : 5 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -172,6 +174,7 @@
 {  "_id" : [ 1, 2, 3 ],  "accum" : 5 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
 	"rejectedPlans" : [ ],
@@ -181,6 +184,9 @@
 		},
 		{
 			"direction" : "forward",
+			"filter" : {
+				
+			},
 			"stage" : "COLLSCAN"
 		}
 	]
@@ -212,6 +218,7 @@
 {  "_id" : 1,  "accum" : [ 1, 2, 3 ] }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -219,9 +226,6 @@
 			"$cursor" : {
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
-					{
-						"stage" : "FETCH"
-					},
 					{
 						"direction" : "forward",
 						"indexBounds" : {
@@ -233,7 +237,7 @@
 							]
 						},
 						"indexName" : "a_1_b_1",
-						"isFetching" : false,
+						"isFetching" : true,
 						"isMultiKey" : true,
 						"isPartial" : false,
 						"isShardFiltering" : false,
@@ -380,6 +384,11 @@
 	"winningPlan" : [
 		{
 			"direction" : "forward",
+			"filter" : {
+				"a" : {
+					"$lt" : 3
+				}
+			},
 			"stage" : "COLLSCAN"
 		}
 	]
@@ -413,7 +422,7 @@
 			"indexName" : "$**_1",
 			"isMultiKey" : false,
 			"isPartial" : false,
-			"isSparse" : false,
+			"isSparse" : true,
 			"isUnique" : false,
 			"keyPattern" : {
 				"$_path" : 1,

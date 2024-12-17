@@ -138,14 +138,11 @@ void RouterUptimeReporter::startPeriodicThread(ServiceContext* serviceContext) {
     Date_t created = jsTime();
 
     _thread = stdx::thread([serviceContext, created] {
-        Client::initThread("Uptime-reporter",
-                           serviceContext->getService(ClusterRole::RouterServer));
-
         // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-        {
-            stdx::lock_guard<Client> lk(cc());
-            cc().setSystemOperationUnkillableByStepdown(lk);
-        }
+        Client::initThread("Uptime-reporter",
+                           serviceContext->getService(ClusterRole::RouterServer),
+                           Client::noSession(),
+                           ClientOperationKillableByStepdown{false});
 
         auto opCtx = cc().makeOperationContext();
         const std::string hostName(getHostNameCached());
@@ -154,7 +151,13 @@ void RouterUptimeReporter::startPeriodicThread(ServiceContext* serviceContext) {
         bool isEmbeddedRouter = serverGlobalParams.clusterRole.has(ClusterRole::ShardServer);
 
         while (!globalInShutdownDeprecated()) {
-            reportStatus(opCtx.get(), instanceId, hostName, created, upTimeTimer, isEmbeddedRouter);
+            // Start reporting statistics from the router port uptime if opened.
+            // TODO SERVER-97757 Remove the need to check if the router port is open in the uptime
+            // reporter.
+            if (!isEmbeddedRouter || serverGlobalParams.routerPort) {
+                reportStatus(
+                    opCtx.get(), instanceId, hostName, created, upTimeTimer, isEmbeddedRouter);
+            }
 
             if (!isEmbeddedRouter) {
                 auto status = Grid::get(opCtx.get())
@@ -165,15 +168,16 @@ void RouterUptimeReporter::startPeriodicThread(ServiceContext* serviceContext) {
                                   "Failed to refresh balancer settings from config server",
                                   "error"_attr = status);
                 }
-
-                try {
-                    ReadWriteConcernDefaults::get(serviceContext).refreshIfNecessary(opCtx.get());
-                } catch (const DBException& ex) {
-                    LOGV2_WARNING(
-                        22877,
-                        "Failed to refresh readConcern/writeConcern defaults from config server",
-                        "error"_attr = redact(ex));
-                }
+            }
+            // Refresh the router-role view of RWC defaults, which is always obtained from the
+            // config server.
+            try {
+                ReadWriteConcernDefaults::get(opCtx.get()).refreshIfNecessary(opCtx.get());
+            } catch (const DBException& ex) {
+                LOGV2_WARNING(
+                    22877,
+                    "Failed to refresh readConcern/writeConcern defaults from config server",
+                    "error"_attr = redact(ex));
             }
 
             MONGO_IDLE_THREAD_BLOCK;

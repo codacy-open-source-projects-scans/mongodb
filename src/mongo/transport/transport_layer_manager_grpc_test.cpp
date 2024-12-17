@@ -94,6 +94,8 @@ public:
         uassertStatusOK(getServiceContext()->getTransportLayerManager()->start());
 
         _asioListenAddress = HostAndPort("127.0.0.1", _asioTL->listenerPort());
+        _grpcEgressReactor = std::dynamic_pointer_cast<grpc::GRPCReactor>(
+            _grpcTL->getReactor(TransportLayer::WhichReactor::kEgress));
     }
 
     void tearDown() override {
@@ -117,6 +119,10 @@ public:
 
     const HostAndPort& getGRPCListenAddress() const {
         return _grpcTL->getListeningAddresses().at(0);
+    }
+
+    const std::shared_ptr<grpc::GRPCReactor>& getGRPCReactor() {
+        return _grpcEgressReactor;
     }
 
     const HostAndPort& getAsioListenAddress() const {
@@ -189,6 +195,7 @@ private:
     test::SSLGlobalParamsGuard _sslGlobalParamsGuard;
 
     HostAndPort _asioListenAddress;
+    std::shared_ptr<grpc::GRPCReactor> _grpcEgressReactor;
 };
 
 TEST_F(AsioGRPCTransportLayerManagerTest, IngressAsioGRPC) {
@@ -219,6 +226,7 @@ TEST_F(AsioGRPCTransportLayerManagerTest, IngressAsioGRPC) {
             for (auto i = 0; i < kNumSessions; i++) {
                 auto session =
                     client->connect(getGRPCListenAddress(),
+                                    getGRPCReactor(),
                                     grpc::CommandServiceTestFixtures::kDefaultConnectTimeout,
                                     {});
                 ON_BLOCK_EXIT([&] { ASSERT_OK(session->finish()); });
@@ -254,7 +262,7 @@ TEST_F(AsioGRPCTransportLayerManagerTest, EgressAsio) {
             ASSERT_OK(session.sinkMessage(swMsg.getValue()));
         });
 
-        auto swSession = getTransportLayerManager().getEgressLayer()->connect(
+        auto swSession = getTransportLayerManager().getDefaultEgressLayer()->connect(
             getAsioListenAddress(),
             ConnectSSLMode::kGlobalSSLMode,
             grpc::CommandServiceTestFixtures::kDefaultConnectTimeout,
@@ -318,6 +326,7 @@ TEST_F(AsioGRPCTransportLayerManagerTest, MarkKillOnGRPCClientDisconnect) {
             client->start(getServiceContext());
             ON_BLOCK_EXIT([&] { client->shutdown(); });
             auto session = client->connect(getGRPCListenAddress(),
+                                           getGRPCReactor(),
                                            grpc::CommandServiceTestFixtures::kDefaultConnectTimeout,
                                            {});
             ON_BLOCK_EXIT([&] { session->end(); });
@@ -333,6 +342,30 @@ TEST_F(AsioGRPCTransportLayerManagerTest, MarkKillOnGRPCClientDisconnect) {
 
         stdx::unique_lock lk(mutex);
         cv.wait(lk, [&]() { return serverCbComplete; });
+    });
+}
+
+TEST_F(AsioGRPCTransportLayerManagerTest, StartupUsingCreateWithConfig) {
+    runTest([&](auto& monitor) {
+        auto tlm = transport::TransportLayerManagerImpl::createWithConfig(
+            &serverGlobalParams, getServiceContext(), true);
+
+        uassertStatusOK(tlm->setup());
+        uassertStatusOK(tlm->start());
+
+        bool hasAsioTl = false;
+        bool hasGRPCTl = false;
+        for (auto& tl : tlm->getTransportLayers()) {
+            auto protocol = tl->getTransportProtocol();
+            if (protocol == TransportProtocol::MongoRPC)
+                hasAsioTl = true;
+            if (protocol == TransportProtocol::GRPC)
+                hasGRPCTl = true;
+        }
+        ASSERT_TRUE(hasAsioTl);
+        ASSERT_TRUE(hasGRPCTl);
+
+        tlm->shutdown();
     });
 }
 

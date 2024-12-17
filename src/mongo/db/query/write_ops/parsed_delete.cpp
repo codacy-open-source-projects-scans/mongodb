@@ -83,12 +83,14 @@ Status ParsedDelete::parseRequest() {
 
     auto [collatorToUse, collationMatchesDefault] =
         resolveCollator(_opCtx, _request->getCollation(), _collection);
-    _expCtx = make_intrusive<ExpressionContext>(_opCtx,
-                                                std::move(collatorToUse),
-                                                _request->getNsString(),
-                                                _request->getLegacyRuntimeConstants(),
-                                                _request->getLet());
-    _expCtx->collationMatchesDefault = collationMatchesDefault;
+    _expCtx = ExpressionContextBuilder{}
+                  .opCtx(_opCtx)
+                  .collator(std::move(collatorToUse))
+                  .ns(_request->getNsString())
+                  .runtimeConstants(_request->getLegacyRuntimeConstants())
+                  .letParameters(_request->getLet())
+                  .collationMatchesDefault(collationMatchesDefault)
+                  .build();
 
     // The '_id' field of a time-series collection needs to be handled as other fields.
     if (CanonicalQuery::isSimpleIdQuery(_request->getQuery()) && !_timeseriesDeleteQueryExprs) {
@@ -137,7 +139,7 @@ Status ParsedDelete::parseQueryToCQ() {
     dassert(!_canonicalQuery.get());
 
     auto statusWithCQ = mongo::parseWriteQueryToCQ(
-        _expCtx->opCtx,
+        _expCtx->getOperationContext(),
         _expCtx.get(),
         *_request,
         _timeseriesDeleteQueryExprs ? _timeseriesDeleteQueryExprs->_bucketExpr.get() : nullptr);

@@ -219,6 +219,10 @@ public:
         return "asio"_sd;
     }
 
+    TransportProtocol getTransportProtocol() const override {
+        return TransportProtocol::MongoRPC;
+    }
+
     int listenerPort() const {
         return _listenerPort;
     }
@@ -233,6 +237,14 @@ public:
 
     std::shared_ptr<SessionManager> getSharedSessionManager() const override {
         return _sessionManager;
+    }
+
+    bool isIngress() const override {
+        return _listenerOptions.isIngress();
+    }
+
+    bool isEgress() const override {
+        return _listenerOptions.isEgress();
     }
 
     /**

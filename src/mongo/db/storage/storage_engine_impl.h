@@ -36,7 +36,6 @@
 #include <deque>
 #include <functional>
 #include <list>
-#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -172,6 +171,8 @@ public:
     Timestamp getAllDurableTimestamp() const override;
 
     boost::optional<Timestamp> getOplogNeededForCrashRecovery() const final;
+
+    Timestamp getPinnedOplog() const final;
 
     bool supportsReadConcernSnapshot() const final;
 

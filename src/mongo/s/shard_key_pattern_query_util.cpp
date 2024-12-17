@@ -74,6 +74,7 @@
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/s/chunk.h"
+#include "mongo/s/shard_targeting_helpers.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
@@ -197,7 +198,7 @@ StatusWith<BSONObj> extractShardKeyFromBasicQuery(OperationContext* opCtx,
     findCommand->setFilter(basicQuery.getOwned());
 
     auto statusWithCQ = CanonicalQuery::make(
-        {.expCtx = makeExpressionContext(opCtx, *findCommand),
+        {.expCtx = ExpressionContextBuilder{}.fromRequest(opCtx, *findCommand).build(),
          .parsedFind = ParsedFindCommandParams{
              .findCommand = std::move(findCommand),
              .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}});
@@ -212,7 +213,7 @@ StatusWith<BSONObj> extractShardKeyFromBasicQueryWithContext(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const ShardKeyPattern& shardKeyPattern,
     const BSONObj& basicQuery) {
-    auto findCommand = std::make_unique<FindCommandRequest>(expCtx->ns);
+    auto findCommand = std::make_unique<FindCommandRequest>(expCtx->getNamespaceString());
     findCommand->setFilter(basicQuery.getOwned());
     if (!expCtx->getCollatorBSON().isEmpty()) {
         findCommand->setCollation(expCtx->getCollatorBSON().getOwned());
@@ -465,8 +466,18 @@ void getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
                          const BSONObj& collation,
                          const ChunkManager& cm,
                          std::set<ShardId>* shardIds,
-                         QueryTargetingInfo* info,
                          bool bypassIsFieldHashedCheck) {
+    return getShardIdsAndChunksForQuery(
+        expCtx, query, collation, cm, shardIds, nullptr, bypassIsFieldHashedCheck);
+}
+
+void getShardIdsAndChunksForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
+                                  const BSONObj& query,
+                                  const BSONObj& collation,
+                                  const ChunkManager& cm,
+                                  std::set<ShardId>* shardIds,
+                                  QueryTargetingInfo* info,
+                                  bool bypassIsFieldHashedCheck) {
     if (info) {
         tassert(7670301, "Invalid QueryTargetingInfo", info->chunkRanges.empty());
     }
@@ -474,7 +485,7 @@ void getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
     auto findCommand = std::make_unique<FindCommandRequest>(cm.getNss());
     findCommand->setFilter(query.getOwned());
 
-    expCtx->uuid = cm.getUUID();
+    expCtx->setUUID(cm.getUUID());
 
     if (!collation.isEmpty()) {
         findCommand->setCollation(collation.getOwned());
@@ -493,14 +504,22 @@ void getShardIdsForQuery(boost::intrusive_ptr<ExpressionContext> expCtx,
             .findCommand = std::move(findCommand),
             .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}});
 
-    getShardIdsForCanonicalQuery(*cq, cm, shardIds, info, bypassIsFieldHashedCheck);
+    getShardIdsAndChunksForCanonicalQuery(*cq, cm, shardIds, info, bypassIsFieldHashedCheck);
 }
 
 void getShardIdsForCanonicalQuery(const CanonicalQuery& query,
                                   const ChunkManager& cm,
                                   std::set<ShardId>* shardIds,
-                                  QueryTargetingInfo* info,
                                   bool bypassIsFieldHashedCheck) {
+    return getShardIdsAndChunksForCanonicalQuery(
+        query, cm, shardIds, nullptr, bypassIsFieldHashedCheck);
+}
+
+void getShardIdsAndChunksForCanonicalQuery(const CanonicalQuery& query,
+                                           const ChunkManager& cm,
+                                           std::set<ShardId>* shardIds,
+                                           QueryTargetingInfo* info,
+                                           bool bypassIsFieldHashedCheck) {
     if (info) {
         tassert(7670300, "Invalid non-empty 'info->chunkRanges'", info->chunkRanges.empty());
     }
@@ -540,14 +559,13 @@ void getShardIdsForCanonicalQuery(const CanonicalQuery& query,
     auto ranges = flattenBounds(cm.getShardKeyPattern(), bounds);
 
     for (BoundList::const_iterator it = ranges.begin(); it != ranges.end(); ++it) {
-        // We need to know which endpoint is the min/max to call getShardIdsForRange(). Normally,
-        // the index bounds should look like [min, max]. If the query was specified with a sort,
-        // however, the index bounds may be out of order, like [max, min].
-        const bool minFirst = !query.getSortPattern() ||
-            SimpleBSONObjComparator::kInstance.evaluate(it->first < it->second);
-        const auto& min = minFirst ? it->first : it->second;
-        const auto& max = minFirst ? it->second : it->first;
+        const auto& min = it->first;
+        const auto& max = it->second;
 
+        // 'getShardIdsForRange()' will only target the correct shards if min < max.
+        tassert(9607300,
+                "Shard targeting index bounds are not in the expected order",
+                SimpleBSONObjComparator::kInstance.evaluate(min <= max));
         cm.getShardIdsForRange(min, max, shardIds, info ? &info->chunkRanges : nullptr);
 
         // Once we know we need to visit all shards no need to keep looping.

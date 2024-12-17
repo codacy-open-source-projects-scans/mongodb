@@ -91,8 +91,6 @@ struct __wt_block_desc;
 typedef struct __wt_block_desc WT_BLOCK_DESC;
 struct __wt_block_header;
 typedef struct __wt_block_header WT_BLOCK_HEADER;
-struct __wt_block_mods;
-typedef struct __wt_block_mods WT_BLOCK_MODS;
 struct __wt_bloom;
 typedef struct __wt_bloom WT_BLOOM;
 struct __wt_bloom_hash;
@@ -135,6 +133,12 @@ struct __wt_chunkcache_pinned_list;
 typedef struct __wt_chunkcache_pinned_list WT_CHUNKCACHE_PINNED_LIST;
 struct __wt_ckpt;
 typedef struct __wt_ckpt WT_CKPT;
+struct __wt_ckpt_block_mods;
+typedef struct __wt_ckpt_block_mods WT_CKPT_BLOCK_MODS;
+struct __wt_ckpt_connection;
+typedef struct __wt_ckpt_connection WT_CKPT_CONNECTION;
+struct __wt_ckpt_session;
+typedef struct __wt_ckpt_session WT_CKPT_SESSION;
 struct __wt_ckpt_snapshot;
 typedef struct __wt_ckpt_snapshot WT_CKPT_SNAPSHOT;
 struct __wt_col;
@@ -193,18 +197,8 @@ struct __wt_cursor_hs;
 typedef struct __wt_cursor_hs WT_CURSOR_HS;
 struct __wt_cursor_index;
 typedef struct __wt_cursor_index WT_CURSOR_INDEX;
-struct __wt_cursor_join;
-typedef struct __wt_cursor_join WT_CURSOR_JOIN;
-struct __wt_cursor_join_endpoint;
-typedef struct __wt_cursor_join_endpoint WT_CURSOR_JOIN_ENDPOINT;
-struct __wt_cursor_join_entry;
-typedef struct __wt_cursor_join_entry WT_CURSOR_JOIN_ENTRY;
-struct __wt_cursor_join_iter;
-typedef struct __wt_cursor_join_iter WT_CURSOR_JOIN_ITER;
 struct __wt_cursor_log;
 typedef struct __wt_cursor_log WT_CURSOR_LOG;
-struct __wt_cursor_lsm;
-typedef struct __wt_cursor_lsm WT_CURSOR_LSM;
 struct __wt_cursor_metadata;
 typedef struct __wt_cursor_metadata WT_CURSOR_METADATA;
 struct __wt_cursor_stat;
@@ -269,38 +263,30 @@ struct __wt_insert;
 typedef struct __wt_insert WT_INSERT;
 struct __wt_insert_head;
 typedef struct __wt_insert_head WT_INSERT_HEAD;
-struct __wt_join_stats;
-typedef struct __wt_join_stats WT_JOIN_STATS;
-struct __wt_join_stats_group;
-typedef struct __wt_join_stats_group WT_JOIN_STATS_GROUP;
 struct __wt_json;
 typedef struct __wt_json WT_JSON;
 struct __wt_keyed_encryptor;
 typedef struct __wt_keyed_encryptor WT_KEYED_ENCRYPTOR;
+struct __wt_live_restore_file_handle;
+typedef struct __wt_live_restore_file_handle WT_LIVE_RESTORE_FILE_HANDLE;
+struct __wt_live_restore_fs;
+typedef struct __wt_live_restore_fs WT_LIVE_RESTORE_FS;
+struct __wt_live_restore_fs_layer;
+typedef struct __wt_live_restore_fs_layer WT_LIVE_RESTORE_FS_LAYER;
+struct __wt_live_restore_hole_node;
+typedef struct __wt_live_restore_hole_node WT_LIVE_RESTORE_HOLE_NODE;
 struct __wt_log;
 typedef struct __wt_log WT_LOG;
 struct __wt_log_desc;
 typedef struct __wt_log_desc WT_LOG_DESC;
+struct __wt_log_manager;
+typedef struct __wt_log_manager WT_LOG_MANAGER;
 struct __wt_log_record;
 typedef struct __wt_log_record WT_LOG_RECORD;
+struct __wt_log_thread;
+typedef struct __wt_log_thread WT_LOG_THREAD;
 struct __wt_logslot;
 typedef struct __wt_logslot WT_LOGSLOT;
-struct __wt_lsm_chunk;
-typedef struct __wt_lsm_chunk WT_LSM_CHUNK;
-struct __wt_lsm_cursor_chunk;
-typedef struct __wt_lsm_cursor_chunk WT_LSM_CURSOR_CHUNK;
-struct __wt_lsm_data_source;
-typedef struct __wt_lsm_data_source WT_LSM_DATA_SOURCE;
-struct __wt_lsm_manager;
-typedef struct __wt_lsm_manager WT_LSM_MANAGER;
-struct __wt_lsm_tree;
-typedef struct __wt_lsm_tree WT_LSM_TREE;
-struct __wt_lsm_work_unit;
-typedef struct __wt_lsm_work_unit WT_LSM_WORK_UNIT;
-struct __wt_lsm_worker_args;
-typedef struct __wt_lsm_worker_args WT_LSM_WORKER_ARGS;
-struct __wt_lsm_worker_cookie;
-typedef struct __wt_lsm_worker_cookie WT_LSM_WORKER_COOKIE;
 struct __wt_multi;
 typedef struct __wt_multi WT_MULTI;
 struct __wt_myslot;
@@ -315,8 +301,6 @@ struct __wt_named_data_source;
 typedef struct __wt_named_data_source WT_NAMED_DATA_SOURCE;
 struct __wt_named_encryptor;
 typedef struct __wt_named_encryptor WT_NAMED_ENCRYPTOR;
-struct __wt_named_extractor;
-typedef struct __wt_named_extractor WT_NAMED_EXTRACTOR;
 struct __wt_named_storage_source;
 typedef struct __wt_named_storage_source WT_NAMED_STORAGE_SOURCE;
 struct __wt_optrack_header;
@@ -521,24 +505,24 @@ typedef uint64_t wt_timestamp_t;
 #include "../evict/evict.h"
 #include "capacity.h"
 #include "cell.h"
-#include "checkpoint.h"
+#include "cursor.h" /* required by checkpoint */
+#include "../checkpoint/checkpoint.h"
 #include "compact.h"
 #include "conf_keys.h" /* required by conf.h */
 #include "conf.h"
 #include "config.h"
-#include "cursor.h"
 #include "dlh.h"
 #include "error.h"
 #include "futex.h"
 #include "generation.h"
 #include "hazard.h"
 #include "json.h"
+#include "../live_restore/live_restore.h"
 #include "../log/log.h"
-#include "lsm.h"
 #include "meta.h" /* required by block.h */
 #include "optrack.h"
 #include "os.h"
-#include "reconcile.h"
+#include "../reconcile/reconcile.h"
 #include "rollback_to_stable.h"
 #include "schema.h"
 #include "tiered.h"
@@ -589,7 +573,7 @@ typedef uint64_t wt_timestamp_t;
 #include "os_fs_inline.h"
 #include "os_fstream_inline.h"
 #include "packing_inline.h"
-#include "reconcile_inline.h"
+#include "../reconcile/reconcile_inline.h"
 #include "serial_inline.h"
 #include "str_inline.h"
 #include "time_inline.h"

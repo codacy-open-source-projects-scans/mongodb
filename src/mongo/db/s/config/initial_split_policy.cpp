@@ -792,8 +792,8 @@ BSONObjSet SamplingBasedSplitPolicy::createFirstSplitPoints(OperationContext* op
                                                             const SplitPolicyParams& params) {
     if (_zones) {
         for (auto& zone : *_zones) {
-            zone.setMinKey(shardKey.getKeyPattern().extendRangeBound(zone.getMinKey(), false));
-            zone.setMaxKey(shardKey.getKeyPattern().extendRangeBound(zone.getMaxKey(), false));
+            zone.setRange({shardKey.getKeyPattern().extendRangeBound(zone.getMinKey(), false),
+                           shardKey.getKeyPattern().extendRangeBound(zone.getMaxKey(), false)});
         }
     }
 
@@ -910,7 +910,7 @@ SamplingBasedSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
                                                       int samplesPerChunk,
                                                       MakePipelineOptions opts) {
     auto rawPipeline = createRawPipeline(shardKey, numInitialChunks, samplesPerChunk);
-    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+    StringMap<ResolvedNamespace> resolvedNamespaces;
     resolvedNamespaces[ns.coll()] = {ns, std::vector<BSONObj>{}};
 
     auto pi = [&]() -> std::shared_ptr<MongoProcessInterface> {
@@ -928,22 +928,15 @@ SamplingBasedSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
         return MongoProcessInterface::create(opCtx);
     }();
 
-    auto expCtx = make_intrusive<ExpressionContext>(opCtx,
-                                                    boost::none, /* explain */
-                                                    false,       /* fromRouter */
-                                                    false,       /* needsMerge */
-                                                    true,        /* allowDiskUse */
-                                                    true,        /* bypassDocumentValidation */
-                                                    false,       /* isMapReduceCommand */
-                                                    ns,
-                                                    boost::none, /* runtimeConstants */
-                                                    nullptr,     /* collator */
-                                                    std::move(pi),
-                                                    std::move(resolvedNamespaces),
-                                                    boost::none); /* collUUID */
-
-    expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
-
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx)
+                      .mongoProcessInterface(std::move(pi))
+                      .ns(ns)
+                      .resolvedNamespace(std::move(resolvedNamespaces))
+                      .allowDiskUse(true)
+                      .bypassDocumentValidation(true)
+                      .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                      .build();
     return std::make_unique<PipelineDocumentSource>(
         Pipeline::makePipeline(rawPipeline, expCtx, opts), samplesPerChunk - 1);
 }
@@ -993,8 +986,8 @@ InitialSplitPolicy::ShardCollectionConfig ShardDistributionSplitPolicy::createFi
     const auto& keyPattern = shardKeyPattern.getKeyPattern();
     if (_zones) {
         for (auto& zone : *_zones) {
-            zone.setMinKey(keyPattern.extendRangeBound(zone.getMinKey(), false));
-            zone.setMaxKey(keyPattern.extendRangeBound(zone.getMaxKey(), false));
+            zone.setRange({keyPattern.extendRangeBound(zone.getMinKey(), false),
+                           keyPattern.extendRangeBound(zone.getMaxKey(), false)});
         }
     }
 

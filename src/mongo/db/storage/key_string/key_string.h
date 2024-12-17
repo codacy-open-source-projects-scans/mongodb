@@ -36,12 +36,10 @@
 #include <cstring>
 #include <functional>
 #include <iosfwd>
-#include <limits>
 #include <string>
 #include <type_traits>
 #include <utility>
 
-#include "mongo/base/data_type_endian.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -770,7 +768,7 @@ public:
     void appendCode(StringData val);
 
     /**
-     * Appends a Discriminator byte and kEnd byte to a key string.
+     * Appends a Discriminator byte or kEnd byte to a key string.
      */
     void appendDiscriminator(Discriminator discriminator);
 
@@ -906,7 +904,6 @@ protected:
     void _appendDoubleWithoutTypeBits(double num, DecimalContinuationMarker dcm, bool invert);
     void _appendHugeDecimalWithoutTypeBits(Decimal128 dec, bool invert);
     void _appendTinyDecimalWithoutTypeBits(Decimal128 dec, double bin, bool invert);
-    void _appendEnd();
 
     template <typename T>
     void _append(const T& thing, bool invert) {

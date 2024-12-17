@@ -48,13 +48,12 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_base.h"
 #include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/catalog/multi_index_block.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/query/client_cursor/cursor_manager.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -83,6 +82,7 @@
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/text.h"  // IWYU pragma: keep
+#include "mongo/util/tick_source_mock.h"
 #include "mongo/util/version/releases.h"
 
 namespace mongo {
@@ -230,10 +230,6 @@ int dbtestsMain(int argc, char** argv) {
     serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
     repl::ReplSettings replSettings;
     replSettings.setOplogSizeBytes(10 * 1024 * 1024);
-    setGlobalServiceContext(ServiceContext::make());
-
-    const auto service = getGlobalServiceContext();
-    service->getService()->setServiceEntryPoint(std::make_unique<ServiceEntryPointShardRole>());
 
     auto fastClock = std::make_unique<ClockSourceMock>();
     // Timestamps are split into two 32-bit integers, seconds and "increments". Currently (but
@@ -242,16 +238,25 @@ int dbtestsMain(int argc, char** argv) {
     // `ClockSourceMock` only bumps the "increment" counter, thus by default, generating "null"
     // timestamps. Bumping by one second here avoids any accidental interpretations.
     fastClock->advance(Seconds(1));
-    service->setFastClockSource(std::move(fastClock));
 
     auto preciseClock = std::make_unique<ClockSourceMock>();
     // See above.
     preciseClock->advance(Seconds(1));
-    CursorManager::get(service)->setPreciseClockSource(preciseClock.get());
-    service->setPreciseClockSource(std::move(preciseClock));
 
-    service->setTransportLayerManager(
-        transport::TransportLayerManagerImpl::makeAndStartDefaultEgressTransportLayer());
+    auto tickSource = std::make_unique<TickSourceMock<Milliseconds>>();
+
+    auto serviceUniq =
+        ServiceContext::make(std::move(fastClock), std::move(preciseClock), std::move(tickSource));
+    serviceUniq->getService()->setServiceEntryPoint(std::make_unique<ServiceEntryPointShardRole>());
+
+    auto tl = transport::TransportLayerManagerImpl::makeDefaultEgressTransportLayer();
+    uassertStatusOK(tl->setup());
+    uassertStatusOK(tl->start());
+    serviceUniq->setTransportLayerManager(std::move(tl));
+
+    setGlobalServiceContext(std::move(serviceUniq));
+
+    const auto service = getGlobalServiceContext();
 
     repl::ReplicationCoordinator::set(
         service,
@@ -262,8 +267,6 @@ int dbtestsMain(int argc, char** argv) {
         .ignore();
 
     auto storageMock = std::make_unique<repl::StorageInterfaceMock>();
-    repl::DropPendingCollectionReaper::set(
-        service, std::make_unique<repl::DropPendingCollectionReaper>(storageMock.get()));
 
     AuthorizationManager::get(service->getService())->setAuthEnabled(false);
     ScriptEngine::setup(ExecutionEnvironment::Server);

@@ -44,19 +44,13 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/internal_plans.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/system_tick_source.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -111,15 +105,21 @@ public:
               wallTime(wallTime) {}
     };
 
+    // The method used for creating the initial set of markers.
+    enum class MarkersCreationMethod { EmptyCollection, Scanning, Sampling };
 
     CollectionTruncateMarkers(std::deque<Marker> markers,
                               int64_t leftoverRecordsCount,
                               int64_t leftoverRecordsBytes,
-                              int64_t minBytesPerMarker)
+                              int64_t minBytesPerMarker,
+                              Microseconds totalTimeSpentBuilding,
+                              MarkersCreationMethod creationMethod)
         : _minBytesPerMarker(minBytesPerMarker),
           _currentRecords(leftoverRecordsCount),
           _currentBytes(leftoverRecordsBytes),
-          _markers(std::move(markers)) {}
+          _markers(std::move(markers)),
+          _totalTimeProcessing(totalTimeSpentBuilding),
+          _creationMethod(creationMethod) {}
 
     virtual ~CollectionTruncateMarkers() = default;
 
@@ -148,9 +148,6 @@ public:
     virtual bool awaitHasExcessMarkersOrDead(OperationContext* opCtx) {
         MONGO_UNREACHABLE;
     }
-
-    // The method used for creating the initial set of markers.
-    enum class MarkersCreationMethod { EmptyCollection, Scanning, Sampling };
 
     static StringData toString(MarkersCreationMethod creationMethod);
 
@@ -213,12 +210,12 @@ public:
         // calling getNext* will start from the beginning again.
         virtual void reset(OperationContext* opCtx) = 0;
 
-        int64_t numRecords(OperationContext* opCtx) const {
-            return getRecordStore()->numRecords(opCtx);
+        int64_t numRecords() const {
+            return getRecordStore()->numRecords();
         }
 
-        int64_t dataSize(OperationContext* opCtx) const {
-            return getRecordStore()->dataSize(opCtx);
+        int64_t dataSize() const {
+            return getRecordStore()->dataSize();
         }
     };
 
@@ -231,7 +228,6 @@ public:
     static InitialSetOfMarkers createFromCollectionIterator(
         OperationContext* opCtx,
         CollectionIterator& collIterator,
-        const NamespaceString& ns,
         int64_t minBytesPerMarker,
         std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime,
         boost::optional<int64_t> numberOfMarkersToKeepForOplog = boost::none);
@@ -241,7 +237,6 @@ public:
     static InitialSetOfMarkers createMarkersByScanning(
         OperationContext* opCtx,
         CollectionIterator& collIterator,
-        const NamespaceString& ns,
         int64_t minBytesPerMarker,
         std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime);
 
@@ -251,7 +246,6 @@ public:
     static InitialSetOfMarkers createMarkersBySampling(
         OperationContext* opCtx,
         CollectionIterator& collIterator,
-        const NamespaceString& ns,
         int64_t estimatedRecordsPerMarker,
         int64_t estimatedBytesPerMarker,
         std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime,
@@ -260,6 +254,14 @@ public:
     void setMinBytesPerMarker(int64_t size);
 
     static constexpr uint64_t kRandomSamplesPerMarker = 10;
+
+    Microseconds getCreationProcessingTime() const {
+        return _totalTimeProcessing;
+    }
+
+    MarkersCreationMethod getMarkersCreationMethod() const {
+        return _creationMethod;
+    }
 
     //
     // The following methods are public only for use in tests.
@@ -351,6 +353,10 @@ protected:
         PartialMarkerMetrics metrics{&_currentRecords, &_currentBytes};
         return f(metrics);
     }
+
+    // Amount of time spent scanning and/or sampling the collection during start up, if any.
+    const Microseconds _totalTimeProcessing;
+    const CollectionTruncateMarkers::MarkersCreationMethod _creationMethod;
 };
 
 /**
@@ -366,53 +372,33 @@ public:
      * Partial marker expiration depends on tracking the highest seen RecordId and wall time
      * across the lifetime of the 'CollectionTruncateMarkersWithPartialExpiration' class.
      *
-     * 'CollectionTruncateMarkersWithPartialExpiration' should always maintain the highest tracked
-     * RecordId and wall time are:
-     *  . Greater than or equal to the 'lastRecord' and 'wall' of the most recent marker
-     *  generated, if any.
-     *  .Initialized provided records have been tracked at any point in time.
+     * 'CollectionTruncateMarkersWithPartialExpiration' should always maintain a state where the
+     * 'highestRecordId' and 'highestWallTime' are:
+     *      . Greater than or equal to the 'lastRecord' and 'wall' of the most recent marker
+     *      generated, if any.
+     *      .Initialized provided records have been tracked at any point in time.
      *              * Records are tracked either by full markers, or a non-zero
      *                'leftoverRecordsCount' or 'leftoveRecordsBytes'.
-     *  . Strictly increasing over time.
+     *      . Strictly increasing over time.
      *
-     * Thus, to support partial marker expiration, the 'InitialSetOfMarkers' is
-     * extended to account for the highest RecordId and wall time.
+     * Callers are responsible for ensuring the state requirements are met upon construction.
      */
-    struct InitialSetOfMarkers {
-        std::deque<Marker> markers;
-        int64_t leftoverRecordsCount;
-        int64_t leftoverRecordsBytes;
-        RecordId highestRecordId;
-        Date_t highestWallTime;
-        Microseconds timeTaken;
-        MarkersCreationMethod methodUsed;
-    };
-
-    // TODO SERVER-95714: Utilize constructor and InitialSetOfMarkers with highestRecordId and
-    // highestWallTime for PreImagesTruncateMarkersPerNsUUID.
     CollectionTruncateMarkersWithPartialExpiration(std::deque<Marker> markers,
-                                                   int64_t leftoverRecordsCount,
-                                                   int64_t leftoverRecordsBytes,
                                                    RecordId highestRecordId,
                                                    Date_t highestWallTime,
-                                                   int64_t minBytesPerMarker)
-        : CollectionTruncateMarkers(
-              std::move(markers), leftoverRecordsCount, leftoverRecordsBytes, minBytesPerMarker),
-          _highestRecordId(std::move(highestRecordId)),
-          _highestWallTime(highestWallTime) {}
-
-    /**
-     * Deprecated: Upon construction, records may be accounted for by the 'markers' or non-zero
-     * 'leftoverRecordsCounts'/'leftoverRecordsBytes' despite uninitialized '_highestRecordId' and
-     * '_highestWallTime'. Until the highest record metrics are updated, partial marker expiration
-     * isn't possible.
-     */
-    CollectionTruncateMarkersWithPartialExpiration(std::deque<Marker> markers,
                                                    int64_t leftoverRecordsCount,
                                                    int64_t leftoverRecordsBytes,
-                                                   int64_t minBytesPerMarker)
-        : CollectionTruncateMarkers(
-              std::move(markers), leftoverRecordsCount, leftoverRecordsBytes, minBytesPerMarker) {}
+                                                   int64_t minBytesPerMarker,
+                                                   Microseconds totalTimeSpentBuilding,
+                                                   MarkersCreationMethod creationMethod)
+        : CollectionTruncateMarkers(std::move(markers),
+                                    leftoverRecordsCount,
+                                    leftoverRecordsBytes,
+                                    minBytesPerMarker,
+                                    totalTimeSpentBuilding,
+                                    creationMethod),
+          _highestRecordId(std::move(highestRecordId)),
+          _highestWallTime(highestWallTime) {}
 
     // Creates a partially filled marker if necessary. The criteria used is whether there is data in
     // the partial marker and whether the implementation's '_hasPartialMarkerExpired' returns true.
@@ -502,54 +488,6 @@ private:
     RecordStore* _rs;
     std::unique_ptr<RecordCursor> _directionalCursor;
     std::unique_ptr<RecordCursor> _randomCursor;
-};
-
-/**
- * A collection iterator that can yield between calls to getNext()/getNextRandom()
- */
-class YieldableCollectionIterator : public CollectionTruncateMarkers::CollectionIterator {
-public:
-    YieldableCollectionIterator(OperationContext* opCtx, VariantCollectionPtrOrAcquisition coll)
-        : _collection(coll) {
-        reset(opCtx);
-    }
-
-    boost::optional<std::pair<RecordId, BSONObj>> getNext() final {
-        RecordId rId;
-        BSONObj doc;
-        if (_collScanExecutor->getNext(&doc, &rId) == PlanExecutor::IS_EOF) {
-            return boost::none;
-        }
-        return std::make_pair(std::move(rId), std::move(doc));
-    }
-
-    boost::optional<std::pair<RecordId, BSONObj>> getNextRandom() final {
-        RecordId rId;
-        BSONObj doc;
-        if (_sampleExecutor->getNext(&doc, &rId) == PlanExecutor::IS_EOF) {
-            return boost::none;
-        }
-        return std::make_pair(std::move(rId), std::move(doc));
-    }
-
-    RecordStore* getRecordStore() const final {
-        return _collection.getCollectionPtr()->getRecordStore();
-    }
-
-    void reset(OperationContext* opCtx) final {
-        _collScanExecutor =
-            InternalPlanner::collectionScan(opCtx,
-                                            _collection,
-                                            PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                            InternalPlanner::Direction::FORWARD);
-        _sampleExecutor = InternalPlanner::sampleCollection(
-            opCtx, _collection, PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
-    }
-
-private:
-    VariantCollectionPtrOrAcquisition _collection;
-    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _collScanExecutor;
-    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _sampleExecutor;
 };
 
 }  // namespace mongo

@@ -50,6 +50,7 @@ def _clang_tidy_executor(
         clang_tidy_filename,
         f"-export-fixes={output_filename_fixes}",
         f"-config={json.dumps(clang_tidy_cfg)}",
+        "--warnings-as-errors=*,-clang-diagnostic-builtin-macro-redefined",
     ]
     proc = subprocess.run(clang_tidy_command, capture_output=True, check=False)
     files_to_parse = None
@@ -207,6 +208,14 @@ def _run_tidy(args, parser_defaults):
         # TODO SERVER-49884 Remove this when we no longer check in generated Bison.
         if file_doc["file"].endswith("/parser_gen.cpp"):
             continue
+
+        # Skip over the tests for clang-tidy that have errors inserted.
+        if (
+            not args.clang_tidy_test
+            and "src/mongo/tools/mongo_tidy_checks/tests" in file_doc["file"]
+        ):
+            continue
+
         filtered_compile_commands.append(file_doc)
 
     if args.split_jobs != 0:
@@ -337,6 +346,12 @@ def main():
         type=str,
         default=CHECKS_SO,
         help="Path to load the custom mongo checks module.",
+    )
+    parser.add_argument(
+        "--clang-tidy-test",
+        action="store_true",
+        default=False,
+        help="if this is a test evaluating clang tidy itself.",
     )
     # TODO: Is there someway to get this without hardcoding this much
     parser.add_argument("-y", "--clang-tidy-toolchain", type=str, default="v4")

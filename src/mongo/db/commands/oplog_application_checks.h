@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 #pragma once
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -81,8 +79,7 @@ private:
     static Status checkOperationAuthorization(OperationContext* opCtx,
                                               const DatabaseName& dbName,
                                               const BSONObj& oplogEntry,
-                                              AuthorizationSession* authSession,
-                                              bool alwaysUpsert);
+                                              AuthorizationSession* authSession);
     /**
      * Returns OK if 'e' contains a valid operation.
      */

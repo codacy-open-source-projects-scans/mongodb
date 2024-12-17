@@ -834,7 +834,6 @@ repl::OpTime ShardServerOpObserver::onDropCollection(OperationContext* opCtx,
                                                      const NamespaceString& collectionName,
                                                      const UUID& uuid,
                                                      std::uint64_t numRecords,
-                                                     const CollectionDropType dropType,
                                                      bool markFromMigrate) {
     // TODO (SERVER-91505): Determine if we should change this to check isDataConsistent.
     if (repl::ReplicationCoordinator::get(opCtx)->isInInitialSyncOrRollback()) {
@@ -886,16 +885,6 @@ void ShardServerOpObserver::onStartIndexBuild(OperationContext* opCtx,
 }
 
 void ShardServerOpObserver::onStartIndexBuildSinglePhase(OperationContext* opCtx,
-                                                         const NamespaceString& nss) {
-    // TODO (SERVER-91505): Determine if we should change this to check isDataConsistent.
-    if (repl::ReplicationCoordinator::get(opCtx)->isInInitialSyncOrRollback()) {
-        return;
-    }
-
-    abortOngoingMigrationIfNeeded(opCtx, nss);
-}
-
-void ShardServerOpObserver::onAbortIndexBuildSinglePhase(OperationContext* opCtx,
                                                          const NamespaceString& nss) {
     // TODO (SERVER-91505): Determine if we should change this to check isDataConsistent.
     if (repl::ReplicationCoordinator::get(opCtx)->isInInitialSyncOrRollback()) {

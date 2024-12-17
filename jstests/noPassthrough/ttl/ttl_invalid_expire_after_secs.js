@@ -21,7 +21,7 @@ function test(expireAfterSecondsVal) {
         settings: {chainingAllowed: false},
     });
     rst.startSet();
-    rst.initiate();
+    rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
     let primary = rst.getPrimary();
     const db = primary.getDB('test');
@@ -73,7 +73,7 @@ function test(expireAfterSecondsVal) {
     // sync.
     const newNode = rst.add({rsConfig: {votes: 0, priority: 0}});
     rst.reInitiate();
-    rst.waitForState(newNode, ReplSetTest.State.SECONDARY);
+    rst.awaitSecondaryNodes(null, [newNode]);
     rst.awaitReplication();
     let newNodeTestDB = newNode.getDB(db.getName());
     let newNodeColl = newNodeTestDB.getCollection(coll.getName());

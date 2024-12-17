@@ -30,7 +30,7 @@ const rst = new ReplSetTest({
     nodeOptions: {setParameter: {logComponentVerbosity: tojsononeline({storage: {recovery: 2}})}}
 });
 const nodes = rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 if (!rst.getPrimary().adminCommand("serverStatus").storageEngine.supportsSnapshotReadConcern) {
     // Only snapshotting storage engines require correct timestamping of index builds.
@@ -44,14 +44,13 @@ assert.commandWorked(rst.getPrimary().adminCommand(
     {setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}));
 
 function getColl(conn) {
-    return conn.getDB("timestampingIndexBuild")["coll"];
+    return conn.getDB(jsTestName())["coll"];
 }
 
 let coll = getColl(rst.getPrimary());
 
 // Create a collection and wait for the stable timestamp to exceed its creation on both nodes.
-assert.commandWorked(
-    coll.insert({}, {writeConcern: {w: "majority", wtimeout: rst.kDefaultTimeoutMS}}));
+assert.commandWorked(coll.insert({}, {writeConcern: {w: "majority", wtimeout: rst.timeoutMS}}));
 
 // Wait for the stable timestamp to match the latest oplog entry on both nodes.
 rst.awaitLastOpCommitted();
@@ -89,7 +88,7 @@ for (let nodeIdx = 0; nodeIdx < 2; ++nodeIdx) {
     {
         jsTestLog("Starting as a replica set. Both indexes should exist. Node: " + nodeIdentity);
         let conn = rst.start(nodeIdx, {startClean: false}, true);
-        rst.waitForState(conn, ReplSetTest.State.SECONDARY);
+        rst.awaitSecondaryNodes(null, [conn]);
         conn.setSecondaryOk();
         IndexBuildTest.assertIndexes(getColl(conn), 2, ['_id_', 'foo_1']);
         rst.stop(nodeIdx);

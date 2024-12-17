@@ -127,6 +127,7 @@
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
+#include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction_resources.h"
@@ -449,14 +450,13 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp, LogicalOp logicalOp) {
         curOp->debug().additiveMetrics.executionTime = executionTimeMicros;
 
         recordCurOpMetrics(opCtx);
-        Top::get(opCtx->getServiceContext())
-            .record(opCtx,
-                    curOp->getNSS(),
-                    logicalOp,
-                    Top::LockType::WriteLocked,
-                    durationCount<Microseconds>(curOp->elapsedTimeExcludingPauses()),
-                    curOp->isCommand(),
-                    curOp->getReadWriteType());
+        Top::getDecoration(opCtx).record(opCtx,
+                                         curOp->getNSS(),
+                                         logicalOp,
+                                         Top::LockType::WriteLocked,
+                                         curOp->elapsedTimeExcludingPauses(),
+                                         curOp->isCommand(),
+                                         curOp->getReadWriteType());
 
         if (!curOp->debug().errInfo.isOK()) {
             LOGV2_DEBUG(7276600,
@@ -683,7 +683,7 @@ void handleGroupedTimeseriesInserts(OperationContext* opCtx,
                                     write_ops_exec::WriteResult& out) {
     size_t numOps = docs.size();
     auto request = getConsecutiveInsertRequest(req, firstOpIdx, docs, nsInfoEntry);
-    auto insertReply = write_ops_exec::performTimeseriesWrites(opCtx, request, curOp);
+    auto insertReply = timeseries::write_ops::performTimeseriesWrites(opCtx, request, curOp);
     populateWriteResultWithInsertReply(numOps, req.getOrdered(), insertReply, out);
 }
 
@@ -769,12 +769,6 @@ bool handleGroupedInserts(OperationContext* opCtx,
         }
     }
 
-    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> priority;
-    if (nsString == NamespaceString::kConfigSampledQueriesNamespace ||
-        nsString == NamespaceString::kConfigSampledQueriesDiffNamespace) {
-        priority.emplace(opCtx, AdmissionContext::Priority::kLow);
-    }
-
     auto txnParticipant = TransactionParticipant::get(opCtx);
 
     size_t bytesInBatch = 0;
@@ -840,7 +834,7 @@ bool handleGroupedInserts(OperationContext* opCtx,
         // Revisit any conditions that may have caused the batch to be flushed. In those cases,
         // append the appropriate result to the output.
         if (!fixedDoc.isOK()) {
-            globalOpCounters.gotInsert();
+            serviceOpCounters(opCtx).gotInsert();
             try {
                 uassertStatusOK(fixedDoc.getStatus());
                 MONGO_UNREACHABLE;
@@ -1121,7 +1115,7 @@ bool handleDeleteOp(OperationContext* opCtx,
         lastOpFixer.startingOp(nsString);
         return writeConflictRetry(opCtx, "bulkWriteDelete", nsString, [&] {
             boost::optional<BSONObj> docFound;
-            globalOpCounters.gotDelete();
+            serviceOpCounters(opCtx).gotDelete();
             ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForDelete(
                 opCtx->getWriteConcern());
             auto nDeleted = write_ops_exec::performDelete(opCtx,
@@ -1152,21 +1146,14 @@ BSONObj getQueryForExplain(OperationContext* opCtx,
                            const BulkWriteCommandRequest& req,
                            const BulkWriteUpdateOrDeleteOp* op,
                            const NamespaceInfoEntry& nsEntry) {
-    if (shouldDoFLERewrite(nsEntry)) {
-        {
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
-            CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-        }
-
-        if (!nsEntry.getEncryptionInformation()->getCrudProcessed().value_or(false)) {
-            return processFLEWriteExplainD(opCtx,
-                                           op->getCollation().value_or(BSONObj()),
-                                           nsEntry.getNs(),
-                                           nsEntry.getEncryptionInformation().get(),
-                                           boost::none, /* runtimeConstants */
-                                           req.getLet(),
-                                           op->getFilter());
-        }
+    if (prepareForFLERewrite(opCtx, nsEntry.getEncryptionInformation())) {
+        return processFLEWriteExplainD(opCtx,
+                                       op->getCollation().value_or(BSONObj()),
+                                       nsEntry.getNs(),
+                                       nsEntry.getEncryptionInformation().get(),
+                                       boost::none, /* runtimeConstants */
+                                       req.getLet(),
+                                       op->getFilter());
     }
 
     return op->getFilter();
@@ -1498,9 +1485,7 @@ public:
 
             // We have replies left that will not make the first batch. Need to construct a cursor.
             if (numRepliesInFirstBatch != replies.size()) {
-                auto expCtx = make_intrusive<ExpressionContext>(
-                    opCtx, std::unique_ptr<CollatorInterface>(nullptr), ns());
-
+                auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).ns(ns()).build();
                 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
                 auto ws = std::make_unique<WorkingSet>();
                 auto root = std::make_unique<QueuedDataStage>(expCtx.get(), ws.get());
@@ -1727,7 +1712,7 @@ bool handleUpdateOp(OperationContext* opCtx,
             for (;;) {
                 try {
                     boost::optional<BSONObj> docFound;
-                    globalOpCounters.gotUpdate();
+                    serviceOpCounters(opCtx).gotUpdate();
                     ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForUpdate(
                         opCtx->getWriteConcern());
                     auto result = write_ops_exec::performUpdate(opCtx,
@@ -1750,7 +1735,10 @@ bool handleUpdateOp(OperationContext* opCtx,
                     auto cq = uassertStatusOK(
                         parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, updateRequest));
                     if (!write_ops_exec::shouldRetryDuplicateKeyException(
-                            updateRequest, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>())) {
+                            updateRequest,
+                            *cq,
+                            *ex.extraInfo<DuplicateKeyErrorInfo>(),
+                            retryAttempts)) {
                         throw;
                     }
 

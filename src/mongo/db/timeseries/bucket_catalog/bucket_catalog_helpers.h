@@ -40,16 +40,10 @@
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/oid.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/timeseries/bucket_catalog/bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
-#include "mongo/db/timeseries/bucket_catalog/write_batch.h"
-#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo::timeseries::bucket_catalog {
@@ -60,7 +54,7 @@ namespace mongo::timeseries::bucket_catalog {
  *
  * Returns a bad status if the bucket document is malformed.
  */
-StatusWith<MinMax> generateMinMaxFromBucketDoc(TrackingContext&,
+StatusWith<MinMax> generateMinMaxFromBucketDoc(tracking::Context&,
                                                const BSONObj& bucketDoc,
                                                const StringDataComparator* comparator);
 
@@ -70,7 +64,7 @@ StatusWith<MinMax> generateMinMaxFromBucketDoc(TrackingContext&,
  *
  * Returns a bad status if the bucket document is malformed or contains mixed schema measurements.
  */
-StatusWith<Schema> generateSchemaFromBucketDoc(TrackingContext&,
+StatusWith<Schema> generateSchemaFromBucketDoc(tracking::Context&,
                                                const BSONObj& bucketDoc,
                                                const StringDataComparator* comparator);
 

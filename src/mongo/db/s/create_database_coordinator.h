@@ -43,7 +43,9 @@ public:
     using Phase = CreateDatabaseCoordinatorPhaseEnum;
 
     CreateDatabaseCoordinator(ShardingDDLCoordinatorService* service, const BSONObj& initialState)
-        : RecoverableShardingDDLCoordinator(service, "CreateDatabaseCoordinator", initialState) {}
+        : RecoverableShardingDDLCoordinator(service, "CreateDatabaseCoordinator", initialState),
+          _critSecReason(BSON("createDatabase" << DatabaseNameUtil::serialize(
+                                  nss().dbName(), SerializationContext::stateCommandRequest()))) {}
 
     ~CreateDatabaseCoordinator() override = default;
 
@@ -56,8 +58,32 @@ private:
         return CreateDatabaseCoordinatorPhase_serializer(phase);
     }
 
+    bool _mustAlwaysMakeProgress() override {
+        return _doc.getPhase() >= Phase::kEnterCriticalSectionOnPrimary;
+    }
+
     ExecutorFuture<void> _runImpl(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                                   const CancellationToken& token) noexcept override;
+
+    ExecutorFuture<void> _cleanupOnAbort(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                         const CancellationToken& token,
+                                         const Status& status) noexcept override;
+
+    // Check the command arguments passed and if a database can be returned right away.
+    void _checkPreconditions();
+
+    void _setupPrimaryShard(OperationContext* opCtx);
+
+    void _enterCriticalSection(OperationContext* opCtx,
+                               std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                               const CancellationToken& token);
+
+    void _exitCriticalSection(OperationContext* opCtx,
+                              std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                              const CancellationToken& token,
+                              bool throwIfReasonDiffers);
+
+    const BSONObj _critSecReason;
 
     // Set on successful completion of the coordinator.
     boost::optional<ConfigsvrCreateDatabaseResponse> _result;

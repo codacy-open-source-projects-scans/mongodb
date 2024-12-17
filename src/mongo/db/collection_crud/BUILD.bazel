@@ -1,4 +1,4 @@
-load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_library")
+load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_library", "mongo_cc_unit_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -33,5 +33,54 @@ mongo_cc_library(
         "//src/mongo/db/storage:record_store_base",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/storage:storage_options",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
+    ],
+)
+
+mongo_cc_library(
+    name = "capped_visibility",
+    srcs = [
+        "capped_visibility.cpp",
+    ],
+    hdrs = [
+        "capped_visibility.h",
+        "//src/mongo/bson:bsonelement_comparator.h",
+        "//src/mongo/db/catalog:collection.h",
+        "//src/mongo/db/catalog:index_catalog.h",
+        "//src/mongo/db/catalog:index_catalog_entry.h",
+        "//src/mongo/db/exec/sbe/values:bson.h",
+        "//src/mongo/db/exec/sbe/values:key_string_entry.h",
+        "//src/mongo/db/exec/sbe/values:value.h",
+        "//src/mongo/db/index:index_descriptor.h",
+        "//src/mongo/db/index:index_descriptor_fwd.h",
+        "//src/mongo/db/matcher:expression_path.h",
+        "//src/mongo/db/matcher:in_list_data.h",
+        "//src/mongo/db/storage:sorted_data_interface.h",
+    ],
+    header_deps = [
+        "//src/mongo/bson/mutable:mutable_bson",
+        "//src/mongo/db/commands:server_status_core",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db/storage:index_entry_comparison",
+        "//src/mongo/db/storage:recovery_unit_base",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "db_capped_test",
+    srcs = [
+        "capped_collection_test.cpp",
+        "capped_utils_test.cpp",
+        "capped_visibility_test.cpp",
+    ],
+    tags = ["mongo_unittest_first_group"],
+    deps = [
+        "//src/mongo/db:service_context_d_test_fixture",
+        "//src/mongo/db/catalog:catalog_control",
+        "//src/mongo/db/collection_crud:capped_visibility",
+        "//src/mongo/db/repl:oplog",
+        "//src/mongo/db/repl:replmocks",
+        "//src/mongo/db/repl:storage_interface_impl",
     ],
 )

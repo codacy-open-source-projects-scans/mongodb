@@ -3,7 +3,7 @@
 // Requires FCV 5.3 since $mergeCursors was added to explain output in 5.3.
 // @tags: [
 //   requires_fcv_53,
-//   # TODO (SERVER-88127): Re-enable this test or add an explanation why it is incompatible.
+//   # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
 //   embedded_router_incompatible,
 // ]
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -34,7 +34,7 @@ function testWithGoodTimeZoneDir(tzGoodInfoDir) {
         () => MongoRunner.runMongos({configdb: st.configRS.getURL(), timeZoneInfo: tzBadInfo}),
         [],
         "expected launching mongos with bad timezone rules to fail");
-    assert.neq(-1, rawMongoProgramOutput().search(/Fatal assertion.*40475/));
+    assert.neq(-1, rawMongoProgramOutput("Fatal assertion").search(/40475/));
 
     // Test that a non-existent timezone directory causes mongoS startup to fail.
     assert.throws(
@@ -42,8 +42,10 @@ function testWithGoodTimeZoneDir(tzGoodInfoDir) {
         [],
         "expected launching mongos with bad timezone rules to fail");
     // Look for either old or new error message
-    assert(rawMongoProgramOutput().includes("Error creating service context") ||
-           rawMongoProgramOutput().includes("Failed to create service context"));
+    var output =
+        rawMongoProgramOutput("(Error creating service context|Failed to create service context)");
+    assert(output.includes("Error creating service context") ||
+           output.includes("Failed to create service context"));
 
     // Enable sharding on the test DB and ensure its primary is st.shard0.shardName.
     assert.commandWorked(
@@ -78,7 +80,7 @@ function testWithGoodTimeZoneDir(tzGoodInfoDir) {
         const tzExpr = {$const: (tz || "GMT")};
         return [
             {$addFields: {mongodParts: {$dateToParts: {date: "$date", timezone: tzExpr}}}},
-            {$_internalSplitPipeline: {mergeType: "mongos"}},
+            {$_internalSplitPipeline: {mergeType: st.getMergeType(mongosDB)}},
             {
                 $addFields: {
                     mongosDate: {
@@ -108,7 +110,7 @@ function testWithGoodTimeZoneDir(tzGoodInfoDir) {
         // The first stage in the mergerPart will be $mergeCursors, so start comparing the pipelines
         // at the 1st index.
         assert.eq(tzExplain.splitPipeline.mergerPart.slice(1), timeZonePipeline.slice(1));
-        assert.eq(tzExplain.mergeType, "mongos");
+        assert.eq(tzExplain.mergeType, st.getMergeType(mongosDB));
 
         // Confirm that both documents are output by the pipeline, demonstrating that the date has
         // been correctly disassembled on mongoD and reassembled on mongoS.

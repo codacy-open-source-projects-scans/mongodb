@@ -34,7 +34,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_error_util.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/unittest/assert.h"
@@ -131,18 +130,43 @@ TEST(WiredTigerSessionCacheTest, ReleaseCursorDuringShutdown) {
     session->releaseCursor(tableIdWeDontCareAbout, cursor, "");
 }
 
+// Test that, in the event that we tried to release a session back into the session cache after
+// the storage engine had shut down, we do not invariant and did not actually release the session
+// back into the cache.
+TEST(WiredTigerSessionCacheTest, ReleaseSessionAfterShutdown) {
+    WiredTigerSessionCacheHarnessHelper harnessHelper("");
+    WiredTigerSessionCache* sessionCache = harnessHelper.getSessionCache();
+    // Assert that there are no idle sessions in the cache to start off with.
+    ASSERT_EQ(sessionCache->getIdleSessionsCount(), 0);
+    {
+        UniqueWiredTigerSession session = sessionCache->getSession();
+        WT_CURSOR* cursor = nullptr;
+
+        sessionCache->shuttingDown();
+        ASSERT(sessionCache->isShuttingDown());
+        sessionCache->restart();
+
+        // After the sessionCache shut down, the outstanding session's epoch should be older than
+        // the cache's current epoch. So, when we go to release it, we should see this and not
+        // release it back into the cache. We should also not release its cursor.
+        auto tableIdWeDontCareAbout = WiredTigerSession::genTableId();
+        session->releaseCursor(tableIdWeDontCareAbout, cursor, "");
+    }
+    // Check that the session was not added back into the cache.
+    ASSERT_EQ(sessionCache->getIdleSessionsCount(), 0);
+}
+
 // Test that, if a recovery unit reconfigures its session, the session will have its configuration
 // reset to default values before it is released to the session cache where it can be used by
 // another recovery unit.
 TEST(WiredTigerSessionCacheTest, resetConfigurationBeforeReleasingSessionToCache) {
     WiredTigerSessionCacheHarnessHelper harnessHelper("");
     WiredTigerSessionCache* sessionCache = harnessHelper.getSessionCache();
-    WiredTigerOplogManager oplogManager;
 
     // Assert that we start off with no sessions in the session cache.
     ASSERT_EQ(sessionCache->getIdleSessionsCount(), 0U);
     {
-        WiredTigerRecoveryUnit recoveryUnit(sessionCache, &oplogManager);
+        WiredTigerRecoveryUnit recoveryUnit(sessionCache, nullptr);
         // Set cache max wait time to be a non-default value.
         recoveryUnit.setCacheMaxWaitTimeout(Milliseconds{100});
 
@@ -166,7 +190,7 @@ TEST(WiredTigerSessionCacheTest, resetConfigurationBeforeReleasingSessionToCache
     // session cache.
     ASSERT_EQ(sessionCache->getIdleSessionsCount(), 1U);
     {
-        WiredTigerRecoveryUnit recoveryUnit(sessionCache, &oplogManager);
+        WiredTigerRecoveryUnit recoveryUnit(sessionCache, nullptr);
         WiredTigerSession* session = recoveryUnit.getSessionNoTxn();
         // Assert that before it was released back into the session cache, the set of undo config
         // strings was cleared, which should indicate that the changes to the default settings of
@@ -181,9 +205,8 @@ TEST(WiredTigerSessionCacheTest, resetConfigurationBeforeReleasingSessionToCache
 TEST(WiredTigerSessionCacheTest, resetConfigurationToDefault) {
     WiredTigerSessionCacheHarnessHelper harnessHelper("");
     WiredTigerSessionCache* sessionCache = harnessHelper.getSessionCache();
-    WiredTigerOplogManager oplogManager;
 
-    WiredTigerRecoveryUnit recoveryUnit(sessionCache, &oplogManager);
+    WiredTigerRecoveryUnit recoveryUnit(sessionCache, nullptr);
     // Set cache max wait time to be a non-default value.
     recoveryUnit.setCacheMaxWaitTimeout(Milliseconds{100});
 

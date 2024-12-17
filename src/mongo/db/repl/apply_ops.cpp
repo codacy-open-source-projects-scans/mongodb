@@ -39,12 +39,10 @@
 #include <boost/optional/optional.hpp>
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
@@ -53,11 +51,9 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
-#include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/shard_role.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -95,7 +91,6 @@ Status _applyOps(OperationContext* opCtx,
     int errors = 0;
 
     BSONArrayBuilder ab;
-    const auto& alwaysUpsert = info.getAlwaysUpsert();
     // Apply each op in the given 'applyOps' command object.
     for (const auto& opObj : ops) {
         // Ignore 'n' operations.
@@ -118,7 +113,7 @@ Status _applyOps(OperationContext* opCtx,
                 opCtx,
                 "applyOps",
                 nss,
-                [opCtx, nss, opObj, opType, alwaysUpsert, oplogApplicationMode, &info, &dbName] {
+                [opCtx, nss, opObj, opType, oplogApplicationMode, &info, &dbName] {
                     BSONObjBuilder builder;
                     builder.appendElements(opObj);
                     if (!builder.hasField(OplogEntry::kTimestampFieldName)) {
@@ -190,7 +185,7 @@ Status _applyOps(OperationContext* opCtx,
                     return repl::applyOperation_inlock(opCtx,
                                                        collection,
                                                        ApplierOperation{&entry},
-                                                       alwaysUpsert,
+                                                       false, /* alwaysUpsert */
                                                        oplogApplicationMode,
                                                        isDataConsistent);
                 });

@@ -193,7 +193,7 @@ TEST(Collator, SetCollationUpdatesModifierInterfaces) {
     bool modified = false;
     mutablebson::Document doc(fromjson("{a: 'cba'}"));
     driver.setCollator(&reverseStringCollator);
-    ASSERT_OK(driver.update(expCtx->opCtx,
+    ASSERT_OK(driver.update(expCtx->getOperationContext(),
                             StringData(),
                             &doc,
                             validateForStorage,
@@ -215,10 +215,15 @@ TEST(Collator, SetCollationUpdatesModifierInterfaces) {
 class CreateFromQueryFixture : public ServiceContextTest {
 public:
     CreateFromQueryFixture()
-        : _driverOps(new UpdateDriver(new ExpressionContext(
-              _opCtx.get(), nullptr, NamespaceString::createNamespaceString_forTest("foo")))),
-          _driverRepl(new UpdateDriver(new ExpressionContext(
-              _opCtx.get(), nullptr, NamespaceString::createNamespaceString_forTest("foo")))) {
+        : _driverOps(new UpdateDriver(ExpressionContextBuilder{}
+                                          .opCtx(_opCtx.get())
+                                          .ns(NamespaceString::createNamespaceString_forTest("foo"))
+                                          .build())),
+          _driverRepl(
+              new UpdateDriver(ExpressionContextBuilder{}
+                                   .opCtx(_opCtx.get())
+                                   .ns(NamespaceString::createNamespaceString_forTest("foo"))
+                                   .build())) {
         _driverOps->parse(makeUpdateMod(fromjson("{$set:{'_':1}}")), _arrayFilters);
         _driverRepl->parse(makeUpdateMod(fromjson("{}")), _arrayFilters);
     }
@@ -596,7 +601,7 @@ public:
         const bool isInsert = false;
         FieldRefSetWithStorage modifiedPaths;
         ASSERT_OK(_driver->update(
-            expCtx->opCtx,
+            expCtx->getOperationContext(),
             matchedField,
             doc,
             validateForStorage,

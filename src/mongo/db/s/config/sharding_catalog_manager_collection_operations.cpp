@@ -130,7 +130,7 @@ void triggerFireAndForgetShardRefreshes(OperationContext* opCtx,
                                                opCtx,
                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                                repl::ReadConcernLevel::kLocalReadConcern,
-                                               ChunkType::ConfigNS,
+                                               NamespaceString::kConfigsvrChunksNamespace,
                                                query,
                                                BSONObj(),
                                                1LL))
@@ -327,7 +327,7 @@ void refineCollectionShardKeyInTxn(OperationContext* opCtx,
 
         const auto chunksQuery = BSON(ChunkType::collectionUUID << collType.getUuid());
         auto chunksUpdateRequest =
-            BatchedCommandRequest::buildPipelineUpdateOp(ChunkType::ConfigNS,
+            BatchedCommandRequest::buildPipelineUpdateOp(NamespaceString::kConfigsvrChunksNamespace,
                                                          chunksQuery,
                                                          chunkUpdates,
                                                          false /* upsert */,
@@ -550,9 +550,8 @@ void ShardingCatalogManager::configureCollectionBalancing(
         // during refresh, so it is safe to release the chunk lock.
     }
 
-    const auto [cm, _] = uassertStatusOK(
-        RoutingInformationCache::get(opCtx)->getShardedCollectionRoutingInfoWithPlacementRefresh(
-            opCtx, nss));
+    const auto cm = uassertStatusOK(
+        RoutingInformationCache::get(opCtx)->getCollectionPlacementInfoWithRefresh(opCtx, nss));
     std::set<ShardId> shardsIds;
     cm.getAllShardIds(&shardsIds);
 

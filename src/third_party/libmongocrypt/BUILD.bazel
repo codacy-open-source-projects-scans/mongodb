@@ -90,6 +90,7 @@ mongo_cc_library(
         "dist/src/mc-fle2-payload-uev-common.c",
         "dist/src/mc-fle2-payload-uev-v2.c",
         "dist/src/mc-fle2-rfds.c",
+        "dist/src/mc-fle2-tag-and-encrypted-metadata-block.c",
         "dist/src/mc-range-edge-generation.c",
         "dist/src/mc-range-encoding.c",
         "dist/src/mc-range-mincover.c",
@@ -197,6 +198,7 @@ mongo_cc_library(
             "KMS_MESSAGE_LITTLE_ENDIAN",
         ],
     }),
+    no_undefined_ref_DO_NOT_USE = False,
     deps = [
         "//src/third_party/IntelRDFPMathLib20U1:intel_decimal128",
         "//src/third_party/libbson:bson",

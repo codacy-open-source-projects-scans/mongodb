@@ -43,7 +43,6 @@
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_set_config.h"
@@ -57,6 +56,7 @@
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/shard_local.h"
+#include "mongo/db/s/shard_server_catalog_cache_loader_impl.h"
 #include "mongo/db/s/shard_server_op_observer.h"
 #include "mongo/db/s/sharding_mongod_test_fixture.h"
 #include "mongo/db/server_options.h"
@@ -77,7 +77,6 @@
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog_cache.h"
-#include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
@@ -96,8 +95,8 @@ using repl::ReplSettings;
 
 ShardingMongoDTestFixture::ShardingMongoDTestFixture(
     MongoDScopedGlobalServiceContextForTest::Options options, bool setUpMajorityReads)
-    : ShardingTestFixtureCommon(
-          std::make_unique<MongoDScopedGlobalServiceContextForTest>(std::move(options))),
+    : ShardingTestFixtureCommon(std::make_unique<MongoDScopedGlobalServiceContextForTest>(
+          std::move(options), shouldSetupTL)),
       _setUpMajorityReads(setUpMajorityReads) {}
 
 ShardingMongoDTestFixture::~ShardingMongoDTestFixture() = default;
@@ -191,7 +190,7 @@ std::unique_ptr<BalancerConfiguration> ShardingMongoDTestFixture::makeBalancerCo
 Status ShardingMongoDTestFixture::initializeGlobalShardingStateForMongodForTest(
     const ConnectionString& configConnStr,
     std::unique_ptr<CatalogCache> catalogCache,
-    std::shared_ptr<CatalogCacheLoader> catalogCacheLoader) {
+    std::shared_ptr<ShardServerCatalogCacheLoader> catalogCacheLoader) {
     invariant(serverGlobalParams.clusterRole.has(ClusterRole::ShardServer));
 
     // Create and initialize each sharding component individually before moving them to the Grid
@@ -242,9 +241,6 @@ void ShardingMongoDTestFixture::setUp() {
     repl::ReplicationCoordinator::set(service, std::move(replCoordPtr));
 
     auto storagePtr = std::make_unique<repl::StorageInterfaceImpl>();
-
-    repl::DropPendingCollectionReaper::set(
-        service, std::make_unique<repl::DropPendingCollectionReaper>(storagePtr.get()));
 
     repl::ReplicationProcess::set(service,
                                   std::make_unique<repl::ReplicationProcess>(

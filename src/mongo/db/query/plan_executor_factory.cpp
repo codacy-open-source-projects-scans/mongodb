@@ -66,7 +66,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<QuerySolution> qs,
     boost::optional<size_t> cachedPlanHash) {
     auto expCtx = cq->getExpCtx();
-    return make(expCtx->opCtx,
+    return make(expCtx->getOperationContext(),
                 std::move(ws),
                 std::move(rootStage),
                 std::move(qs),
@@ -93,7 +93,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     NamespaceString nss,
     std::unique_ptr<QuerySolution> qs) {
 
-    return make(expCtx->opCtx,
+    return make(expCtx->getOperationContext(),
                 std::move(ws),
                 std::move(rootStage),
                 std::move(qs),
@@ -172,32 +172,30 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
                 "slots"_attr = data.debugString(),
                 "stages"_attr = sbe::DebugPrinter{}.print(*rootStage));
 
-    return {{new PlanExecutorSBE(
-                 opCtx,
-                 std::move(cq),
-                 {makeVector<sbe::plan_ranker::CandidatePlan>(sbe::plan_ranker::CandidatePlan{
-                      std::move(solution),
-                      std::move(rootStage),
-                      sbe::plan_ranker::CandidatePlanData{std::move(data)},
-                      false /*exitedEarly*/,
-                      Status::OK(),
-                      planIsFromCache}),
-                  0},
-                 plannerOptions & QueryPlannerParams::RETURN_OWNED_DATA,
-                 std::move(nss),
-                 false /*isOpen*/,
-                 std::move(yieldPolicy),
-                 cachedPlanHash,
-                 std::move(remoteCursors),
-                 std::move(remoteExplains),
-                 std::move(classicRuntimePlannerStage)),
+    return {{new PlanExecutorSBE(opCtx,
+                                 std::move(cq),
+                                 sbe::plan_ranker::CandidatePlan{
+                                     std::move(solution),
+                                     std::move(rootStage),
+                                     sbe::plan_ranker::CandidatePlanData{std::move(data)},
+                                     false /*exitedEarly*/,
+                                     Status::OK(),
+                                     planIsFromCache},
+                                 plannerOptions & QueryPlannerParams::RETURN_OWNED_DATA,
+                                 std::move(nss),
+                                 false /*isOpen*/,
+                                 std::move(yieldPolicy),
+                                 cachedPlanHash,
+                                 std::move(remoteCursors),
+                                 std::move(remoteExplains),
+                                 std::move(classicRuntimePlannerStage)),
              PlanExecutor::Deleter{opCtx}}};
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     OperationContext* opCtx,
     std::unique_ptr<CanonicalQuery> cq,
-    sbe::plan_ranker::CandidatePlans candidates,
+    sbe::plan_ranker::CandidatePlan candidate,
     const MultipleCollectionAccessor& collections,
     size_t plannerOptions,
     NamespaceString nss,
@@ -208,12 +206,12 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     LOGV2_DEBUG(4822861,
                 5,
                 "SBE plan",
-                "slots"_attr = candidates.winner().data.stageData.debugString(),
-                "stages"_attr = sbe::DebugPrinter{}.print(*candidates.winner().root));
+                "slots"_attr = candidate.data.stageData.debugString(),
+                "stages"_attr = sbe::DebugPrinter{}.print(*candidate.root));
 
     return {{new PlanExecutorSBE(opCtx,
                                  std::move(cq),
-                                 std::move(candidates),
+                                 std::move(candidate),
                                  plannerOptions & QueryPlannerParams::RETURN_OWNED_DATA,
                                  std::move(nss),
                                  true, /*isOpen*/
@@ -229,7 +227,7 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> make(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
     PlanExecutorPipeline::ResumableScanType resumableScanType) {
-    auto* opCtx = expCtx->opCtx;
+    auto* opCtx = expCtx->getOperationContext();
     auto exec = new PlanExecutorPipeline(std::move(expCtx), std::move(pipeline), resumableScanType);
     return {exec, PlanExecutor::Deleter{opCtx}};
 }

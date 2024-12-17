@@ -119,7 +119,7 @@ void validateRequestForAPIVersion(const OperationContext* opCtx,
                                   const AggregateCommandRequest& request);
 /**
  * Validates if 'AggregateCommandRequest' sets the "isClusterQueryWithoutShardKeyCmd" field then the
- * request must have been fromMongos.
+ * request must have been fromRouter.
  */
 void validateRequestFromClusterQueryWithoutShardKey(const AggregateCommandRequest& request);
 
@@ -129,6 +129,15 @@ void validateRequestFromClusterQueryWithoutShardKey(const AggregateCommandReques
  */
 PlanExecutorPipeline::ResumableScanType getResumableScanType(const AggregateCommandRequest& request,
                                                              bool isChangeStream);
+
+// TODO SERVER-95358 remove once 9.0 becomes last LTS.
+const mongo::OptionalBool& getFromRouter(const AggregateCommandRequest& request);
+
+// TODO SERVER-95358 remove once 9.0 becomes last LTS.
+void setFromRouter(AggregateCommandRequest& request, mongo::OptionalBool value);
+
+// TODO SERVER-95358 remove once 9.0 becomes last LTS.
+void setFromRouter(MutableDocument& doc, mongo::Value value);
 }  // namespace aggregation_request_helper
 
 /**
@@ -168,20 +177,30 @@ void serializeAggregateCursorToBSON(const SimpleCursorOptions& cursor,
  * IMPORTANT: The method should not be modified, as API version input/output guarantees could
  * break because of it.
  */
-static std::vector<BSONObj> parsePipelineFromBSON(const BSONElement& pipelineElem) {
+static StatusWith<std::vector<BSONObj>> attemptToParsePipelineFromBSON(
+    const BSONElement& pipelineElem) {
     std::vector<BSONObj> pipeline;
 
-    uassert(ErrorCodes::TypeMismatch,
-            "'pipeline' option must be specified as an array",
-            !pipelineElem.eoo() && pipelineElem.type() == BSONType::Array);
+    if (pipelineElem.eoo() || pipelineElem.type() != BSONType::Array) {
+        return {ErrorCodes::TypeMismatch, "A pipeline must be an array of objects"};
+    }
 
     for (auto elem : pipelineElem.Obj()) {
-        uassert(ErrorCodes::TypeMismatch,
-                "Each element of the 'pipeline' array must be an object",
-                elem.type() == BSONType::Object);
+        if (elem.type() != BSONType::Object) {
+            return {ErrorCodes::TypeMismatch,
+                    "Each element of the 'pipeline' array must be an object"};
+        }
         pipeline.push_back(elem.embeddedObject().getOwned());
     }
 
     return pipeline;
 }
+
+/**
+ * A throwing version of the above.
+ */
+static std::vector<BSONObj> parsePipelineFromBSON(const BSONElement& pipelineElem) {
+    return uassertStatusOK(attemptToParsePipelineFromBSON(pipelineElem));
+}
+
 }  // namespace mongo

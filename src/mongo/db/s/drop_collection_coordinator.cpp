@@ -71,7 +71,6 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
-#include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog_cache.h"
@@ -91,7 +90,8 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
                                                       const NamespaceString& nss,
                                                       bool fromMigrate,
                                                       bool dropSystemCollections,
-                                                      const boost::optional<UUID>& expectedUUID) {
+                                                      const boost::optional<UUID>& expectedUUID,
+                                                      bool requireCollectionEmpty) {
 
     boost::optional<UUID> collectionUUID;
     {
@@ -118,6 +118,26 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
                         "uuid"_attr = *collectionUUID,
                         "expectedUUID"_attr = *expectedUUID);
             return;
+        }
+
+        if (requireCollectionEmpty) {
+            bool isEmpty = [&]() {
+                auto localCatalog = CollectionCatalog::get(opCtx);
+                const auto coll = localCatalog->lookupCollectionByNamespace(opCtx, nss);
+                if (coll) {
+                    return coll->isEmpty(opCtx);
+                }
+                return true;
+            }();
+            if (!isEmpty) {
+                // Ignore the drop collection if the collection has records locally and it's
+                // explicitely required to skip non-empty collections.
+                LOGV2_DEBUG(9525700,
+                            1,
+                            "Skipping dropping the collection because it is not empty",
+                            "nss"_attr = nss);
+                return;
+            }
         }
     }
 
@@ -172,7 +192,7 @@ void DropCollectionCoordinator::dropCollectionLocally(OperationContext* opCtx,
     // Force the refresh of the catalog cache to purge outdated information. Note also that this
     // code is indirectly used to notify to secondary nodes to clear their filtering information
     // once the data flushed to disk get replicated.
-    FilteringMetadataCache::get(opCtx)->forceShardFilteringMetadataRefresh(opCtx, nss);
+    FilteringMetadataCache::get(opCtx)->forceCollectionPlacementRefresh(opCtx, nss);
     FilteringMetadataCache::get(opCtx)->waitForCollectionFlush(opCtx, nss);
 
     // Ensures the remove of range deletions and the refresh of the catalog cache will be waited for
@@ -301,10 +321,10 @@ void DropCollectionCoordinator::_commitDropCollection(
     LOGV2_DEBUG(5390504, 2, "Dropping collection", logAttrs(nss()), "sharded"_attr = collIsSharded);
 
     // Remove the query sampling configuration document for this collection, if it exists.
-    sharding_ddl_util::removeQueryAnalyzerMetadataFromConfig(
-        opCtx,
-        BSON(analyze_shard_key::QueryAnalyzerDocument::kNsFieldName
-             << NamespaceStringUtil::serialize(nss(), SerializationContext::stateDefault())));
+    {
+        const auto session = getNewSession(opCtx);
+        sharding_ddl_util::removeQueryAnalyzerMetadata(opCtx, nss(), session);
+    }
 
     if (collIsSharded) {
         invariant(_doc.getCollInfo());

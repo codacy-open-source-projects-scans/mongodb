@@ -225,6 +225,7 @@ public:
      */
     virtual Status dropIdent(RecoveryUnit* ru,
                              StringData ident,
+                             bool identHasSizeInfo,
                              const StorageEngine::DropIdentCallback& onDrop = nullptr) = 0;
 
     /**
@@ -440,6 +441,13 @@ public:
      * See `StorageEngine::getOplogNeededForCrashRecovery`
      */
     virtual boost::optional<Timestamp> getOplogNeededForCrashRecovery() const = 0;
+
+    /**
+     * See `StorageEngine::getPinnedOplog`
+     */
+    virtual Timestamp getPinnedOplog() const {
+        return Timestamp::min();
+    }
 
     /**
      * See `StorageEngine::supportsReadConcernSnapshot`

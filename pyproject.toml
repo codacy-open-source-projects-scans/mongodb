@@ -28,6 +28,7 @@ gevent = { version = "*", optional = true }
 progressbar2 = { version = "*", optional = true }
 cxxfilt = { version = "*", optional = true }
 pympler = { version = "*", optional = true }
+pyright = "1.1.382"
 
 [tool.poetry.group.aws.dependencies]
 boto3 = "^1.34.156"
@@ -97,11 +98,8 @@ PyJWT = "^2.9.0"
 # Note: These versions are checked by python modules in buildscripts/linter/
 GitPython = "^3.1.7"
 mypy = "^1.11.1"
-pydocstyle = "^6.3.0"
-pylint = "^2.17.7"
 structlog = "^24.4.0"
 yamllint = "^1.35.1"
-yapf = "0.26.0"              # latest is 0.40.1, but that causes CI failures
 types-setuptools = "57.4.12" # latest is 68.0.0.0, but that causes pip install requirements to fail
 types-requests = "^2.32.0.20240712"
 tqdm = "*"
@@ -154,6 +152,7 @@ geckodriver-autoinstaller = "^0.1.0"
 retry = "^0.9.2"
 gdbmongo = "^0.15.0"
 googleapis-common-protos = "^1.63.2"
+gcovr = "7.2"
 opentelemetry-api = "*"
 opentelemetry-sdk = "*"
 opentelemetry-exporter-otlp-proto-common = "*"
@@ -193,7 +192,9 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["I"]
+extend-select = [
+    "I",   # isort
+]
 ignore = [
     "E402", # module-import-not-at-top-of-file
     "E721", # type-comparison
@@ -206,6 +207,67 @@ ignore = [
     "F821", # undefined-name
     "F822", # undefined-export
     ]
+
+[tool.pyright]
+include = [
+    "buildscripts",
+    "src"
+]
+exclude = [
+    "**/third_party/**",
+    "**/external/**"
+]
+pythonVersion  = "3.10"
+
+# These should be set to "error" for basic functionality
+reportInvalidTypeForm = "none"
+reportMissingImports = "none"
+reportUndefinedVariable = "none"
+reportAbstractUsage = "none"
+reportAssertTypeFailure = "none"
+reportInconsistentOverload = "none"
+reportInvalidTypeArguments = "none"
+reportNoOverloadImplementation = "none"
+reportOptionalCall = "none"
+reportOptionalContextManager = "none"
+reportRedeclaration = "none"
+reportUnboundVariable = "none"
+reportUnhashable = "none"
+reportUnusedCoroutine = "none"
+reportUnusedExcept = "none"
+
+# These should be set to "warning" or "error" for standard checks
+reportArgumentType = "none"
+reportAssignmentType = "none"
+reportAttributeAccessIssue = "none"
+reportCallIssue = "none"
+reportGeneralTypeIssues = "none"
+reportIndexIssue = "none"
+reportOperatorIssue = "none"
+reportOptionalSubscript = "none"
+reportOptionalMemberAccess = "none"
+reportOptionalIterable = "none"
+reportOptionalOperand = "none"
+reportReturnType = "none"
+reportTypedDictNotRequiredAccess = "none"
+reportPrivateImportUsage = "none"
+reportFunctionMemberAccess = "none"
+reportIncompatibleMethodOverride = "none"
+reportIncompatibleVariableOverride = "none"
+reportOverlappingOverload = "none"
+reportPossiblyUnboundVariable = "none"
+
+# These are additional checks for strict mode
+reportMissingTypeStubs = "none"
+reportAssertAlwaysTrue = "none"
+reportInvalidStringEscapeSequence = "none"
+reportInvalidTypeVarUse = "none"
+reportSelfClsParameterName = "none"
+reportUnsupportedDunderAll = "none"
+reportUnusedExpression = "none"
+reportWildcardImportFromLibrary = "none"
+reportConstantRedefinition = "none"
+
 
 [build-system]
 requires = ["poetry-core"]

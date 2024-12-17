@@ -31,7 +31,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <cstddef>
-#include <memory>
 
 #include <boost/optional/optional.hpp>
 
@@ -164,7 +163,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateMinMaxBadBucketDocumentsTest) {
                                  ::mongo::fromjson(R"({control: {min: {a: 1}, max: {}}})")};
 
     for (const BSONObj& doc : docs) {
-        TrackingContext trackingContext;
+        tracking::Context trackingContext;
         StatusWith<MinMax> swMinMax = generateMinMaxFromBucketDoc(trackingContext, doc, collator);
         ASSERT_NOT_OK(swMinMax.getStatus());
     }
@@ -191,7 +190,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateMinMaxTest) {
                                         max:{a: 2, b: {c: 2, d: [4, 5, 6]}, e: [4, 5, 6]}}})")};
 
     for (const BSONObj& doc : docs) {
-        TrackingContext trackingContext;
+        tracking::Context trackingContext;
         StatusWith<MinMax> swMinMax = generateMinMaxFromBucketDoc(trackingContext, doc, collator);
         ASSERT_OK(swMinMax.getStatus());
 
@@ -218,7 +217,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateMinMaxWithLowerCaseFirstCollationTest) 
     // Lowercase compares less than uppercase with a {caseFirst: "lower"} collator.
     BSONObj doc = ::mongo::fromjson(R"({control: {min: {field: "a"}, max: {field: "A"}}})");
 
-    TrackingContext trackingContext;
+    tracking::Context trackingContext;
     StatusWith<MinMax> swMinMax = generateMinMaxFromBucketDoc(trackingContext, doc, collator);
     ASSERT_OK(swMinMax.getStatus());
 
@@ -244,7 +243,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateMinMaxWithUpperCaseFirstCollationTest) 
     // Uppercase compares less than lowercase with a {caseFirst: "upper"} collator.
     BSONObj doc = ::mongo::fromjson(R"({control: {min: {field: "A"}, max: {field: "a"}}})");
 
-    TrackingContext trackingContext;
+    tracking::Context trackingContext;
     StatusWith<MinMax> swMinMax = generateMinMaxFromBucketDoc(trackingContext, doc, collator);
     ASSERT_OK(swMinMax.getStatus());
 
@@ -269,7 +268,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateMinMaxSucceedsWithMixedSchemaBucketDocu
                                  ::mongo::fromjson(R"({control:{min: {a: 1}, max: {a: "foo"}}})")};
 
     for (const BSONObj& doc : docs) {
-        TrackingContext trackingContext;
+        tracking::Context trackingContext;
         StatusWith<MinMax> swMinMax = generateMinMaxFromBucketDoc(trackingContext, doc, collator);
         ASSERT_OK(swMinMax.getStatus());
     }
@@ -290,7 +289,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateSchemaFailsWithMixedSchemaBucketDocumen
                                  ::mongo::fromjson(R"({control:{min: {a: 1}, max: {a: "foo"}}})")};
 
     for (const BSONObj& doc : docs) {
-        TrackingContext trackingContext;
+        tracking::Context trackingContext;
         StatusWith<Schema> swSchema = generateSchemaFromBucketDoc(trackingContext, doc, collator);
         ASSERT_NOT_OK(swSchema.getStatus());
     }
@@ -330,7 +329,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateSchemaWithInvalidMeasurementsTest) {
          ::mongo::fromjson(R"({a: {b: []}})")}};
 
     for (const auto& [minMaxDoc, measurementDoc] : docs) {
-        TrackingContext trackingContext;
+        tracking::Context trackingContext;
         StatusWith<Schema> swSchema =
             generateSchemaFromBucketDoc(trackingContext, minMaxDoc, collator);
         ASSERT_OK(swSchema.getStatus());
@@ -366,7 +365,7 @@ TEST_F(BucketCatalogHelpersTest, GenerateSchemaWithValidMeasurementsTest) {
          ::mongo::fromjson(R"({a: {b: 3}})")}};
 
     for (const auto& [minMaxDoc, measurementDoc] : docs) {
-        TrackingContext trackingContext;
+        tracking::Context trackingContext;
         StatusWith<Schema> swSchema =
             generateSchemaFromBucketDoc(trackingContext, minMaxDoc, collator);
         ASSERT_OK(swSchema.getStatus());
@@ -500,79 +499,6 @@ TEST_F(BucketCatalogHelpersTest, FindSuitableBucketForMeasurements) {
     }
 }
 
-TEST_F(BucketCatalogHelpersTest, IncompatibleBucketsForNewMeasurements) {
-    RAIIServerParameterControllerForTest featureFlagController{
-        "featureFlagTimeseriesAlwaysUseCompressedBuckets", false};
-
-    ASSERT_OK(createCollection(
-        operationContext(),
-        kNss.dbName(),
-        BSON("create" << kNss.coll() << "timeseries"
-                      << BSON("timeField" << _timeField << "metaField" << _metaField))));
-
-    AutoGetCollection autoColl(operationContext(), kNss.makeTimeseriesBucketsNamespace(), MODE_IX);
-    ASSERT(autoColl->getTimeseriesOptions() && autoColl->getTimeseriesOptions()->getMetaField());
-    auto tsOptions = *autoColl->getTimeseriesOptions();
-
-    std::vector<BSONObj> bucketDocs = {// control.version indicates bucket is compressed.
-                                       mongo::fromjson(
-                                           R"({
-            "_id":{"$oid":"62e7e6ec27c28d338ab29200"},
-            "control":{"version":2,"min":{"_id":1,"time":{"$date":"2021-08-01T11:00:00Z"},"a":1},
-                                   "max":{"_id":3,"time":{"$date":"2021-08-01T12:00:00Z"},"a":3}},
-            "meta":1,
-            "data":{"time":{"0":{"$date":"2021-08-01T11:00:00Z"},
-                            "1":{"$date":"2021-08-01T11:00:00Z"},
-                            "2":{"$date":"2021-08-01T11:00:00Z"}},
-                    "a":{"0":1,"1":2,"2":3}}})"),
-                                       // control.closed flag is true.
-                                       mongo::fromjson(
-                                           R"(
-            {"_id":{"$oid":"62e7eee4f33f295800073138"},
-            "control":{"version":1,"min":{"_id":7,"time":{"$date":"2022-08-01T12:00:00Z"},"a":1},
-                                   "max":{"_id":10,"time":{"$date":"2022-08-01T13:00:00Z"},"a":3},
-                       "closed":true},
-            "meta":2,
-            "data":{"time":{"0":{"$date":"2022-08-01T12:00:00Z"},
-                            "1":{"$date":"2022-08-01T12:00:00Z"},
-                            "2":{"$date":"2022-08-01T12:00:00Z"}},
-                    "a":{"0":1,"1":2,"2":3}}})"),
-                                       // Compressed bucket with closed flag set.
-                                       mongo::fromjson(
-                                           R"({
-            "_id":{"$oid":"629e1e680958e279dc29a517"},
-            "control":{"version":2,"min":{"_id":7,"time":{"$date":"2023-08-01T13:00:00Z"},"a":1},
-                                   "max":{"_id":10,"time":{"$date":"2023-08-01T14:00:00Z"},"a":3},
-                       "closed":true},
-            "meta":3,
-            "data":{"time":{"0":{"$date":"2023-08-01T13:00:00Z"},
-                            "1":{"$date":"2023-08-01T13:00:00Z"},
-                            "2":{"$date":"2023-08-01T13:00:00Z"}},
-                    "a":{"0":1,"1":2,"2":3}}})")};
-
-    // Insert bucket documents into the system.buckets collection.
-    for (const auto& doc : bucketDocs) {
-        _insertIntoBucketColl(doc);
-    }
-
-    auto time1 = dateFromISOString("2021-08-01T11:30:00Z");
-    auto time2 = dateFromISOString("2022-08-01T12:30:00Z");
-    auto time3 = dateFromISOString("2023-08-01T13:30:00Z");
-    std::vector<BSONObj> validMeasurementDocs = {
-        BSON("_id" << 1 << _timeField << time1.getValue() << _metaField << 1),
-        BSON("_id" << 2 << _timeField << time2.getValue() << _metaField << 2),
-        BSON("_id" << 3 << _timeField << time3.getValue() << _metaField << 3)};
-
-    // Verify that even with matching meta fields and buckets with acceptable time ranges, if the
-    // bucket is compressed and/or closed, we should not see it as a candid bucket for future
-    // inserts.
-    for (const auto& doc : validMeasurementDocs) {
-        auto result = _findSuitableBucket(
-            operationContext(), kNss.makeTimeseriesBucketsNamespace(), tsOptions, doc);
-        ASSERT(result.isEmpty());
-    }
-}
-
 TEST_F(BucketCatalogHelpersTest, FindDocumentFromOID) {
     ASSERT_OK(createCollection(
         operationContext(),
@@ -648,9 +574,6 @@ TEST_F(BucketCatalogHelpersTest, FindDocumentFromOID) {
 }
 
 TEST_F(BucketCatalogHelpersTest, FindSuitableCompressedBucketForMeasurement) {
-    RAIIServerParameterControllerForTest featureFlagController{
-        "featureFlagTimeseriesAlwaysUseCompressedBuckets", true};
-
     ASSERT_OK(createCollection(
         operationContext(),
         kNss.dbName(),

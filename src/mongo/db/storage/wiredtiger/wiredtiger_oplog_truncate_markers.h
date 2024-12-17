@@ -83,23 +83,22 @@ public:
                                                int64_t bytesRemoved,
                                                const RecordId& firstRemovedId);
 
-    void getOplogTruncateMarkersStats(BSONObjBuilder& builder) const;
-
     // Resize oplog size
-    void adjust(OperationContext* opCtx, int64_t maxSize);
+    void adjust(int64_t maxSize);
 
     // The start point of where to truncate next. Used by the background reclaim thread to
     // efficiently truncate records with WiredTiger by skipping over tombstones, etc.
     RecordId firstRecord;
 
     static std::shared_ptr<WiredTigerOplogTruncateMarkers> createOplogTruncateMarkers(
-        OperationContext* opCtx, WiredTigerRecordStore* rs, const NamespaceString& ns);
+        OperationContext* opCtx, WiredTigerRecordStore* rs);
     //
     // The following methods are public only for use in tests.
     //
 
     bool processedBySampling() const {
-        return _processBySampling;
+        return getMarkersCreationMethod() ==
+            CollectionTruncateMarkers::MarkersCreationMethod::Sampling;
     }
 
 private:
@@ -117,10 +116,6 @@ private:
     bool _isDead = false;
 
     WiredTigerRecordStore* _rs;
-
-    Microseconds _totalTimeProcessing;  // Amount of time spent scanning and/or sampling the
-                                        // oplog during start up, if any.
-    bool _processBySampling;            // Whether the oplog was sampled or scanned.
 };
 
 }  // namespace mongo

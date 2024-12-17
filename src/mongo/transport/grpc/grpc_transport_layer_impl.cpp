@@ -60,7 +60,10 @@ GRPCTransportLayerImpl::Options::Options(const ServerGlobalParams& params) {
 GRPCTransportLayerImpl::GRPCTransportLayerImpl(ServiceContext* svcCtx,
                                                Options options,
                                                std::unique_ptr<SessionManager> sm)
-    : _svcCtx{svcCtx}, _options{std::move(options)}, _sessionManager(std::move(sm)) {}
+    : _svcCtx{svcCtx},
+      _egressReactor(std::make_shared<GRPCReactor>()),
+      _options{std::move(options)},
+      _sessionManager(std::move(sm)) {}
 
 std::unique_ptr<GRPCTransportLayerImpl> GRPCTransportLayerImpl::createWithConfig(
     ServiceContext* svcCtx,
@@ -69,18 +72,22 @@ std::unique_ptr<GRPCTransportLayerImpl> GRPCTransportLayerImpl::createWithConfig
 
     auto clientCache = std::make_shared<ClientCache>();
 
-    auto tl = std::make_unique<GRPCTransportLayerImpl>(
-        svcCtx,
-        std::move(options),
-        std::make_unique<GRPCSessionManager>(svcCtx, clientCache, std::move(observers)));
-    uassertStatusOK(tl->registerService(std::make_unique<CommandService>(
-        tl.get(),
-        [tlPtr = tl.get()](auto session) {
-            invariant(session->getTransportLayer() == tlPtr);
-            tlPtr->getSessionManager()->startSession(std::move(session));
-        },
-        std::make_shared<grpc::WireVersionProvider>(),
-        std::move(clientCache))));
+    auto sm = options.enableIngress
+        ? std::make_unique<GRPCSessionManager>(svcCtx, clientCache, std::move(observers))
+        : nullptr;
+
+    auto tl = std::make_unique<GRPCTransportLayerImpl>(svcCtx, std::move(options), std::move(sm));
+
+    if (options.enableIngress) {
+        uassertStatusOK(tl->registerService(std::make_unique<CommandService>(
+            tl.get(),
+            [tlPtr = tl.get()](auto session) {
+                invariant(session->getTransportLayer() == tlPtr);
+                tlPtr->getSessionManager()->startSession(std::move(session));
+            },
+            std::make_shared<grpc::WireVersionProvider>(),
+            std::move(clientCache))));
+    }
 
     return tl;
 }
@@ -161,6 +168,11 @@ Status GRPCTransportLayerImpl::setup() {
             _client = std::make_shared<GRPCClient>(
                 this, *_options.clientMetadata, std::move(clientOptions));
         }
+
+        iassert(ErrorCodes::InvalidOptions,
+                "gRPC cannot be setup with both ingress and egress disabled",
+                _client || _server);
+
         return Status::OK();
     } catch (const DBException& e) {
         return e.toStatus();
@@ -173,26 +185,31 @@ Status GRPCTransportLayerImpl::start() {
         iassert(TransportLayer::ShutdownStatus.code(),
                 "Cannot start GRPCTransportLayer after it has been shut down",
                 !_isShutdown);
+        iassert(ErrorCodes::NotYetInitialized,
+                "gRPC networking has not been setup yet",
+                _client || _server);
 
-        // We can't distinguish between the default list of disabled protocols and one specified by
-        // via options, so we just log that the list is being ignored when using gRPC.
-        if (!sslGlobalParams.sslDisabledProtocols.empty()) {
-            LOGV2_DEBUG(8000811,
-                        3,
-                        "Ignoring tlsDisabledProtocols for gRPC-based connections",
-                        "tlsDisabledProtocols"_attr = sslGlobalParams.sslDisabledProtocols);
-        }
-        uassert(ErrorCodes::InvalidSSLConfiguration,
-                "Specifying a CRL file is not supported when gRPC mode is enabled",
-                sslGlobalParams.sslCRLFile.empty());
-        uassert(ErrorCodes::InvalidSSLConfiguration,
-                "Certificate passwords are not supported when gRPC mode is enabled",
-                sslGlobalParams.sslPEMKeyPassword.empty());
-        uassert(ErrorCodes::InvalidSSLConfiguration,
-                "tlsFIPSMode is not supported when gRPC mode is enabled",
-                !sslGlobalParams.sslFIPSMode);
-
+        // TODO SERVER-97619: Depending on the resolution of SERVER-97619, we may need to move the
+        // log and uasserts out of this block.
         if (_server) {
+            // We can't distinguish between the default list of disabled protocols and one specified
+            // by via options, so we just log that the list is being ignored when using gRPC.
+            if (!sslGlobalParams.sslDisabledProtocols.empty()) {
+                LOGV2_DEBUG(8000811,
+                            3,
+                            "Ignoring tlsDisabledProtocols for gRPC-based connections",
+                            "tlsDisabledProtocols"_attr = sslGlobalParams.sslDisabledProtocols);
+            }
+            uassert(ErrorCodes::InvalidSSLConfiguration,
+                    "Specifying a CRL file is not supported when gRPC mode is enabled",
+                    sslGlobalParams.sslCRLFile.empty());
+            uassert(ErrorCodes::InvalidSSLConfiguration,
+                    "Certificate passwords are not supported when gRPC mode is enabled",
+                    sslGlobalParams.sslPEMKeyPassword.empty());
+            uassert(ErrorCodes::InvalidSSLConfiguration,
+                    "tlsFIPSMode is not supported when gRPC mode is enabled",
+                    !sslGlobalParams.sslFIPSMode);
+
             invariant(_sessionManager);
             _server->start();
             if (_options.useUnixDomainSockets) {
@@ -201,6 +218,14 @@ Status GRPCTransportLayerImpl::start() {
             }
         }
         if (_client) {
+            _ioThread = stdx::thread([this] {
+                setThreadName("GRPCDefaultEgressReactor");
+                LOGV2_DEBUG(9715105, 2, "Starting the default egress gRPC reactor");
+                _egressReactor->run();
+                LOGV2_DEBUG(9715106, 2, "Draining the default egress gRPC reactor");
+                _egressReactor->drain();
+                LOGV2_DEBUG(9715107, 2, "Finished drain of the default egress gRPC reactor");
+            });
             _client->start(_svcCtx);
         }
         return Status::OK();
@@ -210,10 +235,14 @@ Status GRPCTransportLayerImpl::start() {
 }
 
 StatusWith<std::shared_ptr<Session>> GRPCTransportLayerImpl::connectWithAuthToken(
-    HostAndPort peer, Milliseconds timeout, boost::optional<std::string> authToken) {
+    HostAndPort peer,
+    ConnectSSLMode sslMode,
+    Milliseconds timeout,
+    boost::optional<std::string> authToken) {
     try {
         invariant(_client);
-        return _client->connect(std::move(peer), timeout, {std::move(authToken)});
+        return _client->connect(
+            std::move(peer), _egressReactor, timeout, {std::move(authToken), sslMode});
     } catch (const DBException& e) {
         return e.toStatus();
     }
@@ -226,14 +255,9 @@ StatusWith<std::shared_ptr<Session>> GRPCTransportLayerImpl::connect(
     const boost::optional<TransientSSLParams>& transientSSLParams) {
     try {
         iassert(ErrorCodes::InvalidSSLConfiguration,
-                "SSL must be enabled when using gRPC",
-                sslMode == ConnectSSLMode::kEnableSSL ||
-                    (sslMode == transport::ConnectSSLMode::kGlobalSSLMode &&
-                     sslGlobalParams.sslMode.load() != SSLParams::SSLModes::SSLMode_disabled));
-        iassert(ErrorCodes::InvalidSSLConfiguration,
                 "Transient SSL parameters are not supported when using gRPC",
                 !transientSSLParams);
-        return connectWithAuthToken(std::move(peer), timeout);
+        return connectWithAuthToken(std::move(peer), sslMode, timeout);
     } catch (const DBException& e) {
         return e.toStatus();
     }
@@ -250,6 +274,10 @@ void GRPCTransportLayerImpl::shutdown() {
     }
     if (_client) {
         _client->shutdown();
+        LOGV2_DEBUG(9715108, 2, "Stopping default egress gRPC reactor");
+        _egressReactor->stop();
+        LOGV2_DEBUG(9715109, 2, "Joining the default egress gRPC reactor thread");
+        _ioThread.join();
     }
 
     if (_sessionManager) {

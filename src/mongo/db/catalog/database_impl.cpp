@@ -70,7 +70,6 @@
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/database_sharding_state.h"
@@ -281,6 +280,7 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
     long long indexFreeStorageSize = 0;
 
     invariant(shard_role_details::getLocker(opCtx)->isDbLockedForMode(name(), MODE_IS));
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
 
     catalog::forEachCollectionFromDb(
         opCtx, name(), MODE_IS, [&](const Collection* collection) -> bool {
@@ -289,13 +289,13 @@ void DatabaseImpl::getStats(OperationContext* opCtx,
             size += collection->dataSize(opCtx);
 
             BSONObjBuilder temp;
-            storageSize += collection->getRecordStore()->storageSize(opCtx, &temp);
+            storageSize += collection->getRecordStore()->storageSize(ru, &temp);
 
             indexes += collection->getIndexCatalog()->numIndexesTotal();
             indexSize += collection->getIndexSize(opCtx);
 
             if (includeFreeStorage) {
-                freeStorageSize += collection->getRecordStore()->freeStorageSize(opCtx);
+                freeStorageSize += collection->getRecordStore()->freeStorageSize(ru);
                 indexFreeStorageSize += collection->getIndexFreeStorageBytes(opCtx);
             }
 
@@ -353,7 +353,7 @@ Status DatabaseImpl::dropView(OperationContext* opCtx, NamespaceString viewName)
         NamespaceString(_viewsName), MODE_X));
 
     Status status = CollectionCatalog::get(opCtx)->dropView(opCtx, viewName);
-    Top::get(opCtx->getServiceContext()).collectionDropped(viewName);
+    Top::getDecoration(opCtx).collectionDropped(viewName);
     return status;
 }
 
@@ -418,7 +418,7 @@ Status DatabaseImpl::dropCollectionEvenIfSystem(OperationContext* opCtx,
     audit::logDropCollection(opCtx->getClient(), nss);
 
     auto serviceContext = opCtx->getServiceContext();
-    Top::get(serviceContext).collectionDropped(nss);
+    Top::getDecoration(opCtx).collectionDropped(nss);
 
     // Drop unreplicated collections immediately.
     // If 'dropOpTime' is provided, we should proceed to rename the collection.
@@ -427,12 +427,7 @@ Status DatabaseImpl::dropCollectionEvenIfSystem(OperationContext* opCtx,
     auto isOplogDisabledForNamespace = replCoord->isOplogDisabledFor(opCtx, nss);
     if (dropOpTime.isNull() && isOplogDisabledForNamespace) {
         _dropCollectionIndexes(opCtx, nss, collection.getWritableCollection(opCtx));
-        opObserver->onDropCollection(opCtx,
-                                     nss,
-                                     uuid,
-                                     numRecords,
-                                     OpObserver::CollectionDropType::kOnePhase,
-                                     markFromMigrate);
+        opObserver->onDropCollection(opCtx, nss, uuid, numRecords, markFromMigrate);
         return _finishDropCollection(opCtx, nss, collection.getWritableCollection(opCtx));
     }
 
@@ -453,76 +448,18 @@ Status DatabaseImpl::dropCollectionEvenIfSystem(OperationContext* opCtx,
           "commitTimestamp"_attr = commitTimestamp);
     if (dropOpTime.isNull()) {
         // Log oplog entry for collection drop and remove the UUID.
-        dropOpTime = opObserver->onDropCollection(opCtx,
-                                                  nss,
-                                                  uuid,
-                                                  numRecords,
-                                                  OpObserver::CollectionDropType::kOnePhase,
-                                                  markFromMigrate);
+        dropOpTime = opObserver->onDropCollection(opCtx, nss, uuid, numRecords, markFromMigrate);
         invariant(!dropOpTime.isNull());
     } else {
         // If we are provided with a valid 'dropOpTime', it means we are dropping this
         // collection in the context of applying an oplog entry on a secondary.
-        auto opTime = opObserver->onDropCollection(opCtx,
-                                                   nss,
-                                                   uuid,
-                                                   numRecords,
-                                                   OpObserver::CollectionDropType::kOnePhase,
-                                                   markFromMigrate);
+        auto opTime = opObserver->onDropCollection(opCtx, nss, uuid, numRecords, markFromMigrate);
         // OpObserver::onDropCollection should not be writing to the oplog on the secondary.
         invariant(opTime.isNull(),
                   str::stream() << "OpTime is not null. OpTime: " << opTime.toString());
     }
 
     return _finishDropCollection(opCtx, nss, collection.getWritableCollection(opCtx));
-
-    // Old two-phase drop: Replicated collections will be renamed with a special drop-pending
-    // namespace and dropped when the replica set optime reaches the drop optime.
-
-    if (dropOpTime.isNull()) {
-        // Log oplog entry for collection drop.
-        dropOpTime = opObserver->onDropCollection(opCtx,
-                                                  nss,
-                                                  uuid,
-                                                  numRecords,
-                                                  OpObserver::CollectionDropType::kTwoPhase,
-                                                  markFromMigrate);
-        invariant(!dropOpTime.isNull());
-    } else {
-        // If we are provided with a valid 'dropOpTime', it means we are dropping this
-        // collection in the context of applying an oplog entry on a secondary.
-        auto opTime = opObserver->onDropCollection(opCtx,
-                                                   nss,
-                                                   uuid,
-                                                   numRecords,
-                                                   OpObserver::CollectionDropType::kTwoPhase,
-                                                   markFromMigrate);
-        // OpObserver::onDropCollection should not be writing to the oplog on the secondary.
-        invariant(opTime.isNull());
-    }
-
-    // Rename collection using drop-pending namespace generated from drop optime.
-    auto dpns = nss.makeDropPendingNamespace(dropOpTime);
-    const bool stayTemp = true;
-    LOGV2(20315,
-          "dropCollection: renaming to drop-pending collection",
-          logAttrs(nss),
-          "uuid"_attr = uuid,
-          "dropPendingName"_attr = dpns,
-          "dropOpTime"_attr = dropOpTime);
-    {
-        // This is a uniquely generated drop-pending namespace that no other operations are using.
-        AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(
-            shard_role_details::getLocker(opCtx));
-        Lock::CollectionLock collLk(opCtx, dpns, MODE_X);
-        fassert(40464, renameCollection(opCtx, nss, dpns, stayTemp));
-    }
-
-    // Register this drop-pending namespace with DropPendingCollectionReaper to remove when the
-    // committed optime reaches the drop optime.
-    repl::DropPendingCollectionReaper::get(opCtx)->addDropPendingNamespace(opCtx, dropOpTime, dpns);
-
-    return Status::OK();
 }
 
 void DatabaseImpl::_dropCollectionIndexes(OperationContext* opCtx,
@@ -591,7 +528,7 @@ Status DatabaseImpl::renameCollection(OperationContext* opCtx,
           "fromName"_attr = fromNss,
           "toName"_attr = toNss);
 
-    Top::get(opCtx->getServiceContext()).collectionDropped(fromNss);
+    Top::getDecoration(opCtx).collectionDropped(fromNss);
 
     // Set the namespace of 'collToRename' from within the CollectionCatalog. This is necessary
     // because the CollectionCatalog manages the necessary isolation for this Collection until the
@@ -929,9 +866,14 @@ Status DatabaseImpl::userCreateNS(OperationContext* opCtx,
     }
 
     if (!collectionOptions.validator.isEmpty()) {
-        boost::intrusive_ptr<ExpressionContext> expCtx(
-            new ExpressionContext(opCtx, std::move(swCollator.getValue()), nss));
-
+        auto expCtx = ExpressionContextBuilder{}
+                          .opCtx(opCtx)
+                          .collator(std::move(swCollator.getValue()))
+                          .ns(nss)
+                          // The match expression parser needs to know that we're parsing an
+                          // expression for a validator to apply some additional checks.
+                          .isParsingCollectionValidator(true)
+                          .build();
         // If the feature compatibility version is not kLatest, and we are validating features as
         // primary, ban the use of new agg features introduced in kLatest to prevent them from being
         // persisted in the catalog.
@@ -940,12 +882,8 @@ Status DatabaseImpl::userCreateNS(OperationContext* opCtx,
         if (serverGlobalParams.validateFeaturesAsPrimary.load() &&
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot().isLessThan(
                 multiversion::GenericFCV::kLatest, &fcv)) {
-            expCtx->maxFeatureCompatibilityVersion = fcv;
+            expCtx->setMaxFeatureCompatibilityVersion(fcv);
         }
-
-        // The match expression parser needs to know that we're parsing an expression for a
-        // validator to apply some additional checks.
-        expCtx->isParsingCollectionValidator = true;
 
         // If the validation action is printing logs or the level is "moderate", or if the user has
         // defined some encrypted fields in the collection options, then disallow any encryption

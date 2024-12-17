@@ -73,9 +73,9 @@ REGISTER_DOCUMENT_SOURCE(unionWith,
 namespace {
 std::unique_ptr<Pipeline, PipelineDeleter> buildPipelineFromViewDefinition(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    ExpressionContext::ResolvedNamespace resolvedNs,
-    std::vector<BSONObj> currentPipeline) {
-
+    ResolvedNamespace resolvedNs,
+    std::vector<BSONObj> currentPipeline,
+    NamespaceString userNss) {
     auto validatorCallback = [](const Pipeline& pipeline) {
         const auto& sources = pipeline.getSources();
         std::for_each(sources.begin(), sources.end(), [](auto& src) {
@@ -96,7 +96,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> buildPipelineFromViewDefinition(
         expCtx->copyForSubPipeline(resolvedNs.ns, resolvedNs.uuid),
         resolvedNs,
         std::move(currentPipeline),
-        opts);
+        opts,
+        userNss);
 }
 
 }  // namespace
@@ -107,26 +108,27 @@ DocumentSourceUnionWith::DocumentSourceUnionWith(
     : DocumentSource(kStageName, expCtx),
       _pipeline(std::move(pipeline)),
       _variablesParseState(_variables.useIdGenerator()) {
-    if (!_pipeline->getContext()->ns.isOnInternalDb()) {
-        globalOpCounters.gotNestedAggregate();
+    if (!_pipeline->getContext()->getNamespaceString().isOnInternalDb()) {
+        serviceOpCounters(expCtx->getOperationContext()).gotNestedAggregate();
     }
-    _pipeline->getContext()->inUnionWith = true;
+    _pipeline->getContext()->setInUnionWith(true);
 }
 
 DocumentSourceUnionWith::DocumentSourceUnionWith(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     NamespaceString unionNss,
     std::vector<BSONObj> pipeline)
-    : DocumentSourceUnionWith(expCtx,
-                              buildPipelineFromViewDefinition(
-                                  expCtx, expCtx->getResolvedNamespace(unionNss), pipeline)) {
+    : DocumentSourceUnionWith(
+          expCtx,
+          buildPipelineFromViewDefinition(
+              expCtx, expCtx->getResolvedNamespace(unionNss), pipeline, unionNss)) {
     _userNss = std::move(unionNss);
     _userPipeline = std::move(pipeline);
 }
 
 DocumentSourceUnionWith::~DocumentSourceUnionWith() {
-    if (_pipeline && _pipeline->getContext()->explain) {
-        _pipeline->dispose(pExpCtx->opCtx);
+    if (_pipeline && _pipeline->getContext()->getExplain()) {
+        _pipeline->dispose(pExpCtx->getOperationContext());
         _pipeline.reset();
     }
 }
@@ -228,17 +230,19 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceUnionWith::createFromBson(
     NamespaceString unionNss;
     std::vector<BSONObj> pipeline;
     if (elem.type() == BSONType::String) {
-        unionNss = NamespaceStringUtil::deserialize(expCtx->ns.dbName(), elem.valueStringData());
+        unionNss = NamespaceStringUtil::deserialize(expCtx->getNamespaceString().dbName(),
+                                                    elem.valueStringData());
     } else {
         auto unionWithSpec =
             UnionWithSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
         if (unionWithSpec.getColl()) {
-            unionNss =
-                NamespaceStringUtil::deserialize(expCtx->ns.dbName(), *unionWithSpec.getColl());
+            unionNss = NamespaceStringUtil::deserialize(expCtx->getNamespaceString().dbName(),
+                                                        *unionWithSpec.getColl());
         } else {
             // if no collection specified, it must have $documents as first field in pipeline
             validateUnionWithCollectionlessPipeline(unionWithSpec.getPipeline());
-            unionNss = NamespaceString::makeCollectionlessAggregateNSS(expCtx->ns.dbName());
+            unionNss = NamespaceString::makeCollectionlessAggregateNSS(
+                expCtx->getNamespaceString().dbName());
         }
         pipeline = unionWithSpec.getPipeline().value_or(std::vector<BSONObj>{});
     }
@@ -265,7 +269,7 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
     if (_executionState == ExecutionProgress::kStartingSubPipeline) {
         // Since the subpipeline will be executed again for explain, we store the starting
         // state of the variables to reset them later.
-        if (pExpCtx->explain) {
+        if (pExpCtx->getExplain()) {
             auto expCtx = _pipeline->getContext();
             _variables = expCtx->variables;
             _variablesParseState =
@@ -285,8 +289,8 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
                         5,
                         "$unionWith before pipeline prep: ",
                         "pipeline"_attr = _pipeline->serializeToBson());
-            _pipeline =
-                pExpCtx->mongoProcessInterface->preparePipelineForExecution(_pipeline.release());
+            _pipeline = pExpCtx->getMongoProcessInterface()->preparePipelineForExecution(
+                _pipeline.release());
             LOGV2_DEBUG(9497003,
                         5,
                         "$unionWith POST pipeline prep: ",
@@ -296,8 +300,9 @@ DocumentSource::GetNextResult DocumentSourceUnionWith::doGetNext() {
         } catch (const ExceptionFor<ErrorCodes::CommandOnShardedViewNotSupportedOnMongod>& e) {
             _pipeline = buildPipelineFromViewDefinition(
                 pExpCtx,
-                ExpressionContext::ResolvedNamespace{e->getNamespace(), e->getPipeline()},
-                std::move(serializedPipe));
+                ResolvedNamespace{e->getNamespace(), e->getPipeline()},
+                std::move(serializedPipe),
+                e->getNamespace());
             logShardedViewFound(e);
             return doGetNext();
         }
@@ -345,7 +350,7 @@ Pipeline::SourceContainer::iterator DocumentSourceUnionWith::doOptimizeAt(
     auto duplicateAcrossUnion = [&](auto&& nextStage) {
         _pipeline->addFinalSource(nextStage->clone(_pipeline->getContext()));
         // Apply the same rewrite to the cached pipeline if available.
-        if (pExpCtx->explain >= ExplainOptions::Verbosity::kExecStats) {
+        if (pExpCtx->getExplain() >= ExplainOptions::Verbosity::kExecStats) {
             _pushedDownStages.push_back(nextStage->serialize().getDocument().toBson());
         }
         auto newStageItr = container->insert(itr, std::move(nextStage));
@@ -377,8 +382,8 @@ void DocumentSourceUnionWith::doDispose() {
             _stats.planSummaryStats.usedDisk || _pipeline->usedDisk();
         accumulatePipelinePlanSummaryStats(*_pipeline, _stats.planSummaryStats);
 
-        if (!_pipeline->getContext()->explain) {
-            _pipeline->dispose(pExpCtx->opCtx);
+        if (!_pipeline->getContext()->getExplain()) {
+            _pipeline->dispose(pExpCtx->getOperationContext());
             _userPipeline.clear();
             _pushedDownStages.clear();
             _pipeline.reset();
@@ -387,7 +392,8 @@ void DocumentSourceUnionWith::doDispose() {
 }
 
 Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const {
-    auto collectionless = _pipeline->getContext()->ns.isCollectionlessAggregateNS();
+    auto collectionless =
+        _pipeline->getContext()->getNamespaceString().isCollectionlessAggregateNS();
     if (opts.verbosity) {
         // There are several different possible states depending on the explain verbosity as well as
         // the other stages in the pipeline:
@@ -426,7 +432,8 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
                 bab << stage;
             auto spec = collectionless
                 ? DOC("pipeline" << bab.arr())
-                : DOC("coll" << opts.serializeIdentifier(_pipeline->getContext()->ns.coll())
+                : DOC("coll" << opts.serializeIdentifier(
+                                    _pipeline->getContext()->getNamespaceString().coll())
                              << "pipeline" << bab.arr());
             return Value(DOC(getSourceName() << spec));
         }
@@ -444,8 +451,8 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
             // moment no query settings are present in the parent context.
             _pipeline->getContext()->setQuerySettingsIfNotPresent(pExpCtx->getQuerySettings());
 
-            return pExpCtx->mongoProcessInterface->preparePipelineAndExplain(ownedPipeline,
-                                                                             *opts.verbosity);
+            return pExpCtx->getMongoProcessInterface()->preparePipelineAndExplain(ownedPipeline,
+                                                                                  *opts.verbosity);
         };
 
         BSONObj explainLocal = [&] {
@@ -456,8 +463,9 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
                 logShardedViewFound(e);
                 auto resolvedPipeline = buildPipelineFromViewDefinition(
                     pExpCtx,
-                    ExpressionContext::ResolvedNamespace{e->getNamespace(), e->getPipeline()},
-                    std::move(serializedPipe));
+                    ResolvedNamespace{e->getNamespace(), e->getPipeline()},
+                    std::move(serializedPipe),
+                    e->getNamespace());
                 return preparePipelineAndExplain(resolvedPipeline.release());
             }
         }();
@@ -468,7 +476,8 @@ Value DocumentSourceUnionWith::serialize(const SerializationOptions& opts) const
 
         auto spec = collectionless
             ? DOC("pipeline" << explainLocal.firstElement())
-            : DOC("coll" << opts.serializeIdentifier(_pipeline->getContext()->ns.coll())
+            : DOC("coll" << opts.serializeIdentifier(
+                                _pipeline->getContext()->getNamespaceString().coll())
                          << "pipeline" << explainLocal.firstElement());
         return Value(DOC(getSourceName() << spec));
     } else {
@@ -542,13 +551,13 @@ void DocumentSourceUnionWith::reattachToOperationContext(OperationContext* opCtx
 }
 
 bool DocumentSourceUnionWith::validateOperationContext(const OperationContext* opCtx) const {
-    return getContext()->opCtx == opCtx &&
+    return getContext()->getOperationContext() == opCtx &&
         (!_pipeline || _pipeline->validateOperationContext(opCtx));
 }
 
 void DocumentSourceUnionWith::addInvolvedCollections(
     stdx::unordered_set<NamespaceString>* collectionNames) const {
-    collectionNames->insert(_pipeline->getContext()->ns);
+    collectionNames->insert(_pipeline->getContext()->getNamespaceString());
     collectionNames->merge(_pipeline->getInvolvedCollections());
 }
 

@@ -29,7 +29,7 @@ selector:
 
     # Expects reads to die with a particular error, but other errors are possible if the read is part
     # of a transaction (e.g. ErrorCodes.LockTimeout).
-    - jstests/concurrency/fsm_workloads/drop_index_during_replan.js
+    - jstests/concurrency/fsm_workloads/query/drop_index_during_replan.js
     - jstests/concurrency/fsm_workloads/query/drop_index_during_lookup.js
 
     ##
@@ -85,6 +85,8 @@ executor:
     tests: true
   config:
     shell_options:
+      eval: >-
+        await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
           # Reads and writes outside of transactions will not have their read or write concerns
@@ -100,6 +102,7 @@ executor:
           runningWithSessions: true
           traceExceptions: false
           runningWithBalancer: true
+          implicitlyShardOnCreateCollectionOnly: true
           fsmPreOverridesLoadedCallback: import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
 
   hooks:
@@ -117,7 +120,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     shard_options:
       mongod_options:
         oplogSize: 1024
@@ -125,10 +127,8 @@ executor:
       set_parameters:
         enableTestCommands: 1
         roleGraphInvalidationIsFatal: 1
-        analyzeShardKeyMaxNumStaleVersionRetries: 2
         queryAnalysisWriterIntervalSecs: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
         skipDroppingHashedShardKeyIndex: true
         reshardingMinimumOperationDurationMillis: 0
         failpoint.overrideDDLLockTimeout:

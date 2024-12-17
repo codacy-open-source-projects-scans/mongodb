@@ -10,7 +10,7 @@
  *   requires_sharding,
  *   # This test uses a new $_internalSplitPipeline syntax introduced in 8.0.
  *   requires_fcv_80,
- *    # TODO (SERVER-88127): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  */
@@ -88,11 +88,11 @@ try {
 
     // Issue an aggregation that will fail during a getMore on shard 0, and make sure that
     // this correctly kills the hanging cursor on shard 1. Use $_internalSplitPipeline to ensure
-    // that this pipeline merges on mongos.
+    // that this pipeline merges on router.
     assertFailsAndCleansUpCursors({
         pipeline: [
             {$project: {out: {$divide: ["$_id", 0]}}},
-            {$_internalSplitPipeline: {mergeType: "mongos"}}
+            {$_internalSplitPipeline: {mergeType: st.getMergeType(mongosDB)}}
         ],
         errCode: kDivideByZeroErrCodes
     });

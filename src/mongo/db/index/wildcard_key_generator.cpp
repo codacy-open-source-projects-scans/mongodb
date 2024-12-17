@@ -308,7 +308,7 @@ WildcardProjection WildcardKeyGenerator::createProjectionExecutor(BSONObj keyPat
     // ExpressionContext's OperationContext and CollatorInterface to 'nullptr' and the namespace
     // string to '' here; since we ban computed fields from the projection, the ExpressionContext
     // will never be used.
-    auto expCtx = make_intrusive<ExpressionContext>(nullptr, nullptr, NamespaceString::kEmpty);
+    auto expCtx = ExpressionContextBuilder{}.ns(NamespaceString::kEmpty).build();
     auto policies = ProjectionPolicies::wildcardIndexSpecProjectionPolicies();
     auto projection = projection_ast::parseAndAnalyze(expCtx, projSpec, policies);
     return WildcardProjection{projection_executor::buildProjectionExecutor(
@@ -331,7 +331,6 @@ WildcardKeyGenerator::WildcardKeyGenerator(BSONObj keyPattern,
     std::vector<const char*> postFields;
     std::vector<BSONElement> preElems;
     std::vector<BSONElement> postElems;
-    size_t idx = 0;
     bool iteratorIsBeforeWildcard = true;
     for (auto elem : keyPattern) {
         if (WildcardNames::isWildcardFieldName(elem.fieldNameStringData())) {
@@ -343,7 +342,6 @@ WildcardKeyGenerator::WildcardKeyGenerator(BSONObj keyPattern,
             postElems.push_back(BSONElement());
             postFields.push_back(elem.fieldName());
         }
-        idx++;
     }
 
     // We should initialize BtreeKeyGenerators if 'keyPattern' is compound.

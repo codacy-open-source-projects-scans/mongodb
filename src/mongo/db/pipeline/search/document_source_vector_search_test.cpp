@@ -41,12 +41,13 @@
 namespace mongo {
 namespace {
 
-using DocumentSourceVectorSearchTest = AggregationContextFixture;
+class DocumentSourceVectorSearchTest : service_context_test::WithSetupTransportLayer,
+                                       public AggregationContextFixture {};
 
 TEST_F(DocumentSourceVectorSearchTest, NotAllowedInTransaction) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
-    expCtx->opCtx->setInMultiDocumentTransaction();
+    expCtx->setUUID(UUID::gen());
+    expCtx->getOperationContext()->setInMultiDocumentTransaction();
 
 
     auto spec = fromjson(R"({
@@ -190,7 +191,7 @@ TEST_F(DocumentSourceVectorSearchTest, HasTheCorrectStagesWhenCreated) {
             return true;
         }
     };
-    expCtx->mongoProcessInterface = std::make_unique<MockMongoInterface>();
+    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>());
 
     auto spec = fromjson(R"({
         $vectorSearch: {

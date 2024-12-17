@@ -296,10 +296,10 @@ public:
 
             CreateCommandReply reply;
             if (cmd.getAutoIndexId()) {
-#define DEPR_23800 "The autoIndexId option is deprecated and will be removed in a future release"
-                LOGV2_WARNING(23800, DEPR_23800);
-                reply.setNote(StringData(DEPR_23800));
-#undef DEPR_23800
+                constexpr const char depr_23800[] =
+                    "The autoIndexId option is deprecated and will be removed in a future release";
+                LOGV2_WARNING(23800, depr_23800);
+                reply.setNote(std::string(depr_23800));
             }
 
             if (!cmd.getClusteredIndex()) {
@@ -359,8 +359,24 @@ public:
                         !hasQueryType(cmd.getEncryptedFields().get(),
                                       QueryTypeEnum::RangePreviewDeprecated));
 
-
-                FLEUtil::checkEFCForECC(cmd.getEncryptedFields().get());
+                if (!gFeatureFlagQETextSearchPreview.isEnabledUseLastLTSFCVWhenUninitialized(
+                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                    uassert(9783415,
+                            "Cannot create a collection with an encrypted field with query type "
+                            "substringPreview unless featureFlagQETextSearchPreview is enabled",
+                            !hasQueryType(cmd.getEncryptedFields().get(),
+                                          QueryTypeEnum::SubstringPreview));
+                    uassert(9783416,
+                            "Cannot create a collection with an encrypted field with query type "
+                            "suffixPreview unless featureFlagQETextSearchPreview is enabled",
+                            !hasQueryType(cmd.getEncryptedFields().get(),
+                                          QueryTypeEnum::SuffixPreview));
+                    uassert(9783417,
+                            "Cannot create a collection with an encrypted field with query type "
+                            "prefixPreview unless featureFlagQETextSearchPreview is enabled",
+                            !hasQueryType(cmd.getEncryptedFields().get(),
+                                          QueryTypeEnum::PrefixPreview));
+                }
             }
 
             if (auto timeseries = cmd.getTimeseries()) {

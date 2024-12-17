@@ -49,6 +49,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/oplog_truncation.h"
 #include "mongo/db/storage/record_store_test_harness.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
@@ -59,7 +60,6 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/assert.h"
@@ -67,9 +67,6 @@
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 namespace {
@@ -118,14 +115,14 @@ TEST(WiredTigerRecordStoreTest, GenerateCreateStringValidConfigStringOption) {
 TEST(WiredTigerRecordStoreTest, Isolation1) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     std::unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
-
     RecordId id1;
     RecordId id2;
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
 
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "a", 2, Timestamp());
             ASSERT_OK(res.getStatus());
@@ -135,19 +132,21 @@ TEST(WiredTigerRecordStoreTest, Isolation1) {
             ASSERT_OK(res.getStatus());
             id2 = res.getValue();
 
-            uow.commit();
+            txn.commit();
         }
     }
 
     {
         auto client1 = harnessHelper->serviceContext()->getService()->makeClient("c1");
         auto t1 = harnessHelper->newOperationContext(client1.get());
+        auto& ru1 = *shard_role_details::getRecoveryUnit(t1.get());
 
         auto client2 = harnessHelper->serviceContext()->getService()->makeClient("c2");
         auto t2 = harnessHelper->newOperationContext(client2.get());
+        auto& ru2 = *shard_role_details::getRecoveryUnit(t2.get());
 
-        std::unique_ptr<WriteUnitOfWork> w1(new WriteUnitOfWork(t1.get()));
-        std::unique_ptr<WriteUnitOfWork> w2(new WriteUnitOfWork(t2.get()));
+        auto w1 = std::make_unique<StorageWriteTransaction>(ru1);
+        auto w2 = std::make_unique<StorageWriteTransaction>(ru2);
 
         rs->dataFor(t1.get(), id1);
         rs->dataFor(t2.get(), id1);
@@ -177,8 +176,9 @@ TEST(WiredTigerRecordStoreTest, Isolation2) {
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
-            WriteUnitOfWork uow(opCtx.get());
+            StorageWriteTransaction txn(ru);
 
             StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "a", 2, Timestamp());
             ASSERT_OK(res.getStatus());
@@ -188,29 +188,31 @@ TEST(WiredTigerRecordStoreTest, Isolation2) {
             ASSERT_OK(res.getStatus());
             id2 = res.getValue();
 
-            uow.commit();
+            txn.commit();
         }
     }
 
     {
         auto client1 = harnessHelper->serviceContext()->getService()->makeClient("c1");
         auto t1 = harnessHelper->newOperationContext(client1.get());
+        auto& ru1 = *shard_role_details::getRecoveryUnit(t1.get());
 
         auto client2 = harnessHelper->serviceContext()->getService()->makeClient("c2");
         auto t2 = harnessHelper->newOperationContext(client2.get());
+        auto& ru2 = *shard_role_details::getRecoveryUnit(t2.get());
 
         // ensure we start transactions
         rs->dataFor(t1.get(), id2);
         rs->dataFor(t2.get(), id2);
 
         {
-            WriteUnitOfWork w(t1.get());
+            StorageWriteTransaction w(ru1);
             ASSERT_OK(rs->updateRecord(t1.get(), id1, "b", 2));
             w.commit();
         }
 
         {
-            WriteUnitOfWork w(t2.get());
+            StorageWriteTransaction w(ru2);
             ASSERT_EQUALS(std::string("a"), rs->dataFor(t2.get(), id1).data());
             try {
                 // this should fail as our version of id1 is too old
@@ -241,30 +243,34 @@ RecordId oplogOrderInsertOplog(OperationContext* opCtx,
  * long as the commit for each insert comes before the next insert starts.
  */
 TEST(WiredTigerRecordStoreTest, OplogDurableVisibilityInOrder) {
-    ON_BLOCK_EXIT([] { WTPauseOplogVisibilityUpdateLoop.setMode(FailPoint::off); });
-    WTPauseOplogVisibilityUpdateLoop.setMode(FailPoint::alwaysOn);
-
     std::unique_ptr<RecordStoreHarnessHelper> harnessHelper(newRecordStoreHarnessHelper());
     std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
     auto engine = harnessHelper->getEngine();
-    auto wtrs = checked_cast<WiredTigerRecordStore*>(rs.get());
+
+    auto isOpHidden = [&engine](const RecordId& id) {
+        return static_cast<WiredTigerKVEngine*>(engine)
+                   ->getOplogManager()
+                   ->getOplogReadTimestamp() < static_cast<std::uint64_t>(id.getLong());
+    };
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        WriteUnitOfWork uow(opCtx.get());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+        StorageWriteTransaction txn(ru);
         RecordId id = oplogOrderInsertOplog(opCtx.get(), engine, rs, 1);
-        ASSERT(wtrs->isOpHidden_forTest(id));
-        uow.commit();
-        ASSERT(wtrs->isOpHidden_forTest(id));
+        ASSERT(isOpHidden(id));
+        txn.commit();
+        ASSERT_FALSE(isOpHidden(id));
     }
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        WriteUnitOfWork uow(opCtx.get());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+        StorageWriteTransaction txn(ru);
         RecordId id = oplogOrderInsertOplog(opCtx.get(), engine, rs, 2);
-        ASSERT(wtrs->isOpHidden_forTest(id));
-        uow.commit();
-        ASSERT(wtrs->isOpHidden_forTest(id));
+        ASSERT(isOpHidden(id));
+        txn.commit();
+        ASSERT_FALSE(isOpHidden(id));
     }
 }
 
@@ -273,19 +279,21 @@ TEST(WiredTigerRecordStoreTest, OplogDurableVisibilityInOrder) {
  * op and all earlier ops are durable.
  */
 TEST(WiredTigerRecordStoreTest, OplogDurableVisibilityOutOfOrder) {
-    ON_BLOCK_EXIT([] { WTPauseOplogVisibilityUpdateLoop.setMode(FailPoint::off); });
-    WTPauseOplogVisibilityUpdateLoop.setMode(FailPoint::alwaysOn);
-
     std::unique_ptr<RecordStoreHarnessHelper> harnessHelper(newRecordStoreHarnessHelper());
     std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
     auto engine = harnessHelper->getEngine();
 
-    auto wtrs = checked_cast<WiredTigerRecordStore*>(rs.get());
+    auto isOpHidden = [&engine](const RecordId& id) {
+        return static_cast<WiredTigerKVEngine*>(engine)
+                   ->getOplogManager()
+                   ->getOplogReadTimestamp() < static_cast<std::uint64_t>(id.getLong());
+    };
 
     ServiceContext::UniqueOperationContext longLivedOp(harnessHelper->newOperationContext());
-    WriteUnitOfWork uow(longLivedOp.get());
+    auto& longLivedRu = *shard_role_details::getRecoveryUnit(longLivedOp.get());
+    StorageWriteTransaction txn(longLivedRu);
     RecordId id1 = oplogOrderInsertOplog(longLivedOp.get(), engine, rs, 1);
-    ASSERT(wtrs->isOpHidden_forTest(id1));
+    ASSERT(isOpHidden(id1));
 
 
     RecordId id2;
@@ -293,31 +301,25 @@ TEST(WiredTigerRecordStoreTest, OplogDurableVisibilityOutOfOrder) {
         auto innerClient = harnessHelper->serviceContext()->getService()->makeClient("inner");
         ServiceContext::UniqueOperationContext opCtx(
             harnessHelper->newOperationContext(innerClient.get()));
-        WriteUnitOfWork uow(opCtx.get());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+        StorageWriteTransaction txn(ru);
         id2 = oplogOrderInsertOplog(opCtx.get(), engine, rs, 2);
-        ASSERT(wtrs->isOpHidden_forTest(id2));
-        uow.commit();
+        ASSERT(isOpHidden(id2));
+        txn.commit();
     }
 
-    ASSERT(wtrs->isOpHidden_forTest(id1));
-    ASSERT(wtrs->isOpHidden_forTest(id2));
+    ASSERT(isOpHidden(id1));
+    ASSERT(isOpHidden(id2));
 
-    uow.commit();
+    txn.commit();
 
-    ASSERT(wtrs->isOpHidden_forTest(id1));
-    ASSERT(wtrs->isOpHidden_forTest(id2));
-
-    // Wait a bit and check again to make sure they don't become visible automatically.
-    sleepsecs(1);
-    ASSERT(wtrs->isOpHidden_forTest(id1));
-    ASSERT(wtrs->isOpHidden_forTest(id2));
-
-    WTPauseOplogVisibilityUpdateLoop.setMode(FailPoint::off);
+    ASSERT_FALSE(isOpHidden(id1));
+    ASSERT_FALSE(isOpHidden(id2));
 
     engine->waitForAllEarlierOplogWritesToBeVisible(longLivedOp.get(), rs.get());
 
-    ASSERT(!wtrs->isOpHidden_forTest(id1));
-    ASSERT(!wtrs->isOpHidden_forTest(id2));
+    ASSERT_FALSE(isOpHidden(id1));
+    ASSERT_FALSE(isOpHidden(id2));
 }
 
 TEST(WiredTigerRecordStoreTest, AppendCustomStatsMetadata) {
@@ -325,8 +327,9 @@ TEST(WiredTigerRecordStoreTest, AppendCustomStatsMetadata) {
     std::unique_ptr<RecordStore> rs(harnessHelper->newRecordStore("a.b"));
 
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
     BSONObjBuilder builder;
-    rs->appendAllCustomStats(opCtx.get(), &builder, 1.0);
+    rs->appendAllCustomStats(ru, &builder, 1.0);
     BSONObj customStats = builder.obj();
 
     BSONElement wiredTigerElement = customStats.getField(kWiredTigerEngineName);
@@ -349,8 +352,9 @@ TEST(WiredTigerRecordStoreTest, AppendCustomNumericStats) {
     std::unique_ptr<RecordStore> rs(harnessHelper->newRecordStore("a.c"));
 
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
     BSONObjBuilder builder;
-    rs->appendNumericCustomStats(opCtx.get(), &builder, 1.0);
+    rs->appendNumericCustomStats(ru, &builder, 1.0);
     BSONObj customStats = builder.obj();
 
     BSONElement wiredTigerElement = customStats.getField(kWiredTigerEngineName);
@@ -384,7 +388,8 @@ StatusWith<RecordId> insertBSONWithSize(
     OperationContext* opCtx, KVEngine* engine, RecordStore* rs, const Timestamp& opTime, int size) {
     BSONObj obj = makeBSONObjWithSize(opTime, size);
 
-    WriteUnitOfWork wuow(opCtx);
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+    StorageWriteTransaction txn(ru);
     WiredTigerRecordStore* wtrs = checked_cast<WiredTigerRecordStore*>(rs);
     invariant(wtrs);
     Status status = engine->oplogDiskLocRegister(
@@ -394,585 +399,9 @@ StatusWith<RecordId> insertBSONWithSize(
     }
     StatusWith<RecordId> res = rs->insertRecord(opCtx, obj.objdata(), obj.objsize(), opTime);
     if (res.isOK()) {
-        wuow.commit();
+        txn.commit();
     }
     return res;
-}
-
-/**
- * Insert records into an oplog and verify the number of truncate markers that are created.
- */
-TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_CreateNewMarker) {
-    std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
-    std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
-    auto engine = harnessHelper->getEngine();
-
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-
-    oplogTruncateMarkers->setMinBytesPerMarker(100);
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(0U, oplogTruncateMarkers->numMarkers_forTest());
-
-        // Inserting a record smaller than 'minBytesPerTruncateMarker' shouldn't create a new oplog
-        // truncate marker.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 1), 99),
-                  RecordId(1, 1));
-        ASSERT_EQ(0U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(99, oplogTruncateMarkers->currentBytes_forTest());
-
-        // Inserting another record such that their combined size exceeds
-        // 'minBytesPerTruncateMarker' should cause a new truncate marker to be created.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 2), 51),
-                  RecordId(1, 2));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-
-        // Inserting a record such that the combined size of this record and the previously inserted
-        // one exceed 'minBytesPerTruncateMarker' shouldn't cause a new truncate marker to be
-        // created because we've started filling a new truncate marker.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 3), 50),
-                  RecordId(1, 3));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-
-        // Inserting a record such that the combined size of this record and the previously inserted
-        // one is exactly equal to 'minBytesPerTruncateMarker' should cause a new truncate marker to
-        // be created.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 4), 50),
-                  RecordId(1, 4));
-        ASSERT_EQ(2U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-
-        // Inserting a single record that exceeds 'minBytesPerTruncateMarker' should cause a new
-        // truncate marker to
-        // be created.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 5), 101),
-                  RecordId(1, 5));
-        ASSERT_EQ(3U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-}
-
-/**
- * Insert records into an oplog and try to update them. The updates shouldn't succeed if the size of
- * record is changed.
- */
-TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_UpdateRecord) {
-    std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
-    std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
-    auto engine = harnessHelper->getEngine();
-
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-
-    oplogTruncateMarkers->setMinBytesPerMarker(100);
-
-    // Insert two records such that one makes up a full truncate marker and the other is a part of
-    // the truncate marker currently being filled.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 1), 100),
-                  RecordId(1, 1));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 2), 50),
-                  RecordId(1, 2));
-
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Attempts to grow the records should fail.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        BSONObj changed1 = makeBSONObjWithSize(Timestamp(1, 1), 101);
-        BSONObj changed2 = makeBSONObjWithSize(Timestamp(1, 2), 51);
-
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_NOT_OK(
-            rs->updateRecord(opCtx.get(), RecordId(1, 1), changed1.objdata(), changed1.objsize()));
-        ASSERT_NOT_OK(
-            rs->updateRecord(opCtx.get(), RecordId(1, 2), changed2.objdata(), changed2.objsize()));
-    }
-
-    // Attempts to shrink the records should also fail.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        BSONObj changed1 = makeBSONObjWithSize(Timestamp(1, 1), 99);
-        BSONObj changed2 = makeBSONObjWithSize(Timestamp(1, 2), 49);
-
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_NOT_OK(
-            rs->updateRecord(opCtx.get(), RecordId(1, 1), changed1.objdata(), changed1.objsize()));
-        ASSERT_NOT_OK(
-            rs->updateRecord(opCtx.get(), RecordId(1, 2), changed2.objdata(), changed2.objsize()));
-    }
-
-    // Changing the contents of the records without changing their size should succeed.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        BSONObj changed1 = makeBSONObjWithSize(Timestamp(1, 1), 100, 'y');
-        BSONObj changed2 = makeBSONObjWithSize(Timestamp(1, 2), 50, 'z');
-
-        WriteUnitOfWork wuow(opCtx.get());
-        // Explicitly sets the timestamp to ensure ordered writes.
-        ASSERT_OK(shard_role_details::getRecoveryUnit(opCtx.get())->setTimestamp(Timestamp(1, 3)));
-        ASSERT_OK(
-            rs->updateRecord(opCtx.get(), RecordId(1, 1), changed1.objdata(), changed1.objsize()));
-        ASSERT_OK(
-            rs->updateRecord(opCtx.get(), RecordId(1, 2), changed2.objdata(), changed2.objsize()));
-        wuow.commit();
-
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-    }
-}
-
-/**
- * Insert multiple records and truncate the oplog using RecordStore::truncate(). The operation
- * should leave no truncate markers, including the partially filled one.
- */
-TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_Truncate) {
-    std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
-    std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
-    auto engine = harnessHelper->getEngine();
-
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-
-    oplogTruncateMarkers->setMinBytesPerMarker(100);
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 1), 50),
-                  RecordId(1, 1));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 2), 50),
-                  RecordId(1, 2));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 3), 50),
-                  RecordId(1, 3));
-
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(3, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(150, rs->dataSize(opCtx.get()));
-
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_OK(rs->truncate(opCtx.get()));
-        wuow.commit();
-
-        ASSERT_EQ(0, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(0, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(0U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-}
-
-/**
- * Insert multiple records, truncate the oplog using RecordStore::cappedTruncateAfter(), and verify
- * that the metadata for each truncate marker is updated. If a full truncate marker is partially
- * truncated, then it should become the truncate marker currently being filled.
- */
-TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_CappedTruncateAfter) {
-    std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
-    std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
-    auto engine = harnessHelper->getEngine();
-
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-
-    oplogTruncateMarkers->setMinBytesPerMarker(1000);
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 1), 400),
-                  RecordId(1, 1));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 2), 800),
-                  RecordId(1, 2));
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 3), 200),
-                  RecordId(1, 3));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 4), 250),
-                  RecordId(1, 4));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 5), 300),
-                  RecordId(1, 5));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 6), 350),
-                  RecordId(1, 6));
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 7), 50),
-                  RecordId(1, 7));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 8), 100),
-                  RecordId(1, 8));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 9), 150),
-                  RecordId(1, 9));
-
-        ASSERT_EQ(9, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(2600, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(2U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(3, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(300, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Make sure all are visible.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        engine->waitForAllEarlierOplogWritesToBeVisible(opCtx.get(), rs.get());
-    }
-
-    // Truncate data using an inclusive RecordId that exists inside the truncate marker currently
-    // being filled.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        rs->cappedTruncateAfter(opCtx.get(),
-                                RecordId(1, 8),
-                                true /* inclusive */,
-                                nullptr /* aboutToDelete callback */);
-
-        ASSERT_EQ(7, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(2350, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(2U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Truncate data using an inclusive RecordId that refers to the 'lastRecord' of a full truncate
-    // marker.
-    // The truncate marker should become the one currently being filled.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        rs->cappedTruncateAfter(opCtx.get(),
-                                RecordId(1, 6),
-                                true /* inclusive */,
-                                nullptr /* aboutToDelete callback */);
-
-        ASSERT_EQ(5, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(1950, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(3, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(750, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Truncate data using a non-inclusive RecordId that exists inside the truncate marker currently
-    // being filled.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        rs->cappedTruncateAfter(opCtx.get(),
-                                RecordId(1, 3),
-                                false /* inclusive */,
-                                nullptr /* aboutToDelete callback */);
-
-        ASSERT_EQ(3, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(1400, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(200, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Truncate data using a non-inclusive RecordId that refers to the 'lastRecord' of a full
-    // truncate marker.
-    // The truncate marker should remain intact.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        rs->cappedTruncateAfter(opCtx.get(),
-                                RecordId(1, 2),
-                                false /* inclusive */,
-                                nullptr /* aboutToDelete callback */);
-
-        ASSERT_EQ(2, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(1200, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Truncate data using a non-inclusive RecordId that exists inside a full truncate marker. The
-    // truncate marker should become the one currently being filled.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        rs->cappedTruncateAfter(opCtx.get(),
-                                RecordId(1, 1),
-                                false /* inclusive */,
-                                nullptr /* aboutToDelete callback */);
-
-        ASSERT_EQ(1, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(400, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(0U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(400, oplogTruncateMarkers->currentBytes_forTest());
-    }
-}
-
-/**
- * Verify that oplog truncate markers are reclaimed when cappedMaxSize is exceeded.
- */
-TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_ReclaimTruncateMarkers) {
-    std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
-    std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
-    auto engine = harnessHelper->getEngine();
-
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        ASSERT_OK(wtrs->updateOplogSize(opCtx.get(), 230));
-    }
-
-    oplogTruncateMarkers->setMinBytesPerMarker(100);
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 1), 100),
-                  RecordId(1, 1));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 2), 110),
-                  RecordId(1, 2));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 3), 120),
-                  RecordId(1, 3));
-
-        ASSERT_EQ(3, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(330, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(3U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Fail to truncate the truncate marker when cappedMaxSize is exceeded, but the persisted
-    // timestamp is before the truncation point (i.e: leaves a gap that replication recovery would
-    // rely on).
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        harnessHelper->advanceStableTimestamp(Timestamp(1, 0));
-        wtrs->reclaimOplog(opCtx.get());
-
-        ASSERT_EQ(3, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(330, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(3U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Truncate a truncate marker when cappedMaxSize is exceeded.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        harnessHelper->advanceStableTimestamp(Timestamp(1, 3));
-        wtrs->reclaimOplog(opCtx.get());
-
-        ASSERT_EQ(2, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(230, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(2U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 4), 130),
-                  RecordId(1, 4));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 5), 140),
-                  RecordId(1, 5));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 6), 50),
-                  RecordId(1, 6));
-
-        ASSERT_EQ(5, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(550, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(4U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Truncate multiple truncate markers if necessary.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        harnessHelper->advanceStableTimestamp(Timestamp(1, 6));
-        wtrs->reclaimOplog(opCtx.get());
-
-        ASSERT_EQ(2, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(190, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // No-op if dataSize <= cappedMaxSize.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        harnessHelper->advanceStableTimestamp(Timestamp(1, 6));
-        wtrs->reclaimOplog(opCtx.get());
-
-        ASSERT_EQ(2, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(190, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Don't truncate the last truncate marker before the truncate point, even if the truncate point
-    // is ahead of it.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 7), 190),
-                  RecordId(1, 7));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 9), 120),
-                  RecordId(1, 9));
-
-        ASSERT_EQ(4, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(500, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(3U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        harnessHelper->advanceStableTimestamp(Timestamp(1, 8));
-        wtrs->reclaimOplog(opCtx.get());
-
-        ASSERT_EQ(3, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(360, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(2U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // Don't truncate entire oplog.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 10), 90),
-                  RecordId(1, 10));
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 11), 210),
-                  RecordId(1, 11));
-
-        ASSERT_EQ(5, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(660, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(3U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        harnessHelper->advanceStableTimestamp(Timestamp(1, 12));
-        wtrs->reclaimOplog(opCtx.get());
-
-        ASSERT_EQ(2, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(300, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
-
-    // OK to truncate all truncate markers if there are records in the oplog that are before or at
-    // the truncate-up-to point, that have not yet created a truncate marker.
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        // Use timestamp (1, 13) as we can't commit at the stable timestamp (1, 12).
-        auto t = insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 13), 90);
-        ASSERT_EQ(t, RecordId(1, 13));
-
-        ASSERT_EQ(3, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(390, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(90, oplogTruncateMarkers->currentBytes_forTest());
-    }
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        harnessHelper->advanceStableTimestamp(Timestamp(1, 13));
-        wtrs->reclaimOplog(opCtx.get());
-
-        ASSERT_EQ(1, rs->numRecords(opCtx.get()));
-        ASSERT_EQ(90, rs->dataSize(opCtx.get()));
-        ASSERT_EQ(0U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(90, oplogTruncateMarkers->currentBytes_forTest());
-    }
-}
-
-/**
- * Verify that an oplog truncate marker isn't created if it would cause the logical representation
- * of the records to not be in increasing order.
- */
-TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_AscendingOrder) {
-    std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
-    std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
-    auto engine = harnessHelper->getEngine();
-
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-
-    oplogTruncateMarkers->setMinBytesPerMarker(100);
-
-    {
-        ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-
-        ASSERT_EQ(0U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(2, 2), 50),
-                  RecordId(2, 2));
-        ASSERT_EQ(0U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(50, oplogTruncateMarkers->currentBytes_forTest());
-
-        // Inserting a record that has a smaller RecordId than the previously inserted record should
-        // be able to create a new truncate marker when no truncate markers already exist.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(2, 1), 50),
-                  RecordId(2, 1));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-
-        // However, inserting a record that has a smaller RecordId than most recently created
-        // truncate marker's last record shouldn't cause a new truncate marker to be created, even
-        // if the size of the inserted record exceeds 'minBytesPerTruncateMarker'.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(1, 1), 100),
-                  RecordId(1, 1));
-        ASSERT_EQ(1U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(1, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(100, oplogTruncateMarkers->currentBytes_forTest());
-
-        // Inserting a record that has a larger RecordId than the most recently created truncate
-        // marker's last record should then cause a new truncate marker to be created.
-        ASSERT_EQ(insertBSONWithSize(opCtx.get(), engine, rs.get(), Timestamp(2, 3), 50),
-                  RecordId(2, 3));
-        ASSERT_EQ(2U, oplogTruncateMarkers->numMarkers_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentRecords_forTest());
-        ASSERT_EQ(0, oplogTruncateMarkers->currentBytes_forTest());
-    }
 }
 
 // When the oplog collection is non-empty, but no OplogTruncateMarkers are
@@ -985,9 +414,8 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_NoMarkersGeneratedFromScann
     std::unique_ptr<RecordStoreHarnessHelper> harnessHelper = newRecordStoreHarnessHelper();
     auto wtHarnessHelper = dynamic_cast<WiredTigerHarnessHelper*>(harnessHelper.get());
     std::unique_ptr<RecordStore> rs(wtHarnessHelper->newOplogRecordStoreNoInit());
-    auto wtKvEngine = dynamic_cast<WiredTigerKVEngine*>(harnessHelper->getEngine());
 
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
+    auto wtrs = static_cast<WiredTigerRecordStore::Oplog*>(rs.get());
 
     int realNumRecords = 4;
     int realSizePerRecord = 100;
@@ -995,14 +423,14 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_NoMarkersGeneratedFromScann
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
 
         for (int i = 1; i <= realNumRecords; i++) {
-            ASSERT_EQ(insertBSONWithSize(
-                          opCtx.get(), wtKvEngine, rs.get(), Timestamp(i, 0), realSizePerRecord),
+            ASSERT_EQ(insertBSONWithSize(opCtx.get(),
+                                         harnessHelper->getEngine(),
+                                         rs.get(),
+                                         Timestamp(i, 0),
+                                         realSizePerRecord),
                       RecordId(i, 0));
         }
     }
-
-    // Force the oplog visibility timestamp to be up-to-date to the last record.
-    wtKvEngine->getOplogManager()->setOplogReadTimestamp(Timestamp(realNumRecords, 0));
 
     // Force the estimates of 'dataSize' and 'numRecords' to be lower than the real values.
     wtrs->setNumRecords(realNumRecords - 1);
@@ -1011,25 +439,22 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_NoMarkersGeneratedFromScann
     // Initialize the truncate markers.
     ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
 
-    wtrs->postConstructorInit(opCtx.get(), NamespaceString::kRsOplogNamespace);
+    wtrs->setTruncateMarkers(
+        WiredTigerOplogTruncateMarkers::createOplogTruncateMarkers(opCtx.get(), wtrs));
 
     // Confirm that small oplogs are processed by scanning.
-    BSONObjBuilder builder;
-    wtrs->getOplogTruncateStats(builder);
-    BSONObj stats = builder.obj();
-    ASSERT_EQ(stats.getField("processingMethod").valueStringDataSafe(), "scanning");
-    ASSERT_GTE(stats.getField("totalTimeProcessingMicros").safeNumberLong(), 0);
-
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-    ASSERT_FALSE(oplogTruncateMarkers->processedBySampling());
+    auto oplogTruncateMarkers = wtrs->oplog()->getCollectionTruncateMarkers();
+    ASSERT_EQ(CollectionTruncateMarkers::MarkersCreationMethod::Scanning,
+              oplogTruncateMarkers->getMarkersCreationMethod());
+    ASSERT_GTE(oplogTruncateMarkers->getCreationProcessingTime().count(), 0);
     auto numMarkers = oplogTruncateMarkers->numMarkers_forTest();
     ASSERT_EQ(numMarkers, 0U);
 
     // A forced scan over the RecordStore should force the 'currentBytes' to be accurate in the
     // truncate markers as well as the RecordStore's 'numRecords' and 'dataSize'.
     ASSERT_EQ(oplogTruncateMarkers->currentBytes_forTest(), realNumRecords * realSizePerRecord);
-    ASSERT_EQ(wtrs->dataSize(opCtx.get()), realNumRecords * realSizePerRecord);
-    ASSERT_EQ(wtrs->numRecords(opCtx.get()), realNumRecords);
+    ASSERT_EQ(wtrs->dataSize(), realNumRecords * realSizePerRecord);
+    ASSERT_EQ(wtrs->numRecords(), realNumRecords);
 }
 
 // Ensure that if we sample and create duplicate oplog truncate markers, perform truncation
@@ -1042,7 +467,7 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_Duplicates) {
     std::unique_ptr<RecordStore> rs(wtHarnessHelper->newOplogRecordStoreNoInit());
     auto engine = harnessHelper->getEngine();
 
-    WiredTigerRecordStore* wtrs = static_cast<WiredTigerRecordStore*>(rs.get());
+    auto wtrs = static_cast<WiredTigerRecordStore::Oplog*>(rs.get());
 
     {
         // Before initializing the RecordStore, which also starts the oplog sampling process,
@@ -1059,29 +484,21 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_Duplicates) {
                   RecordId(4, 0));
     }
 
-    // Force the oplog visibility timestamp to be up-to-date to the last record.
-    auto wtKvEngine = dynamic_cast<WiredTigerKVEngine*>(harnessHelper->getEngine());
-    wtKvEngine->getOplogManager()->setOplogReadTimestamp(Timestamp(4, 0));
-
     {
         // Force initialize the oplog truncate markers to use sampling by providing very large,
         // inaccurate sizes. This should cause us to oversample the records in the oplog.
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         wtrs->setNumRecords(1024 * 1024);
         wtrs->setDataSize(1024 * 1024 * 1024);
-        wtrs->postConstructorInit(opCtx.get(), NamespaceString::kRsOplogNamespace);
+        wtrs->setTruncateMarkers(
+            WiredTigerOplogTruncateMarkers::createOplogTruncateMarkers(opCtx.get(), wtrs));
     }
 
-    // Confirm that sampling occurred.
-    BSONObjBuilder builder;
-    wtrs->getOplogTruncateStats(builder);
-    BSONObj stats = builder.obj();
-    ASSERT_EQ(stats.getField("processingMethod").valueStringDataSafe(), "sampling");
-    ASSERT_GTE(stats.getField("totalTimeProcessingMicros").safeNumberLong(), 0);
-
     // Confirm that some truncate markers were generated.
-    auto oplogTruncateMarkers = wtrs->oplogTruncateMarkers();
-    ASSERT(oplogTruncateMarkers->processedBySampling());
+    auto oplogTruncateMarkers = wtrs->oplog()->getCollectionTruncateMarkers();
+    ASSERT_EQ(CollectionTruncateMarkers::MarkersCreationMethod::Sampling,
+              oplogTruncateMarkers->getMarkersCreationMethod());
+    ASSERT_GTE(oplogTruncateMarkers->getCreationProcessingTime().count(), 0);
     auto truncateMarkersBefore = oplogTruncateMarkers->numMarkers_forTest();
     ASSERT_GT(truncateMarkersBefore, 0U);
     ASSERT_GT(oplogTruncateMarkers->currentBytes_forTest(), 0);
@@ -1091,12 +508,13 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_Duplicates) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
 
         wtHarnessHelper->advanceStableTimestamp(Timestamp(4, 0));
-        wtrs->reclaimOplog(opCtx.get());
+        auto mayTruncateUpTo = RecordId(engine->getPinnedOplog().asULL());
+        oplog_truncation::reclaimOplog(opCtx.get(), *rs.get(), mayTruncateUpTo);
         ASSERT_EQ(truncateMarkersBefore, oplogTruncateMarkers->numMarkers_forTest());
 
         // Reduce the oplog size to ensure we create a truncate marker and truncate on the next
         // insert.
-        ASSERT_OK(wtrs->updateOplogSize(opCtx.get(), 400));
+        ASSERT_OK(wtrs->updateSize(400));
 
         // Inserting these records should meet the requirements for truncation. That is: there is a
         // record, 5, after the last truncate marker, 4, and before the truncation point, 6.
@@ -1107,12 +525,13 @@ TEST(WiredTigerRecordStoreTest, OplogTruncateMarkers_Duplicates) {
 
         // Ensure every truncate marker has been cleaned up except for the last one ending in 6.
         wtHarnessHelper->advanceStableTimestamp(Timestamp(6, 0));
-        wtrs->reclaimOplog(opCtx.get());
+        mayTruncateUpTo = RecordId(engine->getPinnedOplog().asULL());
+        oplog_truncation::reclaimOplog(opCtx.get(), *rs.get(), mayTruncateUpTo);
         ASSERT_EQ(1, oplogTruncateMarkers->numMarkers_forTest());
 
         // The original oplog should have rolled over and the size and count should be accurate.
-        ASSERT_EQ(1, wtrs->numRecords(opCtx.get()));
-        ASSERT_EQ(100, wtrs->dataSize(opCtx.get()));
+        ASSERT_EQ(1, wtrs->numRecords());
+        ASSERT_EQ(100, wtrs->dataSize());
     }
 }
 
@@ -1128,6 +547,7 @@ void testTruncateRange(int64_t numRecordsToInsert,
     std::vector<RecordId> recordIds;
 
     auto opCtx = harnessHelper->newOperationContext();
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
 
     for (int i = 0; i < numRecordsToInsert; i++) {
         auto recordId = insertBSONWithSize(opCtx.get(), engine, wtrs, Timestamp(1, i), 100);
@@ -1135,25 +555,24 @@ void testTruncateRange(int64_t numRecordsToInsert,
         recordIds.emplace_back(std::move(recordId.getValue()));
     }
 
-    auto sizePerRecord = wtrs->dataSize(opCtx.get()) / wtrs->numRecords(opCtx.get());
+    auto sizePerRecord = wtrs->dataSize() / wtrs->numRecords();
 
     std::sort(recordIds.begin(), recordIds.end());
 
     const auto& beginId = recordIds[deletionPosBegin];
     const auto& endId = recordIds[deletionPosEnd];
     {
-        WriteUnitOfWork wuow(opCtx.get());
+        StorageWriteTransaction txn(ru);
 
         auto numRecordsDeleted = deletionPosEnd - deletionPosBegin + 1;
 
         ASSERT_OK(wtrs->rangeTruncate(
             opCtx.get(), beginId, endId, -(sizePerRecord * numRecordsDeleted), -numRecordsDeleted));
 
-        ASSERT_EQ(wtrs->dataSize(opCtx.get()),
-                  sizePerRecord * (numRecordsToInsert - numRecordsDeleted));
-        ASSERT_EQ(wtrs->numRecords(opCtx.get()), (numRecordsToInsert - numRecordsDeleted));
+        ASSERT_EQ(wtrs->dataSize(), sizePerRecord * (numRecordsToInsert - numRecordsDeleted));
+        ASSERT_EQ(wtrs->numRecords(), (numRecordsToInsert - numRecordsDeleted));
 
-        wuow.commit();
+        txn.commit();
     }
     std::set<RecordId> expectedRemainingRecordIds;
     std::copy(recordIds.begin(),
@@ -1188,23 +607,24 @@ TEST(WiredTigerRecordStoreTest, GetLatestOplogTest) {
     std::unique_ptr<RecordStore> rs(harnessHelper->newOplogRecordStore());
     auto engine = harnessHelper->getEngine();
 
-    auto wtrs = checked_cast<WiredTigerRecordStore*>(rs.get());
+    auto wtrs = checked_cast<WiredTigerRecordStore::Oplog*>(rs.get());
 
     // 1) Initialize the top of oplog to "1".
     ServiceContext::UniqueOperationContext op1(harnessHelper->newOperationContext());
+    auto& ru1 = *shard_role_details::getRecoveryUnit(op1.get());
 
     Timestamp tsOne = [&] {
-        WriteUnitOfWork op1WUOW(op1.get());
+        StorageWriteTransaction op1Txn(ru1);
         Timestamp tsOne = Timestamp(static_cast<unsigned long long>(
             oplogOrderInsertOplog(op1.get(), engine, rs, 1).getLong()));
-        op1WUOW.commit();
+        op1Txn.commit();
         return tsOne;
     }();
     // Asserting on a recovery unit without a snapshot.
-    ASSERT_EQ(tsOne, wtrs->getLatestOplogTimestamp(op1.get()));
+    ASSERT_EQ(tsOne, wtrs->getLatestTimestamp(ru1));
 
     // 2) Open a hole at time "2".
-    boost::optional<WriteUnitOfWork> op1WUOW(op1.get());
+    boost::optional<StorageWriteTransaction> op1txn(ru1);
     // Don't save the return value because the compiler complains about unused variables.
     oplogOrderInsertOplog(op1.get(), engine, rs, 2);
 
@@ -1213,28 +633,29 @@ TEST(WiredTigerRecordStoreTest, GetLatestOplogTest) {
     Client::initThread("client2", getGlobalServiceContext()->getService());
 
     ServiceContext::UniqueOperationContext op2(harnessHelper->newOperationContext());
-    // Should not see uncommited write from op1.
-    ASSERT_EQ(tsOne, wtrs->getLatestOplogTimestamp(op2.get()));
+    auto& ru2 = *shard_role_details::getRecoveryUnit(op2.get());
+    // Should not see uncommitted write from op1.
+    ASSERT_EQ(tsOne, wtrs->getLatestTimestamp(ru2));
 
     Timestamp tsThree = [&] {
-        WriteUnitOfWork op2WUOW(op2.get());
+        StorageWriteTransaction op2Txn(ru2);
         Timestamp tsThree = Timestamp(static_cast<unsigned long long>(
             oplogOrderInsertOplog(op2.get(), engine, rs, 3).getLong()));
-        op2WUOW.commit();
+        op2Txn.commit();
         return tsThree;
     }();
     // After committing, three is the top of oplog.
-    ASSERT_EQ(tsThree, wtrs->getLatestOplogTimestamp(op2.get()));
+    ASSERT_EQ(tsThree, wtrs->getLatestTimestamp(ru2));
 
     // Switch to client 1.
     op2.reset();
     auto client2 = Client::releaseCurrent();
     Client::setCurrent(std::move(client1));
 
-    op1WUOW->commit();
+    op1txn->commit();
     // Committing the write at timestamp "2" does not change the top of oplog result. A new query
     // with client 1 will see timestamp "3".
-    ASSERT_EQ(tsThree, wtrs->getLatestOplogTimestamp(op1.get()));
+    ASSERT_EQ(tsThree, wtrs->getLatestTimestamp(ru1));
 }
 
 TEST(WiredTigerRecordStoreTest, CursorInActiveTxnAfterNext) {
@@ -1244,8 +665,9 @@ TEST(WiredTigerRecordStoreTest, CursorInActiveTxnAfterNext) {
     RecordId rid1;
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
 
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "a", 2, Timestamp());
         ASSERT_OK(res.getStatus());
         rid1 = res.getValue();
@@ -1253,28 +675,28 @@ TEST(WiredTigerRecordStoreTest, CursorInActiveTxnAfterNext) {
         res = rs->insertRecord(opCtx.get(), "b", 2, Timestamp());
         ASSERT_OK(res.getStatus());
 
-        uow.commit();
+        txn.commit();
     }
 
     // Cursors should always ensure they are in an active transaction when next() is called.
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
 
-        auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx.get()));
+        auto& ru = *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx.get()));
 
         auto cursor = rs->getCursor(opCtx.get());
         ASSERT(cursor->next());
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(ru.isActive());
 
-        // Committing a WriteUnitOfWork will end the current transaction.
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_TRUE(ru->isActive());
-        wuow.commit();
-        ASSERT_FALSE(ru->isActive());
+        // Committing a StorageWriteTransaction will end the current transaction.
+        StorageWriteTransaction txn(ru);
+        ASSERT_TRUE(ru.isActive());
+        txn.commit();
+        ASSERT_FALSE(ru.isActive());
 
         // If a cursor is used after a WUOW commits, it should implicitly start a new transaction.
         ASSERT(cursor->next());
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(ru.isActive());
     }
 }
 
@@ -1285,8 +707,9 @@ TEST(WiredTigerRecordStoreTest, CursorInActiveTxnAfterSeek) {
     RecordId rid1;
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
 
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "a", 2, Timestamp());
         ASSERT_OK(res.getStatus());
         rid1 = res.getValue();
@@ -1294,7 +717,7 @@ TEST(WiredTigerRecordStoreTest, CursorInActiveTxnAfterSeek) {
         res = rs->insertRecord(opCtx.get(), "b", 2, Timestamp());
         ASSERT_OK(res.getStatus());
 
-        uow.commit();
+        txn.commit();
     }
 
     // Cursors should always ensure they are in an active transaction when seekExact() or seek() is
@@ -1302,30 +725,30 @@ TEST(WiredTigerRecordStoreTest, CursorInActiveTxnAfterSeek) {
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
 
-        auto ru = WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx.get()));
+        auto& ru = *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx.get()));
 
         auto cursor = rs->getCursor(opCtx.get());
         ASSERT(cursor->seekExact(rid1));
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(ru.isActive());
 
-        // Committing a WriteUnitOfWork will end the current transaction.
-        WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_TRUE(ru->isActive());
-        wuow.commit();
-        ASSERT_FALSE(ru->isActive());
+        // Committing a StorageWriteTransaction will end the current transaction.
+        StorageWriteTransaction txn(ru);
+        ASSERT_TRUE(ru.isActive());
+        txn.commit();
+        ASSERT_FALSE(ru.isActive());
 
         // If a cursor is used after a WUOW commits, it should implicitly start a new transaction.
         ASSERT(cursor->seekExact(rid1));
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(ru.isActive());
 
         // End the transaction and test seek()
         {
-            WriteUnitOfWork wuow(opCtx.get());
-            wuow.commit();
+            StorageWriteTransaction txn(ru);
+            txn.commit();
         }
-        ASSERT_FALSE(ru->isActive());
+        ASSERT_FALSE(ru.isActive());
         ASSERT(cursor->seek(rid1, SeekableRecordCursor::BoundInclusion::kInclude));
-        ASSERT_TRUE(ru->isActive());
+        ASSERT_TRUE(ru.isActive());
     }
 }
 
@@ -1335,13 +758,14 @@ TEST(WiredTigerRecordStoreTest, CursorInActiveTxnAfterSeek) {
 TEST(WiredTigerRecordStoreTest, ClusteredRecordStore) {
     const std::unique_ptr<RecordStoreHarnessHelper> harnessHelper(newRecordStoreHarnessHelper());
     const ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
+    auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
 
     const std::string ns = "testRecordStore";
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
     const std::string uri = WiredTigerKVEngine::kTableUriPrefix + ns;
     const StatusWith<std::string> result =
         WiredTigerRecordStore::generateCreateString(std::string{kWiredTigerEngineName},
-                                                    nss,
+                                                    NamespaceStringUtil::serializeForCatalog(nss),
                                                     "",
                                                     CollectionOptions(),
                                                     "",
@@ -1351,24 +775,23 @@ TEST(WiredTigerRecordStoreTest, ClusteredRecordStore) {
     const std::string config = result.getValue();
 
     {
-        WriteUnitOfWork uow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         WiredTigerRecoveryUnit* ru =
             checked_cast<WiredTigerRecoveryUnit*>(shard_role_details::getRecoveryUnit(opCtx.get()));
         WT_SESSION* s = ru->getSession()->getSession();
         invariantWTOK(s->create(s, uri.c_str(), config.c_str()), s);
-        uow.commit();
+        txn.commit();
     }
 
     WiredTigerRecordStore::Params params;
-    params.nss = nss;
     params.uuid = boost::none;
     params.ident = ns;
     params.engineName = std::string{kWiredTigerEngineName};
-    params.isCapped = false;
     params.keyFormat = KeyFormat::String;
     params.overwrite = false;
     params.isEphemeral = false;
     params.isLogged = WiredTigerUtil::useTableLogging(nss);
+    params.isChangeCollection = false;
     params.sizeStorer = nullptr;
     params.tracksSizeAdjustments = true;
     params.forceUpdateWithFullDocument = false;
@@ -1378,18 +801,17 @@ TEST(WiredTigerRecordStoreTest, ClusteredRecordStore) {
         wtKvEngine,
         WiredTigerRecoveryUnit::get(*shard_role_details::getRecoveryUnit(opCtx.get())),
         params);
-    rs->postConstructorInit(opCtx.get(), nss);
 
     const auto id = StringData{"1"};
     const auto rid = RecordId(id.rawData(), id.size());
     const auto data = "data";
     {
-        WriteUnitOfWork wuow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         StatusWith<RecordId> s =
             rs->insertRecord(opCtx.get(), rid, data, strlen(data), Timestamp());
         ASSERT_TRUE(s.isOK());
-        ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
-        wuow.commit();
+        ASSERT_EQUALS(1, rs->numRecords());
+        txn.commit();
     }
     // Read the record back.
     RecordData rd;
@@ -1398,10 +820,10 @@ TEST(WiredTigerRecordStoreTest, ClusteredRecordStore) {
     // Update the record.
     const auto dataUpdated = "updated";
     {
-        WriteUnitOfWork wuow(opCtx.get());
+        StorageWriteTransaction txn(ru);
         ASSERT_OK(rs->updateRecord(opCtx.get(), rid, dataUpdated, strlen(dataUpdated)));
-        ASSERT_EQUALS(1, rs->numRecords(opCtx.get()));
-        wuow.commit();
+        ASSERT_EQUALS(1, rs->numRecords());
+        txn.commit();
     }
     ASSERT_TRUE(rs->findRecord(opCtx.get(), rid, &rd));
     ASSERT_EQ(0, memcmp(dataUpdated, rd.data(), strlen(dataUpdated)));
@@ -1416,17 +838,18 @@ TEST(WiredTigerRecordStoreTest, SizeInfoAccurateAfterRollbackWithDelete) {
     RecordId rid;  // This record will be deleted by two transactions.
 
     ServiceContext::UniqueOperationContext ctx(harnessHelper->newOperationContext());
+    auto& ru = *shard_role_details::getRecoveryUnit(ctx.get());
 
     {
-        WriteUnitOfWork uow(ctx.get());
+        StorageWriteTransaction txn(ru);
         rid = rs->insertRecord(ctx.get(), "a", 2, Timestamp()).getValue();
-        uow.commit();
+        txn.commit();
     }
 
-    ASSERT_EQ(1, rs->numRecords(ctx.get()));
-    ASSERT_EQ(2, rs->dataSize(ctx.get()));
+    ASSERT_EQ(1, rs->numRecords());
+    ASSERT_EQ(2, rs->dataSize());
 
-    WriteUnitOfWork uow(ctx.get());
+    StorageWriteTransaction txn(ru);
 
     auto aborted = std::make_shared<unittest::Barrier>(2);
     auto deleted = std::make_shared<unittest::Barrier>(2);
@@ -1437,7 +860,8 @@ TEST(WiredTigerRecordStoreTest, SizeInfoAccurateAfterRollbackWithDelete) {
     stdx::thread abortedThread([&harnessHelper, &rs, &rid, aborted, deleted]() {
         auto client = harnessHelper->serviceContext()->getService()->makeClient("c1");
         auto ctx = harnessHelper->newOperationContext(client.get());
-        WriteUnitOfWork txn(ctx.get());
+        auto& ru = *shard_role_details::getRecoveryUnit(ctx.get());
+        StorageWriteTransaction txn(ru);
         // Registered changes are executed in reverse order.
         rs->deleteRecord(ctx.get(), rid);
         shard_role_details::getRecoveryUnit(ctx.get())->onRollback(
@@ -1454,11 +878,11 @@ TEST(WiredTigerRecordStoreTest, SizeInfoAccurateAfterRollbackWithDelete) {
     // Notify the other thread we have deleted, let it complete the rollback.
     deleted->countDownAndWait();
 
-    uow.commit();
+    txn.commit();
 
     abortedThread.join();
-    ASSERT_EQ(0, rs->numRecords(ctx.get()));
-    ASSERT_EQ(0, rs->dataSize(ctx.get()));
+    ASSERT_EQ(0, rs->numRecords());
+    ASSERT_EQ(0, rs->dataSize());
 }
 
 // Makes sure that when records are inserted with provided recordIds, the
@@ -1474,18 +898,19 @@ TEST(WiredTigerRecordStoreTest, LargestRecordIdSeenIsCorrectWhenGivenRecordIds) 
     RecordId rid;
 
     ServiceContext::UniqueOperationContext ctx(harnessHelper->newOperationContext());
+    auto& ru = *shard_role_details::getRecoveryUnit(ctx.get());
 
     {
         // Insert a single record with recordId 7.
-        WriteUnitOfWork uow(ctx.get());
+        StorageWriteTransaction txn(ru);
         rid = rs->insertRecord(ctx.get(), RecordId(7), "a", 2, Timestamp()).getValue();
-        uow.commit();
+        txn.commit();
     }
 
     // The next recordId reserved is higher than 7.
     rs->reserveRecordIds(ctx.get(), &reservedRids, 1);
     ASSERT_GT(reservedRids[0].getLong(), RecordId(7).getLong());
-    ASSERT_EQ(1, rs->numRecords(ctx.get()));
+    ASSERT_EQ(1, rs->numRecords());
 
     // Insert a few records at once, where the recordIds are not in order. And ensure that
     // we still reserve recordIds from the right point afterwards.
@@ -1494,16 +919,16 @@ TEST(WiredTigerRecordStoreTest, LargestRecordIdSeenIsCorrectWhenGivenRecordIds) 
     recordsToInsert.push_back(Record{RecordId(14), RecordData()});
     recordsToInsert.push_back(Record{RecordId(13), RecordData()});
     {
-        WriteUnitOfWork uow(ctx.get());
+        StorageWriteTransaction txn(ru);
         ASSERT_OK(rs->insertRecords(ctx.get(), &recordsToInsert, timestamps));
-        uow.commit();
+        txn.commit();
     }
 
     // The next recordId reserved is higher than 14.
     reservedRids.clear();
     rs->reserveRecordIds(ctx.get(), &reservedRids, 1);
     ASSERT_GT(reservedRids[0].getLong(), RecordId(14).getLong());
-    ASSERT_EQ(3, rs->numRecords(ctx.get()));
+    ASSERT_EQ(3, rs->numRecords());
 
     // Insert a few records at once, where the recordIds are in order. And ensure that
     // we still reserve recordIds from the right point afterwards.
@@ -1511,16 +936,16 @@ TEST(WiredTigerRecordStoreTest, LargestRecordIdSeenIsCorrectWhenGivenRecordIds) 
     recordsToInsert.push_back(Record{RecordId(19), RecordData()});
     recordsToInsert.push_back(Record{RecordId(20), RecordData()});
     {
-        WriteUnitOfWork uow(ctx.get());
+        StorageWriteTransaction txn(ru);
         ASSERT_OK(rs->insertRecords(ctx.get(), &recordsToInsert, timestamps));
-        uow.commit();
+        txn.commit();
     }
 
     // The next recordId reserved is higher than 20.
     reservedRids.clear();
     rs->reserveRecordIds(ctx.get(), &reservedRids, 1);
     ASSERT_GT(reservedRids[0].getLong(), RecordId(20).getLong());
-    ASSERT_EQ(5, rs->numRecords(ctx.get()));
+    ASSERT_EQ(5, rs->numRecords());
 }
 
 }  // namespace

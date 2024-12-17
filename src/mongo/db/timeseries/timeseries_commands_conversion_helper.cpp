@@ -46,15 +46,12 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/commit_quorum_options.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/timeseries/bucket_spec.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/logv2/redaction.h"
@@ -149,16 +146,17 @@ CreateIndexesCommand makeTimeseriesCreateIndexesCommand(OperationContext* opCtx,
                 }
                 // Since no collation was specified in the command, we know the index collation will
                 // match the collection's collation.
-                auto collationMatchesDefault = ExpressionContext::CollationMatchesDefault::kYes;
+                auto collationMatchesDefault = ExpressionContextCollationMatchesDefault::kYes;
 
                 // Even though the index collation will match the collection's collation, we don't
                 // know whether or not that collation is simple. However, I think we can correctly
                 // rewrite the filter expression without knowing this... Looking up the correct
                 // value would require handling mongos and mongod separately.
-                std::unique_ptr<CollatorInterface> collator{nullptr};
-
-                auto expCtx = make_intrusive<ExpressionContext>(opCtx, std::move(collator), origNs);
-                expCtx->collationMatchesDefault = collationMatchesDefault;
+                auto expCtx = ExpressionContextBuilder{}
+                                  .opCtx(opCtx)
+                                  .ns(origNs)
+                                  .collationMatchesDefault(collationMatchesDefault)
+                                  .build();
                 // We can't know if there won't be extended range values in the collection, so
                 // assume there will be.
                 expCtx->setRequiresTimeseriesExtendedRangeSupport(true);

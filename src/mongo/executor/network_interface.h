@@ -60,7 +60,6 @@
 namespace mongo {
 namespace executor {
 
-extern FailPoint networkInterfaceDiscardCommandsBeforeAcquireConn;
 extern FailPoint networkInterfaceHangCommandsAfterAcquireConn;
 extern FailPoint networkInterfaceCommandsFailedWithErrorCode;
 extern FailPoint networkInterfaceShouldNotKillPendingRequests;
@@ -287,6 +286,8 @@ public:
      * Acquire a connection and subsequently release it.
      * If status is not OK, the connection will be dropped,
      * otherwise the connection will be returned to the pool.
+     * Throws `ExceptionFor<ErrorCodes::NotYetInitialized>`
+     * if NetworkInterface is not started up yet.
      */
     virtual void testEgress(const HostAndPort& hostAndPort,
                             transport::ConnectSSLMode sslMode,

@@ -127,11 +127,15 @@ public:
      * If an index is compound but not prefixed by a predicate's path, it's only useful if
      * there exists another predicate that 1. will use that index and 2. is related to the
      * original predicate by having an AND as a parent.
+     *
+     * 'nodeIsNotChild' passes information if a node is an indirect child of a '$not' node. Some
+     * types of nodes can use index by themselves, but cannot use it if they are under a $not.
      */
     static void rateIndices(MatchExpression* node,
                             std::string prefix,
                             const std::vector<IndexEntry>& indices,
-                            const QueryContext& queryContex);
+                            const QueryContext& queryContext,
+                            bool nodeIsNotChild = false);
 
     /**
      * Amend the RelevantTag lists for all predicates in the subtree rooted at 'node' to remove
@@ -186,11 +190,6 @@ public:
      */
     static bool nodeIsSupportedByWildcardIndex(const MatchExpression* queryExpr);
 
-    /**
-     * Check if this match expression is a leaf and is supported by a hashed index.
-     */
-    static bool nodeIsSupportedByHashedIndex(const MatchExpression* queryExpr);
-
     /*
      * Return true if the given match expression can use a sparse index, false otherwise. This will
      * not traverse the children of the given match expression.
@@ -203,20 +202,6 @@ public:
      * returns true then 'queryExpr' may (or may not) be supported by some index.
      */
     static bool logicalNodeMayBeSupportedByAnIndex(const MatchExpression* queryExpr);
-
-    /**
-     * We can use an index for this special case: {$not:{$in:[null, []]}}. Return true if this is
-     * the expression (modulo in-list ordering) and it doesn't contain any regexes.
-     *
-     * Why is this case special? An equality expression for "null" will match both documents with a
-     * literal null for the specified key, and those where the key is not present. An equality
-     * expression for "[]" (which is stored as "undefined" in the index) will match documents with
-     * an empty array or an array with an empty array element. If we negate either of this bounds in
-     * isolation, we may produce incomplete results wrt the other expression. If we negate the
-     * composition of the two, we can properly return complete results excluding both null and empty
-     * array values.
-     */
-    static bool canUseIndexForNin(const InMatchExpression* ime);
 
 private:
     /**
@@ -234,7 +219,8 @@ private:
                             std::size_t keyPatternIndex,
                             MatchExpression* node,
                             StringData fullPathToNode,
-                            const QueryContext& queryContex);
+                            const QueryContext& queryContext,
+                            bool nodeIsNotChild);
 
     /**
      * Amend the RelevantTag lists for all predicates in the subtree rooted at 'node' to remove

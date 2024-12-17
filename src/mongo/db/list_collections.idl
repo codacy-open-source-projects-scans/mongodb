@@ -50,6 +50,13 @@ structs:
                 description: "Unique, immutable collection ID."
                 optional: true
                 stability: stable
+            configDebugDump:
+                type: bool
+                description: >-
+                    When true, the collection should be included in full-cluster dumps
+                    (e.g., mongodump).
+                optional: true
+                stability: unstable
 
     ListCollectionsReplyItem:
         description: "Individual result"
@@ -134,7 +141,10 @@ commands:
                 default: false
                 stability: stable
             includePendingDrops:
+                # Deprecated: This field has no effect since ~4.2 when we stopped
+                # using drop pending namespaces.
+                # TODO(SERVER-92839): remove this option.
+                ignore: true
                 type: safeBool
                 stability: unstable
-                optional: true
         reply_type: ListCollectionsReply

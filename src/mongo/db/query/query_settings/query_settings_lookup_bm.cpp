@@ -232,7 +232,7 @@ public:
         auto client = getGlobalServiceContext()->getService()->makeClient("setup");
         auto opCtx = client->makeOperationContext();
         auto expCtx =
-            make_intrusive<ExpressionContext>(opCtx.get(), nullptr, makeNamespace(tenantId));
+            ExpressionContextBuilder{}.opCtx(opCtx.get()).ns(makeNamespace(tenantId)).build();
         std::vector<QueryShapeConfiguration> queryShapeConfigs;
 
         auto generateQueryShapeConfiguration =
@@ -284,7 +284,7 @@ public:
         auto opCtx = client->makeOperationContext();
         auto tid = tenantId(state.thread_index);
         auto ns = makeNamespace(tid);
-        auto expCtx = make_intrusive<ExpressionContext>(opCtx.get(), nullptr, ns);
+        auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx.get()).ns(ns).build();
 
         bool isTestingHitCase = state.range(0) > 0 && state.range(2) == 1;
         BSONObjBuilder bob;
@@ -352,7 +352,7 @@ class QuerySettingsNotMultitenantLookupBenchmark : public QuerySettingsLookupBen
 
             // On the first launch, initialize global service context and the QuerySettingsManager.
             setGlobalServiceContext(ServiceContext::make());
-            QuerySettingsManager::create(getGlobalServiceContext(), {});
+            QuerySettingsManager::create(getGlobalServiceContext(), {}, {});
 
             // Initialize the feature flag.
             _querySettingsFeatureFlag.emplace("featureFlagQuerySettings", true);
@@ -380,7 +380,7 @@ class QuerySettingsMultiTenantLookupBenchmark : public QuerySettingsLookupBenchm
             // On the first launched thread, initialize global service context and the
             // QuerySettingsManager.
             setGlobalServiceContext(ServiceContext::make());
-            QuerySettingsManager::create(getGlobalServiceContext(), {});
+            QuerySettingsManager::create(getGlobalServiceContext(), {}, {});
 
             // Initialize the feature flags.
             _querySettingsFeatureFlag.emplace("featureFlagQuerySettings", true);

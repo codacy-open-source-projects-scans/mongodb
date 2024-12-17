@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include "mongo/db/query/ce/sampling_estimator.h"
 #include <cstddef>
 #include <functional>
 #include <map>
@@ -43,7 +44,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/cost_based_ranker/qsn_estimator.h"
+#include "mongo/db/query/cost_based_ranker/estimates_storage.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
@@ -152,7 +153,9 @@ public:
      * plans from which the caller can select a winner.
      */
     static StatusWith<CostBasedRankerResult> planWithCostBasedRanking(
-        const CanonicalQuery& query, const QueryPlannerParams& params);
+        const CanonicalQuery& query,
+        const QueryPlannerParams& params,
+        const ce::SamplingEstimator* samplingEstimator);
 
     /**
      * Generates and returns a query solution, given data retrieved from the plan cache.
@@ -179,7 +182,8 @@ public:
             const CanonicalQuery& cq, const CollectionPtr& coll)> getSolutionCachedData,
         const CollectionPtr& collection,
         const CanonicalQuery& query,
-        const QueryPlannerParams& params);
+        const QueryPlannerParams& params,
+        const ce::SamplingEstimator* samplingEstimator);
 
     /**
      * Generates and returns the index tag tree that will be inserted into the plan cache. This data

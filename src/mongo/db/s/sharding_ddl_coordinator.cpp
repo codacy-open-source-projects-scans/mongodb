@@ -29,16 +29,14 @@
 
 
 #include <algorithm>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <mutex>
-#include <tuple>
 #include <type_traits>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -46,28 +44,22 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
-#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_ddl_coordinator.h"
 #include "mongo/db/s/sharding_ddl_coordinator_gen.h"
 #include "mongo/db/s/sharding_ddl_util.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/shard_id.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/rpc/unique_message.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
@@ -265,15 +257,30 @@ ExecutorFuture<void> ShardingDDLCoordinator::_acquireAllLocksAsync(
         const bool isDbOnly = lockNss.coll().empty();
 
         // Acquiring the database DDL lock
-        if (lastDb != lockNss.dbName()) {
+        const auto normalizedDbName = [&] {
+            if (_coordId.getOperationType() != DDLCoordinatorTypeEnum::kCreateDatabase) {
+                // Already existing databases are not allowed to have their names differ just on
+                // case. Uses the requested database name directly.
+                return lockNss.dbName();
+            }
+            const auto dbNameStr =
+                DatabaseNameUtil::serialize(lockNss.dbName(), SerializationContext::stateDefault());
+            return DatabaseNameUtil::deserialize(
+                boost::none, str::toLower(dbNameStr), SerializationContext::stateDefault());
+        }();
+        if (lastDb != normalizedDbName) {
             const auto lockMode = (isDbOnly ? MODE_X : MODE_IX);
-            const auto& dbName = lockNss.dbName();
-            futureChain =
-                std::move(futureChain)
-                    .then([this, executor, token, dbName, lockMode, anchor = shared_from_this()] {
-                        return _acquireLockAsync<DatabaseName>(executor, token, dbName, lockMode);
-                    });
-            lastDb = dbName;
+            futureChain = std::move(futureChain)
+                              .then([this,
+                                     executor,
+                                     token,
+                                     normalizedDbName,
+                                     lockMode,
+                                     anchor = shared_from_this()] {
+                                  return _acquireLockAsync<DatabaseName>(
+                                      executor, token, normalizedDbName, lockMode);
+                              });
+            lastDb = normalizedDbName;
         }
 
         // Acquiring the collection DDL lock
@@ -351,7 +358,8 @@ SemiFuture<void> ShardingDDLCoordinator::run(std::shared_ptr<executor::ScopedTas
             return _acquireAllLocksAsync(opCtx, executor, token);
         })
         .then([this, executor, token, anchor = shared_from_this()] {
-            if (!originalNss().isConfigDB() && !originalNss().isAdminDB() && !_recoveredFromDisk) {
+            if (!originalNss().isConfigDB() && !originalNss().isAdminDB() && !_recoveredFromDisk &&
+                operationType() != DDLCoordinatorTypeEnum::kCreateDatabase) {
                 auto opCtxHolder = cc().makeOperationContext();
                 auto* opCtx = opCtxHolder.get();
                 invariant(metadata().getDatabaseVersion());

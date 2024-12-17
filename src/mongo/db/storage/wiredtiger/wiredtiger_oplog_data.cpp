@@ -32,17 +32,9 @@
 
 namespace mongo {
 
-WiredTigerOplogData::WiredTigerOplogData(const WiredTigerRecordStore::Params& params)
+WiredTigerOplogData::WiredTigerOplogData(const WiredTigerRecordStore::Oplog::Params& params)
     : _maxSize(params.oplogMaxSize) {
-    invariant(_maxSize.load(), str::stream() << "Namespace " << params.nss.toStringForErrorMsg());
-}
-
-void WiredTigerOplogData::getTruncateStats(BSONObjBuilder& builder) const {
-    if (_truncateMarkers) {
-        _truncateMarkers->getOplogTruncateMarkersStats(builder);
-    }
-    builder.append("totalTimeTruncatingMicros", _totalTimeTruncating.load());
-    builder.append("truncateCount", _truncateCount.load());
+    invariant(_maxSize.load());
 }
 
 std::shared_ptr<WiredTigerOplogTruncateMarkers> WiredTigerOplogData::getTruncateMarkers() const {
@@ -58,11 +50,7 @@ int64_t WiredTigerOplogData::getMaxSize() const {
     return _maxSize.load();
 }
 
-AtomicWord<Timestamp>& WiredTigerOplogData::getFirstRecordTimestamp() {
-    return _firstRecordTimestamp;
-}
-
-Status WiredTigerOplogData::updateSize(OperationContext* opCtx, int64_t newSize) {
+Status WiredTigerOplogData::updateSize(int64_t newSize) {
     invariant(_maxSize.load());
 
     if (_maxSize.load() == newSize) {
@@ -72,15 +60,7 @@ Status WiredTigerOplogData::updateSize(OperationContext* opCtx, int64_t newSize)
     _maxSize.store(newSize);
 
     invariant(_truncateMarkers);
-    _truncateMarkers->adjust(opCtx, newSize);
+    _truncateMarkers->adjust(newSize);
     return Status::OK();
 }
-
-
-void WiredTigerOplogData::trackTruncateCompletion(int64_t micros) {
-    _totalTimeTruncating.fetchAndAdd(micros);
-    _truncateCount.fetchAndAdd(1);
-}
-
-
 }  // namespace mongo

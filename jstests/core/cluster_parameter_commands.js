@@ -8,8 +8,6 @@
 //    not_allowed_with_signed_security_token,
 //   # Transactions aborted upon fcv upgrade or downgrade; cluster parameters use internal txns.
 //    uses_transactions,
-//   # SERVER-90248 fixed in 8.1
-//    requires_fcv_81
 //   ]
 
 import {
@@ -52,8 +50,7 @@ let conn = db.getMongo();
 // returns the updated value.
 
 // We need to use assert.soon because, when running against an embedded router,
-// we might not see updates right away. TODO SERVER-86543 update this if we guarantee
-// strong consistency for getClusterParameter.
+// we might not see updates right away.
 for (const [name, data] of Object.entries(kTestOnlyClusterParameters)) {
     if (data.hasOwnProperty('featureFlag')) {
         // Skip testing feature-flag-gated params for now.

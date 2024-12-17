@@ -29,7 +29,8 @@
 
 #pragma once
 
-#include "mongo/db/query/ce/histogram_estimation_impl.h"
+#include "mongo/db/query/ce/histogram_common.h"
+#include "mongo/db/query/stats/ce_histogram.h"
 
 namespace mongo::ce {
 
@@ -41,17 +42,17 @@ public:
      * 'inputScalar' indicates whether or not the provided interval should include non-array values.
      * e.g., $elemMatch should exclude the non-array values when 'includeScalar' is set to false.
      */
-    static Cardinality estimateCardinality(const stats::CEHistogram& hist,
-                                           Cardinality collectionSize,
-                                           const mongo::Interval& interval,
-                                           bool includeScalar);
+    static CardinalityEstimate estimateCardinality(const stats::CEHistogram& hist,
+                                                   CardinalityEstimate collectionSize,
+                                                   const mongo::Interval& interval,
+                                                   bool includeScalar,
+                                                   ArrayRangeEstimationAlgo arrayEstimationAlgo);
 
     /**
      * Checks if given interval can be estimated.
      */
     static bool canEstimateInterval(const stats::CEHistogram& hist,
-                                    const mongo::Interval& interval,
-                                    bool includeScalar);
+                                    const mongo::Interval& interval);
 };
 
 }  // namespace mongo::ce

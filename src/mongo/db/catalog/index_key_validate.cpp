@@ -31,7 +31,6 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
-#include <memory>
 #include <set>
 #include <string>
 #include <utility>
@@ -55,7 +54,6 @@
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/catalog/clustered_collection_options_gen.h"
 #include "mongo/db/catalog/index_key_validate.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -67,7 +65,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/ttl/ttl_collection_cache.h"
@@ -510,10 +507,8 @@ StatusWith<BSONObj> validateIndexSpec(OperationContext* opCtx, const BSONObj& in
             // this invocation of the parser is just for validity checking. It's also legal to parse
             // with an empty namespace string, because we are only doing validity checking and not
             // resolving the expression against a given namespace.
-            auto simpleCollator = nullptr;
-            boost::intrusive_ptr<ExpressionContext> expCtx(
-                new ExpressionContext(opCtx, simpleCollator, NamespaceString::kEmpty));
-
+            auto expCtx =
+                ExpressionContextBuilder{}.opCtx(opCtx).ns(NamespaceString::kEmpty).build();
             // Special match expression features (e.g. $jsonSchema, $expr, ...) are not allowed in a
             // partialFilterExpression on index creation.
             auto statusWithMatcher =
@@ -1045,10 +1040,9 @@ BSONObj parseAndValidateIndexSpecs(OperationContext* opCtx, const BSONObj& index
 
 
 GlobalInitializerRegisterer filterAllowedIndexFieldNamesInitializer(
-    "FilterAllowedIndexFieldNames", [](InitializerContext* service) {
+    "FilterAllowedIndexFieldNames", [](InitializerContext*) {
         if (filterAllowedIndexFieldNames)
             filterAllowedIndexFieldNames(allowedFieldNames);
-        return Status::OK();
     });
 
 }  // namespace index_key_validate

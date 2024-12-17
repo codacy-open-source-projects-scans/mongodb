@@ -140,7 +140,7 @@ public:
             keyPatternObj = keyPatternElem.Obj();
         }
 
-        auto chunkRange = uassertStatusOK(ChunkRange::fromBSON(cmdObj));
+        auto chunkRange = ChunkRange::fromBSON(cmdObj);
 
         std::string shardName;
         auto parseShardNameStatus = bsonExtractStringField(cmdObj, "from", &shardName);
@@ -178,8 +178,9 @@ public:
         // Check that the preconditions for split chunk are met and throw StaleShardVersion
         // otherwise.
         {
-            FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
-                opCtx, nss, boost::none);
+            uassertStatusOK(
+                FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
+                    opCtx, nss, boost::none));
             const auto [metadata, indexInfo] = checkCollectionIdentity(
                 opCtx, nss, expectedCollectionEpoch, expectedCollectionTimestamp);
             checkShardKeyPattern(opCtx, nss, metadata, indexInfo, chunkRange);

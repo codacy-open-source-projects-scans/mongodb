@@ -271,15 +271,19 @@ AutoMergerPolicy::_getNamespacesWithMergeableChunksPerShard(OperationContext* op
     for (const auto& shard : shardIds) {
         // Build an aggregation pipeline to get the collections with mergeable chunks placed on a
         // specific shard
-        Pipeline::SourceContainer stages;
 
-        auto expCtx = make_intrusive<ExpressionContext>(opCtx, nullptr, ChunkType::ConfigNS);
-        StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
-        resolvedNamespaces[ChunkType::ConfigNS.coll()] = {ChunkType::ConfigNS,
-                                                          std::vector<BSONObj>()};
+        StringMap<ResolvedNamespace> resolvedNamespaces;
+        resolvedNamespaces[NamespaceString::kConfigsvrChunksNamespace.coll()] = {
+            NamespaceString::kConfigsvrChunksNamespace, std::vector<BSONObj>()};
         resolvedNamespaces[CollectionType::ConfigNS.coll()] = {CollectionType::ConfigNS,
                                                                std::vector<BSONObj>()};
-        expCtx->setResolvedNamespaces(resolvedNamespaces);
+
+        Pipeline::SourceContainer stages;
+        auto expCtx = ExpressionContextBuilder{}
+                          .opCtx(opCtx)
+                          .ns(NamespaceString::kConfigsvrChunksNamespace)
+                          .resolvedNamespace(std::move(resolvedNamespaces))
+                          .build();
 
         // 1. Match all collections where `automerge` is enabled and `defragmentation` is disabled
         // {
@@ -322,17 +326,18 @@ AutoMergerPolicy::_getNamespacesWithMergeableChunksPerShard(OperationContext* op
 
         stages.emplace_back(DocumentSourceLookUp::createFromBson(
             BSON("$lookup" << BSON(
-                     "from"
-                     << ChunkType::ConfigNS.coll() << "localField" << CollectionType::kUuidFieldName
-                     << "foreignField" << ChunkType::collectionUUID() << "pipeline"
-                     << BSON_ARRAY(BSON("$match" << BSON(
+                     "from" << NamespaceString::kConfigsvrChunksNamespace.coll() << "localField"
+                            << CollectionType::kUuidFieldName << "foreignField"
+                            << ChunkType::collectionUUID() << "pipeline"
+                            << BSON_ARRAY(
+                                   BSON("$match" << BSON(
                                             ChunkType::shard(shard.toString())
                                             << ChunkType::onCurrentShardSince()
                                             << BSON("$lt" << _maxHistoryTimeCurrentRound << "$gte"
                                                           << _maxHistoryTimePreviousRound)))
                                    << BSON("$limit" << 1))
-                     << "as"
-                     << "chunks"))
+                            << "as"
+                            << "chunks"))
                 .firstElement(),
             expCtx));
 

@@ -26,7 +26,7 @@ import {
 // logged at an earlier wall clock time.
 function waitForLog(logLine, times) {
     assert.soon(function() {
-        const matches = rawMongoProgramOutput().match(new RegExp(logLine, "g")) || [];
+        const matches = rawMongoProgramOutput(".*").match(new RegExp(logLine, "g")) || [];
         return matches.length === times;
     }, 'Failed to find "' + logLine + '" logged ' + times + ' times');
 }
@@ -92,6 +92,11 @@ let st = new ShardingTest({
         rs1: {nodes: [{}, {rsConfig: {priority: 0}}]},
         rs2: {nodes: [{}, {rsConfig: {priority: 0}}]},
     },
+    // By default, our test infrastructure sets the election timeout to a very high value (24
+    // hours). For this test, we need a shorter election timeout because it relies on nodes running
+    // an election when they do not detect an active primary. Therefore, we are setting the
+    // electionTimeoutMillis to its default value.
+    initiateWithDefaultElectionTimeout: true
 });
 
 enableCoordinateCommitReturnImmediatelyAfterPersistingDecision(st);
@@ -246,7 +251,7 @@ const failureModes = {
             let primary = st.rs0.getPrimary();
             assert.commandWorked(
                 primary.adminCommand({replSetStepDown: 60 /* stepDownSecs */, force: true}));
-            st.rs0.waitForState(primary, ReplSetTest.State.SECONDARY);
+            st.rs0.awaitSecondaryNodes(null, [primary]);
             assert.commandWorked(primary.adminCommand({replSetFreeze: 0}));
             st.rs0.awaitNodesAgreeOnPrimary();
         },
@@ -311,8 +316,8 @@ const failureModes = {
                     // Router returns whatever error the first failed read commit failed with as a
                     // command error, even if it was a write concern error, since nothing durable
                     // could be written. This particular error isn't considered transient since
-                    // WriteWriteConcernFailed is not a transient code.
-                    assert.commandFailedWithCode(res, ErrorCodes.WriteConcernFailed);
+                    // WriteWriteConcernTimeout is not a transient code.
+                    assert.commandFailedWithCode(res, ErrorCodes.WriteConcernTimeout);
                     assert(!res.writeConcernError, res);
                     assert.eq(null, res.errorLabels);
 

@@ -55,16 +55,79 @@ bool nearlyEqual(double a, double b, double epsilon) {
  */
 
 void EstimateBase::mergeSources(const EstimateBase& other) {
-    // It is illegal to perform operations on estimates with unknown source
-    tassert(
-        9274204, "This estimate has unknown source", this->_source != EstimationSource::Unknown);
-    tassert(
-        9274203, "Other estimate has unknown source", other._source != EstimationSource::Unknown);
+    EstimationSource s1 = this->_source;
+    EstimationSource s2 = other._source;
 
-    if (other._source == EstimationSource::Code) {
-        return;  // Estimates stored as C++ do not modify the source
+    // It is illegal to perform operations on estimates with unknown source
+    tassert(9274204, "This estimate has unknown source", s1 != EstimationSource::Unknown);
+    tassert(9274203, "Other estimate has unknown source", s2 != EstimationSource::Unknown);
+
+    if (s1 == s2) {
+        return;  // This covers the diagonal of the state matrix in the header comment
     }
-    _source = (_source == other._source) ? _source : EstimationSource::Mixed;
+
+    // Define the rules of source merging as a state transition table.
+    auto getSource = [](EstimationSource a, EstimationSource b) -> EstimationSource {
+        if (a > b) {
+            std::swap(a, b);  // Ensure a <= b to handle symmetric cases
+        }
+        switch (a) {
+            case EstimationSource::Histogram:
+                switch (b) {
+                    case EstimationSource::Sampling:
+                    case EstimationSource::Heuristics:
+                    case EstimationSource::Mixed:
+                        return EstimationSource::Mixed;
+                    case EstimationSource::Metadata:
+                    case EstimationSource::Code:
+                        return EstimationSource::Histogram;
+                    default:
+                        MONGO_UNREACHABLE_TASSERT(9695207);
+                }
+            case EstimationSource::Sampling:
+                switch (b) {
+                    case EstimationSource::Mixed:
+                    case EstimationSource::Heuristics:
+                        return EstimationSource::Mixed;
+                        return EstimationSource::Mixed;
+                    case EstimationSource::Metadata:
+                    case EstimationSource::Code:
+                        return EstimationSource::Sampling;
+                    default:
+                        MONGO_UNREACHABLE_TASSERT(9695206);
+                }
+            case EstimationSource::Heuristics:
+                switch (b) {
+                    case EstimationSource::Mixed:
+                        return EstimationSource::Mixed;
+                    case EstimationSource::Metadata:
+                    case EstimationSource::Code:
+                        return EstimationSource::Heuristics;
+                    default:
+                        MONGO_UNREACHABLE_TASSERT(9695205);
+                }
+            case EstimationSource::Mixed:
+                switch (b) {
+                    case EstimationSource::Metadata:
+                    case EstimationSource::Code:
+                        return EstimationSource::Mixed;
+                    default:
+                        MONGO_UNREACHABLE_TASSERT(9695204);
+                }
+            case EstimationSource::Metadata:
+                switch (b) {
+                    case EstimationSource::Code:
+                        return EstimationSource::Metadata;
+                    default:
+                        MONGO_UNREACHABLE_TASSERT(9695203);
+                }
+            default:
+                MONGO_UNREACHABLE_TASSERT(9695201);
+        }
+        MONGO_UNREACHABLE_TASSERT(9695200);
+    };
+
+    _source = getSource(s1, s2);
 }
 
 /**
@@ -89,14 +152,16 @@ CostEstimate operator*(const CardinalityEstimate& ce, const CostCoefficient& cc)
 SelectivityEstimate operator/(const CardinalityEstimate& smaller_ce,
                               const CardinalityEstimate& bigger_ce) {
     // Make sure the underlying double values are in correct relationship to produce selectivity.
-    // Using operator< could still pass when smaller_ce is slightly bigger than bigger_ce.
+    // Using operator<= could still pass when smaller_ce is slightly bigger than bigger_ce.
     tassert(9274202,
-            str::stream() << smaller_ce._estimate.v() << " must be < " << bigger_ce._estimate.v()
+            str::stream() << smaller_ce._estimate.v() << " must be <= " << bigger_ce._estimate.v()
                           << " to produce selectivity",
-            smaller_ce._estimate.v() < bigger_ce._estimate.v());
+            smaller_ce._estimate.v() <= bigger_ce._estimate.v());
+
     SelectivityEstimate result(SelectivityType{0.0}, smaller_ce._source);
     result.mergeSources(bigger_ce);
-    result._estimate._v = smaller_ce._estimate.v() / bigger_ce._estimate.v();
+    result._estimate._v =
+        (smaller_ce == bigger_ce) ? 1.0 : smaller_ce._estimate.v() / bigger_ce._estimate.v();
     result.assertValid();
     return result;
 }

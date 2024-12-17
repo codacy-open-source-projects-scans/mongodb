@@ -30,6 +30,7 @@
 #include <sstream>
 
 #include "mongo/db/query/ce/histogram_accuracy_test_utils.h"
+#include "mongo/db/query/ce/histogram_estimation_impl.h"
 
 namespace mongo::ce {
 
@@ -41,6 +42,12 @@ namespace mongo::ce {
  * percentiles.
  */
 std::tuple<double, double, double, double> percentiles(std::vector<double> arr) {
+
+    // Check if the simulation has returned at least one error estimation.
+    if (arr.size() == 0) {
+        return {-1, -1, -1, -1};
+    }
+
     // Sort array before calculating the cummulative stats.
     std::sort(arr.begin(), arr.end());
 
@@ -50,13 +57,44 @@ std::tuple<double, double, double, double> percentiles(std::vector<double> arr) 
             arr[(size_t)(arr.size() * 0.99)]};
 }
 
-static size_t calculateFrequencyFromDataVectorEq(const std::vector<stats::SBEValue>& data,
-                                                 sbe::value::TypeTags type,
-                                                 stats::SBEValue valueToCalculate) {
+size_t calculateFrequencyFromDataVectorEq(const std::vector<stats::SBEValue>& data,
+                                          stats::SBEValue valueToCalculate,
+                                          bool includeScalar) {
     int actualCard = 0;
     for (const auto& value : data) {
-        if (mongo::stats::compareValues(
-                type, value.getValue(), type, valueToCalculate.getValue()) == 0) {
+        if (value.getTag() == TypeTags::Array) {
+            auto array = sbe::value::getArrayView(value.getValue());
+
+            bool matched = std::any_of(
+                array->values().begin(), array->values().end(), [&](const auto& element) {
+                    return mongo::stats::compareValues(element.first,
+                                                       element.second,
+                                                       valueToCalculate.getTag(),
+                                                       valueToCalculate.getValue()) == 0;
+                });
+
+            if (matched) {
+                actualCard++;
+            }
+        } else {
+            if (includeScalar) {
+                if (mongo::stats::compareValues(value.getTag(),
+                                                value.getValue(),
+                                                valueToCalculate.getTag(),
+                                                valueToCalculate.getValue()) == 0) {
+                    actualCard++;
+                }
+            }
+        }
+    }
+    return actualCard;
+}
+
+size_t calculateTypeFrequencyFromDataVectorEq(const std::vector<stats::SBEValue>& data,
+                                              sbe::value::TypeTags type) {
+    int actualCard = 0;
+    for (const auto& value : data) {
+        if (type == value.getTag()) {
             actualCard++;
         }
     }
@@ -64,20 +102,27 @@ static size_t calculateFrequencyFromDataVectorEq(const std::vector<stats::SBEVal
 }
 
 static size_t calculateFrequencyFromDataVectorRange(const std::vector<stats::SBEValue>& data,
-                                                    sbe::value::TypeTags type,
                                                     stats::SBEValue valueToCalculateLow,
                                                     stats::SBEValue valueToCalculateHigh) {
     int actualCard = 0;
     for (const auto& value : data) {
         // Higher OR equal to low AND lower OR equal to high.
-        if (((mongo::stats::compareValues(
-                  type, value.getValue(), type, valueToCalculateLow.getValue()) > 0) ||
-             (mongo::stats::compareValues(
-                  type, value.getValue(), type, valueToCalculateLow.getValue()) == 0)) &&
-            ((mongo::stats::compareValues(
-                  type, value.getValue(), type, valueToCalculateHigh.getValue()) < 0) ||
-             (mongo::stats::compareValues(
-                  type, value.getValue(), type, valueToCalculateHigh.getValue()) == 0))) {
+        if (((mongo::stats::compareValues(value.getTag(),
+                                          value.getValue(),
+                                          valueToCalculateLow.getTag(),
+                                          valueToCalculateLow.getValue()) > 0) ||
+             (mongo::stats::compareValues(value.getTag(),
+                                          value.getValue(),
+                                          valueToCalculateLow.getTag(),
+                                          valueToCalculateLow.getValue()) == 0)) &&
+            ((mongo::stats::compareValues(value.getTag(),
+                                          value.getValue(),
+                                          valueToCalculateHigh.getTag(),
+                                          valueToCalculateHigh.getValue()) < 0) ||
+             (mongo::stats::compareValues(value.getTag(),
+                                          value.getValue(),
+                                          valueToCalculateHigh.getTag(),
+                                          valueToCalculateHigh.getValue()) == 0))) {
             actualCard++;
         }
     }
@@ -102,7 +147,7 @@ static std::pair<boost::optional<double>, boost::optional<double>> computeErrors
 
 void printHeader() {
     std::stringstream ss;
-    ss << "Data distribution, Number of histogram buckets, Data type, Data size, "
+    ss << "Data distribution, Number of histogram buckets, Data type, IncludeScalar, Data size, "
        << "Query type, Query data type, Number of Queries, "
        << "Data interval start, Data interval end, "
        << "relative error (Avg), relative error (Max), relative error "
@@ -112,13 +157,14 @@ void printHeader() {
 }
 
 void printResult(const DataDistributionEnum dataDistribution,
-                 const std::vector<std::pair<sbe::value::TypeTags, size_t>>& typeCombination,
+                 const TypeCombination& typeCombination,
                  const int size,
                  const int numberOfBuckets,
-                 const std::pair<sbe::value::TypeTags, size_t>& typeCombinationQuery,
+                 const TypeProbability& typeCombinationQuery,
                  const int numberOfQueries,
                  QueryType queryType,
                  const std::pair<size_t, size_t>& dataInterval,
+                 bool includeScalar,
                  ErrorCalculationSummary error) {
 
     std::string distribution;
@@ -144,9 +190,11 @@ void printResult(const DataDistributionEnum dataDistribution,
 
     // Data types
     for (auto type : typeCombination) {
-        ss << type.first << "." << type.second << " ";
+        ss << type.typeTag << "." << type.typeProbability << "." << type.nanProb << " ";
     }
     ss << ", ";
+
+    ss << includeScalar << ", ";
 
     // Data size
     ss << size << ", ";
@@ -161,7 +209,7 @@ void printResult(const DataDistributionEnum dataDistribution,
             queryTypeStr = "Range";
             break;
     }
-    ss << queryTypeStr << ", " << typeCombinationQuery.first << ", ";
+    ss << queryTypeStr << ", " << typeCombinationQuery.typeTag << ", ";
 
     // Number of Queries:
     ss << numberOfQueries << ", ";
@@ -182,39 +230,94 @@ void printResult(const DataDistributionEnum dataDistribution,
 }
 
 
+/**
+ * Populates TypeDistrVector 'td' based on the input configuration.
+ *
+ * This function iterates over a given type combination and populates the provided 'td' with various
+ * statistical distributions according to the specified types and their probabilities.
+ *
+ * This function supports data types: nothing, null, boolean, integer, string, and array. Note that
+ * currently, arrays are only generated with integer elements.
+ *
+ * @param td The TypeDistrVector that will be populated.
+ * @param interval A pair representing the inclusive minimum and maximum bounds for the data.
+ * @param typeCombination The types and their associated probabilities presenting the distribution.
+ * @param ndv The number of distinct values to generate.
+ * @param seedArray A random number seed for generating array. Used only by TypeTags::Array.
+ * @param mdd The distribution descriptor.
+ * @param arrayLength The maximum length for array distributions, defaulting to 0.
+ */
 void populateTypeDistrVectorAccordingToInputConfig(stats::TypeDistrVector& td,
                                                    const std::pair<size_t, size_t>& interval,
                                                    const TypeCombination& typeCombination,
                                                    const size_t ndv,
                                                    std::mt19937_64& seedArray,
-                                                   stats::MixedDistributionDescriptor& mdd) {
+                                                   stats::MixedDistributionDescriptor& mdd,
+                                                   int arrayLength = 0) {
     for (auto type : typeCombination) {
-        switch (type.first) {
+
+        switch (type.typeTag) {
+            case sbe::value::TypeTags::Nothing:
+            case sbe::value::TypeTags::Null:
+                td.push_back(
+                    std::make_unique<stats::NullDistribution>(mdd, type.typeProbability, ndv));
+                break;
+            case sbe::value::TypeTags::Boolean: {
+                bool includeFalse = false, includeTrue = false;
+                if (!(bool)interval.first || !(bool)interval.second) {
+                    includeFalse = true;
+                }
+                if ((bool)interval.first || (bool)interval.second) {
+                    includeTrue = true;
+                }
+                td.push_back(std::make_unique<stats::BooleanDistribution>(mdd,
+                                                                          type.typeProbability,
+                                                                          (int)includeFalse +
+                                                                              (int)includeTrue,
+                                                                          includeFalse,
+                                                                          includeTrue));
+                break;
+            }
             case sbe::value::TypeTags::NumberInt32:
             case sbe::value::TypeTags::NumberInt64:
-                td.push_back(std::make_unique<stats::IntDistribution>(
-                    mdd, type.second, ndv, interval.first, interval.second));
+                td.push_back(std::make_unique<stats::IntDistribution>(mdd,
+                                                                      type.typeProbability,
+                                                                      ndv,
+                                                                      interval.first,
+                                                                      interval.second,
+                                                                      0 /*nullsRatio*/,
+                                                                      type.nanProb));
                 break;
             case sbe::value::TypeTags::NumberDouble:
-                td.push_back(std::make_unique<stats::DoubleDistribution>(
-                    mdd, type.second, ndv, interval.first, interval.second));
+                td.push_back(std::make_unique<stats::DoubleDistribution>(mdd,
+                                                                         type.typeProbability,
+                                                                         ndv,
+                                                                         interval.first,
+                                                                         interval.second,
+                                                                         0 /*nullsRatio*/,
+                                                                         type.nanProb));
                 break;
             case sbe::value::TypeTags::StringSmall:
             case sbe::value::TypeTags::StringBig:
                 td.push_back(std::make_unique<stats::StrDistribution>(
-                    mdd, type.second, ndv, interval.first, interval.second));
+                    mdd, type.typeProbability, ndv, interval.first, interval.second));
                 break;
             case sbe::value::TypeTags::Array: {
                 stats::TypeDistrVector arrayData;
-                arrayData.push_back(
-                    std::make_unique<stats::IntDistribution>(mdd, 1.0, 100, 0, 10000));
+                arrayData.push_back(std::make_unique<stats::IntDistribution>(
+                    mdd, type.typeProbability, ndv, interval.first, interval.second));
                 auto arrayDataDesc =
                     std::make_unique<stats::DatasetDescriptorNew>(std::move(arrayData), seedArray);
-                td.push_back(std::make_unique<stats::ArrDistribution>(
-                    mdd, 1.0, 10, 1, 5, std::move(arrayDataDesc)));
+                td.push_back(std::make_unique<stats::ArrDistribution>(mdd,
+                                                                      1.0 /*weight*/,
+                                                                      10 /*ndv*/,
+                                                                      0 /*minArraLen*/,
+                                                                      arrayLength /*maxArrLen*/,
+                                                                      std::move(arrayDataDesc)));
                 break;
             }
             default:
+                MONGO_UNREACHABLE;
                 break;
         }
     }
@@ -225,7 +328,8 @@ void generateDataUniform(size_t size,
                          const TypeCombination& typeCombination,
                          const size_t seed,
                          const size_t ndv,
-                         std::vector<stats::SBEValue>& data) {
+                         std::vector<stats::SBEValue>& data,
+                         int arrayLength) {
 
     // Generator for type selection.
     std::mt19937 rng(seed);
@@ -239,7 +343,7 @@ void generateDataUniform(size_t size,
     stats::TypeDistrVector td;
 
     populateTypeDistrVectorAccordingToInputConfig(
-        td, interval, typeCombination, ndv, seedArray, uniform);
+        td, interval, typeCombination, ndv, seedArray, uniform, arrayLength);
 
     stats::DatasetDescriptorNew desc{std::move(td), seedDataset};
     data = desc.genRandomDataset(size);
@@ -250,7 +354,8 @@ void generateDataNormal(size_t size,
                         const TypeCombination& typeCombination,
                         const size_t seed,
                         const size_t ndv,
-                        std::vector<stats::SBEValue>& data) {
+                        std::vector<stats::SBEValue>& data,
+                        int arrayLength) {
 
     // Generator for type selection.
     std::mt19937 rng(seed);
@@ -264,7 +369,7 @@ void generateDataNormal(size_t size,
     stats::TypeDistrVector td;
 
     populateTypeDistrVectorAccordingToInputConfig(
-        td, interval, typeCombination, ndv, seedArray, normal);
+        td, interval, typeCombination, ndv, seedArray, normal, arrayLength);
 
     stats::DatasetDescriptorNew desc{std::move(td), seedDataset};
     data = desc.genRandomDataset(size);
@@ -275,7 +380,8 @@ void generateDataZipfian(const size_t size,
                          const TypeCombination& typeCombination,
                          const size_t seed,
                          const size_t ndv,
-                         std::vector<stats::SBEValue>& data) {
+                         std::vector<stats::SBEValue>& data,
+                         int arrayLength) {
 
     // Generator for type selection.
     std::mt19937 rng(seed);
@@ -289,39 +395,29 @@ void generateDataZipfian(const size_t size,
     stats::TypeDistrVector td;
 
     populateTypeDistrVectorAccordingToInputConfig(
-        td, interval, typeCombination, ndv, seedArray, zipfian);
+        td, interval, typeCombination, ndv, seedArray, zipfian, arrayLength);
 
     stats::DatasetDescriptorNew desc{std::move(td), seedDataset};
     data = desc.genRandomDataset(size);
 }
 
-ErrorCalculationSummary runQueries(size_t size,
-                                   size_t numberOfQueries,
-                                   QueryType queryType,
-                                   const std::pair<size_t, size_t> interval,
-                                   const std::pair<sbe::value::TypeTags, size_t> queryTypeInfo,
-                                   const std::vector<stats::SBEValue>& data,
-                                   const std::shared_ptr<const stats::CEHistogram> ceHist,
-                                   bool includeScalar,
-                                   bool useE2EAPI,
-                                   const size_t seed) {
-    double relativeErrorSum = 0, relativeErrorMax = 0;
-    ErrorCalculationSummary finalResults;
-
-    // 'sbeValLow' stores also the values for the equality comparison.
+std::vector<std::pair<stats::SBEValue, stats::SBEValue>> generateIntervals(
+    QueryType queryType,
+    const std::pair<size_t, size_t>& interval,
+    size_t numberOfQueries,
+    const TypeProbability& queryTypeInfo,
+    const size_t seed) {
     std::vector<stats::SBEValue> sbeValLow, sbeValHigh;
-    TypeCombination typeCombination{{queryTypeInfo.first, 100}};
     switch (queryType) {
         case kPoint: {
             // For ndv we set the number of values in the provided data interval. This may lead to
             // re-running values the same values if the number of queries is larger than the size of
             // the interval.
             auto ndv = interval.second - interval.first;
-            generateDataUniform(numberOfQueries, interval, typeCombination, seed, ndv, sbeValLow);
+            generateDataUniform(numberOfQueries, interval, {queryTypeInfo}, seed, ndv, sbeValLow);
             break;
         }
         case kRange: {
-
             const std::pair<size_t, size_t> intervalLow{
                 interval.first, interval.first + (interval.second - interval.first) / 2};
 
@@ -333,52 +429,150 @@ ErrorCalculationSummary runQueries(size_t size,
             // the interval.
             auto ndv = intervalLow.second - intervalLow.first;
             generateDataUniform(
-                numberOfQueries, intervalLow, typeCombination, seed, ndv, sbeValLow);
+                numberOfQueries, intervalLow, {queryTypeInfo}, seed, ndv, sbeValLow);
 
             generateDataUniform(
-                numberOfQueries, intervalHigh, typeCombination, seed, ndv, sbeValHigh);
-            break;
-        }
-    }
+                numberOfQueries, intervalHigh, {queryTypeInfo}, seed, ndv, sbeValHigh);
 
-    for (size_t i = 0; i < numberOfQueries; i++) {
-
-        size_t actualCard;
-        EstimationResult estimatedCard;
-
-        switch (queryType) {
-            case kPoint: {
-
-                // Find actual frequency.
-                actualCard =
-                    calculateFrequencyFromDataVectorEq(data, queryTypeInfo.first, sbeValLow[i]);
-
-                // Estimate result.
-                estimatedCard = estimateCardinalityEq(
-                    *ceHist, queryTypeInfo.first, sbeValLow[i].getValue(), includeScalar);
-                break;
-            }
-            case kRange: {
+            for (size_t i = 0; i < sbeValLow.size();) {
                 if (mongo::stats::compareValues(sbeValLow[i].getTag(),
                                                 sbeValLow[i].getValue(),
                                                 sbeValHigh[i].getTag(),
                                                 sbeValHigh[i].getValue()) >= 0) {
-                    continue;
+                    // Remove elements from both vectors
+                    sbeValLow.erase(sbeValLow.begin() + i);
+                    sbeValHigh.erase(sbeValHigh.begin() + i);
+                } else {
+                    // Only increment if no removal to avoid skipping elements
+                    ++i;
                 }
+            }
+            break;
+        }
+    }
 
-                // Find actual frequency.
-                actualCard = calculateFrequencyFromDataVectorRange(
-                    data, queryTypeInfo.first, sbeValLow[i], sbeValHigh[i]);
+    std::vector<std::pair<stats::SBEValue, stats::SBEValue>> intervals;
+    for (size_t i = 0; i < sbeValLow.size(); ++i) {
+        if (queryType == kPoint) {
+            // Copy the first argument and move the second argument.
+            intervals.emplace_back(sbeValLow[i], std::move(sbeValLow[i]));
+        } else {
+            intervals.emplace_back(std::move(sbeValLow[i]), std::move(sbeValHigh[i]));
+        }
+    }
+    return intervals;
+}
 
+EstimationResult runSingleQuery(QueryType queryType,
+                                const stats::SBEValue& sbeValLow,
+                                const stats::SBEValue& sbeValHigh,
+                                const std::shared_ptr<const stats::CEHistogram>& ceHist,
+                                bool includeScalar,
+                                ArrayRangeEstimationAlgo arrayRangeEstimationAlgo,
+                                bool useE2EAPI,
+                                size_t size) {
+    EstimationResult estimatedCard;
+
+    switch (queryType) {
+        case kPoint: {
+            if (useE2EAPI) {
+                BSONObj bsonInterval = sbeValuesToInterval(sbeValLow, "", sbeValLow, "");
+
+                Interval interval(bsonInterval, true /*startIncluded*/, true /*endIncluded*/);
+
+                auto sizeCardinality =
+                    CardinalityEstimate{CardinalityType{(double)size}, EstimationSource::Histogram};
+
+                estimatedCard.card =
+                    HistogramEstimator::estimateCardinality(*ceHist,
+                                                            sizeCardinality,
+                                                            interval,
+                                                            includeScalar,
+                                                            ArrayRangeEstimationAlgo::kExactArrayCE)
+                        .toDouble();
+
+            } else {
+                // Estimate result.
+                estimatedCard = estimateCardinalityEq(
+                    *ceHist, sbeValLow.getTag(), sbeValLow.getValue(), includeScalar);
+            }
+
+            break;
+        }
+        case kRange: {
+            if (useE2EAPI) {
+                BSONObj bsonInterval = sbeValuesToInterval(sbeValLow, "", sbeValHigh, "");
+
+                Interval interval(bsonInterval, true /*startIncluded*/, true /*endIncluded*/);
+
+                auto sizeCardinality =
+                    CardinalityEstimate{CardinalityType{(double)size}, EstimationSource::Histogram};
+
+                estimatedCard.card =
+                    HistogramEstimator::estimateCardinality(*ceHist,
+                                                            sizeCardinality,
+                                                            interval,
+                                                            includeScalar,
+                                                            ArrayRangeEstimationAlgo::kExactArrayCE)
+                        .toDouble();
+            } else {
                 // Estimate result.
                 estimatedCard = estimateCardinalityRange(*ceHist,
                                                          true /*lowInclusive*/,
-                                                         queryTypeInfo.first,
-                                                         sbeValLow[i].getValue(),
+                                                         sbeValLow.getTag(),
+                                                         sbeValLow.getValue(),
                                                          true /*highInclusive*/,
-                                                         queryTypeInfo.first,
-                                                         sbeValHigh[i].getValue(),
-                                                         includeScalar);
+                                                         sbeValHigh.getTag(),
+                                                         sbeValHigh.getValue(),
+                                                         includeScalar,
+                                                         arrayRangeEstimationAlgo);
+            }
+            break;
+        }
+    }
+    return estimatedCard;
+}
+
+ErrorCalculationSummary runQueries(size_t size,
+                                   size_t numberOfQueries,
+                                   QueryType queryType,
+                                   const std::pair<size_t, size_t> interval,
+                                   const TypeProbability queryTypeInfo,
+                                   const std::vector<stats::SBEValue>& data,
+                                   const std::shared_ptr<const stats::CEHistogram> ceHist,
+                                   bool includeScalar,
+                                   ArrayRangeEstimationAlgo arrayRangeEstimationAlgo,
+                                   bool useE2EAPI,
+                                   const size_t seed) {
+    double relativeErrorSum = 0, relativeErrorMax = 0;
+    ErrorCalculationSummary finalResults;
+
+    auto queryIntervals =
+        generateIntervals(queryType, interval, numberOfQueries, queryTypeInfo, seed);
+
+    for (size_t i = 0; i < numberOfQueries; i++) {
+        size_t actualCard;
+        EstimationResult estimatedCard = runSingleQuery(queryType,
+                                                        queryIntervals[i].first,
+                                                        queryIntervals[i].second,
+                                                        ceHist,
+                                                        includeScalar,
+                                                        arrayRangeEstimationAlgo,
+                                                        useE2EAPI,
+                                                        size);
+
+        switch (queryType) {
+            case kPoint: {
+                // Find actual frequency.
+                actualCard = calculateFrequencyFromDataVectorEq(
+                    data, queryIntervals[i].first, includeScalar);
+
+                break;
+            }
+            case kRange: {
+                // Find actual frequency.
+                actualCard = calculateFrequencyFromDataVectorRange(
+                    data, queryIntervals[i].first, queryIntervals[i].second);
                 break;
             }
         }
@@ -395,6 +589,9 @@ ErrorCalculationSummary runQueries(size_t size,
             relativeErrorSum += abs(errors.second.get());
             relativeErrorMax = fmax(relativeErrorMax, abs(errors.second.get()));
         }
+
+        // Increment the number of executed queries.
+        ++finalResults.executedQueries;
     }
 
     // Store results over the whole dataset to final structure.
@@ -421,7 +618,12 @@ bool checkTypeExistence(const TypeProbability& typeCombinationQuery,
 
     bool typeExists = false;
     for (const auto& typeCombinationData : typeCombinationsData) {
-        if (typeCombinationQuery.first == typeCombinationData.first) {
+        if (typeCombinationQuery.typeTag == typeCombinationData.typeTag) {
+            typeExists = true;
+        } else if (typeCombinationData.typeTag == TypeTags::Array &&
+                   typeCombinationQuery.typeTag == TypeTags::NumberInt64) {
+            // If the data type is array, we accept queries on integers. (the default data type in
+            // arrays is integer.)
             typeExists = true;
         }
     }
@@ -439,12 +641,13 @@ void runAccuracyTestConfiguration(const DataDistributionEnum dataDistribution,
                                   const int numberOfQueries,
                                   QueryType queryType,
                                   bool includeScalar,
+                                  ArrayRangeEstimationAlgo arrayRangeEstimationAlgo,
                                   bool useE2EAPI,
                                   const size_t seed,
-                                  bool printResults) {
+                                  bool printResults,
+                                  int arrayTypeLength) {
 
-    auto ndv = (dataInterval.second - dataInterval.first) / 2;
-
+    auto ndv = std::max((size_t)1, (size_t)(dataInterval.second - dataInterval.first));
     for (auto numberOfBuckets : numberOfBucketsVector) {
         for (const auto& typeCombinationData : typeCombinationsData) {
             // Random value generator for actual data in histogram.
@@ -454,13 +657,16 @@ void runAccuracyTestConfiguration(const DataDistributionEnum dataDistribution,
             // Create one by one the values.
             switch (dataDistribution) {
                 case kUniform:
-                    generateDataUniform(size, dataInterval, typeCombinationData, seed, ndv, data);
+                    generateDataUniform(
+                        size, dataInterval, typeCombinationData, seed, ndv, data, arrayTypeLength);
                     break;
                 case kNormal:
-                    generateDataNormal(size, dataInterval, typeCombinationData, seed, ndv, data);
+                    generateDataNormal(
+                        size, dataInterval, typeCombinationData, seed, ndv, data, arrayTypeLength);
                     break;
                 case kZipfian:
-                    generateDataZipfian(size, dataInterval, typeCombinationData, seed, ndv, data);
+                    generateDataZipfian(
+                        size, dataInterval, typeCombinationData, seed, ndv, data, arrayTypeLength);
                     break;
             }
 
@@ -482,6 +688,7 @@ void runAccuracyTestConfiguration(const DataDistributionEnum dataDistribution,
                                         data,
                                         ceHist,
                                         includeScalar,
+                                        arrayRangeEstimationAlgo,
                                         useE2EAPI,
                                         seed);
                 if (printResults) {
@@ -493,6 +700,7 @@ void runAccuracyTestConfiguration(const DataDistributionEnum dataDistribution,
                                 numberOfQueries,
                                 queryType,
                                 dataInterval,
+                                includeScalar,
                                 error);
                 }
             }

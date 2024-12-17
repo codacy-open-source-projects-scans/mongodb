@@ -111,6 +111,7 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+#include "mongo/util/versioned_value.h"
 
 namespace mongo {
 
@@ -338,30 +339,14 @@ public:
 
     ConnectionString getConfigConnectionString() const override;
 
-    Milliseconds getConfigElectionTimeoutPeriod() const override;
-
-    std::vector<MemberConfig> getConfigVotingMembers() const override;
-
-    size_t getNumConfigVotingMembers() const override;
-
     std::int64_t getConfigTerm() const override;
 
     std::int64_t getConfigVersion() const override;
 
     ConfigVersionAndTerm getConfigVersionAndTerm() const override;
 
-    int getConfigNumMembers() const override;
-
-    Milliseconds getConfigHeartbeatTimeoutPeriodMillis() const override;
-
-    BSONObj getConfigBSON() const override;
-
     boost::optional<MemberConfig> findConfigMemberByHostAndPort_deprecated(
         const HostAndPort& hap) const override;
-
-    bool isConfigLocalHostAllowed() const override;
-
-    Milliseconds getConfigHeartbeatInterval() const override;
 
     Status validateWriteConcern(const WriteConcernOptions& writeConcern) const override;
 
@@ -721,29 +706,6 @@ public:
     bool isDataConsistent() const override;
     void setConsistentDataAvailable_forTest();
 
-    class SharedReplSetConfig {
-    public:
-        struct Lease {
-            uint64_t version = 0;
-            std::shared_ptr<ReplSetConfig> config;
-        };
-
-        SharedReplSetConfig();
-        Lease renew() const;
-        bool isStale(const Lease& lease) const;
-        ReplSetConfig& getConfig() const;
-        // This must be called while holding a lock on the
-        // ReplicationCoordinatorImpl _mutex. Unlike getConfig(), it does not
-        // provide any locking of its own.
-        ReplSetConfig& getConfig(WithLock lk) const;
-        void setConfig(std::shared_ptr<ReplSetConfig> newConfig);
-
-    private:
-        mutable WriteRarelyRWMutex _rwMutex;
-        Atomic<uint64_t> _version;
-        std::shared_ptr<ReplSetConfig> _current;
-    };
-
 private:
     using CallbackFn = executor::TaskExecutor::CallbackFn;
 
@@ -926,7 +888,7 @@ private:
     class WaiterList {
     public:
         WaiterList() = delete;
-        WaiterList(Atomic64Metric& waiterCountMetric);
+        WaiterList(Counter64& waiterCountMetric);
 
         // Adds waiter into the list.
         void add(WithLock lk, const OpTime& opTime, SharedWaiterHandle waiter);
@@ -947,13 +909,11 @@ private:
         void setErrorAll(WithLock lk, Status status);
 
     private:
-        void _updateMetric(WithLock);
-
         // Waiters sorted by OpTime.
         std::multimap<OpTime, SharedWaiterHandle> _waiters;
         // We keep a separate count outside _waiters.size() in order to avoid having to
         // take a lock to read the metric.
-        Atomic64Metric& _waiterCountMetric;
+        Counter64& _waiterCountMetric;
     };
 
     // This is a waiter list for things waiting on opTimes along with a WriteConcern.  It breaks
@@ -997,8 +957,7 @@ private:
     };
 
     enum class HeartbeatState { kScheduled = 0, kSent = 1 };
-    struct HeartbeatHandle {
-        executor::TaskExecutor::CallbackHandle handle;
+    struct HeartbeatHandleMetadata {
         HeartbeatState hbState;
         HostAndPort target;
     };
@@ -1498,6 +1457,19 @@ private:
                                 bool isForceReconfig,
                                 int myIndex);
 
+    template <typename T>
+    static StatusOrStatusWith<T> _futureGetNoThrowWithDeadline(OperationContext* opCtx,
+                                                               SharedSemiFuture<T>& f,
+                                                               Date_t deadline,
+                                                               ErrorCodes::Error error) {
+        try {
+            return opCtx->runWithDeadline(deadline, error, [&] { return f.getNoThrow(opCtx); });
+        } catch (const DBException& e) {
+            return e.toStatus();
+        }
+    }
+
+
     /**
      * Changes _rsConfigState to newState, and notify any waiters.
      */
@@ -1598,26 +1570,17 @@ private:
     void _scheduleHeartbeatReconfig(WithLock lk, const ReplSetConfig& newConfig);
 
     /**
-     * Accepts a ReplSetConfig and resolves it either to itself, or the embedded shard split
-     * recipient config if it's present and self is a shard split recipient. Returns a tuple of the
-     * resolved config and a boolean indicating whether a recipient config was found.
-     */
-    std::tuple<StatusWith<ReplSetConfig>, bool> _resolveConfigToApply(const ReplSetConfig& config);
-
-    /**
      * Method to write a configuration transmitted via heartbeat message to stable storage.
      */
     void _heartbeatReconfigStore(const executor::TaskExecutor::CallbackArgs& cbd,
-                                 const ReplSetConfig& newConfig,
-                                 bool isSplitRecipientConfig = false);
+                                 const ReplSetConfig& newConfig);
 
     /**
      * Conclusion actions of a heartbeat-triggered reconfiguration.
      */
     void _heartbeatReconfigFinish(const executor::TaskExecutor::CallbackArgs& cbData,
                                   const ReplSetConfig& newConfig,
-                                  StatusWith<int> myIndex,
-                                  bool isSplitRecipientConfig);
+                                  StatusWith<int> myIndex);
 
     /**
      * Calculates the time (in millis) left in quiesce mode and converts the value to int64.
@@ -1899,6 +1862,12 @@ private:
      */
     bool _isCollectionReplicated(OperationContext* opCtx, const NamespaceStringOrUUID& nsOrUUID);
 
+    /**
+     * Returns the latest configuration without acquiring `_mutex`. Internally, it reads the config
+     * from a thread-local cache. The config is refreshed to the latest if stale.
+     */
+    const ReplSetConfig& _getReplSetConfig() const;
+
     //
     // All member variables are labeled with one of the following codes indicating the
     // synchronization rules for accessing them.
@@ -1914,7 +1883,11 @@ private:
     mutable stdx::mutex _mutex;  // (S)
 
     // Handles to actively queued heartbeats.
-    std::vector<HeartbeatHandle> _heartbeatHandles;  // (M)
+    size_t _maxSeenHeartbeatQSize = 0;
+    stdx::unordered_map<executor::TaskExecutor::CallbackHandle,
+                        HeartbeatHandleMetadata,
+                        absl::Hash<executor::TaskExecutor::CallbackHandle>>
+        _heartbeatHandles;
 
     // When this node does not know itself to be a member of a config, it adds
     // every host that sends it a heartbeat request to this set, and also starts
@@ -1987,7 +1960,7 @@ private:
     // An instance for getting a lease on the current ReplicaSet
     // configuration object, including the information about tag groups that is
     // used to satisfy write concern requests with named gle modes.
-    SharedReplSetConfig _rsConfig;  // (S)
+    mutable VersionedValue<ReplSetConfig, WriteRarelyRWMutex> _rsConfig;  // (S)
 
     // This member's index position in the current config.
     int _selfIndex;  // (M)
@@ -2101,9 +2074,6 @@ private:
     // changes.
     WriteConcernTagChangesImpl _writeConcernTagChanges;
 
-    // An optional promise created when entering drain mode for shard split.
-    boost::optional<Promise<void>> _finishedDrainingPromise;  // (M)
-
     // Pointer to the SplitPrepareSessionManager owned by this ReplicationCoordinator.
     SplitPrepareSessionManager _splitSessionManager;  // (S)
 
@@ -2215,7 +2185,7 @@ private:
 };
 
 extern Counter64& replicationWaiterListMetric;
-extern Atomic64Metric& opTimeWaiterListMetric;
+extern Counter64& opTimeWaiterListMetric;
 
 }  // namespace repl
 }  // namespace mongo

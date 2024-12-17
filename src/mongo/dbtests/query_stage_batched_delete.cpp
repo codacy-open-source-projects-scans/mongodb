@@ -59,6 +59,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
@@ -123,31 +124,15 @@ public:
 class QueryStageBatchedDeleteTest : public unittest::Test {
 public:
     QueryStageBatchedDeleteTest() : _client(&_opCtx) {
-        // Since this test overrides the tick source on the global service context, it may
-        // conflict with the checkpoint thread, which needs to create an operation context.
-        // Since this test suite is run in isolation, it should be safe to disable the
-        // background job before installing a new tick source.
         auto service = _opCtx.getServiceContext();
-        if (!_tickSource) {
-            if (auto checkpointer = Checkpointer::get(service)) {
-                // BackgrounJob::cancel() keeps the checkpoint thread from starting.
-                // However, if it is already running, we use Checkpoint::shutdown()
-                // to wait for it to stop.
-                if (!checkpointer->cancel().isOK()) {
-                    checkpointer->shutdown({ErrorCodes::ShutdownInProgress, ""});
-                }
-            }
-
-            auto tickSource = std::make_unique<TickSourceMock<Milliseconds>>();
-            _tickSource = tickSource.get();
-            service->setTickSource(std::move(tickSource));
-        }
+        _tickSource = checked_cast<decltype(_tickSource)>(service->getTickSource());
         _tickSource->reset(1);
+
         std::unique_ptr<ClockAdvancingOpObserver> opObserverUniquePtr =
             std::make_unique<ClockAdvancingOpObserver>();
         opObserverUniquePtr->tickSource = _tickSource;
         _opObserver = opObserverUniquePtr.get();
-        service->setOpObserver(std::move(opObserverUniquePtr));
+        service->resetOpObserver_forTest(std::move(opObserverUniquePtr));
     }
 
     ~QueryStageBatchedDeleteTest() override {
@@ -211,9 +196,7 @@ public:
         CollectionScanParams params;
         params.direction = direction;
         params.tailable = false;
-
-        boost::intrusive_ptr<ExpressionContext> expCtx =
-            make_intrusive<ExpressionContext>(opCtx, nullptr, collection->ns());
+        auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).ns(collection->ns()).build();
         std::unique_ptr<CollectionScan> scan(
             new CollectionScan(expCtx.get(), &collection, params, &ws, nullptr));
         while (!scan->isEOF()) {
@@ -230,9 +213,9 @@ public:
     std::unique_ptr<CanonicalQuery> canonicalize(const BSONObj& query) {
         auto findCommand = std::make_unique<FindCommandRequest>(nss);
         findCommand->setFilter(query);
-        return std::make_unique<CanonicalQuery>(
-            CanonicalQueryParams{.expCtx = makeExpressionContext(&_opCtx, *findCommand),
-                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        return std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = ExpressionContextBuilder{}.fromRequest(&_opCtx, *findCommand).build(),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     }
 
     // Uses the default _expCtx tied to the test suite.
@@ -247,7 +230,6 @@ public:
         CollectionAcquisition coll,
         ExpressionContext* expCtx,
         CanonicalQuery* deleteParamsFilter = nullptr) {
-
         auto batchedDeleteParams = std::make_unique<BatchedDeleteStageParams>();
         batchedDeleteParams->targetBatchDocs = targetBatchDocs;
         batchedDeleteParams->targetBatchTimeMS = targetBatchTimeMS;
@@ -261,7 +243,6 @@ public:
         ExpressionContext* expCtx,
         std::unique_ptr<BatchedDeleteStageParams> batchedDeleteParams,
         CanonicalQuery* deleteParamsFilter = nullptr) {
-
         // DeleteStageParams must always be multi.
         auto deleteParams = std::make_unique<DeleteStageParams>();
         deleteParams->isMulti = true;
@@ -282,7 +263,7 @@ protected:
     OperationContext& _opCtx = *_opCtxPtr;
 
     boost::intrusive_ptr<ExpressionContext> _expCtx =
-        make_intrusive<ExpressionContext>(&_opCtx, nullptr, nss);
+        ExpressionContextBuilder{}.opCtx(&_opCtx).ns(nss).build();
     ClockAdvancingOpObserver* _opObserver;
     static TickSourceMock<Milliseconds>* _tickSource;
 
@@ -395,7 +376,7 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsDeletedWriteConflict
     auto batchedDeleteClient = serviceContext->getService()->makeClient("batchedDeleteClient");
     auto batchedDeleteOpCtx = batchedDeleteClient->makeOperationContext();
     boost::intrusive_ptr<ExpressionContext> batchedDeleteExpCtx =
-        make_intrusive<ExpressionContext>(batchedDeleteOpCtx.get(), nullptr, nss);
+        ExpressionContextBuilder{}.opCtx(batchedDeleteOpCtx.get()).ns(nss).build();
 
     // Acquire locks for the batched delete.
     Lock::DBLock dbLk1(batchedDeleteOpCtx.get(), nss.dbName(), LockMode::MODE_IX);
@@ -533,7 +514,7 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsUpdatedToNotMatchCli
     auto batchedDeleteClient = serviceContext->getService()->makeClient("batchedDeleteClient");
     auto batchedDeleteOpCtx = batchedDeleteClient->makeOperationContext();
     boost::intrusive_ptr<ExpressionContext> batchedDeleteExpCtx =
-        make_intrusive<ExpressionContext>(batchedDeleteOpCtx.get(), nullptr, nss);
+        ExpressionContextBuilder{}.opCtx(batchedDeleteOpCtx.get()).ns(nss).build();
 
     // Acquire locks for the batched delete.
     Lock::DBLock dbLk1(batchedDeleteOpCtx.get(), nss.dbName(), LockMode::MODE_IX);

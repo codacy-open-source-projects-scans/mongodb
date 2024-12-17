@@ -42,26 +42,26 @@ selector:
     # but this suite puts us in a multi-auth state.
     - jstests/core/**/list_all_sessions.js # Too many users authenticated
     - jstests/core/**/list_sessions.js # Too many users authenticated
-    # The following tests fail because of divergent dropCollection behavior between standalones and
-    # sharded clusters. These tests expect a second drop command to error, whereas in sharded clusters
-    # we expect a second drop to return status OK.
-    - jstests/core/**/explain_upsert.js
 
     # These include operations the root user auth'd on the test database is not authorized to perform,
     # e.g. reading system.views, dropping or creating system collections.
     - jstests/core/**/list_collections_no_views.js
     - jstests/core/**/rename_collection_system_db.js
+    - jstests/core/catalog/agg_internal_list_collections_stage.js
     - jstests/core/views/invalid_system_views.js
     - jstests/core/views/view_with_invalid_dbname.js
     - jstests/core/views/views_creation.js
     - jstests/core/views/views_drop.js
     - jstests/core/**/query/disallow_system_views_user_writes.js
-    - jstests/core/timeseries/bucket_granularity.js
+    - jstests/core/timeseries/ddl/bucket_granularity.js
+    - jstests/core_sharding/analyze_shard_key/configure_query_analyzer_cmd_validation.js
+    - jstests/core_sharding/resharding/*.js
 
     # These tests expect listCollections to return system.bucket.* collections, which are filtered
     # out by mongos when authentication is enabled.
     # Refer to filter in cluster_list_collections_cmd.cpp
-    - jstests/core/timeseries/timeseries_*.js
+    - jstests/core/timeseries/ddl/*.js
+    - jstests/core/timeseries/query/timeseries_out_non_sharded.js
     # This test uses `benchRun` which spawns connections which do not inherit the causal session.
     - jstests/core/**/benchrun_pipeline_updates.js
 
@@ -96,7 +96,7 @@ selector:
     - uses_transactions
     # Parallel shell is not causally consistent because it uses a different session.
     - uses_parallel_shell
-
+    - requires_2_or_more_shards
 executor:
   archive:
     hooks:
@@ -165,6 +165,8 @@ executor:
         <<: *authOptions
     - class: CleanEveryN
       n: 20
+      shell_options:
+        <<: *authOptions
   fixture:
     class: ShardedClusterFixture
     mongos_options:

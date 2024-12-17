@@ -181,14 +181,6 @@ public:
 
     void updateClientOperationTime(OperationContext* opCtx) const final;
 
-    boost::optional<ShardVersion> refreshAndGetCollectionVersion(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        const NamespaceString& nss) const override;
-
-    boost::optional<mongo::DatabaseVersion> refreshAndGetDatabaseVersion(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        const DatabaseName& dbName) const override;
-
     boost::optional<ShardId> determineSpecificMergeShard(
         OperationContext* opCtx, const NamespaceString& nss) const override {
         return boost::none;
@@ -236,6 +228,22 @@ protected:
      */
     virtual void _reportCurrentOpsForQueryAnalysis(OperationContext* opCtx,
                                                    std::vector<BSONObj>* ops) const = 0;
+
+    /**
+     * Get all the databases. This method can only run on a sharded cluster.
+     */
+    std::vector<DatabaseName> _getAllDatabasesOnAShardedCluster(OperationContext* opCtx,
+                                                                boost::optional<TenantId> tenantId);
+
+    /**
+     * Utility to run a 'listCollections' command on the primary shard corresponding to the database
+     * in 'nss'. If the namespace is collectionless, it will return all the collections for the
+     * given database. Otherwise, it'll return just the requested collection.
+     * This method can only run on a sharded cluster.
+     */
+    std::vector<BSONObj> _runListCollectionsCommandOnAShardedCluster(OperationContext* opCtx,
+                                                                     const NamespaceString& nss,
+                                                                     bool addPrimaryShard = false);
 };
 
 }  // namespace mongo

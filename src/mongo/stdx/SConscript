@@ -6,27 +6,15 @@ env = env.Clone()
 
 env.Benchmark(
     target="condition_variable_bm",
-    source=[
-        "condition_variable_bm.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
-    CONSOLIDATED_TARGET="first_half_bm",
+    source=[],
+    LIBDEPS=[],
 )
 
 env.CppUnitTest(
     target="stdx_test",
-    source=[
-        "unordered_map_test.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/third_party/abseil-cpp/absl_city",
-        "$BUILD_DIR/third_party/abseil-cpp/absl_hash",
-        "$BUILD_DIR/third_party/abseil-cpp/absl_int128",
-        "$BUILD_DIR/third_party/abseil-cpp/absl_low_level_hash",
-        "$BUILD_DIR/third_party/abseil-cpp/absl_raw_hash_set",
-    ],
+    source=[],
+    LIBDEPS=[],
+    PROVE_ALIASES=["server-programmability"],
 )
 
 # Specify UNITTEST_HAS_CUSTOM_MAINLINE because it needs low-level control of
@@ -34,13 +22,10 @@ env.CppUnitTest(
 # mongo startup routines.
 env.CppUnitTest(
     target="sigaltstack_location_test",
-    source=[
-        "sigaltstack_location_test.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
+    source=[],
+    LIBDEPS=[],
     UNITTEST_HAS_CUSTOM_MAINLINE=True,
+    PROVE_ALIASES=["server-programmability"],
 )
 
 # The tests for `stdx::set_terminate` need to run outside of the mongo unittest harneses.
@@ -54,47 +39,34 @@ env.CppUnitTest(
 # Needs to be a different test -- It has to have direct control over the `main()` entry point.
 env.CppUnitTest(
     target="set_terminate_dispatch_test",
-    source=[
-        "set_terminate_dispatch_test.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
+    source=[],
+    LIBDEPS=[],
     UNITTEST_HAS_CUSTOM_MAINLINE=True,
+    PROVE_ALIASES=["server-programmability"],
 )
 
 # Needs to be a different test -- It has to have direct control over the `main()` entry point.
 env.CppUnitTest(
     target="set_terminate_from_main_die_in_thread_test",
-    source=[
-        "set_terminate_from_main_die_in_thread_test.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
+    source=[],
+    LIBDEPS=[],
     UNITTEST_HAS_CUSTOM_MAINLINE=True,
+    PROVE_ALIASES=["server-programmability"],
 )
 
 # Needs to be a different test -- It has to have direct control over the `main()` entry point.
 env.CppUnitTest(
     target="set_terminate_from_thread_die_in_main_test",
-    source=[
-        "set_terminate_from_thread_die_in_main_test.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
+    source=[],
+    LIBDEPS=[],
     UNITTEST_HAS_CUSTOM_MAINLINE=True,
 )
 
 # Needs to be a different test -- It has to have direct control over the `main()` entry point.
 env.CppUnitTest(
     target="set_terminate_from_thread_die_in_thread_test",
-    source=[
-        "set_terminate_from_thread_die_in_thread_test.cpp",
-    ],
-    LIBDEPS=[
-        "$BUILD_DIR/mongo/base",
-    ],
+    source=[],
+    LIBDEPS=[],
     UNITTEST_HAS_CUSTOM_MAINLINE=True,
+    PROVE_ALIASES=["server-programmability"],
 )

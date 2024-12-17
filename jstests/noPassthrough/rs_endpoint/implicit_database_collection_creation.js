@@ -7,10 +7,9 @@
  *   is dropped.
  *
  * @tags: [
- *   requires_fcv_80,
+ *   requires_fcv_81,
  *   featureFlagReplicaSetEndpoint,
  *   featureFlagRouterPort,
- *   featureFlagTrackUnshardedCollectionsUponCreation,
  *   featureFlagSecurityToken,
  *   requires_persistence,
  * ]
@@ -30,6 +29,7 @@ import {
     makeCreateRoleCmdObj,
     makeCreateUserCmdObj,
     runCommands,
+    transitionToDedicatedConfigServer,
     waitForAutoBootstrap,
 } from "jstests/noPassthrough/rs_endpoint/lib/util.js";
 
@@ -66,12 +66,12 @@ function testImplicitCreateCollection(
     }
     assert(coll.drop());
     assertShardingMetadataForUnshardedCollectionDoesNotExist(db, collUuid);
+    assert.commandWorked(db.dropDatabase());
 }
 
+let dbNum = 0;
 function makeDatabaseNameForTest() {
-    // Truncate the uuid string to avoid exceeding the database name length limit when there is a
-    // tenant id prefix.
-    return "testDb-" + extractUUIDFromObject(UUID()).substring(0, 5);
+    return "testDb-" + dbNum++;
 }
 
 function runTest(shard0Primary, execCtxType, expectShardingMetadata) {
@@ -237,7 +237,8 @@ function runTests(getShard0PrimaryFunc,
         return {router: mongos, mongos};
     })();
     jsTest.log("Using " + tojsononeline({router, mongos}));
-    assert.commandWorked(router.adminCommand({transitionToDedicatedConfigServer: 1}));
+
+    transitionToDedicatedConfigServer(router, shard0Primary, shard1Name /* otherShardName */);
 
     jsTest.log("Running tests for " + shard0Primary.host +
                " while the cluster contains one shard (regular shard)");
@@ -394,7 +395,10 @@ function getReplicaSetRestartOptions(maintenanceMode, setParameterOpts) {
     const testRole = {
         name: "testRole",
         roles: ["readWriteAnyDatabase"],
-        privileges: [{resource: {db: "config", collection: ""}, actions: ["find"]}]
+        privileges: [
+            {resource: {db: "config", collection: ""}, actions: ["find"]},
+            {resource: {db: "", collection: ""}, actions: ["dropDatabase"]}
+        ]
     };
     const testUser =
         {userName: "testUser", password: "testUserPwd", roles: [testRole.name], tenantId};

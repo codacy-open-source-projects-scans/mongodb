@@ -416,6 +416,12 @@ const internalCommandsMap = {
         testname: "_shardsvrAbortReshardCollection",
         command: {_shardsvrAbortReshardCollection: UUID(), userCanceled: true},
     },
+    _shardsvrRunSearchIndexCommand: {
+        // test only comand. Bc this command is included in test_only_commands_list.js, this will be
+        // skipped.
+        testname: "__shardsvrRunSearchIndexCommand",
+        command: {__shardsvrRunSearchIndexCommand: 1, hostAndPort: []},
+    },
     _shardsvrBeginMigrationBlockingOperation: {
         testname: "_shardsvrBeginMigrationBlockingOperation",
         command: {_shardsvrBeginMigrationBlockingOperation: ns, operationId: migrationOperationId},
@@ -921,7 +927,7 @@ function runMongosTest(opts) {
         config: 1,
         keyFile: "jstests/libs/key1",
         other: {
-            shardOptions: opts,
+            rsOptions: opts,
             // We have to set the mongotHost parameter for the $search-related tests to pass
             // configuration checks.
             mongosOptions:
@@ -947,7 +953,7 @@ function runShardedServerTest(opts) {
         keyFile: "jstests/libs/key1",
         useHostname: false,
         other: {
-            shardOptions: opts,
+            rsOptions: opts,
             // We have to set the mongotHost parameter for the $search-related tests to pass
             // configuration checks.
             mongosOptions:
@@ -978,7 +984,7 @@ function runConfigServer(opts) {
         config: 1,
         keyFile: "jstests/libs/key1",
         other: {
-            shardOptions: opts,
+            rsOptions: opts,
             // We have to set the mongotHost parameter for the $search-related tests to pass
             // configuration checks.
             mongosOptions:

@@ -157,9 +157,10 @@ struct __wt_session_impl {
     WT_RWLOCK *current_rwlock;
     uint8_t current_rwticket;
 
-    WT_ITEM **scratch;     /* Temporary memory for any function */
-    u_int scratch_alloc;   /* Currently allocated */
-    size_t scratch_cached; /* Scratch bytes cached */
+    WT_ITEM **scratch;        /* Temporary memory for any function */
+    u_int scratch_alloc;      /* Currently allocated */
+    size_t scratch_cached;    /* Scratch bytes cached */
+    WT_SPINLOCK scratch_lock; /* Scratch buffer lock */
 #ifdef HAVE_DIAGNOSTIC
 
     /* Enforce the contract that a session is only used by a single thread at a time. */
@@ -213,19 +214,9 @@ struct __wt_session_impl {
     void *block_manager; /* Block-manager support */
     int (*block_manager_cleanup)(WT_SESSION_IMPL *);
 
-    const char *hs_checkpoint;     /* History store checkpoint name, during checkpoint cursor ops */
-    uint64_t checkpoint_write_gen; /* Write generation override, during checkpoint cursor ops */
+    const char *hs_checkpoint; /* History store checkpoint name, during checkpoint cursor ops */
 
-    /* Checkpoint handles */
-    WT_DATA_HANDLE **ckpt_handle; /* Handle list */
-    u_int ckpt_handle_next;       /* Next empty slot */
-    size_t ckpt_handle_allocated; /* Bytes allocated */
-
-    /* Named checkpoint drop list, during a checkpoint */
-    WT_ITEM *ckpt_drop_list;
-
-    /* Checkpoint time of current checkpoint, during a checkpoint */
-    uint64_t current_ckpt_sec;
+    WT_CKPT_SESSION ckpt; /* Checkpoint-related data */
 
     /*
      * Operations acting on handles.

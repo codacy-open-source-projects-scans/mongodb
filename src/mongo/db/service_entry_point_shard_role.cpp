@@ -108,7 +108,6 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/request_execution_context.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_statistics.h"
@@ -811,16 +810,9 @@ private:
     bool _shouldCleanUp = false;
 };
 
-void InvokeCommand::run() try {
-    auto& execContext = _ecd->getExecutionContext();
+void InvokeCommand::run() {
     const auto dbName = _ecd->getInvocation()->ns().dbName();
-    tenant_migration_access_blocker::checkIfCanRunCommandOrBlock(
-        execContext.getOpCtx(), dbName, execContext.getCommand()->getName())
-        .get(execContext.getOpCtx());
     runCommandInvocation(_ecd->getExecutionContext(), _ecd->getInvocation());
-} catch (const ExceptionForCat<ErrorCategory::TenantMigrationConflictError>& ex) {
-    uassertStatusOK(tenant_migration_access_blocker::handleTenantMigrationConflict(
-        _ecd->getExecutionContext().getOpCtx(), ex.toStatus()));
 }
 
 void CheckoutSessionAndInvokeCommand::run() {
@@ -828,11 +820,7 @@ void CheckoutSessionAndInvokeCommand::run() {
         try {
             _checkOutSession();
 
-            auto& execContext = _ecd->getExecutionContext();
             const auto dbName = _ecd->getInvocation()->ns().dbName();
-            tenant_migration_access_blocker::checkIfCanRunCommandOrBlock(
-                execContext.getOpCtx(), dbName, execContext.getCommand()->getName())
-                .get(execContext.getOpCtx());
 
             if (auto scoped = failWithErrorCodeAfterSessionCheckOut.scoped();
                 MONGO_unlikely(scoped.isActive())) {
@@ -847,18 +835,6 @@ void CheckoutSessionAndInvokeCommand::run() {
             }
 
             runCommandInvocation(_ecd->getExecutionContext(), _ecd->getInvocation());
-            return Status::OK();
-        } catch (const ExceptionForCat<ErrorCategory::TenantMigrationConflictError>& ex) {
-            auto opCtx = _ecd->getExecutionContext().getOpCtx();
-            if (auto txnParticipant = TransactionParticipant::get(opCtx)) {
-                // If the command didn't yield its session, abort transaction and clean up
-                // transaction resources before blocking the command to allow the stable timestamp
-                // on the node to advance.
-                _cleanupTransaction(txnParticipant);
-            }
-
-            uassertStatusOK(tenant_migration_access_blocker::handleTenantMigrationConflict(
-                opCtx, ex.toStatus()));
             return Status::OK();
         } catch (const ExceptionFor<ErrorCodes::WouldChangeOwningShard>& ex) {
             auto opCtx = _ecd->getExecutionContext().getOpCtx();
@@ -1255,8 +1231,6 @@ void RunCommandImpl::_epilogue() {
         });
 
     service_entry_point_shard_role_helpers::waitForLinearizableReadConcern(opCtx);
-    const DatabaseName& dbName = _ecd->getInvocation()->db();
-    tenant_migration_access_blocker::checkIfLinearizableReadWasAllowedOrThrow(opCtx, dbName);
 
     // Wait for data to satisfy the read concern level, if necessary.
     service_entry_point_shard_role_helpers::waitForSpeculativeMajorityReadConcern(opCtx);
@@ -1513,8 +1487,7 @@ StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(
             // which is to apply the CWRWC defaults if present.  This means we just test isEmpty(),
             // since this covers both isSpecified() && !isSpecified()
             if (readConcernArgs.isEmpty()) {
-                const auto rwcDefaults =
-                    ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
+                const auto rwcDefaults = ReadWriteConcernDefaults::get(opCtx).getDefault(opCtx);
                 const auto rcDefault = rwcDefaults.getDefaultReadConcern();
                 if (rcDefault) {
                     const auto readConcernSource = rwcDefaults.getDefaultReadConcernSource();
@@ -1533,8 +1506,7 @@ StatusWith<repl::ReadConcernArgs> ExecCommandDatabase::_extractReadConcern(
     if (!readConcernSupport.defaultReadConcernPermit.isOK() &&
         readConcernSupport.implicitDefaultReadConcernPermit.isOK() && shouldApplyDefaults &&
         !_isInternalClient() && readConcernArgs.isEmpty()) {
-        auto rcDefault = ReadWriteConcernDefaults::get(opCtx->getServiceContext())
-                             .getImplicitDefaultReadConcern();
+        auto rcDefault = ReadWriteConcernDefaults::get(opCtx).getImplicitDefaultReadConcern();
         applyDefaultReadConcern(rcDefault);
     }
 
@@ -1754,14 +1726,14 @@ void ExecCommandDatabase::_initiateCommand() {
     }
 
     if (command->shouldAffectCommandCounter()) {
-        globalOpCounters.gotCommand();
+        serviceOpCounters(opCtx).gotCommand();
         if (analyze_shard_key::supportsSamplingQueries(opCtx)) {
             analyze_shard_key::QueryAnalysisSampler::get(opCtx).gotCommand(command->getName());
         }
     }
 
     if (command->shouldAffectQueryCounter()) {
-        globalOpCounters.gotQuery();
+        serviceOpCounters(opCtx).gotQuery();
     }
 
     auto [requestOrDefaultMaxTimeMS, usesDefaultMaxTimeMS] = getRequestOrDefaultMaxTimeMS(
@@ -1802,13 +1774,15 @@ void ExecCommandDatabase::_initiateCommand() {
         }
     }
 
+    const auto isProcessInternalCommand = isProcessInternalClient(*opCtx->getClient());
+
     if (gIngressAdmissionControlEnabled.load()) {
         // The way ingress admission works, one ticket should cover all the work for the operation.
         // Therefore, if the operation has already been admitted by IngressAdmissionController, all
         // of the subsequent admissions of the same operation (e.g. via DBDirectClient) should be
         // exempt from ingress admission control.
         boost::optional<ScopedAdmissionPriority<IngressAdmissionContext>> admissionPriority;
-        if (!_invocation->isSubjectToIngressAdmissionControl() ||
+        if (isProcessInternalCommand || !_invocation->isSubjectToIngressAdmissionControl() ||
             IngressAdmissionContext::get(opCtx).isHoldingTicket()) {
             admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
         }
@@ -1899,11 +1873,6 @@ void ExecCommandDatabase::_initiateCommand() {
 
     command->incrementCommandsExecuted();
 }
-
-namespace {
-const CommandNameAtom aggregateAtom("aggregate");
-const CommandNameAtom getMoreAtom("getMore");
-}  // namespace
 
 void ExecCommandDatabase::_commandExec() {
     auto opCtx = _execContext.getOpCtx();
@@ -2090,42 +2059,17 @@ bool ExecCommandDatabase::canRetryCommand(const Status& execError) {
         return !inCriticalSection;
     }
 
-    // Can not rerun the command when executing a GetMore command as the cursor may already be lost.
-    const auto isRunningGetMoreCmd = _execContext.getCommand()->getNameAtom() == getMoreAtom;
-
-    // Can not rerun the command when executing an aggregation that runs $mergeCursors as it may
-    // have consumed the cursors within.
-    const auto isAggregateWithMergeCursors = [&]() {
-        if (_execContext.getCommand()->getNameAtom() != aggregateAtom) {
-            return false;
-        }
-
-        const auto& opMsgRequest = _execContext.getRequest();
-        SerializationContext serializationCtx = opMsgRequest.getSerializationContext();
-
-        const AggregateCommandRequest aggregationRequest =
-            aggregation_request_helper::parseFromBSON(opMsgRequest.body,
-                                                      opMsgRequest.validatedTenancyScope,
-                                                      boost::none,
-                                                      serializationCtx);
-
-        const auto& pipeline = aggregationRequest.getPipeline();
-        const auto hasMergeCursor =
-            std::any_of(pipeline.begin(), pipeline.end(), [](const BSONObj& stage) {
-                return stage.firstElementFieldNameStringData() ==
-                    DocumentSourceMergeCursors::kStageName;
-            });
-        return hasMergeCursor;
-    }();
+    const auto canRetryCmd = _invocation->canRetryOnStaleConfigOrShardCannotRefreshDueToLocksHeld(
+        _execContext.getRequest());
 
     if (execError == ErrorCodes::StaleConfig) {
         const auto staleInfo = execError.extraInfo<StaleConfigInfo>();
         tassert(8462307, "StaleConfig must have extraInfo", staleInfo);
         const auto inCriticalSection = staleInfo->getCriticalSectionSignal().has_value();
 
-        return !inCriticalSection && !isRunningGetMoreCmd && !isAggregateWithMergeCursors;
+        return !inCriticalSection && canRetryCmd;
     } else if (execError == ErrorCodes::ShardCannotRefreshDueToLocksHeld) {
-        return !isRunningGetMoreCmd && !isAggregateWithMergeCursors;
+        return canRetryCmd;
     }
 
     return false;
@@ -2416,13 +2360,11 @@ void HandleRequest::completeOperation(DbResponse& response) {
         executionContext.slowMsOverride,
         executionContext.forceLog);
 
-    Top::get(opCtx->getServiceContext())
-        .incrementGlobalLatencyStats(
-            opCtx,
-            durationCount<Microseconds>(currentOp.elapsedTimeExcludingPauses()),
-            durationCount<Microseconds>(
-                duration_cast<Microseconds>(currentOp.debug().workingTimeMillis)),
-            currentOp.getReadWriteType());
+    ServiceLatencyTracker::getDecoration(opCtx->getService())
+        .increment(opCtx,
+                   currentOp.elapsedTimeExcludingPauses(),
+                   currentOp.debug().workingTimeMillis,
+                   currentOp.getReadWriteType());
 
     if (shouldProfile) {
         // Performance profiling is on

@@ -58,15 +58,21 @@ var cursorCounter = 123;
  * array, length must be equal to times.
  * Returns the query to run.
  */
-function setupSearchQuery(
-    term, times, batch, searchMetaValue, explainVerbosity = null, explainObject = null) {
+function setupSearchQuery(term,
+                          times,
+                          batch,
+                          searchMetaValue,
+                          viewName = null,
+                          explainVerbosity = null,
+                          explainObject = null) {
     const searchQuery = {query: term, path: "title"};
     const searchCmd = mongotCommandForQuery({
         query: searchQuery,
         collName: coll.getName(),
         db: dbName,
         collectionUUID: collUUID,
-        explainVerbosity
+        explainVerbosity,
+        viewName,
     });
 
     if (Array.isArray(searchMetaValue)) {
@@ -714,31 +720,34 @@ const nestedLookupExpected = [
 ];
 assert.sameMembers(nestedLookupExpected, nested.toArray());
 
+// TODO SERVER-96439 add non-mock test case for this.
 // $lookup against non-trivial view($search) fails.
+// view1.drop();
+// assert.commandWorked(db.createView(view1.getName(), coll.getName(), [
+//     {$project: {"_id": 1}},
+// ]));
 
-view1.drop();
-assert.commandWorked(db.createView(view1.getName(), coll.getName(), [
-    {$project: {"_id": 1}},
-]));
-
-assert.commandFailedWithCode(db.runCommand({
-    aggregate: collBase.getName(),
-    pipeline: makeLookupSearchPipeline(view1.getName(), {query: "cakes", path: "title"}),
-    cursor: {}
-}),
-                             40602);
+// assert.commandFailedWithCode(db.runCommand({
+//     aggregate: collBase.getName(),
+//     pipeline: makeLookupSearchPipeline(view1.getName(), {query: "cakes", path: "title"}),
+//     cursor: {}
+// }),
+//                              40602);
 
 // $lookup against trivial view($search) works.
-const lookupSearchViewQuery = setupSearchQuery("cakes",
-                                               1,
-                                               [
-                                                   {_id: 1, $searchScore: 0.9},
-                                                   {_id: 2, $searchScore: 0.8},
-                                                   {_id: 5, $searchScore: 0.7},
-                                                   {_id: 6, $searchScore: 0.6},
-                                                   {_id: 8, $searchScore: 0.5}
-                                               ],
-                                               1);
+const lookupSearchViewQuery = setupSearchQuery(
+    "cake",
+    1,
+    [
+        {_id: 1, $searchScore: 0.9},
+        {_id: 2, $searchScore: 0.8},
+        {_id: 5, $searchScore: 0.7},
+        {_id: 6, $searchScore: 0.6},
+        {_id: 8, $searchScore: 0.5}
+    ],
+    1,
+    view1.getName()  // viewName
+);
 view1.drop();
 assert.commandWorked(db.createView(view1.getName(), coll.getName(), []));
 
@@ -748,22 +757,6 @@ assert.sameMembers(
         {"localField": "cakes and kale", "weird": true, "cake_data": [{"ref_id": 8}]}
     ],
     collBase.aggregate(makeLookupSearchPipeline(view1.getName(), lookupSearchViewQuery)).toArray());
-
-// $unionWith against non-trivial view($search) fails.
-view1.drop();
-assert.commandWorked(db.createView(view1.getName(), coll.getName(), [
-    {$project: {"_id": 1}},
-]));
-
-assert.commandFailedWithCode(db.runCommand({
-    aggregate: collBase.getName(),
-    pipeline: [
-        {$project: {"localField": 1, "_id": 0}},
-        {$unionWith: {coll: view1.getName(), pipeline: [{$search: unionSearchQuery}]}}
-    ],
-    cursor: {}
-}),
-                             40602);
 
 // $unionWith against trivial view($search) passes.
 const unionSearchViewQuery = setupSearchQuery("cakes",
@@ -870,6 +863,7 @@ for (const currentVerbosity of ["executionStats", "allPlansExecution"]) {
                                                              {_id: 8, $searchScore: 0.5}
                                                          ],
                                                          1,
+                                                         null,  // viewName
                                                          {verbosity: currentVerbosity},
                                                          explainObj);
 
@@ -886,6 +880,7 @@ for (const currentVerbosity of ["executionStats", "allPlansExecution"]) {
                              {_id: 8, $searchScore: 0.5}
                          ],
                          1,
+                         null,  // viewName
                          {verbosity: currentVerbosity},
                          explainObj);
 
@@ -921,6 +916,7 @@ for (const currentVerbosity of ["executionStats", "allPlansExecution"]) {
                                                                {_id: 2, $searchScore: 0.8},
                                                            ],
                                                            "metaVal",
+                                                           null,  // viewName
                                                            {verbosity: currentVerbosity},
                                                            explainObj);
         // $unionWith will run the search stage once to execute the query and again to obtain
@@ -932,6 +928,7 @@ for (const currentVerbosity of ["executionStats", "allPlansExecution"]) {
                              {_id: 2, $searchScore: 0.8},
                          ],
                          "metaVal",
+                         null,  // viewName
                          {verbosity: currentVerbosity},
                          explainObj);
 
@@ -969,6 +966,7 @@ for (const currentVerbosity of ["executionStats", "allPlansExecution"]) {
                                                               {_id: 8, $searchScore: 0.5}
                                                           ],
                                                           1,
+                                                          null,  // viewName
                                                           {verbosity: currentVerbosity},
                                                           explainObj);
 
@@ -993,6 +991,7 @@ for (const currentVerbosity of ["executionStats", "allPlansExecution"]) {
                                                              {_id: 2, $searchScore: 0.8},
                                                          ],
                                                          "metaVal",
+                                                         null,  // viewName
                                                          {verbosity: currentVerbosity},
                                                          explainObj);
 

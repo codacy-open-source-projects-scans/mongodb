@@ -149,6 +149,13 @@ void _processCollModIndexRequestExpireAfterSeconds(OperationContext* opCtx,
          oldExpireSecsElement.type() != BSONType::NumberLong);
     if (shouldUpdateCatalog) {
         // Change the value of "expireAfterSeconds" on disk.
+        auto ttlCache = &TTLCollectionCache::get(opCtx->getServiceContext());
+        shard_role_details::getRecoveryUnit(opCtx)->onCommit(
+            [ttlCache, uuid = writableColl->uuid(), indexName = idx->indexName()](
+                OperationContext*, boost::optional<Timestamp>) {
+                ttlCache->setTTLIndexExpireAfterSecondsType(
+                    uuid, indexName, TTLCollectionCache::Info::ExpireAfterSecondsType::kInt);
+            });
         writableColl->updateTTLSetting(opCtx, idx->indexName(), indexExpireAfterSeconds);
     }
 }
@@ -180,9 +187,7 @@ void _processCollModIndexRequestUnique(OperationContext* opCtx,
                                        boost::optional<bool>* newUnique) {
     invariant(!idx->unique(), str::stream() << "Index is already unique: " << idx->infoObj());
 
-    // Checks for duplicates for the 'applyOps' command. In the tenant migration case, assumes
-    // similarly to initial sync that we don't need to perform this check in the destination
-    // cluster.
+    // Checks for duplicates for the 'applyOps' command.
     if (mode && *mode == repl::OplogApplication::Mode::kApplyOpsCmd) {
         auto duplicateRecords = scanIndexForDuplicates(opCtx, idx);
         if (!duplicateRecords.empty()) {

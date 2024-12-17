@@ -36,7 +36,7 @@ imports:
 
 feature_flags:
     featureFlagReshardingImprovements:
-        description: "Feature flag for applying improvements on resharding to make it faster and 
+        description: "Feature flag for applying improvements on resharding to make it faster and
         support same-key resharding."
         cpp_varname: gFeatureFlagReshardingImprovements
         default: true
@@ -54,20 +54,30 @@ feature_flags:
         default: true
         version: 8.0
         shouldBeFCVGated: true
-    # TODO SERVER-93149: Enable 'featureFlagReshardingForTimeseries' by default.
     featureFlagReshardingForTimeseries:
         description: "Feature flag for enabling resharding a timeseries collection."
         cpp_varname: gFeatureFlagReshardingForTimeseries
-        default: false
-        shouldBeFCVGated: true
-    featureFlagReshardingSpuriousDuplicateKeyErrors:
-        description: "Feature flag to prevent unique: true indexes from falsely creating a duplicate key error during resharding"
-        cpp_varname: gFeatureFlagReshardingSpuriousDuplicateKeyErrors
-        default: false
+        default: true
+        version: 8.0
         shouldBeFCVGated: true
     featureFlagRelaxedMode:
         description: "Feature flag for implmenting relaxed resharding mode."
         cpp_varname: gFeatureFlagReshardingRelaxedMode
         default: true
         version: 8.1
+        shouldBeFCVGated: true
+    featureFlagReshardingSkipCloningAndApplyingIfApplicable:
+        description: "Feature flag to make recipient shards that are not going to own any chunks for
+                      the collection after resharding only clone the options and indexes for the
+                      collection (i.e. skip cloning the documents and fetch/apply the oplog entries
+                      for it). Currently, only the primary shard can be such a recipient shard."
+        cpp_varname: gFeatureFlagReshardingSkipCloningAndApplyingIfApplicable
+        default: false
+        shouldBeFCVGated: true
+    featureFlagReshardingStoreOplogFetcherProgress:
+        description: "Feature flag to make recipient shards store the count of oplog entries fetched
+                      in a progress document and use this count instead of the fast count to recover
+                      metrics upon recovery."
+        cpp_varname: gFeatureFlagReshardingStoreOplogFetcherProgress
+        default: false
         shouldBeFCVGated: true

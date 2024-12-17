@@ -48,7 +48,8 @@ using boost::intrusive_ptr;
 using std::list;
 using std::vector;
 
-using SearchTest = AggregationContextFixture;
+class SearchTest : service_context_test::WithSetupTransportLayer,
+                   public AggregationContextFixture {};
 
 struct MockMongoInterface final : public StubMongoProcessInterface {
     bool inShardedEnvironment(OperationContext* opCtx) const override {
@@ -56,13 +57,13 @@ struct MockMongoInterface final : public StubMongoProcessInterface {
     }
 };
 
-TEST_F(SearchTest, ShouldSerializeAndExplainAtUnspecifiedVerbosity) {
+TEST_F(SearchTest, ShouldSerializeAllNecessaryFieldsAtUnspecifiedVerbosity) {
     const auto mongotQuery = fromjson("{term: 'asdf'}");
     const auto stageObj = BSON("$search" << mongotQuery);
 
     auto expCtx = getExpCtx();
-    expCtx->mongoProcessInterface = std::make_unique<MockMongoInterface>();
-    expCtx->uuid = UUID::gen();
+    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>());
+    expCtx->setUUID(UUID::gen());
 
     intrusive_ptr<DocumentSource> searchDS =
         DocumentSourceSearch::createFromBson(stageObj.firstElement(), expCtx);
@@ -88,10 +89,8 @@ TEST_F(SearchTest, ShouldSerializeAndExplainAtUnspecifiedVerbosity) {
                        Document({{"$_internalSearchMongotRemote", Document(mongotQuery)}}));
 
     auto idLookupExplain = explainedStages[1];
-    ASSERT_DOCUMENT_EQ(
-        idLookupExplain.getDocument(),
-        Document({{"$_internalSearchIdLookup",
-                   Document(fromjson("{'subPipeline':[{'$match':{'_id':'_id placeholder'}}]}"))}}));
+    ASSERT_DOCUMENT_EQ(idLookupExplain.getDocument(),
+                       Document({{"$_internalSearchIdLookup", Document()}}));
 }
 
 TEST_F(SearchTest, ShouldFailToParseIfSpecIsNotObject) {

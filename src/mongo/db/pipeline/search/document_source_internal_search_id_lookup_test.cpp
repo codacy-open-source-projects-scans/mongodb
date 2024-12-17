@@ -61,13 +61,14 @@ public:
     InternalSearchIdLookupTest() : InternalSearchIdLookupTest(NamespaceString(kTestNss)) {}
 
     InternalSearchIdLookupTest(NamespaceString nss) {
-        _expCtx = new ExpressionContext(_opCtx.get(), nullptr, kTestNss);
-        _expCtx->ns = std::move(nss);
         unittest::TempDir tempDir("AggregationContextFixture");
-        _expCtx->tempDir = tempDir.path();
-
-        _expCtx->mongoProcessInterface =
-            std::make_unique<MockMongoInterface>(std::deque<DocumentSource::GetNextResult>());
+        _expCtx = ExpressionContextBuilder{}
+                      .opCtx(_opCtx.get())
+                      .ns(nss)
+                      .mongoProcessInterface(std::make_unique<MockMongoInterface>(
+                          std::deque<DocumentSource::GetNextResult>()))
+                      .tmpDir(tempDir.path())
+                      .build();
     }
 
     boost::intrusive_ptr<ExpressionContext> getExpCtx() {
@@ -81,7 +82,7 @@ private:
 
 TEST_F(InternalSearchIdLookupTest, ShouldSkipResultsWhenIdNotFound) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
+    expCtx->setUUID(UUID::gen());
     auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
     auto spec = specObj.firstElement();
 
@@ -95,8 +96,8 @@ TEST_F(InternalSearchIdLookupTest, ShouldSkipResultsWhenIdNotFound) {
 
     // Mock documents for this namespace.
     deque<DocumentSource::GetNextResult> mockDbContents{Document{{"_id", 0}, {"color", "red"_sd}}};
-    expCtx->mongoProcessInterface =
-        std::make_unique<StubLookupSingleDocumentProcessInterface>(mockDbContents);
+    expCtx->setMongoProcessInterface(
+        std::make_unique<StubLookupSingleDocumentProcessInterface>(mockDbContents));
 
     // We should find one document here with _id = 0.
     auto next = idLookupStage->getNext();
@@ -109,7 +110,7 @@ TEST_F(InternalSearchIdLookupTest, ShouldSkipResultsWhenIdNotFound) {
 
 TEST_F(InternalSearchIdLookupTest, ShouldNotRemoveMetadata) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
+    expCtx->setUUID(UUID::gen());
 
     // Create a mock data source.
     MutableDocument docOne(Document({{"_id", 0}}));
@@ -137,7 +138,7 @@ TEST_F(InternalSearchIdLookupTest, ShouldNotRemoveMetadata) {
     // Mock documents for this namespace.
     deque<DocumentSource::GetNextResult> mockDbContents{
         Document{{"_id", 0}, {"color", "red"_sd}, {"something else", "will be projected out"_sd}}};
-    expCtx->mongoProcessInterface = std::make_unique<MockMongoInterface>(mockDbContents);
+    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>(mockDbContents));
 
     // We should find one document here with _id = 0.
     auto next = projectStage->getNext();
@@ -153,7 +154,7 @@ TEST_F(InternalSearchIdLookupTest, ShouldNotRemoveMetadata) {
 
 TEST_F(InternalSearchIdLookupTest, ShouldParseFromSerialized) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
+    expCtx->setUUID(UUID::gen());
 
     DocumentSourceInternalSearchIdLookUp idLookupStage(expCtx);
 
@@ -163,61 +164,43 @@ TEST_F(InternalSearchIdLookupTest, ShouldParseFromSerialized) {
     ASSERT_EQ(serialization.size(), 1UL);
     ASSERT_EQ(serialization[0].getType(), BSONType::Object);
 
-    BSONObj spec =
-        BSON("$_internalSearchIdLookup"
-             << BSON("subPipeline" << BSON_ARRAY(BSON("$match" << BSON("_id"
-                                                                       << "_id placeholder")))));
+    BSONObj spec = BSON("$_internalSearchIdLookup" << BSONObj());
     ASSERT_BSONOBJ_EQ(serialization[0].getDocument().toBson(), spec);
 
     // On shard we should be able to re-parse it.
-    expCtx->inRouter = false;
+    expCtx->setInRouter(false);
     auto idLookupStageShard =
         DocumentSourceInternalSearchIdLookUp::createFromBson(spec.firstElement(), expCtx);
     ASSERT_EQ(DocumentSourceInternalSearchIdLookUp::kStageName,
               idLookupStageShard->getSourceName());
 }
 
-TEST_F(InternalSearchIdLookupTest, ShouldFailParsingWhenSpecNotEmptyObject) {
+TEST_F(InternalSearchIdLookupTest, ShouldFailToParseInvalidArgumentTypes) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
+    expCtx->setUUID(UUID::gen());
 
+    // Test parsing with not an object.
     ASSERT_THROWS_CODE(
         DocumentSourceInternalSearchIdLookUp::createFromBson(BSON("$_internalSearchIdLookup"
                                                                   << "string spec")
                                                                  .firstElement(),
                                                              expCtx),
         AssertionException,
-        31016);
+        ErrorCodes::FailedToParse);
 
+    // Test parsing with an unknown field.
     ASSERT_THROWS_CODE(DocumentSourceInternalSearchIdLookUp::createFromBson(
-                           BSON("$_internalSearchIdLookup" << 42).firstElement(), expCtx),
-                       AssertionException,
-                       31016);
-
-    ASSERT_THROWS_CODE(DocumentSourceInternalSearchIdLookUp::createFromBson(
-                           BSON("$_internalSearchIdLookup" << BSON("not"
-                                                                   << "empty"))
+                           BSON("$_internalSearchIdLookup" << BSON("unknownParameter"
+                                                                   << "a"))
                                .firstElement(),
                            expCtx),
                        AssertionException,
-                       31016);
-
-    ASSERT_THROWS_CODE(DocumentSourceInternalSearchIdLookUp::createFromBson(
-                           BSON("$_internalSearchIdLookup" << true).firstElement(), expCtx),
-                       AssertionException,
-                       31016);
-
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalSearchIdLookUp::createFromBson(
-            BSON("$_internalSearchIdLookup" << OID("54651022bffebc03098b4567")).firstElement(),
-            expCtx),
-        AssertionException,
-        31016);
+                       ErrorCodes::IDLUnknownField);
 }
 
 TEST_F(InternalSearchIdLookupTest, ShouldAllowStringOrObjectIdValues) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
+    expCtx->setUUID(UUID::gen());
     auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
     auto spec = specObj.firstElement();
 
@@ -235,7 +218,7 @@ TEST_F(InternalSearchIdLookupTest, ShouldAllowStringOrObjectIdValues) {
     deque<DocumentSource::GetNextResult> mockDbContents{
         Document{{"_id", "tango"_sd}, {"color", "red"_sd}},
         Document{{"_id", Document{{"number", 42}, {"irrelevant", "something"_sd}}}}};
-    expCtx->mongoProcessInterface = std::make_unique<MockMongoInterface>(mockDbContents);
+    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>(mockDbContents));
 
     // Find documents when _id is a string or document.
     auto next = idLookupStage->getNext();
@@ -255,7 +238,7 @@ TEST_F(InternalSearchIdLookupTest, ShouldAllowStringOrObjectIdValues) {
 
 TEST_F(InternalSearchIdLookupTest, ShouldNotErrorOnEmptyResult) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
+    expCtx->setUUID(UUID::gen());
     auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
     auto spec = specObj.firstElement();
 
@@ -268,7 +251,7 @@ TEST_F(InternalSearchIdLookupTest, ShouldNotErrorOnEmptyResult) {
 
     // Mock documents for this namespace.
     deque<DocumentSource::GetNextResult> mockDbContents{Document{{"_id", 0}, {"color", "red"_sd}}};
-    expCtx->mongoProcessInterface = std::make_unique<MockMongoInterface>(mockDbContents);
+    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>(mockDbContents));
 
     ASSERT_TRUE(idLookupStage->getNext().isEOF());
     ASSERT_TRUE(idLookupStage->getNext().isEOF());
@@ -276,11 +259,8 @@ TEST_F(InternalSearchIdLookupTest, ShouldNotErrorOnEmptyResult) {
 
 TEST_F(InternalSearchIdLookupTest, RedactsCorrectly) {
     auto expCtx = getExpCtx();
-    expCtx->uuid = UUID::gen();
-    auto specObj =
-        BSON("$_internalSearchIdLookup" << BSON(
-                 "subPipeline" << BSON_ARRAY(BSON("$match" << BSON("_id" << BSON("$eq"
-                                                                                 << "?string"))))));
+    expCtx->setUUID(UUID::gen());
+    auto specObj = BSON("$_internalSearchIdLookup" << BSONObj());
     auto spec = specObj.firstElement();
 
     auto idLookupStage = DocumentSourceInternalSearchIdLookUp::createFromBson(spec, expCtx);
@@ -296,7 +276,7 @@ TEST_F(InternalSearchIdLookupTest, RedactsCorrectly) {
     limitedLookup.serializeToArray(vec, opts);
 
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
-        R"({"$_internalSearchIdLookup":{"limit":"?number", "subPipeline":[{"$match":{"_id":{"$eq":"?string"}}}]}})",
+        R"({"$_internalSearchIdLookup":{"limit":"?number"}})",
         vec[0].getDocument().toBson());
 }
 

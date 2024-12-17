@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-
 #include <boost/optional/optional.hpp>
 
 #include "mongo/bson/bsonelement.h"
@@ -70,7 +68,6 @@ public:
                    oldestRequiredTimestampForCrashRecovery
                        ? *oldestRequiredTimestampForCrashRecovery
                        : Timestamp());
-        bob.append("supportsPendingDrops", true);
         bob.append("dropPendingIdents", static_cast<long long>(engine->getNumDropPendingIdents()));
         bob.append("supportsSnapshotReadConcern", engine->supportsReadConcernSnapshot());
         bob.append("readOnly", !opCtx->getServiceContext()->userWritesAllowed());

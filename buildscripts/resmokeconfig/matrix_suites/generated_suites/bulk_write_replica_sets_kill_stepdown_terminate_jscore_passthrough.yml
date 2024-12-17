@@ -87,7 +87,6 @@ selector:
     - jstests/core/**/project_with_collation.js
     - jstests/core/**/currentop.js
     - jstests/core/**/fsync.js
-    - jstests/core/**/explain_upsert.js
     - jstests/core/**/indexes_multiple_commands.js
     - jstests/core/**/create_indexes.js
     - jstests/core/**/objid5.js
@@ -102,7 +101,7 @@ selector:
     - jstests/core/**/shell_connection_strings.js
     - jstests/core/**/geo_s2ordering.js
     - jstests/core/mixed_version_replica_set.js
-    - jstests/core/timeseries/timeseries_delete_hint.js
+    - jstests/core/timeseries/write/timeseries_delete_hint.js
     - jstests/core/**/set_param1.js
     - jstests/core/**/profile*.js
     - jstests/core/query/comment_field.js

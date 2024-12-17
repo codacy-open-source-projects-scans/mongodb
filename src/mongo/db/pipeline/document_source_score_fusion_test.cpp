@@ -41,7 +41,11 @@
 namespace mongo {
 namespace {
 
-using DocumentSourceScoreFusionTest = AggregationContextFixture;
+class DocumentSourceScoreFusionTest : service_context_test::WithSetupTransportLayer,
+                                      public AggregationContextFixture {};
+
+// TODO SERVER-94022: Adapt all the tests that "ASSERT_DOES_NOT_THROW" to confirm that the desugared
+// pipeline returns the correct list of stages when the $rankFusion implementation is complete.
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNoInputsField) {
     auto spec = fromjson(R"({
@@ -52,6 +56,16 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNoInputsField) {
     ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
                        AssertionException,
                        ErrorCodes::IDLFailedToParse);
+}
+
+TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNoNestedObject) {
+    auto spec = fromjson(R"({
+        $rankFusion: 'not_an_object'
+    })");
+
+    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()),
+                       AssertionException,
+                       ErrorCodes::FailedToParse);
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfUnknownField) {
@@ -707,7 +721,7 @@ TEST_F(DocumentSourceScoreFusionTest, CheckSomeOptionalArgsUnspecified) {
 }
 
 TEST_F(DocumentSourceScoreFusionTest, CheckMultiplePipelinesAndOptionalArgumentsAllowed) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [
@@ -756,7 +770,7 @@ TEST_F(DocumentSourceScoreFusionTest, CheckMultiplePipelinesAndOptionalArguments
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithFirstPipelineValid) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [
@@ -782,7 +796,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithFirstPipeline
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithSecondPipelineValid) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [
@@ -809,7 +823,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfNotScoredPipelineWithSecondPipelin
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfSearchMetaUsed) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [
@@ -846,7 +860,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfSearchMetaUsed) {
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfSearchStoredSourceUsed) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [
@@ -884,7 +898,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfSearchStoredSourceUsed) {
 }
 
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfInternalSearchMongotRemoteUsed) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [
@@ -921,7 +935,7 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfInternalSearchMongotRemoteUsed) {
 }
 
 TEST_F(DocumentSourceScoreFusionTest, CheckLimitSampleAllowed) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [
@@ -941,11 +955,11 @@ TEST_F(DocumentSourceScoreFusionTest, CheckLimitSampleAllowed) {
         DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()));
 }
 
-TEST_F(DocumentSourceScoreFusionTest, ErrorsIfUnionWith) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+TEST_F(DocumentSourceScoreFusionTest, CheckUnionWithAllowed) {
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto expCtx = getExpCtx();
-    auto nsToUnionWith1 =
-        NamespaceString::createNamespaceString_forTest(expCtx->ns.dbName(), "novels");
+    auto nsToUnionWith1 = NamespaceString::createNamespaceString_forTest(
+        expCtx->getNamespaceString().dbName(), "novels");
     expCtx->addResolvedNamespaces({nsToUnionWith1});
 
     auto spec = fromjson(R"({
@@ -960,25 +974,77 @@ TEST_F(DocumentSourceScoreFusionTest, ErrorsIfUnionWith) {
                },
                {
                 pipeline: [
-                    { $unionWith: 
-                        { coll: "novels" } 
+                    { $unionWith:
+                        { coll: "novels" }
                     },
                     { $score: { score : 5.0 } }
                 ]
                }
-               
+
             ],
             inputNormalization: "none"
         }
     })");
 
-    ASSERT_THROWS_CODE(DocumentSourceScoreFusion::createFromBson(spec.firstElement(), expCtx),
-                       AssertionException,
-                       9402502);
+    ASSERT_DOES_NOT_THROW(
+        DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()));
 }
 
+TEST_F(DocumentSourceScoreFusionTest, CheckLimitSampleUnionwithAllowed) {
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
+    auto expCtx = getExpCtx();
+    expCtx->setResolvedNamespaces(
+        StringMap<ResolvedNamespace>{{expCtx->getNamespaceString().coll().toString(),
+                                      {expCtx->getNamespaceString(), std::vector<BSONObj>()}}});
+    auto nsToUnionWith1 = NamespaceString::createNamespaceString_forTest(
+        expCtx->getNamespaceString().dbName(), "novels");
+    expCtx->addResolvedNamespaces({nsToUnionWith1});
+    auto nsToUnionWith2 = NamespaceString::createNamespaceString_forTest(
+        expCtx->getNamespaceString().dbName(), "shortstories");
+    expCtx->addResolvedNamespaces({nsToUnionWith2});
+
+    auto spec = fromjson(R"({
+        $scoreFusion: {
+            inputs: [
+               {
+                pipeline: [
+                    { $sample: { size: 10 } },
+                    { $score: { score : 5.0 } },
+                    { $limit: 10 }
+                ]
+               },
+               {
+                pipeline: [
+                    { $unionWith:
+                        {
+                            coll: "novels",
+                            pipeline: [
+                                { $limit: 3 },
+                                {
+                                    $unionWith: {
+                                        coll: "shortstories"
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    { $score: { score : 5.0 } }
+                ]
+               }
+            ],
+            inputNormalization: "none"
+        }
+    })");
+
+    ASSERT_DOES_NOT_THROW(
+        DocumentSourceScoreFusion::createFromBson(spec.firstElement(), getExpCtx()));
+}
+
+// TODO SERVER-94022: Add a test comparable to
+// DocumentSourceRankFusionTest::ErrorsIfNestedUnionWithModifiesFields
+
 TEST_F(DocumentSourceScoreFusionTest, ErrorsIfIncludeProject) {
-    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoring", true);
+    RAIIServerParameterControllerForTest controller("featureFlagSearchHybridScoringFull", true);
     auto spec = fromjson(R"({
         $scoreFusion: {
             inputs: [

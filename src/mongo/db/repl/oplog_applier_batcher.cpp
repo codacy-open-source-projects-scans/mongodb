@@ -35,7 +35,6 @@
 // IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
 #include <mutex>
-#include <string>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -45,7 +44,6 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/apply_ops_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
@@ -335,15 +333,12 @@ void OplogApplierBatcher::_consume(OperationContext* opCtx, OplogBuffer* oplogBu
 }
 
 void OplogApplierBatcher::_run(StorageInterface* storageInterface) {
+    // The OplogApplierBatcher's thread has its own shutdown sequence triggered by the
+    // OplogApplier, so we don't want it to be killed in other ways.
     Client::initThread("ReplBatcher",
-                       getGlobalServiceContext()->getService(ClusterRole::ShardServer));
-
-    {
-        // The OplogApplierBatcher's thread has its own shutdown sequence triggered by the
-        // OplogApplier, so we don't want it to be killed in other ways.
-        stdx::lock_guard<Client> lk(cc());
-        cc().setSystemOperationUnkillableByStepdown(lk);
-    }
+                       getGlobalServiceContext()->getService(ClusterRole::ShardServer),
+                       Client::noSession(),
+                       ClientOperationKillableByStepdown{false});
 
     BatchLimits batchLimits;
 

@@ -124,6 +124,7 @@ const allCommands = {
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
     _shardsvrRenameIndexMetadata: {skip: isAnInternalCommand},
+    _shardsvrRunSearchIndexCommand: {skip: isAnInternalCommand},
     _shardsvrDropDatabase: {skip: isAnInternalCommand},
     _shardsvrDropDatabaseParticipant: {skip: isAnInternalCommand},
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
@@ -199,7 +200,6 @@ const allCommands = {
         },
     },
     analyze: {
-        checkFeatureFlag: "CommonQueryFramework",
         setUp: function(mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
@@ -1151,6 +1151,7 @@ const allCommands = {
     transitionToDedicatedConfigServer: {skip: requiresMongoS},
     transitionToShardedCluster: {skip: isAnInternalCommand},
     unshardCollection: {skip: requiresMongoS},
+    untrackUnshardedCollection: {skip: requiresMongoS},
     update: {
         setUp: function(conn) {
             assert.commandWorked(conn.getCollection(fullNs).insert({x: 1}));

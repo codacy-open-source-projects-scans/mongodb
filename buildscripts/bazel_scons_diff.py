@@ -404,10 +404,8 @@ def main():
 
     # Set JAVA_HOME on ppc & s390x architectures
     global bazel_env_settings
-    if platform.machine().lower() == "ppc64le":
-        bazel_env_settings["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-11.0.4.11-2.el8.ppc64le"
-    elif platform.machine().lower() == "s390x":
-        bazel_env_settings["JAVA_HOME"] = "/usr/lib/jvm/java-11-openjdk-11.0.11.0.9-0.el8_3.s390x"
+    if platform.machine().lower() in {"ppc64le", "s390x"}:
+        bazel_env_settings["JAVA_HOME"] = "/usr/lib/jvm/java-21-openjdk"
 
     target_type_map = {}
     for scons_target in args.scons_targets:

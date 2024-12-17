@@ -690,13 +690,12 @@ void FleCrudTest::doSingleUpdateWithUpdateDoc(int id,
     updateRequest.setUpdates({entry});
     updateRequest.getWriteCommandRequestBase().setEncryptionInformation(ei);
 
-
-    std::unique_ptr<CollatorInterface> collator;
-    auto expCtx = make_intrusive<ExpressionContext>(_opCtx.get(),
-                                                    std::move(collator),
-                                                    updateRequest.getNamespace(),
-                                                    updateRequest.getLegacyRuntimeConstants(),
-                                                    updateRequest.getLet());
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(_opCtx.get())
+                      .ns(updateRequest.getNamespace())
+                      .runtimeConstants(updateRequest.getLegacyRuntimeConstants())
+                      .letParameters(updateRequest.getLet())
+                      .build();
     processUpdate(_queryImpl.get(), expCtx, updateRequest);
 }
 
@@ -716,13 +715,12 @@ void FleCrudTest::doSingleDelete(int id, Fle2AlgorithmInt alg) {
     deleteRequest.setDeletes({entry});
     deleteRequest.getWriteCommandRequestBase().setEncryptionInformation(ei);
 
-    std::unique_ptr<CollatorInterface> collator;
-    auto expCtx = make_intrusive<ExpressionContext>(_opCtx.get(),
-                                                    std::move(collator),
-                                                    deleteRequest.getNamespace(),
-                                                    deleteRequest.getLegacyRuntimeConstants(),
-                                                    deleteRequest.getLet());
-
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(_opCtx.get())
+                      .ns(deleteRequest.getNamespace())
+                      .runtimeConstants(deleteRequest.getLegacyRuntimeConstants())
+                      .letParameters(deleteRequest.getLet())
+                      .build();
     processDelete(_queryImpl.get(), expCtx, deleteRequest);
 }
 
@@ -735,13 +733,12 @@ void FleCrudTest::doFindAndModify(write_ops::FindAndModifyCommandRequest& reques
     auto ei = EncryptionInformation::parse(IDLParserContext("test"), doc);
 
     request.setEncryptionInformation(ei);
-
-    std::unique_ptr<CollatorInterface> collator;
-    auto expCtx = make_intrusive<ExpressionContext>(_opCtx.get(),
-                                                    std::move(collator),
-                                                    request.getNamespace(),
-                                                    request.getLegacyRuntimeConstants(),
-                                                    request.getLet());
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(_opCtx.get())
+                      .ns(request.getNamespace())
+                      .runtimeConstants(request.getLegacyRuntimeConstants())
+                      .letParameters(request.getLet())
+                      .build();
     processFindAndModify(expCtx, _queryImpl.get(), request);
 }
 
@@ -788,7 +785,6 @@ protected:
         auto s = getTestESCDataToken(obj);
         auto d = getTestEDCDataToken(obj);
         auto nssEsc = NamespaceString::createNamespaceString_forTest("test.enxcol_.coll.esc");
-        auto nssEcc = NamespaceString::createNamespaceString_forTest("test.enxcol_.coll.ecc");
 
         return mongo::fle::readTags(_queryImpl.get(), nssEsc, s, d, cm);
     }
@@ -947,13 +943,14 @@ TEST_F(FleCrudTest, InsertV1PayloadAgainstV2Protocol) {
     BSONObj document = builder.obj();
     ASSERT_THROWS_CODE(EDCServerCollection::getEncryptedFieldInfo(document), DBException, 7291901);
 
+    auto bogusEncryptedTokens = StateCollectionTokensV2({{}}, false).encrypt({{}});
+
     FLE2InsertUpdatePayloadV2 payload;
-    PrfBlock dummyToken;
-    payload.setEdcDerivedToken(dummyToken);
-    payload.setEscDerivedToken(dummyToken);
-    payload.setServerDerivedFromDataToken(dummyToken);
-    payload.setServerEncryptionToken(dummyToken);
-    payload.setEncryptedTokens(buf);
+    payload.setEdcDerivedToken({{}});
+    payload.setEscDerivedToken({{}});
+    payload.setServerDerivedFromDataToken({{}});
+    payload.setServerEncryptionToken({{}});
+    payload.setEncryptedTokens(bogusEncryptedTokens);
     payload.setValue(buf);
     payload.setType(BSONType::String);
 
@@ -977,13 +974,13 @@ TEST_F(FleCrudTest, InsertUnindexedV1AgainstV2Protocol) {
 
     // Create a dummy InsertUpdatePayloadV2 to include in the document.
     // This is so that the assertion being tested will not be skipped during processInsert()
+    auto bogusEncryptedTokens = StateCollectionTokensV2({{}}, false).encrypt({{}});
     FLE2InsertUpdatePayloadV2 payload;
-    PrfBlock dummyToken;
-    payload.setEdcDerivedToken(dummyToken);
-    payload.setEscDerivedToken(dummyToken);
-    payload.setServerDerivedFromDataToken(dummyToken);
-    payload.setServerEncryptionToken(dummyToken);
-    payload.setEncryptedTokens(std::vector<uint8_t>{64});
+    payload.setEdcDerivedToken({{}});
+    payload.setEscDerivedToken({{}});
+    payload.setServerDerivedFromDataToken({{}});
+    payload.setServerEncryptionToken({{}});
+    payload.setEncryptedTokens(bogusEncryptedTokens);
     payload.setValue(std::vector<uint8_t>{64});
     payload.setType(BSONType::String);
     payload.setContentionFactor(0);
@@ -1444,8 +1441,10 @@ TEST_F(FleCrudTest, FindAndModify_SetSafeContent) {
 
 BSONObj makeInsertUpdatePayload(StringData path, const UUID& uuid) {
     // Actual values don't matter for these tests (apart from indexKeyId).
-    auto bson =
-        FLE2InsertUpdatePayloadV2({}, {}, {}, uuid, BSONType::String, {}, {}, {}, 0).toBSON();
+    auto encryptedTokens = StateCollectionTokensV2({{}}, boost::none).encrypt({{}});
+    auto bson = FLE2InsertUpdatePayloadV2(
+                    {}, {}, std::move(encryptedTokens), uuid, BSONType::String, {}, {}, {}, 0)
+                    .toBSON();
     std::vector<std::uint8_t> bindata;
     bindata.resize(bson.objsize() + 1);
     bindata[0] = static_cast<std::uint8_t>(EncryptedBinDataType::kFLE2InsertUpdatePayloadV2);
@@ -1569,7 +1568,6 @@ TEST_F(FleTagsTest, InsertAndUpdate) {
 TEST_F(FleTagsTest, ContentionFactor) {
     auto efc = EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(R"({
         "escCollection": "enxcol_.coll.esc",
-        "eccCollection": "enxcol_.coll.ecc",
         "ecocCollection": "enxcol_.coll.ecoc",
         "fields": [{
             "keyId": { "$uuid": "12345678-1234-9876-1234-123456789012"},

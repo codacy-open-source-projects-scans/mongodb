@@ -45,7 +45,6 @@
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
@@ -350,7 +349,7 @@ void PrimaryOnlyService::startup(OperationContext* opCtx) {
     threadPoolOptions.threadNamePrefix = getServiceName() + "-";
     threadPoolOptions.poolName = getServiceName() + "ThreadPool";
     threadPoolOptions.onCreateThread = [this](const std::string& threadName) {
-        Client::initThread(threadName.c_str(),
+        Client::initThread(threadName,
                            getGlobalServiceContext()->getService(ClusterRole::ShardServer));
         auto client = Client::getCurrent();
         AuthorizationSession::get(*client)->grantInternalAuthorization();

@@ -29,11 +29,9 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/tracked_types.h"
+#include "mongo/util/tracking/memory.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -67,7 +65,6 @@ struct ExecutionStats {
     AtomicWord<long long> numBucketsFrozen;
     AtomicWord<long long> numCompressedBucketsConvertedToUnsorted;
     AtomicWord<long long> numCommits;
-    AtomicWord<long long> numMeasurementsGroupCommitted;
     AtomicWord<long long> numWaits;
     AtomicWord<long long> numMeasurementsCommitted;
     AtomicWord<long long> numBucketsReopened;
@@ -78,20 +75,12 @@ struct ExecutionStats {
     AtomicWord<long long> numBucketQueriesFailed;
     AtomicWord<long long> numBucketReopeningsFailed;
     AtomicWord<long long> numDuplicateBucketsReopened;
-
-    // TODO SERVER-70605: Remove the metrics below.
-    AtomicWord<long long> numBytesUncompressed;
-    AtomicWord<long long> numBytesCompressed;
-    AtomicWord<long long> numSubObjCompressionRestart;
-    AtomicWord<long long> numCompressedBuckets;
-    AtomicWord<long long> numUncompressedBuckets;
-    AtomicWord<long long> numFailedDecompressBuckets;
 };
 
 class ExecutionStatsController {
 public:
     ExecutionStatsController() = default;
-    ExecutionStatsController(const shared_tracked_ptr<ExecutionStats>& collectionStats,
+    ExecutionStatsController(const tracking::shared_ptr<ExecutionStats>& collectionStats,
                              ExecutionStats& globalStats)
         : _collectionStats(collectionStats), _globalStats(&globalStats) {}
 
@@ -115,7 +104,6 @@ public:
     void incNumBucketsFrozen(long long increment = 1);
     void incNumCompressedBucketsConvertedToUnsorted(long long increment = 1);
     void incNumCommits(long long increment = 1);
-    void incNumMeasurementsGroupCommitted(long long increment = 1);
     void incNumWaits(long long increment = 1);
     void incNumMeasurementsCommitted(long long increment = 1);
     void incNumBucketsReopened(long long increment = 1);
@@ -126,15 +114,9 @@ public:
     void incNumBucketQueriesFailed(long long increment = 1);
     void incNumBucketReopeningsFailed(long long increment = 1);
     void incNumDuplicateBucketsReopened(long long increment = 1);
-    void incNumBytesUncompressed(long long increment = 1);
-    void incNumBytesCompressed(long long increment = 1);
-    void incNumSubObjCompressionRestart(long long increment = 1);
-    void incNumCompressedBuckets(long long increment = 1);
-    void incNumUncompressedBuckets(long long increment = 1);
-    void incNumFailedDecompressBuckets(long long increment = 1);
 
 private:
-    shared_tracked_ptr<ExecutionStats> _collectionStats;
+    tracking::shared_ptr<ExecutionStats> _collectionStats;
     ExecutionStats* _globalStats;
 };
 

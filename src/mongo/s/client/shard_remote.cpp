@@ -72,7 +72,6 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
-#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
@@ -321,7 +320,7 @@ Milliseconds getExhaustiveFindOnConfigMaxTimeMS(OperationContext* opCtx,
     }
 
     return std::min(opCtx->getRemainingMaxTimeMillis(),
-                    nss == ChunkType::ConfigNS
+                    nss == NamespaceString::kConfigsvrChunksNamespace
                         ? Milliseconds(gFindChunksOnConfigTimeoutMS.load())
                         : Milliseconds(defaultConfigCommandTimeoutMS.load()));
 }
@@ -349,16 +348,10 @@ StatusWith<Shard::QueryResponse> ShardRemote::_exhaustiveFindOnConfig(
         return readPrefToReturn;
     }();
 
-    repl::ReadConcernArgs readConcern = [&] {
-        if (readConcernLevel == repl::ReadConcernLevel::kMajorityReadConcern) {
-            repl::OpTime configOpTime{configTime.asTimestamp(),
-                                      mongo::repl::OpTime::kUninitializedTerm};
-            return repl::ReadConcernArgs(configOpTime, readConcernLevel);
-        } else {
-            invariant(readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern);
-            return repl::ReadConcernArgs(configTime, readConcernLevel);
-        }
-    }();
+
+    invariant(readConcernLevel == repl::ReadConcernLevel::kMajorityReadConcern ||
+              readConcernLevel == repl::ReadConcernLevel::kSnapshotReadConcern);
+    repl::ReadConcernArgs readConcern{configTime /* afterClusterTime */, readConcernLevel};
 
     const Milliseconds maxTimeMS = getExhaustiveFindOnConfigMaxTimeMS(opCtx, nss);
 

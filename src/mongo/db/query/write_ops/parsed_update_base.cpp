@@ -86,16 +86,19 @@ ParsedUpdateBase::ParsedUpdateBase(OperationContext* opCtx,
                                    bool isRequestToTimeseries)
     : _opCtx(opCtx),
       _request(request),
-      _expCtx(make_intrusive<ExpressionContext>(
-          opCtx,
-          nullptr,
-          _request->getNamespaceString(),
-          _request->getLegacyRuntimeConstants(),
-          _request->getLetParameters(),
-          allowDiskUseByDefault.load(),  // allowDiskUse
-          true,  // mayDbProfile. We pass 'true' here conservatively. In the future we may
-          // change this.
-          request->explain())),
+      _expCtx(ExpressionContextBuilder{}
+                  .opCtx(opCtx)
+                  .ns(_request->getNamespaceString())
+                  // mayDbProfile. We pass 'true' here conservatively. In the
+                  // future we may change this.
+                  .mayDbProfile(true)
+                  .allowDiskUse(allowDiskUseByDefault.load())
+                  .explain(_request->explain())
+                  .runtimeConstants(_request->getLegacyRuntimeConstants())
+                  .letParameters(_request->getLetParameters())
+                  .isUpsert(request->isUpsert())
+                  .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                  .build()),
       _driver(_expCtx),
       _modification(
           std::make_unique<write_ops::UpdateModification>(_request->getUpdateModification())),
@@ -111,11 +114,8 @@ ParsedUpdateBase::ParsedUpdateBase(OperationContext* opCtx,
               : nullptr),
       _isRequestToTimeseries(isRequestToTimeseries) {
     if (forgoOpCounterIncrements) {
-        _expCtx->enabledCounters = false;
+        _expCtx->setEnabledCounters(false);
     }
-    _expCtx->tempDir = storageGlobalParams.dbpath + "/_tmp";
-    _expCtx->isUpsert = request->isUpsert();
-
     tassert(
         7655104, "timeseries collection must already exist", _collection || !isRequestToTimeseries);
 
@@ -195,7 +195,7 @@ Status ParsedUpdateBase::parseRequest() {
     auto [collatorToUse, collationMatchesDefault] =
         resolveCollator(_opCtx, _request->getCollation(), _collection);
     _expCtx->setCollator(std::move(collatorToUse));
-    _expCtx->collationMatchesDefault = collationMatchesDefault;
+    _expCtx->setCollationMatchesDefault(collationMatchesDefault);
 
     auto statusWithArrayFilters = parsedUpdateArrayFilters(
         _expCtx, _request->getArrayFilters(), _request->getNamespaceString());
@@ -235,7 +235,7 @@ Status ParsedUpdateBase::parseQueryToCQ() {
     dassert(!_canonicalQuery.get());
 
     auto statusWithCQ = impl::parseWriteQueryToCQ(
-        _expCtx->opCtx,
+        _expCtx->getOperationContext(),
         _expCtx.get(),
         *_extensionsCallback,
         *_request,
@@ -271,10 +271,10 @@ void ParsedUpdateBase::parseUpdate() {
         _driver.setSkipDotsDollarsCheck(true);
     }
 
-    _expCtx->isParsingPipelineUpdate = true;
+    _expCtx->setIsParsingPipelineUpdate(true);
     _driver.parse(
         *_modification, _arrayFilters, _request->getUpdateConstants(), _request->isMulti());
-    _expCtx->isParsingPipelineUpdate = false;
+    _expCtx->setIsParsingPipelineUpdate(false);
 }
 
 PlanYieldPolicy::YieldPolicy ParsedUpdateBase::yieldPolicy() const {

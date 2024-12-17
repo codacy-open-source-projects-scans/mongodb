@@ -666,7 +666,7 @@ OVERRIDE_METHOD(__wt_cursor, WT_CURSOR, search_near, (self))
 		metadata = PyBytes_FromStringAndSize(*$1, *$2);
 		$result = metadata;
 		data = PyBytes_FromStringAndSize(*$3, *$4);
-		$result = SWIG_Python_AppendOutput($result, data);
+		$result = SWIG_AppendOutput($result, data);
 	} else {
 		SWIG_exception_fail(SWIG_AttributeError, "invalid pointer argument");
 	}
@@ -678,7 +678,7 @@ OVERRIDE_METHOD(__wt_cursor, WT_CURSOR, search_near, (self))
 		key_data = PyBytes_FromStringAndSize(*$1, *$2);
 		$result = key_data;
 		value_data = PyBytes_FromStringAndSize(*$3, *$4);
-		$result = SWIG_Python_AppendOutput($result, value_data);
+		$result = SWIG_AppendOutput($result, value_data);
 	} else {
 		SWIG_exception_fail(SWIG_AttributeError, "invalid pointer argument");
 	}
@@ -1241,7 +1241,6 @@ int standalone_build();
 %ignore __wt_data_source;
 %ignore __wt_encryptor;
 %ignore __wt_event_handler;
-%ignore __wt_extractor;
 %ignore __wt_item;
 %ignore __wt_lsn;
 
@@ -1249,7 +1248,6 @@ int standalone_build();
 %ignore __wt_connection::add_compressor;
 %ignore __wt_connection::add_data_source;
 %ignore __wt_connection::add_encryptor;
-%ignore __wt_connection::add_extractor;
 %ignore __wt_connection::get_extension_api;
 %ignore __wt_session::log_printf;
 

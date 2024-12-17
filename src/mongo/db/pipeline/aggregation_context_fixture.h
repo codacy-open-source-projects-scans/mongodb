@@ -56,17 +56,18 @@ public:
     struct ExpressionContextOptionsStruct {
         bool inRouter = false;
         bool allowDiskUse = true;
+        bool requiresTimeseriesExtendedRangeSupport = false;
     };
 
     AggregationContextFixture()
         : AggregationContextFixture(NamespaceString::createNamespaceString_forTest(
               boost::none, "unittests", "pipeline_test")) {}
 
-    AggregationContextFixture(NamespaceString nss) {
+    explicit AggregationContextFixture(NamespaceString nss) {
         _opCtx = makeOperationContext();
         _expCtx = make_intrusive<ExpressionContextForTest>(_opCtx.get(), nss);
-        _expCtx->tempDir = _tempDir.path();
-        _expCtx->changeStreamSpec = DocumentSourceChangeStreamSpec();
+        _expCtx->setTempDir(_tempDir.path());
+        _expCtx->setChangeStreamSpec(DocumentSourceChangeStreamSpec());
     }
 
     auto getExpCtx() {
@@ -82,8 +83,10 @@ public:
     }
 
     void setExpCtx(ExpressionContextOptionsStruct options) {
-        _expCtx->inRouter = options.inRouter;
-        _expCtx->allowDiskUse = options.allowDiskUse;
+        _expCtx->setInRouter(options.inRouter);
+        _expCtx->setAllowDiskUse(options.allowDiskUse);
+        _expCtx->setRequiresTimeseriesExtendedRangeSupport(
+            options.requiresTimeseriesExtendedRangeSupport);
     }
 
     /*
@@ -131,8 +134,8 @@ public:
         return DocumentSourceDeferredMergeSort::create(_expCtx);
     }
 
-    boost::intrusive_ptr<DocumentSourceMustRunOnMongoS> runOnMongos() {
-        return DocumentSourceMustRunOnMongoS::create(_expCtx);
+    boost::intrusive_ptr<DocumentSourceMustRunOnRouter> runOnRouter() {
+        return DocumentSourceMustRunOnRouter::create(_expCtx);
     }
 
     boost::intrusive_ptr<DocumentSourceMatch> matchStage(const std::string& matchStr) {
@@ -245,9 +248,8 @@ struct DocumentSourceDeleter {
     }
 };
 
-namespace {
 // A utility function to convert pipeline (a vector of BSONObj) to a string. Helpful for debugging.
-std::string to_string(const std::vector<BSONObj>& objs) {
+inline std::string to_string(const std::vector<BSONObj>& objs) {
     std::stringstream sstrm;
     sstrm << "[" << std::endl;
     for (const auto& obj : objs) {
@@ -256,5 +258,4 @@ std::string to_string(const std::vector<BSONObj>& objs) {
     sstrm << "]" << std::endl;
     return sstrm.str();
 }
-}  // namespace
 }  // namespace mongo

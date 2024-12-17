@@ -8,6 +8,10 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
+// Because this test intentionally crashes the server, we instruct the
+// the shell to clean up after us and remove the core dump.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
+
 function makeShutdownByCrashFn(crashHow) {
     return function(conn) {
         var admin = conn.getDB("admin");
@@ -28,7 +32,7 @@ function testShutdownLogging(launcher, crashFn, matchFn, expectedExitCode) {
     var conn = launcher.start({});
 
     function checkOutput() {
-        var logContents = rawMongoProgramOutput();
+        var logContents = rawMongoProgramOutput(".*");
         function printLog() {
             // We can't just return a string because it will be well over the max
             // line length.

@@ -34,7 +34,6 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -86,7 +85,6 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  CollectionDropType dropType,
                                   bool markFromMigrate) final;
 
     void onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;

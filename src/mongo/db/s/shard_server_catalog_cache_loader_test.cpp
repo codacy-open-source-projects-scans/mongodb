@@ -43,7 +43,7 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/s/shard_metadata_util.h"
-#include "mongo/db/s/shard_server_catalog_cache_loader.h"
+#include "mongo/db/s/shard_server_catalog_cache_loader_impl.h"
 #include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/s/type_shard_collection.h"
 #include "mongo/db/shard_id.h"
@@ -53,7 +53,7 @@
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_database_gen.h"
-#include "mongo/s/catalog_cache_loader_mock.h"
+#include "mongo/s/config_server_catalog_cache_loader_mock.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/unittest/assert.h"
@@ -153,7 +153,7 @@ public:
     void refreshCollectionEpochOnRemoteLoader();
     void refreshDatabaseOnRemoteLoader();
 
-    CatalogCacheLoaderMock* _remoteLoaderMock;
+    ConfigServerCatalogCacheLoaderMock* _remoteLoaderMock;
     std::unique_ptr<ShardServerCatalogCacheLoader> _shardLoader;
 
 private:
@@ -166,9 +166,9 @@ void ShardServerCatalogCacheLoaderTest::setUp() {
 
     // Create mock remote and real shard loader, retaining a pointer to the mock remote loader so
     // that unit tests can manipulate it to return certain responses.
-    auto mockLoader = std::make_unique<CatalogCacheLoaderMock>();
+    auto mockLoader = std::make_unique<ConfigServerCatalogCacheLoaderMock>();
     _remoteLoaderMock = mockLoader.get();
-    _shardLoader = std::make_unique<ShardServerCatalogCacheLoader>(std::move(mockLoader));
+    _shardLoader = std::make_unique<ShardServerCatalogCacheLoaderImpl>(std::move(mockLoader));
 
     // Set the shard loader to primary mode, and set it for testing.
     _shardLoader->initializeReplicaSetRole(true);
@@ -196,8 +196,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeFiveChunks(
 
         ChunkType chunk;
         chunk.setCollectionUUID(uuid);
-        chunk.setMin(mins[i]);
-        chunk.setMax(maxs[i]);
+        chunk.setRange({mins[i], maxs[i]});
         chunk.setShard(kShardId);
         chunk.setVersion(collPlacementVersion);
 
@@ -229,8 +228,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeFiveRefinedChunks(
 
         ChunkType chunk;
         chunk.setCollectionUUID(uuid);
-        chunk.setMin(mins[i]);
-        chunk.setMax(maxs[i]);
+        chunk.setRange({mins[i], maxs[i]});
         chunk.setShard(kShardId);
         chunk.setVersion(collPlacementVersion);
 
@@ -253,8 +251,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeThreeUpdatedChunksDiff(
     // persisted results without applying modifications.
     ChunkType oldChunk;
     oldChunk.setCollectionUUID(uuid);
-    oldChunk.setMin(BSON("a" << 200));
-    oldChunk.setMax(BSON("a" << MAXKEY));
+    oldChunk.setRange({BSON("a" << 200), BSON("a" << MAXKEY)});
     oldChunk.setShard(kShardId);
     oldChunk.setVersion(collPlacementVersion);
     chunks.push_back(oldChunk);
@@ -269,8 +266,7 @@ vector<ChunkType> ShardServerCatalogCacheLoaderTest::makeThreeUpdatedChunksDiff(
 
         ChunkType chunk;
         chunk.setCollectionUUID(uuid);
-        chunk.setMin(mins[i]);
-        chunk.setMax(maxs[i]);
+        chunk.setRange({mins[i], maxs[i]});
         chunk.setShard(kShardId);
         chunk.setVersion(collPlacementVersion);
 
@@ -565,6 +561,52 @@ TEST_F(ShardServerCatalogCacheLoaderTest, PrimaryLoadFromShardedAndFindMixedChun
                           chunksWithNewEpoch[i].getMax());
         ASSERT_EQUALS(collAndChunksRes.changedChunks[i].getVersion(),
                       chunksWithNewEpoch[i].getVersion());
+    }
+}
+
+TEST_F(ShardServerCatalogCacheLoaderTest, PersistedCachedDataIsDroppedWhenCorrupted) {
+    //  Required fields for documents in config.cache.collections
+    std::vector<StringData> requiredFieldNames = {ShardCollectionType::kEpochFieldName,
+                                                  ShardCollectionType::kTimestampFieldName,
+                                                  ShardCollectionType::kUuidFieldName,
+                                                  ShardCollectionType::kKeyPatternFieldName,
+                                                  ShardCollectionType::kUniqueFieldName};
+
+    const auto collAndChunks = setUpChunkLoaderWithFiveChunks();
+    _shardLoader->waitForCollectionFlush(operationContext(), kNss);
+    const auto persistedCollection =
+        uassertStatusOK(shardmetadatautil::readShardCollectionsEntry(operationContext(), kNss));
+
+    for (const auto& fieldName : requiredFieldNames) {
+        // Simulate config.cache.collections getting corrupted by missing a required field
+        ASSERT_OK(shardmetadatautil::updateShardCollectionsEntry(
+            operationContext(),
+            BSON(ShardCollectionType::kNssFieldName
+                 << NamespaceStringUtil::serialize(kNss, SerializationContext::stateDefault())),
+            BSON("$unset" << BSON(fieldName << 1)),
+            false /*upsert*/));
+
+        // Assert that data in config.cache.collections is corrupted
+        const auto status =
+            shardmetadatautil::readShardCollectionsEntry(operationContext(), kNss).getStatus();
+        ASSERT_FALSE(status.isOK());
+        ASSERT_EQUALS(status.code(), ErrorCodes::IDLFailedToParse);
+
+        // Ensure that the corrupted cache gets dropped and the persisted metadata
+        // is intact after a refresh.
+        _remoteLoaderMock->setCollectionRefreshReturnValue(collAndChunks.first);
+        _remoteLoaderMock->setChunkRefreshReturnValue(collAndChunks.second);
+        const auto newChunks = retryableGetChunksSince(
+            _shardLoader.get(), kNss, collAndChunks.second.back().getVersion());
+        _shardLoader->waitForCollectionFlush(operationContext(), kNss);
+        // Assert that refreshing from the latest version returned a single document
+        // matching that version.
+        ASSERT_EQUALS(newChunks.changedChunks.size(), 1UL);
+        ASSERT_EQUALS(newChunks.epoch, collAndChunks.second.back().getVersion().epoch());
+        // Assert that the persisted metadata is intact
+        const auto newPersistedCollection =
+            uassertStatusOK(shardmetadatautil::readShardCollectionsEntry(operationContext(), kNss));
+        ASSERT_BSONOBJ_EQ(persistedCollection.toBSON(), newPersistedCollection.toBSON());
     }
 }
 

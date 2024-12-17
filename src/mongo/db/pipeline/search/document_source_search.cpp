@@ -63,7 +63,7 @@ const char* DocumentSourceSearch::getSourceName() const {
 }
 
 Value DocumentSourceSearch::serialize(const SerializationOptions& opts) const {
-    if (!opts.verbosity || pExpCtx->inRouter) {
+    if (!opts.verbosity || pExpCtx->getInRouter()) {
         // When serializing $search, we only need to serialize the full mongot remote spec when
         // in a sharded scenario (i.e., when we have a metadata merge protocol verison), regardless
         // of whether we're on a router or a data-bearing node. Otherwise, we only need the mongot
@@ -100,7 +100,8 @@ intrusive_ptr<DocumentSource> DocumentSourceSearch::createFromBson(
 }
 
 std::list<intrusive_ptr<DocumentSource>> DocumentSourceSearch::desugar() {
-    auto executor = executor::getMongotTaskExecutor(pExpCtx->opCtx->getServiceContext());
+    auto executor =
+        executor::getMongotTaskExecutor(pExpCtx->getOperationContext()->getServiceContext());
     std::list<intrusive_ptr<DocumentSource>> desugaredPipeline;
     // 'getBoolField' returns false if the field is not present.
     bool storedSource = _spec.getMongotQuery().getBoolField(mongot_cursor::kReturnStoredSourceArg);
@@ -133,15 +134,24 @@ std::list<intrusive_ptr<DocumentSource>> DocumentSourceSearch::desugar() {
                          "$ifNull" << BSON_ARRAY("$" + kProtocolStoredFieldsName << "$$ROOT"))));
         desugaredPipeline.push_back(
             DocumentSourceReplaceRoot::createFromBson(replaceRootSpec.firstElement(), pExpCtx));
+        // Note: intentionally not including a shard filtering operator here. The isolation
+        // semantics are already weaker here so this was deemed OK. Potentially part of that
+        // conversation: the documents are not guaranteed to have the shard key, and we don't have
+        // an idLookup to go get it.
+        return desugaredPipeline;
     } else {
+        auto shardFilterer = DocumentSourceInternalShardFilter::buildIfNecessary(pExpCtx);
         // idLookup must always be immediately after the $mongotRemote stage, which is always first
         // in the pipeline.
         auto idLookupStage = make_intrusive<DocumentSourceInternalSearchIdLookUp>(
-            pExpCtx, _spec.getLimit().value_or(0));
+            pExpCtx, _spec.getLimit().value_or(0), buildExecShardFilterPolicy(shardFilterer));
         desugaredPipeline.insert(std::next(desugaredPipeline.begin()), idLookupStage);
         // In this case, connect the shared search state of these two stages of the pipeline
         // for batch size tuning.
         mongoTRemoteStage->setSearchIdLookupMetrics(idLookupStage->getSearchIdLookupMetrics());
+        if (shardFilterer) {
+            desugaredPipeline.push_back(std::move(shardFilterer));
+        }
     }
 
     return desugaredPipeline;

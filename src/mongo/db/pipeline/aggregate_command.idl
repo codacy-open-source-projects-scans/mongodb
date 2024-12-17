@@ -94,6 +94,7 @@ commands:
         access_check:
             complex:
                 - check: check_cursor_session_privilege
+                - check: is_authorized_for_any_action_on_any_resource_in_db
                 - check: is_coauthorized_with_client
                 - check: is_coauthorized_with
                 - check: should_ignore_auth_checks
@@ -132,7 +133,7 @@ commands:
                 - privilege: # $changeStream
                     resource_pattern: any_normal
                     action_type: find
-                - privilege: # $changeStream
+                - privilege: # $changeStream, $_internalListCollections
                     resource_pattern: cluster
                     action_type: internal
                 - privilege: # $collstats
@@ -198,7 +199,15 @@ commands:
                 - privilege: # $listSearchIndexes
                     agg_stage: listSearchIndexes
                     resource_pattern: database
-                    action_type: listSearchIndexes
+                    action_type: listSearchIndexes 
+                - privilege: # $listClusterCatalog
+                    agg_stage: listClusterCatalog
+                    resource_pattern: cluster
+                    action_type: listClusterCatalog
+                - privilege: # $listClusterCatalog
+                    agg_stage: listClusterCatalog
+                    resource_pattern: database
+                    action_type: listCollections
         # Note that the 'CursorInitialReply' is not the only response that an aggregate command
         # could return. With 'explain' or 'exchange', the response would not include the fields in
         # 'CursorInitialReply'. But using 'explain' or 'exchange' is unstable, but otherwise the
@@ -254,6 +263,10 @@ commands:
                 stability: internal
             fromMongos:
                 description: "True if this request originated from a mongoS."
+                type: optionalBool
+                stability: internal
+            fromRouter:
+                description: "True if this request originated from a router."
                 type: optionalBool
                 stability: internal
             $_requestReshardingResumeToken:

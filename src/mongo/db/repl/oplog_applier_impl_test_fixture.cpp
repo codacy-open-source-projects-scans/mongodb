@@ -43,7 +43,6 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/catalog/health_log.h"
 #include "mongo/db/catalog/health_log_interface.h"
-#include "mongo/db/catalog/index_builds_manager.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/exception_util.h"
@@ -52,14 +51,14 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_manager.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/pipeline/change_stream_pre_and_post_images_options_gen.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
@@ -210,8 +209,6 @@ void OplogApplierImplTest::setUp() {
         std::make_unique<MongoDSessionCatalog>(
             std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
 
-    DropPendingCollectionReaper::set(
-        serviceContext, std::make_unique<DropPendingCollectionReaper>(getStorageInterface()));
     repl::createOplog(_opCtx.get());
 
     _consistencyMarkers = std::make_unique<ReplicationConsistencyMarkersMock>();
@@ -240,7 +237,6 @@ void OplogApplierImplTest::tearDown() {
     HealthLogInterface::get(serviceContext)->shutdown();
     _opCtx.reset();
     _consistencyMarkers = {};
-    DropPendingCollectionReaper::set(serviceContext, {});
     StorageInterface::set(serviceContext, {});
     ServiceContextMongoDTest::tearDown();
 
@@ -274,7 +270,7 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
     const OplogEntry& op,
     const NamespaceString& targetNss,
     bool expectedApplyOpCalled) {
-    bool applyOpCalled = false;
+    auto applyOpCalled = std::make_shared<Atomic<bool>>(false);
 
     auto checkOpCtx = [&targetNss](OperationContext* opCtx) {
         ASSERT_TRUE(opCtx);
@@ -289,21 +285,21 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
     };
 
     _opObserver->onInsertsFn =
-        [&](OperationContext* opCtx, const NamespaceString& nss, const std::vector<BSONObj>& docs) {
+        [op, targetNss, applyOpCalled, checkOpCtx](
+            OperationContext* opCtx, const NamespaceString& nss, const std::vector<BSONObj>& docs) {
             // Other threads may be calling into the opObserver. Only assert if we are writing to
             // the target ns, otherwise skip these asserts.
             if (targetNss != nss) {
-                return Status::OK();
+                return;
             }
 
-            applyOpCalled = true;
+            applyOpCalled->store(true);
             checkOpCtx(opCtx);
             ASSERT_EQUALS(1U, docs.size());
             // For upserts we don't know the intended value of the document.
             if (op.getOpType() == repl::OpTypeEnum::kInsert) {
                 ASSERT_BSONOBJ_EQ(op.getObject(), docs[0]);
             }
-            return Status::OK();
         };
 
     _opObserver->onDeleteFn = [&](OperationContext* opCtx,
@@ -314,31 +310,29 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
         // Other threads may be calling into the opObserver. Only assert if we are writing to
         // the target ns, otherwise skip these asserts.
         if (targetNss != coll->ns()) {
-            return Status::OK();
+            return;
         }
 
-        applyOpCalled = true;
+        applyOpCalled->store(true);
         checkOpCtx(opCtx);
         ASSERT_BSONOBJ_EQ(op.getObject(), doc);
-        return Status::OK();
     };
 
     _opObserver->onUpdateFn = [&](OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
         // Other threads may be calling into the opObserver. Only assert if we are writing to
         // the target ns, otherwise skip these asserts.
         if (targetNss != args.coll->ns()) {
-            return Status::OK();
+            return;
         }
 
-        applyOpCalled = true;
+        applyOpCalled->store(true);
         checkOpCtx(opCtx);
-        return Status::OK();
     };
 
     ASSERT_EQ(_applyOplogEntryOrGroupedInsertsWrapper(
                   _opCtx.get(), ApplierOperation{&op}, OplogApplication::Mode::kSecondary),
               expectedError);
-    ASSERT_EQ(applyOpCalled, expectedApplyOpCalled);
+    ASSERT_EQ(applyOpCalled->load(), expectedApplyOpCalled);
 }
 
 Status failedApplyCommand(OperationContext* opCtx,

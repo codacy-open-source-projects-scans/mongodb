@@ -14,8 +14,8 @@ const sampleWriteConcernError = {
     n: 1,
     ok: 1,
     writeConcernError: {
-        code: ErrorCodes.WriteConcernFailed,
-        codeName: "WriteConcernFailed",
+        code: ErrorCodes.WriteConcernTimeout,
+        codeName: "WriteConcernTimeout",
         errmsg: "waiting for replication timed out",
         errInfo: {
             wtimeout: true,
@@ -278,7 +278,7 @@ tests.push(function writeConcernErrorCausesCommandFailedToPass() {
 
     assert.doesNotThrow(() => {
         assert.commandFailed(result);
-        assert.commandFailedWithCode(result, ErrorCodes.WriteConcernFailed);
+        assert.commandFailedWithCode(result, ErrorCodes.WriteConcernTimeout);
     });
 });
 
@@ -316,6 +316,50 @@ tests.push(function invalidResponsesAttemptToProvideInformationCommandFailed() {
     });
 });
 
+tests.push(function assertsPreserveErrorCode() {
+    function runTestOnErrorResult(res, errorCode, test) {
+        let caught = false;
+        try {
+            test();
+        } catch (e) {
+            caught = true;
+            assert(hasErrorCode(e, [errorCode]),
+                   "expect error code " + errorCode + " to be present in error " + tojson(e));
+        }
+        assert(caught);
+    }
+
+    function testErrorResult(res, errorCode) {
+        runTestOnErrorResult(res, errorCode, () => assert.commandWorked(res));
+        runTestOnErrorResult(
+            res, errorCode, () => assert.commandFailedWithCode(res, [errorCode + 1]));
+        runTestOnErrorResult(
+            res, errorCode, () => assert.commandWorkedOrFailedWithCode(res, [errorCode + 1]));
+    }
+
+    {
+        const commandNotFound = db.runCommand({"IHopeNobodyEverMakesThisACommand": 1});
+        testErrorResult(commandNotFound, ErrorCodes.CommandNotFound);
+    }
+
+    {
+        const rawCommandError = db.runCommand({insert: "coll", documents: [{_id: 1}]});
+        testErrorResult(rawCommandError, ErrorCodes.DuplicateKey);
+    }
+    {
+        const insertResultError = db.coll.insert({_id: 1});
+        testErrorResult(insertResultError, ErrorCodes.DuplicateKey);
+    }
+    {
+        const insertCommandError = db.coll.insert({x: 1}, {writeConcern: {"bad": 1}});
+        testErrorResult(insertCommandError, ErrorCodes.IDLUnknownField);
+    }
+    {
+        const bulkInsertError = db.coll.insert([{_id: 1}, {_id: 2}]);
+        testErrorResult(bulkInsertError, ErrorCodes.DuplicateKey);
+    }
+});
+
 tests.push(function assertCallsHangAnalyzer() {
     function runAssertTest(f, expectCall) {
         const oldMongoRunner = MongoRunner;
@@ -340,8 +384,8 @@ tests.push(function assertCallsHangAnalyzer() {
         n: 1,
         ok: 1,
         writeConcernError: {
-            code: ErrorCodes.WriteConcernFailed,
-            codeName: "WriteConcernFailed",
+            code: ErrorCodes.WriteConcernTimeout,
+            codeName: "WriteConcernTimeout",
             errmsg: "foo",
         },
     };
@@ -372,7 +416,7 @@ tests.push(function assertCallsHangAnalyzer() {
         () => assert.commandFailedWithCode(nonTimeOutWriteConcernError, ErrorCodes.DuplicateKey),
         false);
     runAssertTest(
-        () => assert.commandFailedWithCode(sampleWriteConcernError, ErrorCodes.WriteConcernFailed),
+        () => assert.commandFailedWithCode(sampleWriteConcernError, ErrorCodes.WriteConcernTimeout),
         false);
 
     runAssertTest(() => assert.commandWorkedIgnoringWriteConcernErrors(sampleWriteConcernError),

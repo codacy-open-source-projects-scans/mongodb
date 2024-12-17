@@ -51,7 +51,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/optimizer/explain_interface.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_explainer_sbe.h"
@@ -85,7 +84,7 @@ public:
 
     PlanExecutorSBE(OperationContext* opCtx,
                     std::unique_ptr<CanonicalQuery> cq,
-                    sbe::plan_ranker::CandidatePlans candidates,
+                    sbe::plan_ranker::CandidatePlan plan,
                     bool returnOwnedBson,
                     NamespaceString nss,
                     bool isOpen,

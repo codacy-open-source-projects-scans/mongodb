@@ -19,7 +19,7 @@ const collName = "testcoll";
 const rst = new ReplSetTest(
     {name: testName, nodes: [{}], settings: {chainingAllowed: false}, useBridge: true});
 rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 const primary = rst.getPrimary();
 const primaryDb = primary.getDB(dbName);
@@ -49,7 +49,7 @@ jsTestLog("Allowing primary to initiate the 'newlyAdded' field removal");
 let hangDuringAutomaticReconfigFP = configureFailPoint(primaryDb, "hangDuringAutomaticReconfig");
 assert.commandWorked(
     secondary.adminCommand({configureFailPoint: "initialSyncHangBeforeFinish", mode: "off"}));
-rst.waitForState(secondary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [secondary]);
 
 hangDuringAutomaticReconfigFP.wait();
 

@@ -30,6 +30,7 @@ DEFAULT_MONGO_EXECUTABLE = "mongo"
 DEFAULT_MONGOD_EXECUTABLE = "mongod"
 DEFAULT_MONGOS_EXECUTABLE = "mongos"
 DEFAULT_MONGOT_EXECUTABLE = "mongot-localdev/mongot"
+DEFAULT_MONGOTEST_EXECUTABLE = "mongotest"
 
 DEFAULT_BENCHMARK_REPETITIONS = 3
 DEFAULT_BENCHMARK_MIN_TIME = datetime.timedelta(seconds=5)
@@ -57,7 +58,6 @@ DEFAULTS = {
     "archive_limit_tests": 10,
     "base_port": 20000,
     "backup_on_restart_dir": None,
-    "buildlogger_url": "https://logkeeper2.build.10gen.cc",
     "embedded_router": None,
     "config_shard": None,
     "continue_on_failure": False,
@@ -66,6 +66,9 @@ DEFAULTS = {
     "dry_run": None,
     "exclude_with_any_tags": None,
     "force_excluded_tests": False,
+    "skip_excluded_tests": False,
+    "skip_tests_covered_by_more_complex_suites": False,
+    "skip_symbolization": False,
     "fuzz_mongod_configs": None,
     "fuzz_runtime_params": None,
     "fuzz_runtime_stress": "off",
@@ -103,6 +106,7 @@ DEFAULTS = {
     "run_no_feature_flag_tests": False,
     "additional_feature_flags": None,
     "additional_feature_flags_file": None,
+    "disable_feature_flags": None,
     "seed": int(time.time() * 256),  # Taken from random.py code in Python 2.7.
     "service_executor": None,
     "shell_conn_string": None,
@@ -164,8 +168,6 @@ DEFAULTS = {
     "config_dir": "buildscripts/resmokeconfig",
     # Directory with jstests
     "jstests_dir": "jstests",
-    # UndoDB options
-    "undo_recorder_path": None,
     # Generate multiversion exclude tags options
     "exclude_tags_file_path": "generated_resmoke_config/multiversion_exclude_tags.yml",
     # Limit the number of tests to execute
@@ -321,9 +323,6 @@ BACKUP_ON_RESTART_DIR = None
 # mongo shell.
 BASE_PORT = None
 
-# The root url of the buildlogger server.
-BUILDLOGGER_URL = None
-
 # Root directory for where resmoke.py puts directories containing data files of mongod's it starts,
 # as well as those started by individual tests.
 DBPATH_PREFIX = None
@@ -401,6 +400,16 @@ EXCLUDE_WITH_ANY_TAGS = None
 # Allow test files passed as positional args to run even if they are excluded on the suite config.
 FORCE_EXCLUDED_TESTS = None
 
+# Allow a suite to continue its execution if the list of test files passed as positional args
+# contains any excluded test. This flag gets ignored when FORCE_EXCLUDED_TESTS is also set.
+SKIP_EXCLUDED_TESTS = None
+
+# Only run tests on the given suite that will not be run on a more complex suite.
+SKIP_TESTS_COVERED_BY_MORE_COMPLEX_SUITES = None
+
+# Skip symbolizing stacktraces generated during tests.
+SKIP_SYMBOLIZATION = None
+
 # A tag which is implicited excluded. This is useful for temporarily disabling a test.
 EXCLUDED_TAG = "__TEMPORARILY_DISABLED__"
 
@@ -457,6 +466,9 @@ RUN_NO_FEATURE_FLAG_TESTS = None
 # the path to a file containing feature flags
 ADDITIONAL_FEATURE_FLAGS_FILE = None
 
+# List of feature flags to disable
+DISABLE_FEATURE_FLAGS = None
+
 # List of enabled feature flags.
 ENABLED_FEATURE_FLAGS = []
 
@@ -468,6 +480,12 @@ MONGOD_EXECUTABLE = None
 
 # The --setParameter options passed to mongod.
 MONGOD_SET_PARAMETERS = []
+
+# Extra configurations for mongod (i.e. ones that aren't setParameters). Unlike other configuration
+# options, these "extra" configs are only used to invoke resmoke's standalone mongod instance. Extra
+# configs are a dictionary of {flag: bool, ...} which will become command-line args to mongod of the
+# form "--flag" if true, and nothing if false.
+MONGOD_EXTRA_CONFIG = {}
 
 # The path to the mongos executable used by resmoke.py.
 MONGOS_EXECUTABLE = None
@@ -623,9 +641,6 @@ BENCHMARK_FILTER = None
 BENCHMARK_LIST_TESTS = None
 BENCHMARK_MIN_TIME = None
 BENCHMARK_REPETITIONS = None
-
-# UndoDB options
-UNDO_RECORDER_PATH = None
 
 # # Generate multiversion exclude tags options
 EXCLUDE_TAGS_FILE_PATH = None

@@ -74,8 +74,6 @@ public:
 
     virtual bool isUpdateOneWithIdWithoutShardKeyEnabled() const = 0;
 
-    virtual bool isUpdateOneWithoutShardKeyEnabled() const = 0;
-
     /**
      * Returns a ShardEndpoint for a single document write or throws ShardKeyNotFound if 'doc' is
      * malformed with respect to the shard key pattern of the collection.
@@ -96,8 +94,7 @@ public:
         OperationContext* opCtx,
         const BatchItemRef& itemRef,
         bool* useTwoPhaseWriteProtocol = nullptr,
-        bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-        std::set<ChunkRange>* chunkRanges = nullptr) const = 0;
+        bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const = 0;
 
     /**
      * Returns a vector of ShardEndpoints for a potentially multi-shard delete or throws
@@ -109,14 +106,12 @@ public:
         OperationContext* opCtx,
         const BatchItemRef& itemRef,
         bool* useTwoPhaseWriteProtocol = nullptr,
-        bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr,
-        std::set<ChunkRange>* chunkRanges = nullptr) const = 0;
+        bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const = 0;
 
     /**
      * Returns a vector of ShardEndpoints for all shards.
      */
-    virtual std::vector<ShardEndpoint> targetAllShards(
-        OperationContext* opCtx, std::set<ChunkRange>* chunkRanges = nullptr) const = 0;
+    virtual std::vector<ShardEndpoint> targetAllShards(OperationContext* opCtx) const = 0;
 
     /**
      * Informs the targeter that a targeting failure occurred during one of the last targeting

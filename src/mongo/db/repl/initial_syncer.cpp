@@ -50,9 +50,8 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/client/remote_command_retry_scheduler.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/feature_compatibility_version_parser.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/all_database_cloner.h"
 #include "mongo/db/repl/collection_cloner.h"
@@ -73,17 +72,14 @@
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_source_selector.h"
-#include "mongo/db/repl/tenant_migration_access_blocker_util.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/serverless/serverless_operation_lock_registry.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_txn_record_gen.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
@@ -561,7 +557,7 @@ void InitialSyncer::_setUp(WithLock lk,
 
     auto serviceCtx = opCtx->getServiceContext();
     _storage->setInitialDataTimestamp(serviceCtx, Timestamp::kAllowUnstableCheckpointsSentinel);
-    _storage->setStableTimestamp(serviceCtx, Timestamp::min());
+    invariant(serviceCtx->getStorageEngine()->getStableTimestamp().isNull());
 
     LOGV2_DEBUG(21162, 1, "Creating oplogBuffer");
     _oplogBuffer = _dataReplicatorExternalState->makeInitialSyncOplogBuffer(opCtx);
@@ -597,10 +593,6 @@ void InitialSyncer::_tearDown(WithLock lk,
     const bool orderedCommit = true;
     _storage->oplogDiskLocRegister(opCtx, initialDataTimestamp, orderedCommit);
 
-    if (ReplicationCoordinator::get(opCtx)->getSettings().isServerless()) {
-        tenant_migration_access_blocker::recoverTenantMigrationAccessBlockers(opCtx);
-    }
-    ServerlessOperationLockRegistry::recoverLocks(opCtx);
     reconstructPreparedTransactions(opCtx, repl::OplogApplication::Mode::kInitialSync);
 
     _replicationProcess->getConsistencyMarkers()->setInitialSyncIdIfNotSet(opCtx);

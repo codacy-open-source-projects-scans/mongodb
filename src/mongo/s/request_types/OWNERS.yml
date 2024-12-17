@@ -1,6 +1,15 @@
 version: 1.0.0
 filters:
+  - "auto_split_vector.idl":
+    approvers:
+      - 10gen/server-cluster-scalability
   - "coordinate_multi_update.idl":
+    approvers:
+      - 10gen/server-cluster-scalability
+  - "migration_blocking_operation.idl":
+    approvers:
+      - 10gen/server-cluster-scalability
+  - "migration_secondary_throttle_options*":
     approvers:
       - 10gen/server-cluster-scalability
   - "add_shard*":
@@ -62,4 +71,7 @@ filters:
       - 10gen/server-catalog-and-routing
   - "cluster_commands_without_shard_key.idl":
     approvers:
-      - 10gen/query-execution
+      - 10gen/query-execution-router-write-exec
+  - "untrack_unsplittable_collection.idl":
+    approvers:
+      - 10gen/server-catalog-and-routing

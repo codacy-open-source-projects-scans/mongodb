@@ -348,8 +348,8 @@ public:
     commitMergeAllChunksOnShard(OperationContext* opCtx,
                                 const NamespaceString& nss,
                                 const ShardId& shardId,
-                                int maxNumberOfChunksToMerge = INT_MAX);
-
+                                int maxNumberOfChunksToMerge = INT_MAX,
+                                int maxTimeProcessingChunksMS = INT_MAX);
 
     /**
      * Updates metadata in config.chunks collection to show the given chunk in its new shard.
@@ -462,14 +462,29 @@ public:
     //
 
     /**
-     * Checks if a database with the same name, optPrimaryShard and enableSharding state already
-     * exists, and if not, creates a new one that matches these prerequisites. If a database already
-     * exists and matches all the prerequisites returns success, otherwise throws NamespaceNotFound.
+     * Checks if a database with the same name, optResolvedPrimaryShard and enableSharding state
+     * already exists, and if not, creates a new one that matches these prerequisites. If a database
+     * already exists and matches all the prerequisites returns success, otherwise throws
+     * NamespaceNotFound.
      */
     DatabaseType createDatabase(OperationContext* opCtx,
                                 const DatabaseName& dbName,
-                                const boost::optional<ShardId>& optPrimaryShard,
+                                const boost::optional<ShardId>& optResolvedPrimaryShard,
                                 const SerializationContext& serializationContext);
+
+    /*
+     * TODO (SERVER-97837): Refactor the function out of ShardingCatalogManager.
+     * Commits the new database metadata for a createDatabase operation.
+     *
+     * Throws ShardNotFound if the proposed 'primaryShard' is found to not exist. Also throws
+     * ShardNotFound if the user-specified primary shard is draining. This check (and the actual)
+     * commit, is done under the _kShardMembershipLock to ensure synchronization with removeShard
+     * operations.
+     */
+    DatabaseType commitCreateDatabase(OperationContext* opCtx,
+                                      const DatabaseName& dbName,
+                                      const ShardId& primaryShard,
+                                      bool userSelectedPrimary);
 
     /**
      * Updates the metadata in config.databases collection with the new primary shard for the given
@@ -648,19 +663,6 @@ public:
      * related initialization metadata).
      **/
     void cleanUpPlacementHistory(OperationContext* opCtx, const Timestamp& earliestClusterTime);
-
-    /**
-     * Remove unused `maxSizeMb` field from `config.shards` documents on upgrade to 8.0
-     * returns the number of documents updated
-     * TODO SERVER-80266 delete once 8.0 becomes last lts
-     */
-    int deleteMaxSizeMbFromShardEntries(OperationContext* opCtx);
-
-    /**
-     * Updates the config.settings schema for FCV upgrade and downgrade.
-     * TODO (SERVER-83264): Remove once 8.0 becomes last LTS.
-     */
-    Status upgradeDowngradeConfigSettings(OperationContext* opCtx);
 
     /**
      * Schedules an asynchronous unset of the addOrRemoveShardInProgress cluster parameter, in case
@@ -934,16 +936,6 @@ private:
                                                                    OperationContext* opCtx);
     Status _updateClusterCardinalityParameterAfterRemoveShardIfNeeded(const Lock::ExclusiveLock&,
                                                                       OperationContext* opCtx);
-    /*
-     * Commits the new database metadata for a createDatabase operation.
-     *
-     * Throws ShardNotFound if the proposed 'primaryShard' is found to not exist or be draining.
-     * This check (and the actual) commit, is done under the _kShardMembershipLock to ensure
-     * synchronization with removeShard operations.
-     */
-    DatabaseType _commitCreateDatabase(OperationContext* opCtx,
-                                       const DatabaseName& dbName,
-                                       const ShardId& primaryShard);
 
     // The owning service context
     ServiceContext* const _serviceContext;

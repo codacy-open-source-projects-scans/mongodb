@@ -35,7 +35,7 @@
 #include "mongo/base/status.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/shutdown.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
@@ -64,7 +64,7 @@ Status stepDownForShutdown(OperationContext* opCtx,
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     // If this is a single node replica set, then we don't have to wait
     // for any secondaries. Ignore stepdown.
-    if (replCoord->getConfigNumMembers() != 1) {
+    if (replCoord->getConfig().getNumMembers() != 1) {
         try {
             if (MONGO_unlikely(hangInShutdownBeforeStepdown.shouldFail())) {
                 LOGV2(5436600, "hangInShutdownBeforeStepdown failpoint enabled");
@@ -89,9 +89,9 @@ Status stepDownForShutdown(OperationContext* opCtx,
             LOGV2_WARNING(4719000, "Error stepping down during force shutdown", "error"_attr = e);
         }
 
-        // Even if the ReplicationCoordinator failed to step down, ensure we still shut down the
-        // TransactionCoordinatorService (see SERVER-45009)
-        TransactionCoordinatorService::get(opCtx)->onStepDown();
+        // Even if the ReplicationCoordinator failed to step down, ensure we still interrupt the
+        // TransactionCoordinatorService (see SERVER-45009).
+        TransactionCoordinatorService::get(opCtx)->interrupt();
     }
     return Status::OK();
 }

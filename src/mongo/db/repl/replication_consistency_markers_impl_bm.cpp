@@ -49,8 +49,6 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/storage_interface_mock.h"
-#include "mongo/db/repl/tenant_migration_donor_op_observer.h"
-#include "mongo/db/repl/tenant_migration_recipient_op_observer.h"
 #include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/query_analysis_op_observer_configsvr.h"
@@ -164,12 +162,7 @@ void setUpObservers(ServiceContext* serviceContext, ClusterRole clusterRole, boo
         opObserverRegistry->addObserver(std::make_unique<ShardServerOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ReshardingOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
-        if (isServerless) {
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationDonorOpObserver>());
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        }
+
         if (!gMultitenancySupport) {
             opObserverRegistry->addObserver(
                 std::make_unique<analyze_shard_key::QueryAnalysisOpObserverShardSvr>());
@@ -191,12 +184,7 @@ void setUpObservers(ServiceContext* serviceContext, ClusterRole clusterRole, boo
         opObserverRegistry->addObserver(std::make_unique<FindAndModifyImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<ChangeStreamPreImagesOpObserver>());
         opObserverRegistry->addObserver(std::make_unique<UserWriteBlockModeOpObserver>());
-        if (isServerless) {
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationDonorOpObserver>());
-            opObserverRegistry->addObserver(
-                std::make_unique<repl::TenantMigrationRecipientOpObserver>());
-        }
+
         if (!gMultitenancySupport) {
             opObserverRegistry->addObserver(
                 std::make_unique<analyze_shard_key::QueryAnalysisOpObserverRS>());
@@ -214,7 +202,7 @@ void setUpObservers(ServiceContext* serviceContext, ClusterRole clusterRole, boo
     if (audit::opObserverRegistrar) {
         audit::opObserverRegistrar(opObserverRegistry.get());
     }
-    serviceContext->setOpObserver(std::move(opObserverRegistry));
+    serviceContext->resetOpObserver_forTest(std::move(opObserverRegistry));
 }
 
 void BM_setOplogTruncateAfterPoint(benchmark::State& state) {

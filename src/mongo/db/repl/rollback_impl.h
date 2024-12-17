@@ -31,7 +31,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-#include <functional>
 #include <set>
 #include <string>
 #include <vector>
@@ -477,9 +476,9 @@ private:
     void _summarizeRollback(OperationContext* opCtx) const;
 
     /**
-     * Aligns the drop pending reaper's state with the catalog.
+     * Confirm that every database has an _id index.
      */
-    void _resetDropPendingState(OperationContext* opCtx);
+    void _checkForAllIdIndexes(OperationContext* opCtx);
 
     // Guards access to member variables.
     mutable stdx::mutex _mutex;  // (S)

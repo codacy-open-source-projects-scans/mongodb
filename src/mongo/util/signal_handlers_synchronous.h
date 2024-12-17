@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <boost/optional.hpp>
 #include <functional>
 #include <iosfwd>
 #include <typeinfo>
@@ -76,6 +77,10 @@ void clearSignalMask();
 int stackTraceSignal();
 #endif
 
+/**
+ * Returns the signal used for stress-testing of EINTR resilience.
+ */
+int interruptResilienceTestingSignal();
 
 /**
  * Analyzes the active exception, describing it to an ostream.
@@ -134,5 +139,12 @@ private:
 ActiveExceptionWitness& globalActiveExceptionWitness();
 
 std::string describeActiveException();
+
+/**
+ * Returns a `shared_ptr` that will have sole ownership of a `MallocFreeOStreamGuard`. The passed in
+ * signal number is used to end the process if the deadlock mitigation is triggered.
+ */
+std::shared_ptr<void> makeMallocFreeOStreamGuard_forTest(int sig);
+void setMallocFreeOStreamGuardDeadlockCallback_forTest(std::function<void(int)> cb);
 
 }  // namespace mongo

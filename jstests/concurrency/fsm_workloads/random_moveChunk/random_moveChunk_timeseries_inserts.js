@@ -22,6 +22,9 @@ import {getPlanStages} from "jstests/libs/query/analyze_plan.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
 export const $config = extendWorkload($baseConfig, function($config, $super) {
+    // This test manually shards the collection.
+    TestData.shardCollectionProbability = 0;
+
     $config.data.nonShardCollName = "unsharded";
 
     // A random non-round start value was chosen so that we can verify the rounding behavior that
@@ -144,12 +147,8 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 assert.eq(bucketIndex, ixScan.keyPattern, ixScan);
             }
         };
-        // TODO SERVER-79304 the test shouldn't rely on the feature flag.
-        if (FeatureFlagUtil.isPresentAndEnabled(db, "AuthoritativeShardCollection")) {
-            verifyBucketIndex({"control.min.t": 1, "control.max.t": 1});
-        } else {
-            verifyBucketIndex({"control.min.t": 1});
-        }
+
+        verifyBucketIndex({"control.min.t": 1, "control.max.t": 1});
         verifyBucketIndex({meta: 1, "control.min._id": 1, "control.max._id": 1});
         verifyBucketIndex({meta: 1, "control.min.t": 1, "control.max.t": 1});
     };

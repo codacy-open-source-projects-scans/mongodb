@@ -52,7 +52,6 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder_impl.h"
 #include "mongo/db/catalog/database_impl.h"
-#include "mongo/db/catalog/index_build_block.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/catalog/unique_collection_name.h"
 #include "mongo/db/catalog_raii.h"
@@ -62,13 +61,13 @@
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_builds/index_build_block.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_mock.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
@@ -115,9 +114,6 @@ void DatabaseTest::setUp() {
     _opCtx = cc().makeOperationContext();
 
     repl::StorageInterface::set(service, std::make_unique<repl::StorageInterfaceMock>());
-    repl::DropPendingCollectionReaper::set(
-        service,
-        std::make_unique<repl::DropPendingCollectionReaper>(repl::StorageInterface::get(service)));
 
     // Set up ReplicationCoordinator and create oplog.
     repl::ReplicationCoordinator::set(service,
@@ -143,7 +139,6 @@ void DatabaseTest::tearDown() {
     _opCtx = {};
 
     auto service = getServiceContext();
-    repl::DropPendingCollectionReaper::set(service, {});
     repl::StorageInterface::set(service, {});
 
     ServiceContextMongoDTest::tearDown();

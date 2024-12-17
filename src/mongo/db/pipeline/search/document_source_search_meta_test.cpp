@@ -52,7 +52,8 @@ using boost::intrusive_ptr;
 using std::list;
 using std::vector;
 
-using SearchMetaTest = AggregationContextFixture;
+class SearchMetaTest : service_context_test::WithSetupTransportLayer,
+                       public AggregationContextFixture {};
 
 struct MockMongoInterface final : public StubMongoProcessInterface {
     bool inShardedEnvironment(OperationContext* opCtx) const override {
@@ -65,10 +66,10 @@ TEST_F(SearchMetaTest, TestParsingOfSearchMeta) {
     auto specObj = BSON("$searchMeta" << mongotQuery);
 
     auto expCtx = getExpCtx();
-    expCtx->mongoProcessInterface = std::make_unique<MockMongoInterface>();
+    expCtx->setMongoProcessInterface(std::make_unique<MockMongoInterface>());
     auto fromNs = NamespaceString::createNamespaceString_forTest("unittests.$cmd.aggregate");
-    expCtx->setResolvedNamespaces(StringMap<ExpressionContext::ResolvedNamespace>{
-        {fromNs.coll().toString(), {fromNs, std::vector<BSONObj>()}}});
+    expCtx->setResolvedNamespaces(
+        StringMap<ResolvedNamespace>{{fromNs.coll().toString(), {fromNs, std::vector<BSONObj>()}}});
     list<intrusive_ptr<DocumentSource>> results =
         DocumentSourceSearchMeta::createFromBson(specObj.firstElement(), expCtx);
 

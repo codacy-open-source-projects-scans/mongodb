@@ -7,39 +7,51 @@ import {ShardedIndexUtil} from "jstests/sharding/libs/sharded_index_util.js";
 
 export class ReshardCollectionCmdTest {
     constructor(testConfig) {
-        assert(testConfig.st && testConfig.dbName && testConfig.collName &&
-               testConfig.numInitialDocs);
+        assert((testConfig.mongos || testConfig.st) && testConfig.dbName && testConfig.collName &&
+               testConfig.numInitialDocs !== undefined);
+
+        // Direct shard checks are only possible with a ShardingTest object.
+        if (!testConfig.st) {
+            assert(testConfig.skipDirectShardChecks);
+        }
         this._st = testConfig.st;
-        this._mongos = this._st.s0;
+        this._mongos = testConfig.mongos ? testConfig.mongos : this._st.s0;
         this._mongosConfig = this._mongos.getDB('config');
         this._dbName = testConfig.dbName;
         this._collName = testConfig.collName;
         this._ns = this._dbName + "." + this._collName;
         this._numInitialDocs = testConfig.numInitialDocs;
+        this._skipDirectShardChecks = testConfig.skipDirectShardChecks != undefined
+            ? testConfig.skipDirectShardChecks
+            : false;
+        this._skipCollectionSetup =
+            testConfig.skipCollectionSetup ? testConfig.skipCollectionSetup : false;
+        this._timeseries = testConfig.timeseries;
 
         this._shardToRSMap = {};
         this._shardIdToShardMap = {};
 
-        // Build the mapping for all shards assuming the shard number is continuously increasing.
-        let i = 0;
-        while (this._st["shard" + i]) {
-            this._shardToRSMap[this._st["shard" + i].shardName] = this._st["rs" + i];
-            this._shardIdToShardMap[this._st["shard" + i].shardName] = this._st["shard" + i];
-            i++;
+        if (!this._skipDirectShardChecks) {
+            // Build the mapping for all shards assuming the shard number is continuously
+            // increasing.
+            let i = 0;
+            while (this._st["shard" + i]) {
+                this._shardToRSMap[this._st["shard" + i].shardName] = this._st["rs" + i];
+                this._shardIdToShardMap[this._st["shard" + i].shardName] = this._st["shard" + i];
+                i++;
+            }
         }
     }
 
-    _getUUIDFromCollectionInfo(dbName, collName, collInfo) {
-        if (collInfo) {
-            return extractUUIDFromObject(collInfo.info.uuid);
-        }
+    _getUUIDFromCollectionInfo(dbName, collName) {
+        const uuidObject = getUUIDFromListCollections(
+            this._mongos.getDB(dbName), this._timeseries ? `system.buckets.${collName}` : collName);
 
-        const uuidObject = getUUIDFromListCollections(this._mongos.getDB(dbName), collName);
         return extractUUIDFromObject(uuidObject);
     }
 
-    _constructTemporaryReshardingCollName(dbName, collName, collInfo) {
-        const existingUUID = this._getUUIDFromCollectionInfo(dbName, collName, collInfo);
+    _constructTemporaryReshardingCollName(dbName, collName) {
+        const existingUUID = this._getUUIDFromCollectionInfo(dbName, collName);
         return 'system.resharding.' + existingUUID;
     }
 
@@ -52,8 +64,9 @@ export class ReshardCollectionCmdTest {
     }
 
     _verifyChunksMatchExpected(numExpectedChunks, presetExpectedChunks) {
-        let collEntry =
-            this._mongos.getDB('config').getCollection('collections').findOne({_id: this._ns});
+        let collEntry = this._mongos.getDB('config').getCollection('collections').findOne({
+            _id: this._timeseries ? `${this._dbName}.system.buckets.${this._collName}` : this._ns
+        });
         let chunkQuery = {uuid: collEntry.uuid};
 
         const reshardedChunks = this._mongosConfig.chunks.find(chunkQuery).toArray();
@@ -109,48 +122,51 @@ export class ReshardCollectionCmdTest {
 
     _verifyTemporaryReshardingCollectionExistsWithCorrectOptions(shardKey,
                                                                  expectedRecipientShards) {
-        const originalCollInfo =
-            this._mongos.getDB(this._dbName).getCollectionInfos({name: this._collName})[0];
-        assert.neq(originalCollInfo, undefined);
-
-        const tempReshardingCollName = this._constructTemporaryReshardingCollName(
-            this._dbName, this._collName, originalCollInfo);
+        const tempReshardingCollName =
+            this._constructTemporaryReshardingCollName(this._dbName, this._collName);
         this._verifyCollectionExistenceForConn(tempReshardingCollName, false, this._mongos);
 
-        expectedRecipientShards.forEach(shardId => {
-            const rsPrimary = this._shardToRSMap[shardId].getPrimary();
-            this._verifyCollectionExistenceForConn(this._collName, true, rsPrimary);
-            this._verifyCollectionExistenceForConn(tempReshardingCollName, false, rsPrimary);
-            ShardedIndexUtil.assertIndexExistsOnShard(
-                this._shardIdToShardMap[shardId], this._dbName, this._collName, shardKey);
-        });
+        if (!this._skipDirectShardChecks) {
+            expectedRecipientShards.forEach(shardId => {
+                const rsPrimary = this._shardToRSMap[shardId].getPrimary();
+                this._verifyCollectionExistenceForConn(this._collName, true, rsPrimary);
+                this._verifyCollectionExistenceForConn(tempReshardingCollName, false, rsPrimary);
+                ShardedIndexUtil.assertIndexExistsOnShard(
+                    this._shardIdToShardMap[shardId], this._dbName, this._collName, shardKey);
+            });
+        }
     }
 
     _verifyAllShardingCollectionsRemoved(tempReshardingCollName) {
         assert.eq(0, this._mongos.getDB(this._dbName)[tempReshardingCollName].find().itcount());
         assert.eq(0, this._mongosConfig.reshardingOperations.find({ns: this._ns}).itcount());
         assert.eq(
-            0, this._mongosConfig.collections.find({reshardingFields: {$exists: true}}).itcount());
-        assert.eq(0,
-                  this._st.rs0.getPrimary()
-                      .getDB('config')
-                      .localReshardingOperations.donor.find({ns: this._ns})
-                      .itcount());
-        assert.eq(0,
-                  this._st.rs0.getPrimary()
-                      .getDB('config')
-                      .localReshardingOperations.recipient.find({ns: this._ns})
-                      .itcount());
-        assert.eq(0,
-                  this._st.rs1.getPrimary()
-                      .getDB('config')
-                      .localReshardingOperations.donor.find({ns: this._ns})
-                      .itcount());
-        assert.eq(0,
-                  this._st.rs1.getPrimary()
-                      .getDB('config')
-                      .localReshardingOperations.recipient.find({ns: this._ns})
-                      .itcount());
+            0,
+            this._mongosConfig.collections.find({_id: this._ns, reshardingFields: {$exists: true}})
+                .itcount());
+
+        if (!this._skipDirectShardChecks) {
+            assert.eq(0,
+                      this._st.rs0.getPrimary()
+                          .getDB('config')
+                          .localReshardingOperations.donor.find({ns: this._ns})
+                          .itcount());
+            assert.eq(0,
+                      this._st.rs0.getPrimary()
+                          .getDB('config')
+                          .localReshardingOperations.recipient.find({ns: this._ns})
+                          .itcount());
+            assert.eq(0,
+                      this._st.rs1.getPrimary()
+                          .getDB('config')
+                          .localReshardingOperations.donor.find({ns: this._ns})
+                          .itcount());
+            assert.eq(0,
+                      this._st.rs1.getPrimary()
+                          .getDB('config')
+                          .localReshardingOperations.recipient.find({ns: this._ns})
+                          .itcount());
+        }
     }
 
     _verifyTagsDocumentsAfterOperationCompletes(ns, shardKeyPattern, expectedZones) {
@@ -182,21 +198,32 @@ export class ReshardCollectionCmdTest {
     }
 
     _verifyShardKey(expectedShardKey) {
-        const shardKey = this._mongos.getDB(this._dbName)[this._collName].getShardKey();
+        const collName = this._timeseries ? "system.buckets." + this._collName : this._collName;
+        const shardKey = this._mongos.getDB(this._dbName)[collName].getShardKey();
         assert.eq(shardKey, expectedShardKey);
     }
 
-    assertReshardCollOkWithPreset(commandObj, presetReshardedChunks) {
-        const oldShardKey = {oldKey: 1};
-        assert.commandWorked(
-            this._mongos.adminCommand({shardCollection: this._ns, key: oldShardKey}));
-        this._verifyShardKey(oldShardKey);
+    _verifyDocumentsExist(docs, collection) {
+        docs.forEach(doc => {
+            assert.eq(collection.find(doc).count(), 1, `Missing document ${tojson(doc)}`);
+        });
+    }
 
-        let bulk = this._mongos.getDB(this._dbName)
-                       .getCollection(this._collName)
-                       .initializeOrderedBulkOp();
+    assertReshardCollOkWithPreset(commandObj, presetReshardedChunks) {
+        if (!this._skipCollectionSetup) {
+            const oldShardKey = {oldKey: 1};
+            assert.commandWorked(
+                this._mongos.adminCommand({shardCollection: this._ns, key: oldShardKey}));
+            this._verifyShardKey(oldShardKey);
+        }
+
+        let docs = [];
+        let collection = this._mongos.getDB(this._dbName).getCollection(this._collName);
+        let bulk = collection.initializeOrderedBulkOp();
         for (let x = 0; x < this._numInitialDocs; x++) {
-            bulk.insert({oldKey: x, newKey: this._numInitialDocs - x});
+            let doc = {oldKey: x, newKey: this._numInitialDocs - x};
+            docs.push(doc);
+            bulk.insert(doc);
         }
         assert.commandWorked(bulk.execute());
 
@@ -214,8 +241,14 @@ export class ReshardCollectionCmdTest {
         this._verifyTagsDocumentsAfterOperationCompletes(this._ns, Object.keys(commandObj.key));
 
         this._verifyChunksMatchExpected(presetReshardedChunks.length, presetReshardedChunks);
+        this._verifyDocumentsExist(docs, collection);
 
-        this._mongos.getDB(this._dbName)[this._collName].drop();
+        // Do not drop the collection if this._skipCollectionSetup because the caller owns the
+        // setup/teardown of the collection.
+        if (!this._skipCollectionSetup) {
+            this._mongos.getDB(this._dbName)[this._collName].drop();
+        }
+
         this._verifyAllShardingCollectionsRemoved(tempReshardingCollName);
     }
 
@@ -229,16 +262,20 @@ export class ReshardCollectionCmdTest {
      */
     assertReshardCollOk(
         commandObj, expectedChunkNum, expectedChunks, expectedZones, additionalSetup) {
-        const oldShardKey = {oldKey: 1};
-        assert.commandWorked(
-            this._mongos.adminCommand({shardCollection: this._ns, key: oldShardKey}));
-        this._verifyShardKey(oldShardKey);
+        if (!this._skipCollectionSetup) {
+            const oldShardKey = {oldKey: 1};
+            assert.commandWorked(
+                this._mongos.adminCommand({shardCollection: this._ns, key: oldShardKey}));
+            this._verifyShardKey(oldShardKey);
+        }
 
-        let bulk = this._mongos.getDB(this._dbName)
-                       .getCollection(this._collName)
-                       .initializeOrderedBulkOp();
+        let docs = [];
+        let collection = this._mongos.getDB(this._dbName).getCollection(this._collName);
+        let bulk = collection.initializeOrderedBulkOp();
         for (let x = 0; x < this._numInitialDocs; x++) {
-            bulk.insert({oldKey: x, newKey: this._numInitialDocs - x});
+            let doc = {oldKey: x, newKey: this._numInitialDocs - x};
+            docs.push(doc);
+            bulk.insert(doc);
         }
         assert.commandWorked(bulk.execute());
         if (additionalSetup) {
@@ -265,7 +302,14 @@ export class ReshardCollectionCmdTest {
 
         this._verifyIndexesCreated(indexes, commandObj.key);
 
-        this._mongos.getDB(this._dbName)[this._collName].drop();
+        this._verifyDocumentsExist(docs, collection);
+
+        // Do not drop the collection if this._skipCollectionSetup because the caller owns the
+        // setup/teardown of the collection.
+        if (!this._skipCollectionSetup) {
+            this._mongos.getDB(this._dbName)[this._collName].drop();
+        }
+
         this._verifyAllShardingCollectionsRemoved(tempReshardingCollName);
     }
 }

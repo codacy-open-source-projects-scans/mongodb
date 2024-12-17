@@ -14,7 +14,7 @@ const collName = "coll";
 
 const replSet = new ReplSetTest({nodes: 2});
 replSet.startSet();
-replSet.initiate();
+replSet.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 let primary = replSet.getPrimary();
 let testDB = primary.getDB(dbName);
@@ -42,7 +42,7 @@ checkLog.contains(primary,
                       "enabled. Blocking until fail point is disabled");
 
 assert.commandWorked(testDB.adminCommand({replSetStepDown: 60, force: true}));
-replSet.waitForState(primary, ReplSetTest.State.SECONDARY);
+replSet.awaitSecondaryNodes(null, [primary]);
 
 assert.commandWorked(primary.adminCommand({configureFailPoint: failpoint, mode: "off"}));
 awaitShell();

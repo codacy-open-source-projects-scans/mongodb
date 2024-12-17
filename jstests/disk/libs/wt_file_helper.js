@@ -1,7 +1,6 @@
 import {
     getPlanStage,
-    getQueryPlanner,
-    getWinningPlan,
+    getWinningPlanFromExplain,
     isExpress,
     isIxscan
 } from "jstests/libs/query/analyze_plan.js";
@@ -50,10 +49,10 @@ export let assertQueryUsesIndex = function(coll, query, indexName) {
 
     let stage;
     if (isIxscan(coll.getDB(), res)) {
-        stage = getPlanStage(getWinningPlan(getQueryPlanner(res)), "IXSCAN");
+        stage = getPlanStage(getWinningPlanFromExplain(res), "IXSCAN");
     } else {
         assert(isExpress(coll.getDB(), res), tojson(res));
-        stage = getPlanStage(getWinningPlan(getQueryPlanner(res)), "EXPRESS_IXSCAN");
+        stage = getPlanStage(getWinningPlanFromExplain(res), "EXPRESS_IXSCAN");
     }
     assert.eq(
         stage.indexName, indexName, "Expecting index scan on " + indexName + ": " + tojson(res));
@@ -106,7 +105,7 @@ export let assertErrorOnStartupWhenStartingAsReplSet = function(dbpath, port, rs
     let node = MongoRunner.runMongod(
         {dbpath: dbpath, port: port, replSet: rsName, noCleanData: true, waitForConnect: false});
     assert.soon(function() {
-        return rawMongoProgramOutput().search(/Fatal assertion.*50923/) >= 0;
+        return rawMongoProgramOutput("Fatal assertion").search(/50923/) >= 0;
     });
     MongoRunner.stopMongod(node, null, {allowedExitCode: MongoRunner.EXIT_ABRUPT});
 };
@@ -122,7 +121,7 @@ export let assertErrorOnStartupAfterIncompleteRepair = function(dbpath, port) {
     let node = MongoRunner.runMongod(
         {dbpath: dbpath, port: port, noCleanData: true, waitForConnect: false});
     assert.soon(function() {
-        return rawMongoProgramOutput().search(/Fatal assertion.*50922/) >= 0;
+        return rawMongoProgramOutput("Fatal assertion").search(/50922/) >= 0;
     });
     MongoRunner.stopMongod(node, null, {allowedExitCode: MongoRunner.EXIT_ABRUPT});
 };
@@ -151,7 +150,7 @@ export let assertErrorOnStartupWhenInitialSyncingWithData = function(replSet, or
         jsTestLog("Ignoring exception from replsettest.start: " + tojson(e));
     } finally {
         assert.soon(function() {
-            return rawMongoProgramOutput().search(/Fatal assertion.*9184100/) >= 0;
+            return rawMongoProgramOutput("Fatal assertion").search(/9184100/) >= 0;
         });
         if (node) {
             MongoRunner.stopMongod(node, null, {allowedExitCode: MongoRunner.EXIT_ABRUPT});

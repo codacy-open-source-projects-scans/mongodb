@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-
 #include <benchmark/benchmark.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
@@ -37,16 +36,13 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/sorted_data_interface_test_assert.h"
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
-#include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/unittest/assert.h"
 
 namespace mongo {
@@ -65,29 +61,31 @@ struct Fixture {
           direction(direction),
           nToInsert(nToInsert),
           harness(newSortedDataInterfaceHarnessHelper()),
-          sorted(
-              harness->newSortedDataInterface(uniqueness == kUnique, /*partial*/ false, keyFormat)),
           opCtx(harness->newOperationContext()),
-          globalLock(opCtx.get(), MODE_X),
+          sorted(harness->newSortedDataInterface(
+              opCtx.get(), uniqueness == kUnique, /*partial*/ false, keyFormat)),
           cursor(sorted->newCursor(opCtx.get(), direction == kForward)),
           firstKey(makeKeyStringForSeek(sorted.get(),
                                         BSON("" << (direction == kForward ? 1 : nToInsert)),
                                         direction == kForward,
                                         true)) {
 
-        WriteUnitOfWork uow(opCtx.get());
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
+
+        StorageWriteTransaction txn(ru);
         for (int i = 0; i < nToInsert; i++) {
             BSONObj key = BSON("" << i);
             if (keyFormat == KeyFormat::Long) {
                 RecordId loc(42, i * 2);
-                ASSERT_OK(sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key, loc), true));
+                ASSERT_SDI_INSERT_OK(
+                    sorted->insert(opCtx.get(), makeKeyString(sorted.get(), key, loc), true));
             } else {
                 RecordId loc(record_id_helpers::keyForObj(key));
-                ASSERT_OK(sorted->insert(
+                ASSERT_SDI_INSERT_OK(sorted->insert(
                     opCtx.get(), makeKeyString(sorted.get(), key, std::move(loc)), true));
             }
         }
-        uow.commit();
+        txn.commit();
         ASSERT_EQUALS(nToInsert, sorted->numEntries(opCtx.get()));
     }
 
@@ -96,9 +94,8 @@ struct Fixture {
     const int nToInsert;
 
     std::unique_ptr<SortedDataInterfaceHarnessHelper> harness;
-    std::unique_ptr<SortedDataInterface> sorted;
     ServiceContext::UniqueOperationContext opCtx;
-    Lock::GlobalLock globalLock;
+    std::unique_ptr<SortedDataInterface> sorted;
     std::unique_ptr<SortedDataInterface::Cursor> cursor;
     key_string::Builder firstKey;
     size_t itemsProcessed = 0;

@@ -16,9 +16,11 @@ executor:
     tests: true
   config:
     shell_options:
+      eval: await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
           fsmPreOverridesLoadedCallback: import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
+          implicitlyShardOnCreateCollectionOnly: true
           runInsideTransaction: true
           runningWithBalancer: true
           runningWithSessions: true
@@ -29,8 +31,6 @@ executor:
     enable_balancer: true
     mongod_options:
       set_parameters:
-        analyzeShardKeyMaxNumStaleVersionRetries: 2
-        defaultConfigCommandTimeoutMS: 90000
         enableTestCommands: 1
         featureFlagRouterPort: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
@@ -57,7 +57,7 @@ executor:
 matrix_suite: true
 selector:
   exclude_files:
-    - jstests/concurrency/fsm_workloads/drop_index_during_replan.js
+    - jstests/concurrency/fsm_workloads/query/drop_index_during_replan.js
     - jstests/concurrency/fsm_workloads/query/drop_index_during_lookup.js
     - jstests/concurrency/fsm_workloads/query/update/update_rename.js
     - jstests/concurrency/fsm_workloads/query/update/update_rename_noindex.js

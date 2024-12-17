@@ -5,4 +5,7 @@ filters:
       - 10gen/server-programmability
   - "*index_build*":
     approvers:
-      - 10gen/server-storage-execution
+      - 10gen/server-index-builds
+  - "*change_stream*":
+    approvers:
+      - 10gen/query-execution-change-streams

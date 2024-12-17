@@ -123,7 +123,7 @@ protected:
         client.createIndex(TagsType::ConfigNS, BSON("ns" << 1 << "min" << 1));
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
         TransactionCoordinatorService::get(operationContext())
-            ->onShardingInitialization(operationContext(), true);
+            ->initializeIfNeeded(operationContext(), /* term */ 1);
 
         _metrics = ReshardingMetrics::makeInstance(_originalUUID,
                                                    _newShardKey.toBSON(),
@@ -134,7 +134,7 @@ protected:
     }
 
     void tearDown() override {
-        TransactionCoordinatorService::get(operationContext())->onStepDown();
+        TransactionCoordinatorService::get(operationContext())->interrupt();
         ConfigServerTestFixture::tearDown();
     }
 
@@ -302,7 +302,7 @@ protected:
         DBDirectClient client(opCtx);
 
         for (const auto& chunk : chunks) {
-            client.insert(ChunkType::ConfigNS, chunk.toConfigBSON());
+            client.insert(NamespaceString::kConfigsvrChunksNamespace, chunk.toConfigBSON());
         }
 
         for (const auto& zone : zones) {
@@ -499,7 +499,7 @@ protected:
                                                        const OID& collEpoch,
                                                        const Timestamp& collTimestamp) {
         DBDirectClient client(opCtx);
-        FindCommandRequest findRequest{ChunkType::ConfigNS};
+        FindCommandRequest findRequest{NamespaceString::kConfigsvrChunksNamespace};
         findRequest.setFilter(BSON("uuid" << uuid));
         auto cursor = client.find(std::move(findRequest));
 
@@ -662,12 +662,12 @@ protected:
                 opCtx->getServiceContext()->getPreciseClockSource()->now());
             client.insert(CollectionType::ConfigNS, originalNssCatalogEntry.toBSON());
 
-            client.createCollection(ChunkType::ConfigNS);
+            client.createCollection(NamespaceString::kConfigsvrChunksNamespace);
             client.createCollection(TagsType::ConfigNS);
 
             ASSERT_OK(createIndexOnConfigCollection(
                 opCtx,
-                ChunkType::ConfigNS,
+                NamespaceString::kConfigsvrChunksNamespace,
                 BSON(ChunkType::collectionUUID() << 1 << ChunkType::lastmod() << 1),
                 true));
         }
@@ -748,7 +748,8 @@ protected:
 
         // Check that chunks and tags under the temp namespace have been removed
         DBDirectClient client(opCtx);
-        auto chunkDoc = client.findOne(ChunkType::ConfigNS, BSON("ns" << _tempNss.ns_forTest()));
+        auto chunkDoc = client.findOne(NamespaceString::kConfigsvrChunksNamespace,
+                                       BSON("ns" << _tempNss.ns_forTest()));
         ASSERT(chunkDoc.isEmpty());
 
         auto tagDoc = client.findOne(TagsType::ConfigNS, BSON("ns" << _tempNss.ns_forTest()));

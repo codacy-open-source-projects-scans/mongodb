@@ -84,17 +84,6 @@ NSS_CONSTANT(kMigrationCoordinatorsNamespace, DatabaseName::kConfig, "migrationC
 // Namespace for storing the persisted state of migration recipients.
 NSS_CONSTANT(kMigrationRecipientsNamespace, DatabaseName::kConfig, "migrationRecipients"_sd)
 
-// Namespace for storing the persisted state of tenant migration donors.
-NSS_CONSTANT(kTenantMigrationDonorsNamespace, DatabaseName::kConfig, "tenantMigrationDonors"_sd)
-
-// Namespace for storing the persisted state of tenant migration recipient service instances.
-NSS_CONSTANT(kTenantMigrationRecipientsNamespace,
-             DatabaseName::kConfig,
-             "tenantMigrationRecipients"_sd)
-
-// Namespace for view on local.oplog.rs for tenant migrations.
-NSS_CONSTANT(kTenantMigrationOplogView, DatabaseName::kLocal, "system.tenantMigration.oplogView"_sd)
-
 // Namespace for replica set configuration settings.
 NSS_CONSTANT(kSystemReplSetNamespace, DatabaseName::kLocal, "system.replset"_sd)
 
@@ -154,10 +143,19 @@ NSS_CONSTANT(kReshardingApplierProgressNamespace,
              DatabaseName::kConfig,
              "localReshardingOperations.recipient.progress_applier"_sd)
 
+// Namespace for storing oplog fetcher progress for resharding.
+NSS_CONSTANT(kReshardingFetcherProgressNamespace,
+             DatabaseName::kConfig,
+             "localReshardingOperations.recipient.progress_fetcher"_sd)
+
 // Namespace for storing config.transactions cloner progress for resharding.
 NSS_CONSTANT(kReshardingTxnClonerProgressNamespace,
              DatabaseName::kConfig,
              "localReshardingOperations.recipient.progress_txn_cloner"_sd)
+
+// Namespace for serializing between dropDatabase and a following concurrent createDatabase. The
+// dropDatabase DDL coordinator will be the only writer to this collection.
+NSS_CONSTANT(kConfigDropPendingDBsNamespace, DatabaseName::kConfig, "dropPendingDBs"_sd)
 
 // Namespace for storing config.collectionCriticalSections documents
 NSS_CONSTANT(kCollectionCriticalSectionsNamespace,

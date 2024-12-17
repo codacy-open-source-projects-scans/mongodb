@@ -202,7 +202,6 @@ boost::optional<WriteConcernErrorDetail> mergeWriteConcernErrors(
     auto errCode = wcErrors.front().error.toStatus().code();
     if (wcErrors.size() != 1) {
         msg << "Multiple errors reported :: ";
-        errCode = ErrorCodes::WriteConcernFailed;
     }
 
     for (auto it = wcErrors.begin(); it != wcErrors.end(); ++it) {
@@ -261,17 +260,9 @@ void populateCollectionUUIDMismatch(OperationContext* opCtx,
 
 bool shouldCoordinateMultiUpdate(OperationContext* opCtx,
                                  PauseMigrationsDuringMultiUpdatesEnablement& pauseMigrations,
-                                 bool isMultiWrite,
-                                 bool isUpsert) {
+                                 bool isMultiWrite) {
     if (!isMultiWrite || !pauseMigrations.isEnabled()) {
         // If this is not a multi write or if the cluster parameter is off, the op is not relevant.
-        return false;
-    }
-
-    if (isUpsert) {
-        // The full shard key must be specified for an upsert, so we will only ever target a single
-        // shard. This prevents chunk migrations from being a problem, since the whole operation
-        // will execute either before or after the migration occurs.
         return false;
     }
 
@@ -390,7 +381,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                         // NOTE: We may repeatedly cancel a write op here, but that's fast and we
                         // want to cancel before erasing the TargetedWrite* (which owns the
                         // cancelled targeting info) for reporting reasons.
-                        writeOps[write->writeOpRef.first].resetWriteToReady();
+                        writeOps[write->writeOpRef.first].resetWriteToReady(opCtx);
                     }
 
                     it = batchMap.erase(it);
@@ -424,7 +415,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
 
                 // Send out what we have, but don't record an error yet, since there may be an error
                 // in the writes before this point.
-                writeOp.resetWriteToReady();
+                writeOp.resetWriteToReady(opCtx);
                 break;
             }
         }
@@ -435,9 +426,18 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             dassert(batchMap.size() == 1u);
             if (isNewBatchRequiredOrdered(
                     targeter.getNS(), writes, batchMap, nsShardIdMap, nsEndpointMap)) {
-                writeOp.resetWriteToReady();
+                writeOp.resetWriteToReady(opCtx);
                 break;
             }
+        }
+
+        // If writes are unordered and we already have targeted endpoints, make sure we don't target
+        // the same shard with a different shardVersion. We can continue to look for the next writes
+        // that can still be included in the same batch.
+        if (!ordered &&
+            isNewBatchRequiredUnordered(targeter.getNS(), writes, nsShardIdMap, nsEndpointMap)) {
+            writeOp.resetWriteToReady(opCtx);
+            continue;
         }
 
         for (auto&& write : writes) {
@@ -446,17 +446,8 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
 
         if (wouldMakeBatchesTooBig(writes, batchMap)) {
             invariant(!batchMap.empty());
-            writeOp.resetWriteToReady();
+            writeOp.resetWriteToReady(opCtx);
             break;
-        }
-
-        // If writes are unordered and we already have targeted endpoints, make sure we don't target
-        // the same shard with a different shardVersion. We can continue to look for the next writes
-        // that can still be included in the same batch.
-        if (!ordered &&
-            isNewBatchRequiredUnordered(targeter.getNS(), writes, nsShardIdMap, nsEndpointMap)) {
-            writeOp.resetWriteToReady();
-            continue;
         }
 
         auto isTimeseriesRetryableUpdate = targeter.isTrackedTimeSeriesBucketsNamespace() &&
@@ -464,7 +455,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction();
         if (isTimeseriesRetryableUpdate) {
             if (!batchMap.empty()) {
-                writeOp.resetWriteToReady();
+                writeOp.resetWriteToReady(opCtx);
                 break;
             } else {
                 writeType = WriteType::TimeseriesRetryableUpdate;
@@ -479,20 +470,20 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             writeItem.getOpType() == BatchedCommandRequest::BatchType_Update ||
             writeItem.getOpType() == BatchedCommandRequest::BatchType_Delete) {
 
-            auto [isMultiWrite, isUpsert] = [&] {
+            auto isMultiWrite = [&] {
                 if (writeItem.getOpType() == BatchedCommandRequest::BatchType_Update) {
                     auto updateReq = writeItem.getUpdateRef();
-                    return std::make_tuple(updateReq.getMulti(), updateReq.getUpsert());
+                    return updateReq.getMulti();
                 } else {
                     auto deleteReq = writeItem.getDeleteRef();
-                    return std::make_tuple(deleteReq.getMulti(), false);
+                    return deleteReq.getMulti();
                 }
             }();
 
-            if (shouldCoordinateMultiUpdate(opCtx, pauseMigrations, isMultiWrite, isUpsert)) {
+            if (shouldCoordinateMultiUpdate(opCtx, pauseMigrations, isMultiWrite)) {
                 // Multi writes blocking migrations should be in their own batch.
                 if (!batchMap.empty()) {
-                    writeOp.resetWriteToReady();
+                    writeOp.resetWriteToReady(opCtx);
                     break;
                 } else {
                     writeType = WriteType::MultiWriteBlockingMigrations;
@@ -509,7 +500,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
             if (writeWithoutShardKeyOrId) {
                 // Writes without shard key should be in their own batch.
                 if (!batchMap.empty()) {
-                    writeOp.resetWriteToReady();
+                    writeOp.resetWriteToReady(opCtx);
                     break;
                 } else {
                     writeType = WriteType::WithoutShardKeyOrId;
@@ -524,7 +515,7 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
 
             if (writeOp.getWriteType() == WriteType::Ordinary &&
                 writeType == WriteType::WithoutShardKeyWithId) {
-                writeOp.resetWriteToReady();
+                writeOp.resetWriteToReady(opCtx);
                 break;
             }
         }
@@ -857,20 +848,21 @@ void BatchWriteOp::noteBatchResponse(const TargetedWriteBatch& targetedBatch,
             if (!ordered || !lastError) {
                 if (writeOp.getWriteType() == WriteType::WithoutShardKeyWithId) {
                     writeOp.noteWriteWithoutShardKeyWithIdResponse(
+                        _opCtx,
                         *write,
                         response.getN(),
                         targetedBatch.getNumOps(),
                         /* bulkWriteReplyItem */ boost::none);
                 } else {
-                    writeOp.noteWriteComplete(*write);
+                    writeOp.noteWriteComplete(_opCtx, *write);
                 }
             } else {
                 // We didn't actually apply this write - cancel so we can retarget
                 dassert(writeOp.getNumTargeted() == 1u);
-                writeOp.resetWriteToReady();
+                writeOp.resetWriteToReady(_opCtx);
             }
         } else {
-            writeOp.noteWriteError(*write, *writeError);
+            writeOp.noteWriteError(_opCtx, *write, *writeError);
             lastError = writeError;
         }
         ++index;
@@ -1119,11 +1111,11 @@ void BatchWriteOp::handleDeferredResponses(bool hasAnyStaleShardResponse) {
             WriteOp& writeOp = _writeOps[write->writeOpRef.first];
             if (hasAnyStaleShardResponse) {
                 if (writeOp.getWriteState() != WriteOpState_Ready) {
-                    writeOp.resetWriteToReady();
+                    writeOp.resetWriteToReady(_opCtx);
                 }
             } else if (writeOp.getWriteState() != WriteOpState_Error) {
                 writeOp.noteWriteWithoutShardKeyWithIdResponse(
-                    *write, response->getN(), targetedWriteBatch->getNumOps(), boost::none);
+                    _opCtx, *write, response->getN(), targetedWriteBatch->getNumOps(), boost::none);
             }
         }
         if (!hasAnyStaleShardResponse) {

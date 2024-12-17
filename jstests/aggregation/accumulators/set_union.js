@@ -1,6 +1,6 @@
 /**
  * Basic tests for the $setUnion accumulator.
- * @tags: [featureFlagArrayAccumulators, requires_fcv_81]
+ * @tags: [requires_fcv_81]
  */
 import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
 
@@ -105,6 +105,19 @@ assert.eq(result, [{_id: null, setUnionArr: ["Happy!", "Smile :)"]}]);
 assert(coll.drop());
 
 // $setUnion dotted field.
+assert.commandWorked(coll.insert(
+    [{_id: 1, a: {b: [1, 2, 3]}}, {_id: 2, a: {b: [3, 4, 5, 6]}}, {_id: 3, a: {b: [7, 8, 9]}}]));
+result = coll.aggregate([
+                 {$sort: {_id: 1}},
+                 {$group: {_id: null, nums: {$setUnion: '$a.b'}}},
+                 {$project: {_id: 1, setUnionArr: {$sortArray: {input: '$nums', sortBy: 1}}}}
+             ])
+             .toArray();
+assert.eq(result, [{_id: null, setUnionArr: [1, 2, 3, 4, 5, 6, 7, 8, 9]}]);
+
+assert(coll.drop());
+
+// $setUnion dotted field, array halfway on path.
 assert.commandWorked(coll.insert([
     {_id: 1, a: [{b: [1, 2, 3]}, {b: [4, 5, 6]}]},
     {_id: 2, a: [{b: [7, 8, 9]}, {b: [10, 11, 12]}]},
@@ -154,3 +167,32 @@ result =
 assert.eq(
     result,
     [{_id: "Pub1", setUnionArr: ["Book 1"]}, {_id: "Pub3", setUnionArr: ["Book 2", "Book 3"]}]);
+
+// Basic correctness tests for $setUnion used in $bucket and $bucketAuto. Though $bucket and
+// $bucketAuto use accumulators in the same way that $group does, the tests below verifies that
+// everything works properly with serialization and reporting results.
+assert(coll.drop());
+const docs = [];
+for (let i = 0; i < 10; i++) {
+    docs.push({_id: i, arr: [42]});
+}
+coll.insertMany(docs);
+
+// $bucket
+result =
+    coll.aggregate([{
+            $bucket: {groupBy: '$_id', boundaries: [0, 5, 10], output: {nums: {$setUnion: "$arr"}}}
+        }])
+        .toArray();
+assert.eq(result, [{"_id": 0, "nums": [42]}, {"_id": 5, "nums": [42]}]);
+
+// $bucketAuto
+result =
+    coll.aggregate(
+            [{$bucketAuto: {groupBy: '$_id', buckets: 2, output: {nums: {$setUnion: "$arr"}}}}])
+        .toArray();
+assert.eq(
+    result,
+    [{"_id": {"min": 0, "max": 5}, "nums": [42]}, {"_id": {"min": 5, "max": 9}, "nums": [42]}]);
+
+assert(coll.drop());

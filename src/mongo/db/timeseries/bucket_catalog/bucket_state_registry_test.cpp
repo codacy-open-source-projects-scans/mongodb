@@ -28,30 +28,22 @@
  */
 
 #include <boost/optional.hpp>
-#include <memory>
-#include <string>
-#include <variant>
-#include <vector>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/optime.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
-#include "mongo/db/timeseries/bucket_catalog/closed_bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
@@ -105,8 +97,8 @@ public:
     }
 
     Bucket& createBucket(InsertContext& info, Date_t time) {
-        auto ptr =
-            &internal::allocateBucket(*this, *stripes[info.stripeNumber], withLock, info, time);
+        auto ptr = &internal::allocateBucket(
+            *this, *stripes[info.stripeNumber], withLock, info, time, nullptr);
         ASSERT_FALSE(hasBeenCleared(*ptr));
         return *ptr;
     }
@@ -172,8 +164,8 @@ public:
     UUID uuid2 = UUID::gen();
     UUID uuid3 = UUID::gen();
     BSONElement elem;
-    TrackingContext trackingContext;
-    BucketMetadata bucketMetadata{trackingContext, elem, nullptr, boost::none};
+    tracking::Context trackingContext;
+    BucketMetadata bucketMetadata{trackingContext, elem, boost::none};
     BucketKey bucketKey1{uuid1, bucketMetadata};
     BucketKey bucketKey2{uuid2, bucketMetadata};
     BucketKey bucketKey3{uuid3, bucketMetadata};
@@ -238,13 +230,18 @@ DEATH_TEST_F(BucketStateRegistryTest, CannotPrepareAnUntrackedBucket, "invariant
                 StateChangeSuccessful::kNo);
 }
 
-TEST_F(BucketStateRegistryTest, TransitionsFromNormalState) {
+DEATH_TEST_F(BucketStateRegistryTest, CannotInitializeAnUnclearedBucket, "invariant") {
     // Start with a 'kNormal' bucket in the registry.
     auto& bucket = createBucket(info1, date);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kNormal));
 
-    // We expect transition to 'kNormal' to succeed.
+    // We expect initialize to invariant.
     ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+}
+
+TEST_F(BucketStateRegistryTest, TransitionsFromNormalState) {
+    // Start with a 'kNormal' bucket in the registry.
+    auto& bucket = createBucket(info1, date);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kNormal));
 
     // We can stop tracking a 'kNormal' bucket.
@@ -498,7 +495,6 @@ TEST_F(BucketStateRegistryTest, TransitionsFromPreparedAndFrozenState) {
 TEST_F(BucketStateRegistryTest, TransitionsFromDirectWriteState) {
     // Start with a bucket with a direct write in the registry.
     auto& bucket = createBucket(info1, date);
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
     auto bucketState = addDirectWrite(bucketStateRegistry, bucket.bucketId);
     ASSERT_TRUE(doesBucketHaveDirectWrite(bucket.bucketId));
     auto originalDirectWriteCount = std::get<DirectWriteCounter>(bucketState);
@@ -613,6 +609,7 @@ TEST_F(BucketStateRegistryTest, HasBeenClearedFunctionReturnsAsExpected) {
 
     // Sanity check that all this still works with multiple buckets in a namespace being cleared.
     auto& bucket3 = createBucket(info2, date);
+    bucket3.rolloverAction = RolloverAction::kArchive;  // Rollover before opening another bucket
     auto& bucket4 = createBucket(info2, date);
     ASSERT_EQ(bucket3.lastChecked, 1);
     ASSERT_EQ(bucket4.lastChecked, 1);
@@ -670,14 +667,22 @@ TEST_F(BucketStateRegistryTest, ClearRegistryGarbageCollection) {
     // Era 2 still has bucket4 in it, so its count remains non-zero.
     ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 1);
     auto& bucket5 = createBucket(info1, date);
+    bucket4.rolloverAction = RolloverAction::kArchive;  // Rollover before opening another bucket
     auto& bucket6 = createBucket(info2, date);
     ASSERT_EQ(bucket5.lastChecked, 3);
     ASSERT_EQ(bucket6.lastChecked, 3);
     clear(*this, uuid1);
     checkAndRemoveClearedBucket(bucket5);
-    // Eras 2 and 3 still have bucket4 and bucket6 in them respectively, so their counts remain
-    // non-zero.
-    ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 2);
+    if constexpr (!kDebugBuild) {
+        ASSERT_EQ(bucket4.lastChecked, 2);
+        // Eras 2 and 3 still have bucket4 and bucket6 in them respectively, so their counts remain
+        // non-zero.
+        ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 2);
+    } else {
+        ASSERT_EQ(bucket4.lastChecked, 3);  // Debug check advanced this while creating bucket6.
+        // Era3 still has bucket4 and bucket6, so its count remains non-zero.
+        ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 1);
+    }
     clear(*this, uuid2);
     checkAndRemoveClearedBucket(bucket4);
     checkAndRemoveClearedBucket(bucket6);
@@ -736,7 +741,7 @@ TEST_F(BucketStateRegistryTest, HasBeenClearedToleratesGapsInRegistry) {
     ASSERT_TRUE(hasBeenCleared(bucket2));
 }
 
-TEST_F(BucketStateRegistryTest, ArchivingBucketPreservesState) {
+TEST_F(BucketStateRegistryTest, ArchivingBucketStopsTrackingState) {
     auto& bucket = createBucket(info1, date);
     auto bucketId = bucket.bucketId;
 
@@ -748,7 +753,7 @@ TEST_F(BucketStateRegistryTest, ArchivingBucketPreservesState) {
                             stats(bucket),
                             closedBuckets);
     auto state = getBucketState(bucketStateRegistry, bucketId);
-    ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kNormal));
+    ASSERT_EQ(state, boost::none);
 }
 
 TEST_F(BucketStateRegistryTest, AbortingBatchRemovesBucketState) {
@@ -768,48 +773,6 @@ TEST_F(BucketStateRegistryTest, AbortingBatchRemovesBucketState) {
     internal::abort(
         *this, *stripes[info1.stripeNumber], WithLock::withoutLock(), batch, Status::OK());
     ASSERT(getBucketState(bucketStateRegistry, bucketId) == boost::none);
-}
-
-TEST_F(BucketStateRegistryTest, ClosingBucketGoesThroughPendingCompressionState) {
-    // ClosedBuckets are not generated when using the always compressed feature.
-    RAIIServerParameterControllerForTest featureFlagController{
-        "featureFlagTimeseriesAlwaysUseCompressedBuckets", false};
-
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest("test.foo");
-    auto& bucket = createBucket(info1, date);
-    auto bucketId = bucket.bucketId;
-
-    ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kNormal));
-
-    auto stats = internal::getOrInitializeExecutionStats(*this, info1.key.collectionUUID);
-    TrackingContexts trackingContexts;
-    auto batch =
-        std::make_shared<WriteBatch>(trackingContexts,
-                                     bucketId,
-                                     info1.key,
-                                     0,
-                                     stats,
-                                     StringData{bucket.timeField.data(), bucket.timeField.size()});
-    ASSERT(claimWriteBatchCommitRights(*batch));
-    ASSERT_OK(prepareCommit(*this, batch));
-    ASSERT_TRUE(doesBucketStateMatch(bucketId, BucketState::kPrepared));
-
-    {
-        // Fool the system by marking the bucket for closure, then finish the batch so it detects
-        // this and closes the bucket.
-        bucket.rolloverAction = RolloverAction::kHardClose;
-        CommitInfo commitInfo{};
-        auto closedBucket = finish(*this, batch, commitInfo);
-        ASSERT(closedBucket.has_value());
-        ASSERT_EQ(closedBucket.value().bucketId.oid, bucketId.oid);
-
-        // Bucket should now be in pending compression state represented by direct write.
-        ASSERT_TRUE(doesBucketHaveDirectWrite(bucketId));
-    }
-
-    // Destructing the 'ClosedBucket' struct should report it compressed should remove it from the
-    // catalog.
-    ASSERT_TRUE(doesBucketStateMatch(bucketId, boost::none));
 }
 
 TEST_F(BucketStateRegistryTest, DirectWriteStartInitializesBucketState) {

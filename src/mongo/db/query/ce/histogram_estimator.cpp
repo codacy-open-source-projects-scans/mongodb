@@ -28,35 +28,48 @@
  */
 
 #include "mongo/db/query/ce/histogram_estimator.h"
+#include "mongo/db/query/ce/histogram_estimation_impl.h"
 
 namespace mongo::ce {
 
-Cardinality HistogramEstimator::estimateCardinality(const stats::CEHistogram& hist,
-                                                    const Cardinality collectionSize,
-                                                    const mongo::Interval& interval,
-                                                    bool includeScalar) {
+
+CardinalityEstimate HistogramEstimator::estimateCardinality(
+    const stats::CEHistogram& hist,
+    const CardinalityEstimate collectionSize,
+    const mongo::Interval& interval,
+    bool includeScalar,
+    ArrayRangeEstimationAlgo arrayEstimationAlgo) {
+
+    // Empty histogram.
+    if (hist.getSampleSize() <= 0) {
+        return CardinalityEstimate{CardinalityType{0.0}, EstimationSource::Histogram};
+    }
+
     // Rescales the cardinality according to the current collection size.
-    return (estimateIntervalCardinality(hist, interval, includeScalar) / hist.getSampleSize()) *
-        collectionSize;
+    auto scaleFactor = collectionSize.toDouble() / hist.getSampleSize();
+    CardinalityEstimate card =
+        estimateIntervalCardinality(hist, interval, includeScalar, arrayEstimationAlgo);
+    return card * scaleFactor;
 }
 
 bool HistogramEstimator::canEstimateInterval(const stats::CEHistogram& hist,
-                                             const mongo::Interval& interval,
-                                             bool includeScalar) {
-
+                                             const mongo::Interval& interval) {
+    bool startInclusive = interval.startInclusive;
+    bool endInclusive = interval.endInclusive;
     auto [startTag, startVal] = sbe::bson::convertFrom<false>(interval.start);
     auto [endTag, endVal] = sbe::bson::convertFrom<false>(interval.end);
     sbe::value::ValueGuard startGuard{startTag, startVal};
     sbe::value::ValueGuard endGuard{endTag, endVal};
 
-    // If 'startTag' and 'endTag' are either in the same type or type-bracketed, they are estimable
-    // directly via either histograms or type counts.
-    if (stats::sameTypeBracketedInterval(startTag, interval.endInclusive, endTag, endVal)) {
-        // TODO: SERVER-91639 to support estimating via type counts here.
-        return stats::canEstimateTypeViaHistogram(startTag);
+    // If the interval is not in the ascending order, then reverse it.
+    if (reversedInterval(startTag, startVal, endTag, endVal)) {
+        std::swap(startInclusive, endInclusive);
+        std::swap(startTag, endTag);
+        std::swap(startVal, endVal);
     }
 
-    return false;
+    return ::mongo::ce::canEstimateInterval(
+        hist.isArray(), startInclusive, startTag, startVal, endInclusive, endTag, endVal);
 }
 
 }  // namespace mongo::ce

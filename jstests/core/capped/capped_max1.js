@@ -12,15 +12,12 @@
  *   # by which point it is too late to complain that "max" has been exceeded.
  *   does_not_support_transactions,
  *   does_not_support_causal_consistency,
- *   # Reading from an pre-existing cursor after tenant migration returns stale data by design,
- *   # so the cursor-invalidation test will not work in that scenario.
- *   tenant_migration_incompatible,
  *   # Does not support multiplanning, because it stashes results beyond batchSize.
  *   does_not_support_multiplanning_single_solutions,
  * ]
  */
 
-var t = db.capped_max1;
+var t = db[jsTestName()];
 t.drop();
 
 var max = 10;

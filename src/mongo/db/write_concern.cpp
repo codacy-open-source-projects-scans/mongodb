@@ -123,8 +123,7 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
     // (if [(#arbiters > 0) AND (#arbiters >= ½(#voting nodes) - 1)] then {w:1} else {w:majority}).
     if (canApplyDefaultWC) {
         auto getDefaultWC = ([&]() {
-            auto rwcDefaults =
-                ReadWriteConcernDefaults::get(opCtx->getServiceContext()).getDefault(opCtx);
+            auto rwcDefaults = ReadWriteConcernDefaults::get(opCtx).getDefault(opCtx);
             auto wcDefault = rwcDefaults.getDefaultWriteConcern();
             const auto defaultWriteConcernSource = rwcDefaults.getDefaultWriteConcernSource();
             customDefaultWasApplied = defaultWriteConcernSource &&
@@ -276,7 +275,7 @@ void WriteConcernResult::appendTo(BSONObjBuilder* result) const {
  */
 void waitForNoOplogHolesIfNeeded(OperationContext* opCtx) {
     auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
-    if (replCoord->getNumConfigVotingMembers() == 1) {
+    if (replCoord->getConfig().getCountOfVotingMembers() == 1) {
         // It is safe for secondaries in multi-node single voter replica sets to truncate writes if
         // there are oplog holes. They can catch up again.
         repl::StorageInterface::get(opCtx)->waitForAllEarlierOplogWritesToBeVisible(
@@ -387,7 +386,7 @@ Status waitForWriteConcern(OperationContext* opCtx,
     // Replica set stepdowns and gle mode changes are thrown as errors
     repl::ReplicationCoordinator::StatusAndDuration replStatus =
         replCoord->awaitReplication(opCtx, replOpTime, writeConcernWithPopulatedSyncMode);
-    if (replStatus.status == ErrorCodes::WriteConcernFailed) {
+    if (replStatus.status == ErrorCodes::WriteConcernTimeout) {
         gleWtimeouts.increment();
         if (!writeConcern.getProvenance().isClientSupplied()) {
             gleDefaultWtimeouts.increment();

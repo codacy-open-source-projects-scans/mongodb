@@ -32,7 +32,6 @@
 
 #include "mongo/db/transaction/transaction_participant.h"
 
-#include <absl/container/node_hash_map.h>
 #include <absl/container/node_hash_set.h>
 #include <absl/meta/type_traits.h>
 #include <algorithm>
@@ -51,12 +50,9 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/database_holder.h"
@@ -82,13 +78,10 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/op_observer/op_observer.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/write_ops/write_ops_retryability.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
@@ -106,7 +99,6 @@
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/shard_role.h"
 #include "mongo/db/stats/resource_consumption_metrics.h"
-#include "mongo/db/stats/top.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
@@ -123,9 +115,7 @@
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/shard_version.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/transport/session.h"
@@ -666,35 +656,30 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
 
     try {
         auto opCtx = cc().makeOperationContext();
-        auto nss = NamespaceString::kSessionTransactionsTableNamespace;
-        auto deadline = Date_t::now() + Milliseconds(100);
-
-        Lock::DBLock dbLock(opCtx.get(), nss.dbName(), MODE_IS, deadline);
-        Lock::CollectionLock collLock(opCtx.get(), nss, MODE_IS, deadline);
-
-        auto databaseHolder = DatabaseHolder::get(opCtx.get());
-        auto db = databaseHolder->getDb(opCtx.get(), nss.dbName());
-        if (!db) {
-            // There is no config database, so there cannot be any active transactions.
-            return boost::none;
-        }
-
-        auto collection =
-            CollectionCatalog::get(opCtx.get())->lookupCollectionByNamespace(opCtx.get(), nss);
-        if (!collection) {
-            return boost::none;
-        }
+        opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
 
         if (!stableTimestamp.isNull()) {
             shard_role_details::getRecoveryUnit(opCtx.get())
                 ->setTimestampReadSource(RecoveryUnit::ReadSource::kProvided, stableTimestamp);
         }
 
-        // Scan. We guess that occasional scans are cheaper than the write overhead of an index.
+        const auto nss = NamespaceString::kSessionTransactionsTableNamespace;
+        const auto deadline = Date_t::now() + Milliseconds(100);
+
+        const AutoGetCollectionForReadLockFree collectionAcquisition(
+            opCtx.get(), nss, AutoGetCollection::Options{}.deadline(deadline));
+
+        if (!collectionAcquisition.getCollection()) {
+            return boost::none;
+        }
+        auto exec = InternalPlanner::collectionScan(opCtx.get(),
+                                                    &collectionAcquisition.getCollection(),
+                                                    PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                                    InternalPlanner::Direction::FORWARD);
+
+        BSONObj doc;
         boost::optional<Timestamp> oldestTxnTimestamp;
-        auto cursor = collection->getCursor(opCtx.get());
-        while (auto record = cursor->next()) {
-            auto doc = record.value().data.toBson();
+        while (exec->getNext(&doc, nullptr) == PlanExecutor::ADVANCED) {
             auto txnRecord =
                 SessionTxnRecord::parse(IDLParserContext("parse oldest active txn record"), doc);
             if (txnRecord.getState() != DurableTxnStateEnum::kPrepared &&
@@ -708,7 +693,6 @@ TransactionParticipant::getOldestActiveTimestamp(Timestamp stableTimestamp) {
                 oldestTxnTimestamp = ts;
             }
         }
-
         return oldestTxnTimestamp;
     } catch (const DBException&) {
         return exceptionToStatus();
@@ -2198,6 +2182,9 @@ void TransactionParticipant::Participant::_commitStorageTransaction(OperationCon
     } catch (const ExceptionFor<ErrorCodes::WriteConflict>&) {
         CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
         throw;
+    } catch (const ExceptionFor<ErrorCodes::TemporarilyUnavailable>&) {
+        CurOp::get(opCtx)->debug().additiveMetrics.incrementTemporarilyUnavailableErrors(1);
+        throw;
     }
     shard_role_details::setWriteUnitOfWork(opCtx, nullptr);
 
@@ -2299,7 +2286,6 @@ void TransactionParticipant::Participant::_finishCommitTransaction(
         o(lk).transactionMetricsObserver.onCommit(opCtx,
                                                   ServerTransactionsMetrics::get(opCtx),
                                                   tickSource,
-                                                  &Top::get(opCtx->getServiceContext()),
                                                   operationCount,
                                                   oplogOperationBytes);
         o(lk).transactionMetricsObserver.onTransactionOperation(
@@ -2551,10 +2537,7 @@ void TransactionParticipant::Participant::_abortTransactionOnSession(OperationCo
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         o(lk).transactionMetricsObserver.onAbort(
-            opCtx,
-            ServerTransactionsMetrics::get(opCtx->getServiceContext()),
-            tickSource,
-            &Top::get(opCtx->getServiceContext()));
+            opCtx, ServerTransactionsMetrics::get(opCtx->getServiceContext()), tickSource);
     }
 
     if (o().txnResourceStash) {
@@ -2895,6 +2878,8 @@ std::string TransactionParticipant::Participant::_transactionInfoForLog(
         s << " prepareOpTime:" << o().prepareOpTime.toString();
     }
 
+    s << " queues:" << singleTransactionStats.getQueueStats().toBson().toString();
+
     // Total duration of the transaction.
     s << ", "
       << duration_cast<Milliseconds>(singleTransactionStats.getDuration(tickSource, curTick));
@@ -2966,6 +2951,8 @@ void TransactionParticipant::Participant::_transactionInfoForLog(
         pAttrs->add("totalPreparedDuration", Microseconds(totalPreparedDuration));
         pAttrs->add("prepareOpTime", o().prepareOpTime);
     }
+
+    pAttrs->add("queues", singleTransactionStats.getQueueStats().toBson());
 
     // Total duration of the transaction.
     pAttrs->add(
@@ -3042,6 +3029,8 @@ BSONObj TransactionParticipant::Participant::_transactionInfoBSONForLog(
             attrs.append("totalPreparedDurationMicros", totalPreparedDuration);
             attrs.append("prepareOpTime", o().prepareOpTime.toBSON());
         }
+
+        attrs.append("queues", singleTransactionStats.getQueueStats().toBson());
 
         // Total duration of the transaction.
         attrs.append(

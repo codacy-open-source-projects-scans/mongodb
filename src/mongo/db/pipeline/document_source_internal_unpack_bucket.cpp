@@ -137,7 +137,7 @@ auto getIncludeExcludeProjectAndType(DocumentSource* src) {
              TransformerInterface::TransformerType::kInclusionProjection ||
          proj->getTransformerType() ==
              TransformerInterface::TransformerType::kExclusionProjection)) {
-        return std::pair{proj->getTransformer().serializeTransformation(boost::none).toBson(),
+        return std::pair{proj->getTransformer().serializeTransformation().toBson(),
                          proj->getTransformerType() ==
                              TransformerInterface::TransformerType::kInclusionProjection};
     }
@@ -566,6 +566,14 @@ std::unique_ptr<AccumulationExpression> rewriteMinMaxGroupAccm(
             }
             os << timeseries::kControlMinFieldNamePrefix;
         } else if (op == "$max") {
+            // The control.max.time field is not a true max if there's extended range data. So we
+            // can only perform this rewrite conditionally.
+            // If we are on mongos, the extended range flag may not be accurate. If we are on
+            // mongod, the flag is accurate and we can perform the rewrite if there's no extended
+            // range data.
+            if (pExpCtx->getInRouter() || bucketSpec.usesExtendedRange()) {
+                return {};
+            }
             os << timeseries::kControlMaxFieldNamePrefix;
         } else {
             MONGO_UNREACHABLE;
@@ -807,7 +815,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalUnpackBucket::createF
                                   << " field must be a bool, got: " << elem.type(),
                     elem.type() == BSONType::Bool);
             if (elem.boolean() == false) {
-                expCtx->sbeCompatibility = SbeCompatibility::notCompatible;
+                expCtx->setSbeCompatibility(SbeCompatibility::notCompatible);
                 sbeCompatible = false;
             }
         } else {
@@ -1113,8 +1121,8 @@ void DocumentSourceInternalUnpackBucket::setEventFilter(BSONObj eventFilterBson,
     // than tracking the specific exprs, we temporarily reset the context to be fully SBE
     // compatible and check after parsing if the '_eventFilter' made the unpack stage
     // incompatible.
-    auto originalSbeCompatibility = pExpCtx->sbeCompatibility;
-    pExpCtx->sbeCompatibility = SbeCompatibility::noRequirements;
+    auto originalSbeCompatibility = pExpCtx->getSbeCompatibility();
+    pExpCtx->setSbeCompatibility(SbeCompatibility::noRequirements);
 
     _eventFilter = uassertStatusOK(MatchExpressionParser::parse(
         _eventFilterBson, pExpCtx, ExtensionsCallbackNoop(), Pipeline::kAllowedMatcherFeatures));
@@ -1122,11 +1130,11 @@ void DocumentSourceInternalUnpackBucket::setEventFilter(BSONObj eventFilterBson,
         _eventFilter =
             MatchExpression::optimize(std::move(_eventFilter), /* enableSimplification */ false);
     }
-    _isEventFilterSbeCompatible.emplace(pExpCtx->sbeCompatibility);
+    _isEventFilterSbeCompatible.emplace(pExpCtx->getSbeCompatibility());
 
     // Reset the sbeCompatibility taking _eventFilter into account.
-    pExpCtx->sbeCompatibility =
-        std::min(originalSbeCompatibility, _isEventFilterSbeCompatible.get());
+    pExpCtx->setSbeCompatibility(
+        std::min(originalSbeCompatibility, _isEventFilterSbeCompatible.get()));
 
     _eventFilterDeps = {};
     match_expression::addDependencies(_eventFilter.get(), &_eventFilterDeps);
@@ -1230,13 +1238,13 @@ DocumentSourceInternalUnpackBucket::rewriteGroupStage(Pipeline::SourceContainer:
     // exprs, we temporarily reset the context to be fully SBE compatible and check later if any of
     // the exprs created by the rewrite mark it as incompatible, so that we can transfer the flag
     // onto the group.
-    const SbeCompatibility origSbeCompat = pExpCtx->sbeCompatibility;
-    pExpCtx->sbeCompatibility = SbeCompatibility::noRequirements;
+    const SbeCompatibility origSbeCompat = pExpCtx->getSbeCompatibility();
+    pExpCtx->setSbeCompatibility(SbeCompatibility::noRequirements);
 
     // We destruct 'this' object when we replace it with the new group, so the guard has to capture
     // the context's intrusive pointer by value.
     const ScopeGuard guard([=, ctx = pExpCtx] {
-        ctx->sbeCompatibility = std::min(origSbeCompat, ctx->sbeCompatibility);
+        ctx->setSbeCompatibility(std::min(origSbeCompat, ctx->getSbeCompatibility()));
     });
 
     // The computed min/max for each bucket uses the default collation. If the collation of the
@@ -1244,7 +1252,7 @@ DocumentSourceInternalUnpackBucket::rewriteGroupStage(Pipeline::SourceContainer:
     // (e.g. numeric and lexicographic collations compare "5" and "10" in opposite order).
     // NB: Unfortuntealy, this means we have to forgo the optimization even if the source field is
     // numeric and not affected by the collation as we cannot know the data type until runtime.
-    if (pExpCtx->collationMatchesDefault == ExpressionContext::CollationMatchesDefault::kNo) {
+    if (pExpCtx->getCollationMatchesDefault() == ExpressionContextCollationMatchesDefault::kNo) {
         return {};
     }
 
@@ -1297,7 +1305,7 @@ DocumentSourceInternalUnpackBucket::rewriteGroupStage(Pipeline::SourceContainer:
 
     // The exprs used in the rewritten group might or might not be supported by SBE, so we have to
     // transfer the state from the expr context onto the group.
-    newGroup->setSbeCompatibility(pExpCtx->sbeCompatibility);
+    newGroup->setSbeCompatibility(pExpCtx->getSbeCompatibility());
 
     // Replace the current stage (DocumentSourceInternalUnpackBucket) and the following group stage
     // with the new group.
@@ -1382,7 +1390,7 @@ bool DocumentSourceInternalUnpackBucket::enableStreamingGroupIfPossible(
 
     // Streaming group isn't supported in SBE yet and we don't want to run the pipeline in hybrid
     // mode due to potential perf impact.
-    pExpCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
+    pExpCtx->setSbePipelineCompatibility(SbeCompatibility::notCompatible);
     _isSbeCompatible = false;
 
     return true;
@@ -1645,7 +1653,7 @@ bool DocumentSourceInternalUnpackBucket::optimizeLastpoint(Pipeline::SourceConta
     // SBE due to the current limitations of 'TsBucketToCellBlockStage', but we don't want to
     // run this pipeline in hybrid mode because of the potential perf impact.
     if (optimized) {
-        pExpCtx->sbePipelineCompatibility = SbeCompatibility::notCompatible;
+        pExpCtx->setSbePipelineCompatibility(SbeCompatibility::notCompatible);
         _isSbeCompatible = false;
     }
     return optimized;
@@ -1762,8 +1770,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalUnpackBucket::doOptimi
         // Unlike other rewrites for this stage, this rewrite affects a $match stage that is
         // *before* the unpack stage. So we need to apply this rewrite first, before the others,
         // which might cause us to return early.
-        if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(std::prev(itr)->get());
-            prevMatch && !pExpCtx->inRouter && !_bucketUnpacker.bucketSpec().usesExtendedRange()) {
+        if (auto prevMatch = dynamic_cast<DocumentSourceMatch*>(std::prev(itr)->get()); prevMatch &&
+            !pExpCtx->getInRouter() && !_bucketUnpacker.bucketSpec().usesExtendedRange()) {
             MatchExpression* matchExpr = prevMatch->getMatchExpression();
             bool updated = generateBucketLevelIdPredicates(matchExpr);
             if (updated) {

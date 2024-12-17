@@ -141,7 +141,8 @@ private:
     ServiceContext* _serviceContext;
 };
 
-class ReshardingCoordinatorServiceTest : public ConfigServerTestFixture {
+class ReshardingCoordinatorServiceTest : service_context_test::WithSetupTransportLayer,
+                                         public ConfigServerTestFixture {
 public:
     std::unique_ptr<repl::PrimaryOnlyService> makeService(ServiceContext* serviceContext) {
         return std::make_unique<ReshardingCoordinatorServiceForTest>(serviceContext);
@@ -168,7 +169,7 @@ public:
 
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
         TransactionCoordinatorService::get(operationContext())
-            ->onShardingInitialization(operationContext(), true);
+            ->initializeIfNeeded(operationContext(), /* term */ 1);
 
         _controller = std::make_shared<CoordinatorStateTransitionController>();
         WaitForMajorityService::get(getServiceContext()).startup(getServiceContext());
@@ -201,7 +202,7 @@ public:
     void tearDown() override {
         globalFailPointRegistry().disableAllFailpoints();
 
-        TransactionCoordinatorService::get(operationContext())->onStepDown();
+        TransactionCoordinatorService::get(operationContext())->interrupt();
         WaitForMajorityService::get(getServiceContext()).shutDown();
         ConfigServerTestFixture::tearDown();
         _registry->onShutdown();
@@ -516,7 +517,7 @@ public:
         DBDirectClient client(opCtx);
 
         for (const auto& chunk : chunks) {
-            client.insert(ChunkType::ConfigNS, chunk.toConfigBSON());
+            client.insert(NamespaceString::kConfigsvrChunksNamespace, chunk.toConfigBSON());
         }
 
         for (const auto& zone : zones) {
@@ -586,11 +587,11 @@ public:
         auto serviceCtx = opCtx->getServiceContext();
         for (ServiceContext::LockedClientsCursor cursor(serviceCtx);
              Client* client = cursor.next();) {
-            ClientLock lk(client);
-            if (client->isFromSystemConnection() && !client->canKillSystemOperationInStepdown(lk)) {
+            if (!client->canKillOperationInStepdown()) {
                 continue;
             }
 
+            ClientLock lk(client);
             OperationContext* toKill = client->getOperationContext();
 
             if (toKill && !toKill->isKillPending() && toKill->getOpID() != opCtx->getOpID()) {
@@ -1051,7 +1052,7 @@ TEST_F(ReshardingCoordinatorServiceTest, StepDownStepUpEachTransition) {
         DBDirectClient client(opCtx);
 
         // config.chunks should have been moved to the new UUID
-        FindCommandRequest findRequest{ChunkType::ConfigNS};
+        FindCommandRequest findRequest{NamespaceString::kConfigsvrChunksNamespace};
         findRequest.setFilter(BSON(ChunkType::collectionUUID() << doc.getReshardingUUID()));
         auto chunkCursor = client.find(std::move(findRequest));
         std::vector<ChunkType> foundChunks;

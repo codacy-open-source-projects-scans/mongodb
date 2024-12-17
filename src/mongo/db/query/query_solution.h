@@ -645,9 +645,6 @@ struct CollectionScanNode : public QuerySolutionNodeWithSortSet {
     // Once the first matching document is found, assume that all documents after it must match.
     // This is useful for oplog queries where we know we will see records ordered by the ts field.
     bool stopApplyingFilterAfterFirstMatch = false;
-
-    // Whether the collection scan should have low storage admission priority.
-    bool lowPriority = false;
 };
 
 /**
@@ -893,8 +890,6 @@ struct IndexScanNode : public QuerySolutionNodeWithSortSet {
      * A vector of Interval Evaluation Trees (IETs) with the same ordering as the index key pattern.
      */
     std::vector<interval_evaluation_tree::IET> iets;
-
-    bool lowPriority = false;
 };
 
 struct ReturnKeyNode : public QuerySolutionNode {
@@ -1639,11 +1634,13 @@ struct GroupNode : public QuerySolutionNode {
               boost::intrusive_ptr<Expression> groupByExpression,
               std::vector<AccumulationStatement> accs,
               bool merging,
+              bool willBeMerged,
               bool shouldProduceBson)
         : QuerySolutionNode(std::move(child)),
           groupByExpression(groupByExpression),
           accumulators(std::move(accs)),
           doingMerge(merging),
+          willBeMerged(willBeMerged),
           shouldProduceBson(shouldProduceBson) {
         // Use the DepsTracker to extract the fields that the 'groupByExpression' and accumulator
         // expressions depend on.
@@ -1689,6 +1686,7 @@ struct GroupNode : public QuerySolutionNode {
     boost::intrusive_ptr<Expression> groupByExpression;
     std::vector<AccumulationStatement> accumulators;
     bool doingMerge;
+    bool willBeMerged;
 
     // Carries the fields this GroupNode depends on. Namely, 'requiredFields' contains the union of
     // the fields in the 'groupByExpressions' and the fields in the input Expressions of the

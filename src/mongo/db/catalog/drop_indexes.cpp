@@ -55,7 +55,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -119,17 +119,6 @@ Status checkReplState(OperationContext* opCtx,
                       str::stream() << "Not primary while dropping indexes on database "
                                     << dbAndUUID.dbName().toStringForErrorMsg()
                                     << " with collection " << dbAndUUID.uuid());
-    }
-
-    // Disallow index drops on drop-pending namespaces (system.drop.*) if we are primary.
-    auto isPrimary = replCoord->getSettings().isReplSet() && canAcceptWrites;
-    const auto& nss = collection->ns();
-    if (isPrimary && nss.isDropPendingNamespace()) {
-        return Status(ErrorCodes::NamespaceNotFound,
-                      str::stream() << "Cannot drop indexes on drop-pending namespace "
-                                    << nss.toStringForErrorMsg() << " in database "
-                                    << dbAndUUID.dbName().toStringForErrorMsg() << " with uuid "
-                                    << dbAndUUID.uuid());
     }
 
     return Status::OK();

@@ -117,7 +117,7 @@ public:
         auto server = connectionString.getServers().front();
 
         auto sc = getGlobalServiceContext();
-        auto tl = sc->getTransportLayerManager()->getEgressLayer();
+        auto tl = sc->getTransportLayerManager()->getDefaultEgressLayer();
         _reactor = tl->getReactor(transport::TransportLayer::kNewReactor);
         _reactorThread = stdx::thread([&] {
             _reactor->run();
@@ -149,15 +149,17 @@ public:
     }
 
     std::shared_ptr<AsyncDBClient> makeClient() {
-        auto metrics =
-            std::make_shared<ConnectionMetrics>(getGlobalServiceContext()->getFastClockSource());
-        auto client = AsyncDBClient::connect(getServer(),
-                                             transport::kGlobalSSLMode,
-                                             getGlobalServiceContext(),
-                                             _reactor,
-                                             Milliseconds::max(),
-                                             metrics)
-                          .get();
+        auto svcCtx = getServiceContext();
+        auto metrics = std::make_shared<ConnectionMetrics>(svcCtx->getFastClockSource());
+        auto client =
+            AsyncDBClient::connect(getServer(),
+                                   transport::kGlobalSSLMode,
+                                   svcCtx,
+                                   svcCtx->getTransportLayerManager()->getDefaultEgressLayer(),
+                                   _reactor,
+                                   Milliseconds::max(),
+                                   metrics)
+                .get();
         client->initWireVersion(__FILE__, nullptr).get();
         return client;
     }
@@ -349,14 +351,17 @@ TEST_WITH_AND_WITHOUT_BATON_F(AsyncClientIntegrationTest, ShortReadsAndWritesWor
 
 TEST_WITH_AND_WITHOUT_BATON_F(AsyncClientIntegrationTest, AsyncConnectTimeoutCleansUpSocket) {
     FailPointEnableBlock fp("asioTransportLayerAsyncConnectTimesOut");
-    auto metrics = std::make_shared<ConnectionMetrics>(getServiceContext()->getFastClockSource());
-    auto client = AsyncDBClient::connect(getServer(),
-                                         transport::kGlobalSSLMode,
-                                         getServiceContext(),
-                                         getReactor(),
-                                         Milliseconds{500},
-                                         metrics)
-                      .getNoThrow();
+    auto svcCtx = getServiceContext();
+    auto metrics = std::make_shared<ConnectionMetrics>(svcCtx->getFastClockSource());
+    auto client =
+        AsyncDBClient::connect(getServer(),
+                               transport::kGlobalSSLMode,
+                               svcCtx,
+                               svcCtx->getTransportLayerManager()->getDefaultEgressLayer(),
+                               getReactor(),
+                               Milliseconds{500},
+                               metrics)
+            .getNoThrow();
     ASSERT_EQ(client.getStatus(), ErrorCodes::NetworkTimeout);
 }
 

@@ -8,7 +8,7 @@
 //   denylist_from_rhel_67_s390x,
 //   requires_majority_read_concern,
 //   requires_persistence,
-//   # TODO (SERVER-88123): Re-enable this test.
+//   # TODO (SERVER-97257): Re-enable this test.
 //   # Test doesn't start enough mongods to have num_mongos routers
 //   embedded_router_incompatible,
 //   uses_change_streams,
@@ -130,8 +130,22 @@ assert.commandWorked(mongosColl.update({_id: 1, a: 1}, {$set: {b: 1}}));
 assert.commandWorked(mongosColl.insert({_id: -2, a: -2}));
 assert.commandWorked(mongosColl.insert({_id: 2, a: 2}));
 
+// Configure fail-points to simulate a network error on the next "getMore" command invocations for
+// the next two change streams.
+assert.commandWorked(mongosDB.adminCommand({
+    configureFailPoint: "failGetMoreAfterCursorCheckout",
+    mode: {times: 2},
+    data: {errorCode: ErrorCodes.HostUnreachable}
+}));
+
+assert.commandWorked(mongos1DB.adminCommand({
+    configureFailPoint: "failGetMoreAfterCursorCheckout",
+    mode: {times: 2},
+    data: {errorCode: ErrorCodes.HostUnreachable}
+}));
+
 // Verify that both cursors pick up the first inserted doc regardless of the moveChunk
-// operation.
+// operation and handle the resumable error correctly.
 cst.assertNextChangesEqual({
     cursor: cursor,
     expectedChanges: [{

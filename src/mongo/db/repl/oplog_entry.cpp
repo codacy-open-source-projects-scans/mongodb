@@ -40,8 +40,6 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -49,7 +47,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog/type_index_catalog.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
@@ -725,18 +722,6 @@ boost::optional<bool> OplogEntry::getFromMigrate() const& {
 
 bool OplogEntry::getCheckExistenceForDiffInsert() const& {
     return _entry.getCheckExistenceForDiffInsert().get_value_or(false);
-}
-
-const boost::optional<mongo::UUID>& OplogEntry::getFromTenantMigration() const& {
-    return _entry.getFromTenantMigration();
-}
-
-const boost::optional<mongo::repl::OpTime>& OplogEntry::getDonorOpTime() const& {
-    return _entry.getDonorOpTime();
-}
-
-boost::optional<std::int64_t> OplogEntry::getDonorApplyOpsIndex() const& {
-    return _entry.getDonorApplyOpsIndex();
 }
 
 const boost::optional<mongo::repl::OpTime>& OplogEntry::getPrevWriteOpTimeInTransaction() const& {

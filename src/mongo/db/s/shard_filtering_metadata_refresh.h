@@ -37,9 +37,11 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/shard_server_catalog_cache_loader.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/database_version.h"
 #include "mongo/s/shard_version.h"
+#include "mongo/util/fail_point.h"
 
 namespace mongo {
 
@@ -53,14 +55,19 @@ public:
     FilteringMetadataCache() = default;
 
     static void init(ServiceContext* serviceCtx,
-                     std::shared_ptr<CatalogCacheLoader> loader,
+                     std::shared_ptr<ShardServerCatalogCacheLoader> loader,
                      bool isPrimary);
     static void initForTesting(ServiceContext* serviceCtx,
-                               std::shared_ptr<CatalogCacheLoader> loader);
+                               std::shared_ptr<ShardServerCatalogCacheLoader> loader);
 
     static FilteringMetadataCache* get(ServiceContext* serviceCtx);
 
     static FilteringMetadataCache* get(OperationContext* opCtx);
+
+    /**
+     * Shuts down and joins the executors used by the internal components.
+     */
+    void shutDown();
 
     /**
      * Updates internal state so that the loader can start behaving like a secondary.
@@ -102,6 +109,11 @@ public:
     void waitForDatabaseFlush(OperationContext* opCtx, const DatabaseName& dbName);
 
     /**
+     * Reports statistics about the catalog cache to be used by serverStatus.
+     */
+    void report(BSONObjBuilder* builder) const;
+
+    /**
      * Must be invoked whenever code, which is executing on a shard encounters a StaleConfig error
      * and should be passed the placement version from the 'version received' in the exception. If
      * the shard's current placement version is behind 'chunkVersionReceived', causes the shard's
@@ -119,14 +131,18 @@ public:
      * execution state in the response. This is specifically problematic for write commands, which
      * are expected to return the set of write batch entries that succeeded.
      */
-    Status onCollectionPlacementVersionMismatchNoExcept(
+    Status onCollectionPlacementVersionMismatch(
         OperationContext* opCtx,
         const NamespaceString& nss,
         boost::optional<ChunkVersion> chunkVersionReceived) noexcept;
 
-    void onCollectionPlacementVersionMismatch(OperationContext* opCtx,
-                                              const NamespaceString& nss,
-                                              boost::optional<ChunkVersion> chunkVersionReceived);
+    /**
+     * Unconditionally causes the collection placement to be refreshed from the config server.
+     *
+     * NOTE: Does network I/O and acquires collection lock on the specified namespace, so it must
+     * not be called with a lock.
+     */
+    void forceCollectionPlacementRefresh(OperationContext* opCtx, const NamespaceString& nss);
 
     /**
      * Should be called when any client request on this shard generates a StaleDbVersion exception.
@@ -134,29 +150,28 @@ public:
      * Invalidates the cached database version, schedules a refresh of the database info, waits for
      * the refresh to complete, and updates the cached database version.
      */
-    Status onDbVersionMismatchNoExcept(OperationContext* opCtx,
-                                       const DatabaseName& dbName,
-                                       boost::optional<DatabaseVersion> clientDbVersion) noexcept;
+    Status onDbVersionMismatch(OperationContext* opCtx,
+                               const DatabaseName& dbName,
+                               boost::optional<DatabaseVersion> clientDbVersion) noexcept;
 
+private:
     /**
      * Unconditionally get the shard's filtering metadata from the config server on the calling
      * thread. Returns the metadata if the nss is sharded, otherwise default unsharded metadata.
      *
      * NOTE: Does network I/O, so it must not be called with a lock
      */
-    CollectionMetadata forceGetCurrentMetadata(OperationContext* opCtx, const NamespaceString& nss);
+    CollectionMetadata _forceGetCurrentMetadata(OperationContext* opCtx,
+                                                const NamespaceString& nss);
 
     /**
-     * Unconditionally causes the shard's filtering metadata to be refreshed from the config server
-     * and returns the resulting placement version (which might not have changed), or throws.
-     *
-     * NOTE: Does network I/O and acquires collection lock on the specified namespace, so it must
-     * not be called with a lock
+     * Drive each unfished migration coordination in the given namespace to completion.
+     * Assumes the caller to have entered CollectionCriticalSection.
      */
-    ChunkVersion forceShardFilteringMetadataRefresh(OperationContext* opCtx,
-                                                    const NamespaceString& nss);
+    void _recoverMigrationCoordinations(OperationContext* opCtx,
+                                        NamespaceString nss,
+                                        CancellationToken cancellationToken);
 
-private:
     /**
      * Unconditionally refreshes the database metadata from the config server.
      *
@@ -180,7 +195,18 @@ private:
         bool runRecover,
         CancellationToken cancellationToken);
 
-    std::shared_ptr<CatalogCacheLoader> _loader = nullptr;
+    void _onCollectionPlacementVersionMismatch(OperationContext* opCtx,
+                                               const NamespaceString& nss,
+                                               boost::optional<ChunkVersion> chunkVersionReceived);
+
+    // TODO (SERVER-97261): remove the Grid's CatalogCache usages once 9.0 becomes last LTS.
+    // If _cache is set, it will be used only for filtering; otherwise, the Grid's CatalogCache will
+    // be used.
+    std::unique_ptr<CatalogCache> _cache;
+    std::shared_ptr<ShardServerCatalogCacheLoader> _loader;
 };
+
+extern FailPoint hangInRefreshFilteringMetadataUntilSuccessInterruptible;
+extern FailPoint hangInRefreshFilteringMetadataUntilSuccessThenSimulateErrorUninterruptible;
 
 }  // namespace mongo

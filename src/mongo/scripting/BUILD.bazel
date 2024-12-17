@@ -1,5 +1,5 @@
-load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_binary", "mongo_cc_library", "mongo_cc_test")
 load("@bazel_skylib//lib:selects.bzl", "selects")
+load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_binary", "mongo_cc_library", "mongo_cc_test", "mongo_cc_unit_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -111,6 +111,7 @@ mongo_cc_library(
             "//src/mongo/scripting/mozjs:oid.cpp",
             "//src/mongo/scripting/mozjs:proxyscope.cpp",
             "//src/mongo/scripting/mozjs:regexp.cpp",
+            "//src/mongo/scripting/mozjs:resumetoken.cpp",
             "//src/mongo/scripting/mozjs:scripting_util_gen",
             "//src/mongo/scripting/mozjs:session.cpp",
             "//src/mongo/scripting/mozjs:status.cpp",
@@ -162,6 +163,7 @@ mongo_cc_library(
             "//src/mongo/scripting/mozjs:oid.h",
             "//src/mongo/scripting/mozjs:proxyscope.h",
             "//src/mongo/scripting/mozjs:regexp.h",
+            "//src/mongo/scripting/mozjs:resumetoken.h",
             "//src/mongo/scripting/mozjs:session.h",
             "//src/mongo/scripting/mozjs:status.h",
             "//src/mongo/scripting/mozjs:timestamp.h",
@@ -182,12 +184,16 @@ mongo_cc_library(
             "/wd5105",
         ],
         "//conditions:default": [
-            # TODO(SERVER-59992): Remove -Wno-class-memacces where possible.
             "-Wno-unknown-warning-option",
-            "-Wno-class-memaccess",
             # TODO(SERVER-77205): Review and Possibly Remove '-Wno-deprecated' After Mozjs Update
             "-Wno-deprecated",
+            "-Wno-dangling-pointer",
         ],
+    }),
+    features = select({
+        # TODO(SERVER-59992): Remove -Wno-class-memaccess where possible.
+        "//bazel/config:compiler_type_gcc": ["no_class_memaccess_warning"],
+        "//conditions:default": [],
     }),
     local_defines = select({
         "//bazel/config:spider_monkey_dbg_enabled": ["MONGO_SPIDERMONKEY_DBG"],
@@ -195,6 +201,7 @@ mongo_cc_library(
     }),
     deps = [
         ":scripting_common",
+        "//src/mongo/util:buildinfo",
     ] + select({
         "//bazel/config:js_engine_none": [
             ":scripting_none",
@@ -236,23 +243,52 @@ mongo_cc_library(
     }),
 )
 
-# Note: These are not fully migrateable yet, but we'll leave them for future
-# reference in case you're working on scripting-related issues.
+mongo_cc_unit_test(
+    name = "scripting_test",
+    srcs = [
+        "bson_template_evaluator_test.cpp",
+        "deadline_monitor_test.cpp",
+    ],
+    tags = ["mongo_unittest_first_group"],
+    deps = [
+        ":scripting_common",
+        "//src/mongo/db/concurrency:lock_manager",
+    ],
+)
 
-#mongo_cc_test(
-#    name = "scripting_mozjs_test",
-#    srcs = [
-#        "//src/mongo/scripting/mozjs:asan_handles_test.cpp",
-#        "//src/mongo/scripting/mozjs:module_loader_test.cpp",
-#    ],
-#    target_compatible_with = select({
-#        "//bazel/config:js_engine_mozjs": [],
-#        "//conditions:default": ["@platforms//:incompatible"],
-#    }),
-#    deps = [
-#        ":bson_template_evaluator",
-#        ":scripting",
-#        "//src/mongo/unittest",
-#        "//src/mongo/unittest:unittest_main",
-#    ],
-#)
+mongo_cc_unit_test(
+    name = "scripting_mozjs_test",
+    srcs = [
+        "//src/mongo/scripting/mozjs:asan_handles_test.cpp",
+        "//src/mongo/scripting/mozjs:module_loader_test.cpp",
+    ],
+    copts = select({
+        "@platforms//os:windows": [
+            # See the /Zc:preprocessor comment in third_party/mozjs/SConscript
+            "/Zc:preprocessor",
+            "/wd5104",
+            "/wd5105",
+        ],
+        "//conditions:default": [
+            # TODO(SERVER-59992): Remove -Wno-class-memacces where possible.
+            "-Wno-unknown-warning-option",
+            "-Wno-class-memaccess",
+            # TODO(SERVER-77205): Review and Possibly Remove '-Wno-deprecated'
+            #                     after Mozjs Update.
+            "-Wno-deprecated",
+        ],
+    }),
+    local_defines = select({
+        "//bazel/config:spider_monkey_dbg_enabled": ["MONGO_SPIDERMONKEY_DBG"],
+        "//conditions:default": [],
+    }),
+    tags = ["mongo_unittest_fourth_group"],
+    target_compatible_with = select({
+        "//bazel/config:js_engine_mozjs": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":bson_template_evaluator",
+        ":scripting",
+    ],
+)

@@ -93,11 +93,11 @@ class ShardingCatalogManagerBumpCollectionPlacementVersionAndChangeMetadataTest
 
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
         TransactionCoordinatorService::get(operationContext())
-            ->onShardingInitialization(operationContext(), true);
+            ->initializeIfNeeded(operationContext(), /* term */ 1);
     }
 
     void tearDown() override {
-        TransactionCoordinatorService::get(operationContext())->onStepDown();
+        TransactionCoordinatorService::get(operationContext())->interrupt();
         ConfigServerTestFixture::tearDown();
     }
 
@@ -112,8 +112,7 @@ protected:
         chunkType.setCollectionUUID(uuid);
         chunkType.setVersion(chunkVersion);
         chunkType.setShard(shardId);
-        chunkType.setMin(minKey);
-        chunkType.setMax(maxKey);
+        chunkType.setRange({minKey, maxKey});
         chunkType.setOnCurrentShardSince(Timestamp(100, 0));
         chunkType.setHistory({ChunkHistory(*chunkType.getOnCurrentShardSince(), shardId)});
         return chunkType;
@@ -192,8 +191,10 @@ TEST_F(ShardingCatalogManagerBumpCollectionPlacementVersionAndChangeMetadataTest
     setupCollection(kNss, kKeyPattern, {shard0Chunk0});
 
     auto opCtx = operationContext();
-    ASSERT_OK(deleteToConfigCollection(
-        opCtx, ChunkType::ConfigNS, BSON(ChunkType::name << shard0Chunk0.getName()), false));
+    ASSERT_OK(deleteToConfigCollection(opCtx,
+                                       NamespaceString::kConfigsvrChunksNamespace,
+                                       BSON(ChunkType::name << shard0Chunk0.getName()),
+                                       false));
 
     ASSERT_THROWS_CODE(
         ShardingCatalogManager::get(opCtx)->bumpCollectionPlacementVersionAndChangeMetadataInTxn(

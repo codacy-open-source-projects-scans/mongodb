@@ -5,7 +5,7 @@
  * @tags: [
  *   multiversion_incompatible,
  *   requires_persistence,
- *   # TODO (SERVER-88123): Re-enable this test.
+ *   # TODO (SERVER-97257): Re-enable this test.
  *   # Test doesn't start enough mongods to have num_mongos routers
  *   embedded_router_incompatible,
  *   requires_scripting
@@ -296,7 +296,7 @@ let checkDDLCommands = function(testDB) {
 jsTest.log("Creating replica set.");
 let rst0 = new ReplSetTest({name: 'rs0', nodes: 2});
 rst0.startSet();
-rst0.initiate();
+rst0.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 waitForAllMembers(rst0.getPrimary().getDB(dbName));
 
 let coll = rst0.getPrimary().getDB(dbName).getCollection(collName);

@@ -137,6 +137,9 @@ public:
     /**
      * Recursively reports all computed paths in this projection, adding them into 'computedPaths'.
      *
+     * A "computed path" is any path that's the left-hand side of a projection, where the right-hand
+     * side is some expression, but not a simple rename.
+     *
      * Computed paths that are identified as the result of a simple rename are instead filled out in
      * 'renamedPaths'. Each entry in 'renamedPaths' maps from the path's new name to its old name
      * prior to application of this projection. 'complexRenamedPaths' is an optional parameter that
@@ -154,12 +157,9 @@ public:
 
     void optimize();
 
-    Document serialize(boost::optional<ExplainOptions::Verbosity> explain,
-                       const SerializationOptions& options) const;
+    Document serialize(const SerializationOptions& options) const;
 
-    void serialize(boost::optional<ExplainOptions::Verbosity> explain,
-                   MutableDocument* output,
-                   const SerializationOptions& options) const;
+    void serialize(MutableDocument* output, const SerializationOptions& options) const;
 
     /**
      * Append the variables referred to by this projection to the set 'refs', without clearing any

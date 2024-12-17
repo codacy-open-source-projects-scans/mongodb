@@ -48,6 +48,48 @@ export function assertViewAppliedCorrectly(explainStages, userPipeline, viewPipe
     }
     return assertToplevelAggContainsView(explainStages, viewPipeline);
 }
+/**
+ * This helper inspects explain.stages to ensure the view pipeline wasn't applied to the final
+ * execution pipeline.
+ */
+export function assertViewNotApplied(explainStages, viewPipeline) {
+    /**
+     * Assert that the view pipeline wasn't pushed down to $_internalSearchIdLookup by ensuring
+     * there is no $_internalSearchIdLookup stage.
+     */
+    assert(!explainStages[1].hasOwnProperty("$_internalSearchIdLookup"));
+    /**
+     * If a view pipeline isn't pushed down to idLookup, there is a risk it was appened to the user
+     * pipeline (as is the case for non-search queries on views). It's important to call out that
+     * this check investigates the most basic case for non-search queries on views, where the view
+     * pipeline isn't desugared and none of the view stages are pushed down or otherwise rearranged
+     * during optimization.
+     */
+    assert.neq(explainStages.slice(0, viewPipeline.length), viewPipeline);
+}
+
+export function extractUnionWithSubPipelineExplainOutput(explainStages) {
+    for (const stage of explainStages) {
+        // Found the $unionWith stage in the explain output.
+        if (stage["$unionWith"]) {
+            return stage["$unionWith"].pipeline;
+        }
+    }
+}
+/**
+ * As the name attempts to suggest, this functions assumes the user ran a top-level $search
+ * aggregation joined via $unionWith with another $search sub-level aggregation. It asserts that the
+ * top-level $search explain contains the outerViewPipeline in its _idLookup and similarly, it
+ * asserts that the $unionWith $search subpipeline contains the innerView pipeline in its idLookup.
+ */
+export function assertUnionWithSearchPipelinesApplyViews(
+    explainStages, outerViewPipeline, innerViewPipeline) {
+    // This will assert that the top-level search has the view correctly pushed down to idLookup.
+    assertIdLookupContainsViewPipeline(explainStages, outerViewPipeline);
+    let unionWithSubPipeExplain = extractUnionWithSubPipelineExplainOutput(explainStages);
+    // Make sure the $unionWith.search subpipeline has the view correctly pushed down to idLookup.
+    assertIdLookupContainsViewPipeline(unionWithSubPipeExplain, innerViewPipeline);
+}
 
 /**
  * This function checks that the explain output for $search queries from an e2e test contains the

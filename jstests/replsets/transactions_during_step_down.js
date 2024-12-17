@@ -14,7 +14,7 @@ const collName = "testcoll";
 
 const rst = new ReplSetTest({nodes: [{}, {rsConfig: {priority: 0}}]});
 rst.startSet();
-rst.initiate();
+rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 var primary = rst.getPrimary();
 var db = primary.getDB(dbName);
@@ -47,7 +47,7 @@ function runStepDown() {
     assert.commandWorked(primaryAdmin.runCommand({"replSetStepDown": 30 * 60, "force": true}));
 
     // Wait until the primary transitioned to SECONDARY state.
-    rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+    rst.awaitSecondaryNodes(null, [primary]);
 
     jsTestLog("Validating data.");
     assert.docEq([{_id: 'readOp'}], primaryColl.find().toArray());

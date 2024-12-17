@@ -29,32 +29,26 @@
 
 #include "oplog_cap_maintainer_thread.h"
 
-#include <exception>
-#include <mutex>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
+#include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/client.h"
+#include "mongo/db/commands/server_status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
+#include "mongo/db/storage/oplog_truncation.h"
 #include "mongo/db/storage/record_store.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/decorable.h"
-#include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -66,6 +60,55 @@ namespace {
 const auto getMaintainerThread = ServiceContext::declareDecoration<OplogCapMaintainerThread>();
 
 MONGO_FAIL_POINT_DEFINE(hangOplogCapMaintainerThread);
+
+class OplogTruncateMarkersServerStatusSection : public ServerStatusSection {
+public:
+    using ServerStatusSection::ServerStatusSection;
+    /**
+     * <ServerStatusSection>
+     */
+    bool includeByDefault() const override {
+        return true;
+    }
+
+    /**
+     * <ServerStatusSection>
+     */
+    BSONObj generateSection(OperationContext* opCtx,
+                            const BSONElement& configElement) const override {
+        BSONObjBuilder builder;
+
+        // Hold reference to the catalog for collection lookup without locks to be safe.
+        auto catalog = CollectionCatalog::get(opCtx);
+        auto oplogCollection =
+            catalog->lookupCollectionByNamespace(opCtx, NamespaceString::kRsOplogNamespace);
+        if (oplogCollection) {
+            // In certain modes, like read-only, no truncate markers are created.
+            if (auto truncateMarkers =
+                    oplogCollection->getRecordStore()->oplog()->getCollectionTruncateMarkers()) {
+                builder.append("totalTimeProcessingMicros",
+                               truncateMarkers->getCreationProcessingTime().count());
+                builder.append("processingMethod",
+                               truncateMarkers->getMarkersCreationMethod() ==
+                                       CollectionTruncateMarkers::MarkersCreationMethod::Sampling
+                                   ? "sampling"
+                                   : "scanning");
+            }
+        }
+
+        if (auto oplogMinRetentionHours = storageGlobalParams.oplogMinRetentionHours.load()) {
+            builder.append("oplogMinRetentionHours", oplogMinRetentionHours);
+        }
+
+        auto& capMaintainer = getMaintainerThread(opCtx->getServiceContext());
+        capMaintainer.appendStats(builder);
+        return builder.obj();
+    }
+};
+
+auto oplogTruncateMarkersStats =
+    *ServerStatusSectionBuilder<OplogTruncateMarkersServerStatusSection>("oplogTruncation")
+         .forShard();
 
 }  // namespace
 
@@ -95,7 +138,7 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
 
         // Create another reference to the oplog truncate markers while holding a lock on
         // the collection to prevent it from being destructed.
-        oplogTruncateMarkers = rs->getCollectionTruncateMarkers();
+        oplogTruncateMarkers = rs->oplog()->getCollectionTruncateMarkers();
         invariant(oplogTruncateMarkers);
     }
 
@@ -113,7 +156,23 @@ bool OplogCapMaintainerThread::_deleteExcessDocuments(OperationContext* opCtx) {
             LOGV2_DEBUG(9064300, 2, "oplog collection does not exist");
             return false;
         }
-        rs->reclaimOplog(opCtx);
+
+        auto mayTruncateUpTo = opCtx->getServiceContext()->getStorageEngine()->getPinnedOplog();
+
+        Timer timer;
+        oplog_truncation::reclaimOplog(opCtx, *rs, RecordId(mayTruncateUpTo.asULL()));
+
+        auto elapsedMicros = timer.micros();
+        _totalTimeTruncating.fetchAndAdd(elapsedMicros);
+        _truncateCount.fetchAndAdd(1);
+
+        auto elapsedMillis = elapsedMicros / 1000;
+        LOGV2(22402,
+              "Oplog truncation finished",
+              "pinnedOplogTimestamp"_attr = mayTruncateUpTo,
+              "numRecords"_attr = rs->numRecords(),
+              "dataSize"_attr = rs->dataSize(),
+              "duration"_attr = Milliseconds(elapsedMillis));
     }
 
     return true;
@@ -130,12 +189,10 @@ void OplogCapMaintainerThread::_run() {
     setThreadName(name);
 
     LOGV2_DEBUG(5295000, 1, "Oplog cap maintainer thread started", "threadName"_attr = name);
-    ThreadClient tc(name, getGlobalServiceContext()->getService(ClusterRole::ShardServer));
-
-    {
-        stdx::lock_guard<Client> lk(*tc.get());
-        tc.get()->setSystemOperationUnkillableByStepdown(lk);
-    }
+    ThreadClient tc(name,
+                    getGlobalServiceContext()->getService(ClusterRole::ShardServer),
+                    Client::noSession(),
+                    ClientOperationKillableByStepdown{false});
 
     ServiceContext::UniqueOperationContext opCtx;
     while (true) {
@@ -173,7 +230,7 @@ void OplogCapMaintainerThread::_run() {
                 LOGV2_FATAL_NOTRACE(
                     6761100, "Error in OplogCapMaintainerThread", "error"_attr = err);
             }
-            // Since we set setSystemOperationUnkillableByStepdown(), the opCtx can't be interrupted
+            // Since we make this operation unkillable by stepdown, the opCtx can't be interrupted
             // by repl state transitions - stepdown, stepup, and rollback.
             // It can only be interrupted by shutdown, killOp, or storage change
             // (causes ErrorCodes::InterruptedDueToStorageChange) due to FCBIS. The shutdown case is
@@ -186,6 +243,11 @@ void OplogCapMaintainerThread::_run() {
     }
 
     MONGO_UNREACHABLE;
+}
+
+void OplogCapMaintainerThread::appendStats(BSONObjBuilder& builder) const {
+    builder.append("totalTimeTruncatingMicros", _totalTimeTruncating.load());
+    builder.append("truncateCount", _truncateCount.load());
 }
 
 void OplogCapMaintainerThread::shutdown() {

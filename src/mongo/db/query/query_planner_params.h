@@ -36,12 +36,15 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/stats/collection_statistics.h"
 #include "mongo/s/shard_key_pattern_query_util.h"
+#include "mongo/s/shard_targeting_helpers.h"
 
 namespace mongo {
 
@@ -67,6 +70,12 @@ struct PlannerCollectionInfo {
  * $lookup) useful for query planning.
  */
 struct CollectionInfo {
+    CollectionInfo() = default;
+    CollectionInfo(const CollectionInfo&) = delete;
+    CollectionInfo& operator=(const CollectionInfo&) = delete;
+    CollectionInfo(CollectionInfo&& other) noexcept = default;
+    CollectionInfo& operator=(CollectionInfo&&) noexcept = default;
+
     // See QueryPlannerParams::Options.
     // For secondary collections, this is currently unused (but may still be populated).
     size_t options{0 /* DEFAULT */};
@@ -84,6 +93,9 @@ struct CollectionInfo {
     // hints, this does not force the planner to prefer collection scans over other candidate
     // solutions. This is currently used for applying query settings '$natural' hints.
     boost::optional<NaturalOrderHint::Direction> collscanDirection = boost::none;
+
+    // Histogram-based statistics for fields in the collection.
+    std::unique_ptr<stats::CollectionStatistics> collStats{nullptr};
 };
 
 
@@ -345,33 +357,49 @@ struct QueryPlannerParams {
     bool querySettingsApplied{false};
 
 private:
+    bool requiresShardFiltering(const CanonicalQuery& canonicalQuery,
+                                const CollectionPtr& collection) {
+        if (!(mainCollectionInfo.options & INCLUDE_SHARD_FILTER)) {
+            // Shard filter was not requested; cmd may not be from a router.
+            return false;
+        }
+        // If the caller wants a shard filter, make sure we're actually sharded.
+        if (!collection.isSharded_DEPRECATED()) {
+            // Not actually sharded.
+            return false;
+        }
+
+        const auto& shardKeyPattern = collection.getShardKeyPattern();
+        // Shards cannot own orphans for the key ranges they own, so there is no need
+        // to include a shard filtering stage. By omitting the shard filter, it may be
+        // possible to get a more efficient plan (for example, a COUNT_SCAN may be used if
+        // the query is eligible).
+        const BSONObj extractedKey = extractShardKeyFromQuery(shardKeyPattern, canonicalQuery);
+
+        if (extractedKey.isEmpty()) {
+            // Couldn't extract all the fields of the shard key from the query,
+            // no way to target a single shard.
+            return true;
+        }
+
+        return !isSingleShardTargetable(
+            extractedKey,
+            shardKeyPattern,
+            CollatorInterface::isSimpleCollator(canonicalQuery.getCollator()));
+    }
+
     MONGO_COMPILER_ALWAYS_INLINE
     void fillOutPlannerParamsForExpressQuery(OperationContext* opCtx,
                                              const CanonicalQuery& canonicalQuery,
                                              const CollectionPtr& collection) {
-        // If the caller wants a shard filter, make sure we're actually sharded.
-        if (mainCollectionInfo.options & INCLUDE_SHARD_FILTER) {
-            if (collection.isSharded_DEPRECATED()) {
-                const auto& shardKeyPattern = collection.getShardKeyPattern();
-
-                // If the shard key is specified exactly, the query is guaranteed to only target one
-                // shard. Shards cannot own orphans for the key ranges they own, so there is no need
-                // to include a shard filtering stage. By omitting the shard filter, it may be
-                // possible to get a more efficient plan (for example, a COUNT_SCAN may be used if
-                // the query is eligible).
-                const BSONObj extractedKey =
-                    extractShardKeyFromQuery(shardKeyPattern, canonicalQuery);
-
-                if (extractedKey.isEmpty()) {
-                    shardKey = shardKeyPattern.toBSON();
-                } else {
-                    mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_SHARD_FILTER;
-                }
-            } else {
-                // If there's no metadata don't bother w/the shard filter since we won't know what
-                // the key pattern is anyway...
-                mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_SHARD_FILTER;
-            }
+        if (requiresShardFiltering(canonicalQuery, collection)) {
+            // This query may have been issued to multiple shards.
+            // Knowing the shardKey may avoid fetching the document to apply shard filtering
+            // e.g., if an ixscan will provide all required fields.
+            shardKey = collection.getShardKeyPattern().toBSON();
+        } else {
+            // A shard filter was not requested, or is not required - clear the flag.
+            mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_SHARD_FILTER;
         }
 
         if (collection->isClustered()) {
@@ -398,19 +426,19 @@ private:
      * Applies 'indexHints' query settings for the given 'collection'.In addition, sets that there
      * were query settings applied.
      */
-    void applyQuerySettingsForCollection(const CanonicalQuery& canonicalQuery,
-                                         const CollectionPtr& collection,
-                                         const query_settings::IndexHintSpecs& indexHintSpecs,
-                                         CollectionInfo& collectionInfo);
+    void applyQuerySettingsForCollection(
+        const CanonicalQuery& canonicalQuery,
+        const NamespaceString& nss,
+        const query_settings::IndexHintSpecs& indexHintSpecs,
+        CollectionInfo& collectionInfo,
+        const boost::optional<TimeseriesOptions>& timeseriesOptions);
 
     void applyQuerySettingsIndexHintsForCollection(const CanonicalQuery& canonicalQuery,
-                                                   const CollectionPtr& collection,
                                                    const std::vector<mongo::IndexHint>& indexHints,
                                                    std::vector<IndexEntry>& indexes);
 
     void applyQuerySettingsNaturalHintsForCollection(
         const CanonicalQuery& canonicalQuery,
-        const CollectionPtr& collection,
         const std::vector<mongo::IndexHint>& indexHints,
         CollectionInfo& collectionInfo);
 };

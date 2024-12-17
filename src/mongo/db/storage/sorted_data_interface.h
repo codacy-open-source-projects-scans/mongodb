@@ -30,7 +30,6 @@
 #include <boost/optional/optional.hpp>
 #include <memory>
 
-#include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/ident.h"
@@ -48,6 +47,10 @@ class SortedDataBuilderInterface;
 class IndexValidateResults;
 class SortedDataKeyValueView;
 
+namespace CollectionValidation {
+class ValidationOptions;
+}
+
 /**
  * This is the uniform interface for storing indexes and supporting point queries as well as range
  * queries. The actual implementation is up to the storage engine. All the storage engines must
@@ -55,6 +58,12 @@ class SortedDataKeyValueView;
  */
 class SortedDataInterface {
 public:
+    struct DuplicateKey {
+        BSONObj key;
+        boost::optional<RecordId> id;
+        DuplicateKeyErrorInfo::FoundValue foundValue;
+    };
+
     /**
      * Constructs a SortedDataInterface. The rsKeyFormat is the RecordId key format of the related
      * RecordStore.
@@ -81,11 +90,9 @@ public:
      * builder.
      *
      * @param opCtx the transaction under which keys are added to 'this' index
-     * @param dupsAllowed true if duplicate keys are allowed, and false
-     *        otherwise
      */
-    virtual std::unique_ptr<SortedDataBuilderInterface> makeBulkBuilder(OperationContext* opCtx,
-                                                                        bool dupsAllowed) = 0;
+    virtual std::unique_ptr<SortedDataBuilderInterface> makeBulkBuilder(
+        OperationContext* opCtx) = 0;
 
     /**
      * Inserts the given key into the index, which must have a RecordId appended to the end. Returns
@@ -95,7 +102,7 @@ public:
      * If `includeDuplicateRecordId` is kOn and DuplicateKey is returned, embeds the record id of
      * the duplicate in the returned status.
      */
-    virtual Status insert(
+    virtual std::variant<Status, DuplicateKey> insert(
         OperationContext* opCtx,
         const key_string::Value& keyString,
         bool dupsAllowed,
@@ -122,13 +129,14 @@ public:
                                               StringData keyString) const = 0;
 
     /**
-     * Return ErrorCodes::DuplicateKey if there is more than one occurence of 'KeyString' in this
-     * index, and Status::OK() otherwise. This call is only allowed on a unique index, and will
-     * invariant otherwise.
+     * Return duplicate key information if there is more than one occurrence of 'KeyString' in this
+     * index, or boost::none otherwise. This call is only allowed on a unique index, and will fail
+     * an invariant otherwise.
      *
      * @param opCtx the transaction under which this operation takes place
      */
-    virtual Status dupKeyCheck(OperationContext* opCtx, const key_string::Value& keyString) = 0;
+    virtual boost::optional<DuplicateKey> dupKeyCheck(OperationContext* opCtx,
+                                                      const SortedDataKeyValueView& keyString) = 0;
 
     /**
      * Attempt to reduce the storage space used by this index via compaction. Only called if the
@@ -148,7 +156,8 @@ public:
      * data. If 'full' is true, additionally traverses the data and validates its internal
      * structure.
      */
-    virtual IndexValidateResults validate(OperationContext* opCtx, bool full) const = 0;
+    virtual IndexValidateResults validate(
+        OperationContext* opCtx, const CollectionValidation::ValidationOptions& options) const = 0;
 
     virtual bool appendCustomStats(OperationContext* opCtx,
                                    BSONObjBuilder* output,
@@ -414,7 +423,7 @@ public:
     // Index creation
     //
 
-    virtual Status initAsEmpty(OperationContext* opCtx) = 0;
+    virtual Status initAsEmpty() = 0;
 
 protected:
     std::shared_ptr<Ident> _ident;
@@ -434,14 +443,15 @@ public:
     /**
      * Adds 'keyString' to intermediate storage.
      *
-     * 'keyString' must be > or >= the last key passed to this function (depends on _dupsAllowed).
-     * If this is violated an error Status (ErrorCodes::InternalError) will be returned.
+     * 'keyString' must be > or >= the last key passed to this function, depending on whether the
+     * thing being built supports duplicates. The behavior if this in violated is unspecified and
+     * must not be relied on by the caller.
      *
      * Some storage engines require callers to manage a WriteUnitOfWork to perform these inserts
      * transactionally. Other storage engines do not perform inserts transactionally and will ignore
      * any parent WriteUnitOfWork.
      */
-    virtual Status addKey(const key_string::Value& keyString) = 0;
+    virtual void addKey(const key_string::Value& keyString) = 0;
 };
 
 /**
@@ -476,6 +486,19 @@ public:
           _id(id) {
         invariant(ksSize > 0 && ridSize >= 0 && typeBitsSize >= 0);
         _ksOriginalSize = isRecordIdAtEndOfKeyString ? (ksSize + ridSize) : ksSize;
+    }
+
+    /**
+     * Construct a SortedDataKeyValueView which points into the given RecordData, which must outlive
+     * this view.
+     */
+    SortedDataKeyValueView(const RecordData& record, key_string::Version keyStringVersion)
+        : _version(keyStringVersion) {
+        BufReader reader(record.data(), record.size());
+        _ksOriginalSize = _ksSize = reader.read<LittleEndian<int32_t>>();
+        _ksData = static_cast<const char*>(reader.skip(_ksSize));
+        _tbSize = reader.remaining();
+        _tbData = static_cast<const char*>(reader.skip(_tbSize));
     }
 
     SortedDataKeyValueView() = default;

@@ -140,7 +140,7 @@ selector:
     - jstests/core/**/list_all_sessions.js
     - jstests/core/**/list_sessions.js
     - jstests/core/**/operation_latency_histogram.js
-    - jstests/core/query/collstats/views_coll_stats.js
+    - jstests/core/catalog/collstats/views_coll_stats.js
     - jstests/core/views/views_stats.js
     - jstests/core/**/bulk_api_ordered.js
     - jstests/core/**/bulk_api_unordered.js
@@ -198,7 +198,6 @@ selector:
     - jstests/core/**/updatef.js
     - jstests/core/**/benchrun_pipeline_updates.js
     - jstests/core/**/cursora.js
-    - jstests/core/**/explain_upsert.js
     - jstests/core/**/create_indexes.js
     - jstests/core/**/objid5.js
     - jstests/core/**/coveredIndex1.js
@@ -218,7 +217,7 @@ selector:
     - jstests/core/**/query/SERVER-23626.js
     - jstests/core/**/find_and_modify_server7660.js
     - jstests/core/**/upsert_shell.js
-    - jstests/core/timeseries/timeseries_delete_hint.js
+    - jstests/core/timeseries/write/timeseries_delete_hint.js
     - jstests/core/**/set_param1.js
     - jstests/core/**/profile*.js
     - jstests/core/query/comment_field.js

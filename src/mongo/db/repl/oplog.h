@@ -42,7 +42,6 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -50,6 +49,7 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
@@ -76,12 +76,12 @@ public:
     explicit InsertStatement(BSONObj toInsert) : doc(std::move(toInsert)) {}
 
     InsertStatement(std::vector<StmtId> statementIds, BSONObj toInsert)
-        : stmtIds(statementIds), doc(std::move(toInsert)) {}
+        : stmtIds(std::move(statementIds)), doc(std::move(toInsert)) {}
     InsertStatement(StmtId stmtId, BSONObj toInsert)
         : InsertStatement(std::vector<StmtId>{stmtId}, std::move(toInsert)) {}
 
     InsertStatement(std::vector<StmtId> statementIds, BSONObj toInsert, OplogSlot os)
-        : stmtIds(statementIds), oplogSlot(std::move(os)), doc(std::move(toInsert)) {}
+        : stmtIds(std::move(statementIds)), oplogSlot(std::move(os)), doc(std::move(toInsert)) {}
     InsertStatement(StmtId stmtId, BSONObj toInsert, OplogSlot os)
         : InsertStatement(std::vector<StmtId>{stmtId}, std::move(toInsert), std::move(os)) {}
 
@@ -162,7 +162,6 @@ OpTime logOp(OperationContext* opCtx, MutableOplogEntry* oplogEntry);
  * @param oplogCollection collection to be written to.
  * @param finalOpTime the OpTime of the last oplog record.
  * @param wallTime the wall clock time of the last oplog record.
- * @param isAbortIndexBuild for tenant migration use only.
  */
 void logOplogRecords(OperationContext* opCtx,
                      const NamespaceString& nss,
@@ -170,8 +169,7 @@ void logOplogRecords(OperationContext* opCtx,
                      const std::vector<Timestamp>& timestamps,
                      const CollectionPtr& oplogCollection,
                      OpTime finalOpTime,
-                     Date_t wallTime,
-                     bool isAbortIndexBuild);
+                     Date_t wallTime);
 
 // Flush out the cached pointer to the oplog.
 void clearLocalOplogPtr(ServiceContext* service);
@@ -261,7 +259,6 @@ void logOplogConstraintViolation(OperationContext* opCtx,
 /**
  * Used for applying from an oplog entry or grouped inserts.
  * @param opOrGroupedInserts a single oplog entry or grouped inserts to be applied.
- * @param alwaysUpsert convert some updates to upserts for idempotency reasons
  * @param mode specifies what oplog application mode we are in
  * @param incrementOpsAppliedStats is called whenever an op is applied.
  * Returns failure status if the op was an update that could not be applied.

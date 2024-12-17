@@ -35,7 +35,6 @@
 #include <boost/smart_ptr.hpp>
 #include <mutex>
 #include <string>
-#include <tuple>
 #include <utility>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
@@ -72,13 +71,11 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/chunk_manager.h"
 #include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/index_version.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
@@ -91,7 +88,6 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/producer_consumer_queue.h"
 #include "mongo/util/scopeguard.h"
@@ -149,7 +145,7 @@ ReshardingCollectionCloner::makeRawPipeline(
     Value resumeId) {
     // Assume that the input collection isn't a view. The collectionUUID parameter to
     // the aggregate would enforce this anyway.
-    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+    StringMap<ResolvedNamespace> resolvedNamespaces;
     resolvedNamespaces[_sourceNss.coll()] = {_sourceNss, std::vector<BSONObj>{}};
 
     // Assume that the config.cache.chunks collection isn't a view either.
@@ -171,21 +167,13 @@ ReshardingCollectionCloner::makeRawPipeline(
     uassert(4929303,
             "Cannot resume cloning when sharded collection has non-simple default collation",
             resumeId.missing() || collectionHasSimpleCollation(opCtx, _sourceNss));
-
-    auto expCtx = make_intrusive<ExpressionContext>(opCtx,
-                                                    boost::none, /* explain */
-                                                    false,       /* fromRouter */
-                                                    false,       /* needsMerge */
-                                                    false,       /* allowDiskUse */
-                                                    false,       /* bypassDocumentValidation */
-                                                    false,       /* isMapReduceCommand */
-                                                    _sourceNss,
-                                                    boost::none, /* runtimeConstants */
-                                                    nullptr,     /* collator */
-                                                    std::move(mongoProcessInterface),
-                                                    std::move(resolvedNamespaces),
-                                                    _sourceUUID);
-
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx)
+                      .mongoProcessInterface(mongoProcessInterface)
+                      .ns(_sourceNss)
+                      .resolvedNamespace(std::move(resolvedNamespaces))
+                      .collUUID(_sourceUUID)
+                      .build();
     std::vector<BSONObj> rawPipeline;
 
     if (!resumeId.missing()) {
@@ -222,7 +210,7 @@ ReshardingCollectionCloner::makeRawNaturalOrderPipeline(
     OperationContext* opCtx, std::shared_ptr<MongoProcessInterface> mongoProcessInterface) {
     // Assume that the input collection isn't a view. The collectionUUID parameter to
     // the aggregate would enforce this anyway.
-    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+    StringMap<ResolvedNamespace> resolvedNamespaces;
     resolvedNamespaces[_sourceNss.coll()] = {_sourceNss, std::vector<BSONObj>{}};
 
     // Assume that the config.cache.chunks collection isn't a view either.
@@ -231,23 +219,14 @@ ReshardingCollectionCloner::makeRawNaturalOrderPipeline(
         "cache.chunks." +
         NamespaceStringUtil::serialize(tempNss, SerializationContext::stateDefault()));
     resolvedNamespaces[tempCacheChunksNss.coll()] = {tempCacheChunksNss, std::vector<BSONObj>{}};
-
-    auto expCtx = make_intrusive<ExpressionContext>(opCtx,
-                                                    boost::none, /* explain */
-                                                    false,       /* fromRouter */
-                                                    false,       /* needsMerge */
-                                                    false,       /* allowDiskUse */
-                                                    false,       /* bypassDocumentValidation */
-                                                    false,       /* isMapReduceCommand */
-                                                    _sourceNss,
-                                                    boost::none, /* runtimeConstants */
-                                                    nullptr,     /* collator */
-                                                    std::move(mongoProcessInterface),
-                                                    std::move(resolvedNamespaces),
-                                                    _sourceUUID);
-
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx)
+                      .mongoProcessInterface(std::move(mongoProcessInterface))
+                      .ns(_sourceNss)
+                      .resolvedNamespace(std::move(resolvedNamespaces))
+                      .collUUID(_sourceUUID)
+                      .build();
     std::vector<BSONObj> rawPipeline;
-
     auto keyPattern = ShardKeyPattern(_newShardKeyPattern.getKeyPattern()).toBSON();
     rawPipeline.emplace_back(BSON(
         DocumentSourceReshardingOwnershipMatch::kStageName
@@ -262,7 +241,7 @@ ReshardingCollectionCloner::makeRawNaturalOrderPipeline(
 std::unique_ptr<Pipeline, PipelineDeleter> ReshardingCollectionCloner::_targetAggregationRequest(
     const std::vector<BSONObj>& rawPipeline,
     const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    auto opCtx = expCtx->opCtx;
+    auto opCtx = expCtx->getOperationContext();
     // We associate the aggregation cursors established on each donor shard with a logical
     // session to prevent them from killing the cursor when it is idle locally. Due to the
     // cursor's merging behavior across all donor shards, it is possible for the cursor to be
@@ -619,7 +598,7 @@ ReshardingCollectionCloner::_queryOnceWithNaturalOrder(
         opCtx->setLogicalSessionId(makeLogicalSessionId(opCtx));
     }
 
-    auto request = AggregateCommandRequest(expCtx->ns, rawPipeline);
+    auto request = AggregateCommandRequest(expCtx->getNamespaceString(), rawPipeline);
     // If running in "relaxed" mode, do not set CollectionUUID to prevent NamespaceNotFound or
     // CollectionUUIDMismatch errors.
     if (!_relaxed) {
@@ -977,15 +956,12 @@ SemiFuture<void> ReshardingCollectionCloner::run(
         // been destructed.
         .onCompletion([chainCtx](Status status) {
             if (chainCtx->pipeline) {
+                // TODO(SERVER-74658): Please revisit if this thread could be made killable.
                 auto client = cc().getServiceContext()
                                   ->getService(ClusterRole::ShardServer)
-                                  ->makeClient("ReshardingCollectionClonerCleanupClient");
-
-                // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-                {
-                    stdx::lock_guard<Client> lk(*client.get());
-                    client.get()->setSystemOperationUnkillableByStepdown(lk);
-                }
+                                  ->makeClient("ReshardingCollectionClonerCleanupClient",
+                                               Client::noSession(),
+                                               ClientOperationKillableByStepdown{false});
 
                 AlternativeClientRegion acr(client);
                 auto opCtx = cc().makeOperationContext();

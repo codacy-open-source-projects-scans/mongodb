@@ -40,13 +40,12 @@
 #include "mongo/s/query/planner/cluster_find.h"
 
 namespace mongo {
-namespace {
 
 // getMore can run with any readConcern, because cursor-creating commands like find can run with any
 // readConcern.  However, since getMore automatically uses the readConcern of the command that
 // created the cursor, it is not appropriate to apply the default readConcern (just as
 // client-specified readConcern isn't appropriate).
-static const ReadConcernSupportResult kSupportsReadConcernResult{
+inline const ReadConcernSupportResult kSupportsReadConcernResult{
     Status::OK(),
     {{ErrorCodes::InvalidOptions,
       "default read concern not permitted (getMore uses the cursor's read concern)"}}};
@@ -109,7 +108,7 @@ public:
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
             // Counted as a getMore, not as a command.
-            globalOpCounters.gotGetMore();
+            serviceOpCounters(opCtx).gotGetMore();
 
             Impl::checkCanRunHere(opCtx);
 
@@ -167,5 +166,5 @@ public:
     }
 };
 
-}  // namespace
+
 }  // namespace mongo

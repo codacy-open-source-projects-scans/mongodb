@@ -60,7 +60,7 @@ buildvariants:
       use_wt_develop: true
       compile_variant: *linux-x86-dynamic-debug-wtdevelop-compile
 
-  - name: &linux-64-debug-wtdevelop linux-64-debug-wtdevelop
+  - name: linux-64-debug-wtdevelop
     display_name: "~ Linux DEBUG WiredTiger develop"
     tags: []
     cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
@@ -164,10 +164,10 @@ buildvariants:
     tasks:
       - name: compile_test_serial_TG
         distros:
-          - windows-2022-xlarge
+          - windows-2022-xxlarge
       - name: compile_test_parallel_unittest_stream_TG
         distros:
-          - windows-2022-xlarge
+          - windows-2022-xxlarge
       - name: burn_in_tests_gen
         depends_on:
           - name: version_burn_in_gen

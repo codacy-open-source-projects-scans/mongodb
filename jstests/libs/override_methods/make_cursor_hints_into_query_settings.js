@@ -1,8 +1,13 @@
+import {sysCollNamePrefix} from "jstests/core/timeseries/libs/timeseries_writes_util.js";
+import {
+    transformIndexHintsFromTimeseriesToView
+} from "jstests/core/timeseries/libs/timeseries_writes_util.js";
 import {
     getCollectionName,
     getCommandName,
     getExplainCommand,
-    getInnerCommand
+    getInnerCommand,
+    isSystemBucketNss
 } from "jstests/libs/cmd_object_utils.js";
 import {OverrideHelpers} from "jstests/libs/override_methods/override_helpers.js";
 import {everyWinningPlan, isIdhackOrExpress} from "jstests/libs/query/analyze_plan.js";
@@ -11,6 +16,24 @@ import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
 function isMinMaxQuery(cmdObj) {
     // When using min()/max() a hint of which index to use must be provided.
     return 'min' in cmdObj || 'max' in cmdObj;
+}
+
+function isValidIndexHint(innerCmd) {
+    // Only intercept commands with cursor hints.
+    if (!innerCmd.hasOwnProperty("hint")) {
+        return false;
+    }
+    const hint = innerCmd.hint;
+    if (typeof hint !== "object") {
+        return true;
+    }
+    const objValues = Object.values(hint);
+    // Empty key-pattern index hint is not valid.
+    if (objValues.length === 0) {
+        return false;
+    }
+    // Only numeric values are accepted for key-pattern values.
+    return objValues.every(val => typeof val === 'number');
 }
 
 function requestsResumeToken(cmdObj) {
@@ -31,9 +54,7 @@ function runCommandOverride(conn, dbName, _cmdName, cmdObj, clientFunction, make
     // exit early with the original command response.
     const db = conn.getDB(dbName);
     const innerCmd = getInnerCommand(cmdObj);
-    const shouldApplyQuerySettings =
-        // Only intercept commands with cursor hints.
-        "hint" in innerCmd &&
+    const shouldApplyQuerySettings = isValidIndexHint(innerCmd) &&
         // Only intercept command types supported by query settings.
         QuerySettingsUtils.isSupportedCommand(getCommandName(innerCmd)) &&
         !isMinMaxQuery(innerCmd) && !requestsResumeToken(innerCmd);
@@ -41,9 +62,13 @@ function runCommandOverride(conn, dbName, _cmdName, cmdObj, clientFunction, make
         return originalResponse;
     }
 
+    const isSystemBucketColl = isSystemBucketNss(innerCmd);
+
     // Construct the equivalent query settings, remove the hint from the original command object and
     // build the representative query.
-    const allowedIndexes = [innerCmd.hint];
+    const allowedIndexes = isSystemBucketColl
+        ? [transformIndexHintsFromTimeseriesToView(innerCmd.hint)]
+        : [innerCmd.hint];
     delete innerCmd.hint;
 
     const explainCmd = getExplainCommand(innerCmd);
@@ -59,7 +84,9 @@ function runCommandOverride(conn, dbName, _cmdName, cmdObj, clientFunction, make
     }
 
     // If the collection used is a view, determine the underlying collection.
-    const collectionName = getCollectionName(db, innerCmd);
+    const resolvedCollName = getCollectionName(db, innerCmd);
+    const collectionName = isSystemBucketColl ? resolvedCollName.substring(sysCollNamePrefix.length)
+                                              : resolvedCollName;
     if (!collectionName) {
         return originalResponse;
     }
@@ -75,7 +102,8 @@ function runCommandOverride(conn, dbName, _cmdName, cmdObj, clientFunction, make
     // remove all the settings.
     const settings = {indexHints: {ns: {db: dbName, coll: collectionName}, allowedIndexes}};
     const qsutils = new QuerySettingsUtils(db, collectionName);
-    const representativeQuery = qsutils.makeQueryInstance(innerCmd);
+    const representativeQuery = qsutils.makeQueryInstance(
+        isSystemBucketColl ? {...innerCmd, [getCommandName(innerCmd)]: collectionName} : innerCmd);
     return qsutils.withQuerySettings(
         representativeQuery, settings, () => clientFunction.apply(conn, makeFuncArgs(cmdObj)));
 }

@@ -211,6 +211,23 @@ var testcases_transformationOnly = [
 var testcases_transformationOnlyExpectFail =
     testcases_transformationOnly.map(t => Object.extend({expectFail: true}, t));
 
+// The following agggregation stages are skipped in 'authCommandsLib' because they are unable to be
+// tested here and already have auth tests elsewhere.
+const skippedAuthTestingAggStages = [
+    "$_analyzeShardKeyReadWriteDistribution",  // Already covered. And it cannot not be tested in
+                                               // commands_lib framework due to its requirement on
+                                               // non-mongos node on a sharded cluster.
+    "$merge",  // Already covered in 'aggregate_merge_insert_documents' and
+               // 'aggregate_merge_replace_documents'.
+    "$set",    // Alias for "$addFields" and already covered.
+
+    // The following stages are required to be tested in stream processors.
+    "$hoppingWindow",
+    "$tumblingWindow",
+    "$sessionWindow",
+    "$validate",
+];
+
 import {getUUIDFromListCollections} from "jstests/libs/uuid_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
@@ -280,9 +297,6 @@ export const authCommandsLib = {
               stmtId: NumberInt(1)
           },
           skipUnlessSharded: true,
-          skipTest: (conn) => {
-              return !TestData.setParameters.featureFlagUpdateOneWithoutShardKey;
-          },
           testcases: [
               {
                   runOnDb: adminDbName,
@@ -308,9 +322,6 @@ export const authCommandsLib = {
           testname: "_clusterWriteWithoutShardKey",
           command: {_clusterWriteWithoutShardKey: 1, writeCmd: {}, shardId: "", targetDocId: {}},
           skipUnlessSharded: true,
-          skipTest: (conn) => {
-              return !TestData.setParameters.featureFlagUpdateOneWithoutShardKey;
-          },
           testcases: [
               {
                   runOnDb: adminDbName,
@@ -1029,7 +1040,6 @@ export const authCommandsLib = {
                   "o2": {"_id": 1},
                   "o": {"_id": 1, "data": 8}
               }],
-              alwaysUpsert: false
           },
           skipSharded: true,
           setup: function(db) {
@@ -1060,7 +1070,6 @@ export const authCommandsLib = {
                       "o2": {"_id": 1},
                       "o": {"_id": 1, "data": 8}
                   }],
-                  alwaysUpsert: false
               };
           },
           skipSharded: true,
@@ -1098,7 +1107,6 @@ export const authCommandsLib = {
                       "o2": {"_id": 1},
                       "o": {"_id": 1, "data": 8}
                   }],
-                  alwaysUpsert: false
               };
           },
           skipSharded: true,
@@ -4956,9 +4964,6 @@ export const authCommandsLib = {
             ],
             "queryType": "insert",
         },
-          skipTest: (conn) => {
-              return !TestData.setParameters.featureFlagFLE2ProtocolVersion2;
-          },
           testcases: [
               {
                   runOnDb: adminDbName,
@@ -6733,6 +6738,21 @@ export const authCommandsLib = {
           ]
         },
         {
+          testname: "untrackUnshardedCollection",
+          command: {untrackUnshardedCollection: "test.x"},
+          skipUnlessSharded: true,
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {__system: 1},
+                privileges: [{resource: {cluster: true}, actions: ["internal"]}],
+                expectFail: true
+              },
+              {runOnDb: firstDbName, roles: {}},
+              {runOnDb: secondDbName, roles: {}}
+          ]
+        },
+        {
           testname: "updateRole_authenticationRestrictions",
           command: {updateRole: "testRole", authenticationRestrictions: []},
           setup: function(db) {
@@ -7090,6 +7110,27 @@ export const authCommandsLib = {
           ]
         },
         {
+          testname: "aggregate_$searchMeta",
+          command: {
+              aggregate: "foo",
+              cursor: {},
+              pipeline: [{$searchMeta: {}}]
+          },
+          testcases: testcases_transformationOnlyExpectFail
+        },
+        {
+          testname: "aggregate_$vectorSearch",
+          command: {
+              aggregate: "foo",
+              cursor: {},
+              pipeline: [{$vectorSearch: {}}]
+          },
+          skipTest: (_) => _isWindows(),
+          // Instead of calling to mongot, lets make the search to return EOF early.
+          disableSearch: true,
+          testcases: testcases_transformationOnlyExpectFail
+        },
+        {
           testname: "startRecordingTraffic",
           command: {startRecordingTraffic: 1, filename: "notARealPath"},
           testcases: [
@@ -7301,7 +7342,7 @@ export const authCommandsLib = {
           testname: "aggregate_$_unpackBucket",
           command: {
               aggregate: "foo",
-              pipeline: [{$_internalUnpackBucket: {timeField: "start", metaField: "tags", bucketMaxSpanSeconds: NumberInt(3000)}}],
+              pipeline: [{$_unpackBucket: {timeField: "start"}}],
               cursor: {}
           },
           setup: function(db) {
@@ -7497,7 +7538,7 @@ export const authCommandsLib = {
               },
             ]
         },
-        { 
+        {
           testname: "aggregate_$_internalChangeStreamUnwindTransaction",
           command: {
               aggregate: 1,
@@ -7532,6 +7573,30 @@ export const authCommandsLib = {
             ],
             expectFail: true
           }],
+        },
+        {
+          testname: "aggregate_$listCachedAndActiveUsers",
+          command: {
+            aggregate: 1,
+            pipeline: [{$listCachedAndActiveUsers: {}}],
+            cursor: {}
+          },
+          testcases: [
+              {
+                runOnDb: adminDbName,
+                roles: {userAdminAnyDatabase: 1, root: 1, __system: 1},
+                privileges: [
+                    {resource: {anyResource: true}, actions: ["listCachedAndActiveUsers"]},
+                ],
+              },
+              {
+                runOnDb: firstDbName,
+                roles: {userAdminAnyDatabase: 1, root: 1, __system: 1},
+                privileges: [
+                    {resource: {anyResource: true}, actions: ["listCachedAndActiveUsers"]},
+                ],
+              }
+            ]
         },
         {
           testname: "aggregate_$listCatalog_admin",
@@ -7652,6 +7717,18 @@ export const authCommandsLib = {
           testcases: testcases_transformationOnly,
         },
         {
+          testname: "aggregate_$_internalBoundedSort",
+          command: {
+              aggregate: "foo",
+              pipeline: [
+                {$skip: 5}, // Adding $skip because $_internalBoundedSort cannot be the first stage on the merger when running in a sharded cluster.
+                {$_internalBoundedSort: {sortKey: {bar: 1}, bound: {base: "min"}}}
+              ],
+              cursor: {}
+          },
+          testcases: testcases_transformationOnly,
+        },
+        {
           testname: "aggregate_$_internalComputeGeoNearDistance",
           command: {
               aggregate: "foo",
@@ -7713,42 +7790,6 @@ export const authCommandsLib = {
               cursor: {}
           },
           testcases: testcases_transformationOnly,
-        },
-        {
-          testname: "aggregate_$_internalProjection",
-          command: {
-              aggregate: "foo",
-              pipeline: [{$_internalProjection: {policies: "aggregate"}}],
-              cursor: {}
-          },
-          skipSharded: true, // Not available on mongos.
-          testcases: [{
-              runOnDb: firstDbName,
-              roles: {__system: 1},
-              privileges: [
-                  {resource: {db: firstDbName, collection: ""}, actions: ["find"]},
-                  {resource: {cluster: true}, actions: ["internal"]},
-              ],
-              expectFail: true
-          }],
-        },
-        {
-          testname: "aggregate_$_internalReplaceRoot",
-          command: {
-              aggregate: "foo",
-              pipeline: [{$_internalReplaceRoot: {}}],
-              cursor: {}
-          },
-          skipSharded: true, // Not available on mongos.
-          testcases: [{
-              runOnDb: firstDbName,
-              roles: {__system: 1},
-              privileges: [
-                  {resource: {db: firstDbName, collection: ""}, actions: ["find"]},
-                  {resource: {cluster: true}, actions: ["internal"]},
-              ],
-              expectFail: true
-          }],
         },
         {
           testname: "aggregate_$_internalReshardingIterateTransaction",
@@ -7877,10 +7918,40 @@ export const authCommandsLib = {
           testcases: testcases_transformationOnly,
         },
         {
+          testname: "aggregate_$https",
+          command: {
+              aggregate: "foo",
+              pipeline: [{$https: {}}],
+              cursor: {},
+          },
+          // TODO SERVER-74961: Windows is not yet supported in stream processing.
+          skipTest: (_) => !TestData.setParameters.featureFlagStreams || _isWindows() || getBuildInfo().version < "8.1",
+          skipSharded: true,
+          testcases: testcases_transformationOnlyExpectFail, // Not allowed in user requests.
+        },
+        {
+          testname: "aggregate_$fill",
+          command: {
+              aggregate: "foo",
+              pipeline: [{$fill: {output: {bar: {value: 0}}}}],
+              cursor: {},
+          },
+          testcases: testcases_transformationOnly,
+        },
+        {
           testname: "aggregate_$group",
           command: {
               aggregate: "foo",
               pipeline: [{$group: {_id: "$bar", count: {$sum: 1}}}],
+              cursor: {},
+          },
+          testcases: testcases_transformationOnly,
+        },
+        {
+          testname: "aggregate_$limit",
+          command: {
+              aggregate: "foo",
+              pipeline: [{$limit: 10}],
               cursor: {},
           },
           testcases: testcases_transformationOnly,
@@ -8224,74 +8295,80 @@ export const authCommandsLib = {
       {
         testname: "aggregate_$rankFusion",
         command: {
-            aggregate: "foo",
-            cursor: {},
-            pipeline: [{
+          aggregate: "foo",
+          cursor: {},
+          pipeline: [
+            {
               $rankFusion: {
-                inputs: [
-                  {
-                    pipeline: [
+                input: {
+                  pipelines: {
+                    geo: [
                       {
                         $geoNear: {near: [50, 50], distanceField: "dist"}
                       },
                       {
                         $limit: 2
                       }
-                    ]
-                  },
-                  {
-                    pipeline: [
+                    ],
+                    matchPipe: [
                       {
                         $match: {a: 1}
                       },
                       {
                         $sort: {x: 1}
-                      },
-                    ]
-                  },
-                  {
-                    pipeline: [
-                      {
-                        $search: {
-                          // empty query
-                        }
                       }
-                    ]
-                  },
-                  {
-                    pipeline: [
+                    ],
+                    search: [
                       {
-                        $vectorSearch: {
-                          // empty query
-                        }
+                        $search: { /* empty query */ }
+                      }
+                    ],
+                    vector: [
+                      {
+                        $vectorSearch: { /* empty query */ }
                       }
                     ]
                   }
-                ]
+                },
               }
-          }]
+            }
+          ]
         },
         setup: function(db) {
           db.createCollection("foo");
+          assert.commandWorked(db.foo.createIndex({loc: "2d"}));
+          assert.commandWorked(db.foo.insert({loc: [45.32, 51.12]}));
         },
         skipSharded: false,
         disableSearch: true,
         skipTest: (conn) => {
-          return !TestData.setParameters.featureFlagSearchHybridScoring;
+          return !TestData.setParameters.featureFlagRankFusionFull;
         },
-        testcases: [
-          {
-            runOnDb: firstDbName,
-            roles: roles_read,
-            privileges: [{resource: {db: firstDbName, collection: "foo"}, actions: ["find"]}]
-          },
-          {
-            runOnDb: secondDbName,
-            roles: roles_readAny,
-            privileges:
-                [{resource: {db: secondDbName, collection: "foo"}, actions: ["find"]}]
-          },
-        ]
+        // Expect this to fail since there's no mongot set up to execute the $search/vectorSearch.
+        testcases: testcases_transformationOnlyExpectFail,
+      },
+      {
+        testname: "aggregate_$score",
+        command: {
+            aggregate: "foo",
+            cursor: {},
+            pipeline: [{$score: {score: 10}}]
+        },
+        setup: db => { db.createCollection("foo"); },
+        disableSearch: true,
+        skipTest: _ => !TestData.setParameters.featureFlagSearchHybridScoringFull,
+        testcases: testcases_transformationOnly
+      },
+      {
+        testname: "aggregate_$setMetadata",
+        command: {
+            aggregate: "foo",
+            cursor: {},
+            pipeline: [{$setMetadata: {score: 5}}]
+        },
+        setup: db => { db.createCollection("foo"); },
+        disableSearch: true,
+        testcases: testcases_transformationOnlyExpectFail
       },
       {
         testname: "aggregate_$scoreFusion",
@@ -8342,24 +8419,81 @@ export const authCommandsLib = {
         skipSharded: false,
         disableSearch: true,
         skipTest: (conn) => {
-          return !TestData.setParameters.featureFlagSearchHybridScoring;
+          return !TestData.setParameters.featureFlagSearchHybridScoringFull;
         },
+        testcases: testcases_transformationOnlyExpectFail,
+      },
+      {
+        testname: "aggregate_internal_list_collections",
+        command: {aggregate: 1, pipeline: [{$_internalListCollections: {}}], cursor: {}},
         testcases: [
           {
-            runOnDb: firstDbName,
-            roles: roles_read,
-            privileges: [{resource: {db: firstDbName, collection: "foo"}, actions: ["find"]}]
+            runOnDb: adminDbName,
+            roles: {__system: 1},
+            privileges: [{resource: {cluster: true}, actions: ["internal"]}]
           },
           {
-            runOnDb: secondDbName,
-            roles: roles_readAny,
-            privileges:
-                [{resource: {db: secondDbName, collection: "foo"}, actions: ["find"]}]
+            runOnDb: firstDbName,
+            roles: {__system: 1},
+            privileges: [{resource: {cluster: true}, actions: ["internal"]}]
           },
         ]
-      }, 
+      },
+      {
+        testname: "aggregate_$listClusterCatalog",
+        command: {aggregate: 1, pipeline: [{$listClusterCatalog: {}}], cursor: {}},
+        testcases: [
+            {
+                runOnDb: adminDbName,
+                roles: roles_monitoring,
+                privileges: [
+                    {resource: {cluster: true}, actions: ["listClusterCatalog"]},
+                ],
+            },
+            {
+                runOnDb: firstDbName,
+                roles: {
+                    read: 1,
+                    readAnyDatabase: 1,
+                    readWrite: 1,
+                    readWriteAnyDatabase: 1,
+                    dbAdmin: 1,
+                    dbAdminAnyDatabase: 1,
+                    dbOwner: 1,
+                    backup: 1,
+                    restore: 1,
+                    root: 1,
+                    __system: 1
+                },
+                privileges: [
+                  {resource: {db: firstDbName, collection: ""}, actions: ["listCollections"]}
+                ]
+            },
+            {runOnDb: firstDbName, privileges: [], expectAuthzFailure: true},
+        ]
+      },
+      {
+        testname: "aggregate_$listMqlEntities",
+        command: {
+          aggregate: 1,
+          pipeline: [{$listMqlEntities: {entityType: "aggregationStages"}}],
+          cursor: {},
+        },
+        testcases: [
+          // expectFail is true because $listMqlEntities is only allowed to run on the admin database,
+          // but this check occurs post-auth.
+          // A user defined role with no privileges is authorized to run this stage because it is a
+          // test-only command (enabled only under --enableTestCommands).
+          {
+            runOnDb: firstDbName,
+            roles: roles_all,
+            privileges: [],
+            expectFail: true
+          },
+        ],
+      },
     ],
-    
+
     /************* SHARED TEST LOGIC ****************/
 
     /**
@@ -8460,10 +8594,15 @@ export const authCommandsLib = {
 
         impls.createUsers(conn);
 
+        // A test may provide a secondary connection to be intermittently authed
+        // with admin privileges for setup/teardown.
+        const setupConn = ("getSideChannel" in impls)? impls.getSideChannel(conn) : conn;
+        checkAggStageCoverage(setupConn);
+
         var failures = [];
 
 
-        for (var i = 0; i < this.tests.length; i++) {
+        for (var i = this.tests.length-1; i < this.tests.length; i++) {
             const res = this.runOneTest(conn, this.tests[i], impls, options);
             failures = failures.concat(res);
         }
@@ -8480,4 +8619,43 @@ export const authCommandsLib = {
  */
 function isStandalone(conn) {
     return FixtureHelpers.isStandalone(conn.getDB(adminDbName));
+}
+
+/**
+ * Checks the test coverage on aggregation stages. If it finds any aggregation stage misses
+ * authorization testing, it throws an error to remind developers to add them.
+ */
+function checkAggStageCoverage(conn) {
+    const adminDb = conn.getDB(adminDbName);
+
+    // Ensures to login as admin.
+    assert(adminDb.auth("admin", "password"));
+    const aggStages = adminDb.aggregate([{$listMqlEntities: {entityType: "aggregationStages"}}])
+                          .toArray()
+                          .map(obj => obj.name);
+    adminDb.logout();
+
+    const unvisited = {};
+    for (let aggStage of aggStages) {
+        // Tracks 'aggStage' unless listed in the exception list 'skippedAuthTestingAggStages'.
+        if (!skippedAuthTestingAggStages.includes(aggStage)) {
+            unvisited[aggStage] = 1;
+        }
+    }
+
+    for (let test of authCommandsLib.tests) {
+        if (!("aggregate" in test.command)) {
+            continue;
+        }
+        for (let stage of test.command.pipeline) {
+            let stageName = Object.keys(stage)[0];
+            delete unvisited[stageName];
+        }
+    }
+
+    const unvisitedList = Object.keys(unvisited);
+    assert.eq(unvisitedList.length,
+              0,
+              `'authCommandsLib.tests' misses auth testing for ${
+                  unvisitedList.length} aggregation stages: ${unvisitedList.join(", ")}`);
 }

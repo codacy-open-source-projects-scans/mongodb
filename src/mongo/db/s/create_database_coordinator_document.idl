@@ -32,6 +32,7 @@ global:
 imports:
     - "mongo/db/basic_types.idl"
     - "mongo/db/s/sharding_ddl_coordinator.idl"
+    - "mongo/s/sharding_types.idl"
 
 enums:
     CreateDatabaseCoordinatorPhase:
@@ -39,7 +40,9 @@ enums:
         type: string
         values:
             kUnset: "unset"
+            kEnterCriticalSectionOnPrimary: "enterCriticalSectionOnPrimary"
             kCommitOnShardingCatalog: "commitOnShardingCatalog"
+            kExitCriticalSectionOnPrimary: "exitCriticalSectionOnPrimary"
 
 structs:
     CreateDatabaseCoordinatorDocument:
@@ -53,3 +56,12 @@ structs:
                 type: CreateDatabaseCoordinatorPhase
                 description: "Coordinator phase."
                 default: kUnset
+            primaryShard:
+                type: shard_id
+                description: >-
+                    Resolved primary shard either from the received parameter or selected by the
+                    DDL coordinator.
+                optional: true
+            userSelectedPrimary:
+                type: bool
+                description: "If the primary shard was specified by the user."

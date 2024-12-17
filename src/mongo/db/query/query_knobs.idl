@@ -64,6 +64,14 @@ enums:
             kHeuristicCE: "heuristicCE"
             kMultiPlanning: "multiPlanning"
 
+    SamplingConfidenceInterval:
+        description: "Enum for supported confidence intervals for sampling estimates."
+        type: string
+        values:
+            k90: "90"
+            k95: "95"
+            k99: "99"
+
 structs:
   InternalQueryCutoffForSampleFromRandomCursorStorage:
     description: "A specification for the 'internalQueryCutoffForSampleFromRandomCursor' cluster-wide configuration parameter type."
@@ -485,13 +493,11 @@ server_parameters:
     redact: false
 
   internalQueryExpressionInterruptIterations:
-    description: "In some potentially long running expressions every n checks, we wake up and see if the query was killed"
+    description: "In some potentially long running expressions every n checks, we wake up and see if the query was killed."
     set_at: [ startup, runtime ]
     cpp_varname: "internalQueryExpressionInterruptIterations"
     cpp_vartype: AtomicWord<int>
     default: 10
-    validator:
-      gte: 0
     redact: false
 
   internalQueryExpressionInterruptPeriodMS:
@@ -535,7 +541,31 @@ server_parameters:
     default:
       expr: 100 * 1024 * 1024
     validator:
-      gte: { expr: BSONObjMaxInternalSize}
+      gte: { expr: BSONObjMaxInternalSize }
+    redact: false
+
+  internalGraphLookupStageIntermediateDocumentMaxSizeBytes:
+    description: "Maximum size of the result set that we cache from the foreign collection during a
+    $graphLookup."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalGraphLookupStageIntermediateDocumentMaxSizeBytes"
+    cpp_vartype: AtomicWord<long long>
+    default:
+      expr: 100 * 1024 * 1024
+    validator:
+      gte: { expr: BSONObjMaxInternalSize }
+    redact: false
+
+  internalDocumentSourceGraphLookupMaxMemoryBytes:
+    description: "Maximum size of the data that the $graphLookup aggregation stage will cache
+    in-memory before failing."
+    set_at: [ startup, runtime ]
+    cpp_varname: "internalDocumentSourceGraphLookupMaxMemoryBytes"
+    cpp_vartype: AtomicWord<long long>
+    default:
+      expr: 100 * 1024 * 1024
+    validator:
+      gt: 0
     redact: false
 
   internalDocumentSourceGroupMaxMemoryBytes:
@@ -680,7 +710,7 @@ server_parameters:
         gt: 0
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
     redact: false
-  
+
   internalQueryMaxSetUnionBytes:
     description: "Limits the vector of values pushed into a single array while grouping with the
     $setUnion accumulator."
@@ -693,7 +723,7 @@ server_parameters:
         gt: 0
     on_update: plan_cache_util::clearSbeCacheOnParameterChange
     redact: false
-  
+
   internalQueryMaxPercentileAccumulatorBytes:
     description: "The maximum amount of memory that can be used by an individual $percentile accumulator."
     set_at: [ startup, runtime ]
@@ -1191,7 +1221,7 @@ server_parameters:
     redact: false
 
   internalRoaringBitmapsMinimalDensity:
-    description: "The minimal denstity required for the hybrid container to switch from hash table to Roaring Bitmaps."
+    description: "The minimal density required for the hybrid container to switch from hash table to Roaring Bitmaps."
     set_at: [ startup, runtime ]
     cpp_varname: internalRoaringBitmapsMinimalDensity
     cpp_vartype: AtomicDouble
@@ -1316,22 +1346,6 @@ server_parameters:
       gt: 0
     redact: false
 
-  deprioritizeUnboundedUserCollectionScans:
-   description: "Unbounded user collection scans are executed with low storage admission priority"
-   set_at: [ startup, runtime ]
-   cpp_varname: gDeprioritizeUnboundedUserCollectionScans
-   cpp_vartype: AtomicWord<bool>
-   default: true
-   redact: false
-
-  deprioritizeUnboundedUserIndexScans:
-   description: "Unbounded user index scans are executed with low storage admission priority"
-   set_at: [ startup, runtime ]
-   cpp_varname: gDeprioritizeUnboundedUserIndexScans
-   cpp_vartype: AtomicWord<bool>
-   default: true
-   redact: false
-
   internalQueryDocumentSourceWriterBatchExtraReservedBytes:
     description: "Space to reserve in document source writer batches for miscellaneous metadata"
     set_at: [ startup, runtime ]
@@ -1385,13 +1399,13 @@ server_parameters:
     validator:
       gte: 0
     redact: false
-  
+
   internalQuerySpillingMinAvailableDiskSpaceBytes:
     description: "Minimum disk space that should be available before spilling"
     set_at: [startup, runtime]
     cpp_vartype: AtomicWord<long long>
     cpp_varname: internalQuerySpillingMinAvailableDiskSpaceBytes
-    default: 
+    default:
       expr: 500 * 1024 * 1024 # 500 MB
     validator:
       gte: 0
@@ -1432,6 +1446,31 @@ server_parameters:
       data: synchronized_value<QueryPlanRankerModeEnum>
     default:
       expr: QueryPlanRankerModeEnum::kMultiPlanning
+    redact: false
+
+  samplingConfidenceInterval:
+    description: "Define target confidence interval for sampling cardinality estimates used for
+    cost-based optimization. Supported values are 90%, 95%, and 99%."
+    set_at: [ startup, runtime ]
+    cpp_class:
+      name: SamplingConfidenceInterval
+      data: synchronized_value<SamplingConfidenceIntervalEnum>
+    default:
+      expr: SamplingConfidenceIntervalEnum::k95
+    redact: false
+
+  samplingMarginOfError:
+    description: "Define target margin of error for sampling cardinality estimates used for
+    cost-based optimization. Default value 5%. Limit values to the interval [1, 10].
+    Margins of error smaller than 1% require too large sample size. Margins of error larger
+    than 10% lead to very wide confidence interval and poor estimate accuracy."
+    set_at: [ startup, runtime ]
+    cpp_varname: samplingMarginOfError
+    cpp_vartype: AtomicDouble
+    default: 5.0
+    validator:
+       gte: 1.0
+       lte: 10.0
     redact: false
 
 # Note for adding additional query knobs:

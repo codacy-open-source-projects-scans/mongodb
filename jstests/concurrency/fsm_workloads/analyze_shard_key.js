@@ -5,7 +5,6 @@
  * guaranteed to be true when it is run in parallel with other workloads.
  *
  * @tags: [
- *  requires_fcv_81,
  *  uses_transactions,
  *  resource_intensive,
  *  incompatible_with_concurrency_simultaneous,
@@ -485,13 +484,21 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         }
 
         // Validate the frequency metrics. Likewise, due to the concurrent writes by other threads,
-        // it is not feasible to assert on the exact "mostCommonValues". Also, if the shard key is
-        // unique and the suite performs unclean shutdown, then the length of "mostCommonValues" may
-        // be less than analyzeShardKeyNumMostCommonValues since unclean shutdown can cause
-        // $collStats to return wrong number of documents and the calculation of the cardinality and
-        // frequency metrics for a unique shard key depends on the metrics returned by $collStats.
-        const shouldCheckMostCommonValues = !(this.shardKeyOptions.isUnique && TestData.killShards);
-        if (shouldCheckMostCommonValues) {
+        // it is not feasible to assert on the exact "mostCommonValues". Also, the length of
+        // "mostCommonValues" may be less than analyzeShardKeyNumMostCommonValues if:
+        // - The shard key is unique and the suite performs unclean shutdown since the calculation
+        //   of the cardinality and frequency metrics for a unique shard key depends on the metrics
+        //   returned by $collStats and unclean shutdown can cause $collStats to return the wrong
+        //   number of documents.
+        // - The shard key is not unique and the balancer is enabled since the calculation of the
+        //   the cardinality and frequency metrics for a non unique shard key depends on running
+        //   an aggregate command with readConcern "available" (to avoid the expensive sharding
+        //   filtering) which can results in reads against the old owning shards, which may return
+        //   partial data.
+        const shouldSkipMostCommonValuesCheck =
+            (this.shardKeyOptions.isUnique && TestData.killShards) ||
+            (!this.shardKeyOptions.isUnique && TestData.runningWithBalancer);
+        if (!shouldSkipMostCommonValuesCheck) {
             assert.eq(metrics.mostCommonValues.length, this.analyzeShardKeyNumMostCommonValues);
         }
 
@@ -738,12 +745,21 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
             // Inaccurate fast count is only expected when there is unclean shutdown.
             return TestData.runningWithShardStepdowns;
         }
-        // TODO SERVER-91030: Remove special handling of error code 7826507.
         if (err.code == 7826507) {
             print(
                 `Failed to analyze the shard key because the number of sampled documents is zero. ${
                     tojsononeline(err)}`);
-            // This may be due to chunk migrations.
+            // Here are the relevant steps in the cluster analyzeShardKey command:
+            // 1. The mongos forwards the analyzeShardKey command to one of the shards that owns
+            //    chunks for the collection (the primary shard is prioritized).
+            // 2. That shard runs a find(One) command to validate that the fields of the shard key
+            //    being analyzed don't contain arrays.
+            // 3. That shard runs a cluster aggregate command $collStats.
+            // 4. That shard runs cluster aggregate $meta: indexKey with readConcern level:
+            //    "available".
+            // For the number of sampled documents to be 0, there must be a data movement between
+            // step (3) and step (4), and the number of shards that own chunks for the collection in
+            // those steps must not overlap. Please see SERVER-91030 for more details.
             return true;
         }
         if (err.code == ErrorCodes.IllegalOperation && err.errmsg &&
@@ -835,10 +851,32 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
     // 'analyzeShardKeySplitPointExpirationSecs' and 'ttlMonitorSleepSecs' server parameters to make
     // the clean up occur as the workload runs, and then restore the original values during
     // teardown().
+    $config.data.maxNumStaleVersionRetries = 2;
     $config.data.splitPointExpirationSecs = 30;
     $config.data.ttlMonitorSleepSecs = 5;
+    $config.data.originalMaxNumStaleVersionRetries = {};
     $config.data.originalSplitPointExpirationSecs = {};
     $config.data.originalTTLMonitorSleepSecs = {};
+
+    $config.data.overrideMaxNumStaleVersionRetries = function overrideMaxNumStaleVersionRetries(
+        cluster) {
+        cluster.executeOnMongodNodes((db) => {
+            const binVersion = assert
+                                   .commandWorked(db.adminCommand({
+                                       serverStatus: 1,
+                                   }))
+                                   .version;
+
+            // analyzeShardKeyMaxNumStaleVersionRetries was added in binVersion 8.1.
+            if (MongoRunner.compareBinVersions(binVersion, "8.1") >= 0) {
+                const res = assert.commandWorked(db.adminCommand({
+                    setParameter: 1,
+                    analyzeShardKeyMaxNumStaleVersionRetries: this.maxNumStaleVersionRetries,
+                }));
+                this.originalMaxNumStaleVersionRetries[db.getMongo().host] = res.was;
+            }
+        });
+    };
 
     $config.data.overrideSplitPointExpiration = function overrideSplitPointExpiration(cluster) {
         cluster.executeOnMongodNodes((db) => {
@@ -855,6 +893,26 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
             const res = assert.commandWorked(
                 db.adminCommand({setParameter: 1, ttlMonitorSleepSecs: this.ttlMonitorSleepSecs}));
             this.originalTTLMonitorSleepSecs[db.getMongo().host] = res.was;
+        });
+    };
+
+    $config.data.restoreMaxNumStaleVersionRetries = function restoreMaxNumStaleVersionRetries(
+        cluster) {
+        cluster.executeOnMongodNodes((db) => {
+            const binVersion = assert
+                                   .commandWorked(db.adminCommand({
+                                       serverStatus: 1,
+                                   }))
+                                   .version;
+
+            // analyzeShardKeyMaxNumStaleVersionRetries was added in binVersion 8.1.
+            if (MongoRunner.compareBinVersions(binVersion, "8.1") >= 0) {
+                assert.commandWorked(db.adminCommand({
+                    setParameter: 1,
+                    analyzeShardKeyMaxNumStaleVersionRetries:
+                        this.originalMaxNumStaleVersionRetries[db.getMongo().host],
+                }));
+            }
         });
     };
 
@@ -976,6 +1034,7 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
                                {comment: this.eligibleForSamplingComment});
         });
 
+        this.overrideMaxNumStaleVersionRetries(cluster);
         this.overrideSplitPointExpiration(cluster);
         this.overrideTTLMonitorSleepSecs(cluster);
 
@@ -1023,6 +1082,7 @@ export const $config = extendWorkload(kBaseConfig, function($config, $super) {
         this.listSampledQueries(db, collName);
 
         print("Cleaning up");
+        this.restoreMaxNumStaleVersionRetries(cluster);
         this.restoreSplitPointExpiration(cluster);
         this.restoreTTLMonitorSleepSecs(cluster);
         this.removeSampledQueryAndSplitPointDocuments(db, collName, cluster);

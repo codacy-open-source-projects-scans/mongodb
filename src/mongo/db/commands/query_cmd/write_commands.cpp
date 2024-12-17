@@ -34,7 +34,6 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
-#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -52,27 +51,21 @@
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/update_metrics.h"
 #include "mongo/db/commands/query_cmd/write_commands_common.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
-#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/process_interface/replica_set_node_process_interface.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/command_diagnostic_printer.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
@@ -92,6 +85,7 @@
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
+#include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
 #include "mongo/db/transaction_resources.h"
 #include "mongo/db/transaction_validation.h"
@@ -176,7 +170,6 @@ void populateReply(OperationContext* opCtx,
         if (lastResult == ErrorCodes::StaleDbVersion ||
             lastResult == ErrorCodes::ShardCannotRefreshDueToLocksHeld ||
             ErrorCodes::isStaleShardVersionError(lastResult.getStatus()) ||
-            ErrorCodes::isTenantMigrationError(lastResult.getStatus()) ||
             lastResult == ErrorCodes::CannotImplicitlyCreateCollection) {
             // For ordered:false commands we need to duplicate these error results for all ops
             // after we stopped. See handleError() in write_ops_exec.cpp for more info.
@@ -303,19 +296,11 @@ public:
             dassert(write_ops::verifySizeEstimate(request(), &unparsedRequest()));
 
             doTransactionValidationForWrites(opCtx, ns());
-            if (request().getEncryptionInformation().has_value()) {
-                {
-                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-                }
-
-                if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
-                    write_ops::InsertCommandReply insertReply;
-                    auto batch = processFLEInsert(opCtx, request(), &insertReply);
-                    if (batch == FLEBatchResult::kProcessed) {
-                        return insertReply;
-                    }
+            if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
+                write_ops::InsertCommandReply insertReply;
+                if (auto batch = processFLEInsert(opCtx, request(), &insertReply);
+                    batch == FLEBatchResult::kProcessed) {
+                    return insertReply;
                 }
             }
 
@@ -325,18 +310,12 @@ public:
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
                 try {
-                    return write_ops_exec::performTimeseriesWrites(opCtx, request());
+                    return timeseries::write_ops::performTimeseriesWrites(opCtx, request());
                 } catch (DBException& ex) {
                     ex.addContext(str::stream()
                                   << "time-series insert failed: " << ns().toStringForErrorMsg());
                     throw;
                 }
-            }
-
-            boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>> priority;
-            if (request().getNamespace() == NamespaceString::kConfigSampledQueriesNamespace ||
-                request().getNamespace() == NamespaceString::kConfigSampledQueriesDiffNamespace) {
-                priority.emplace(opCtx, AdmissionContext::Priority::kLow);
             }
 
             if (hangInsertBeforeWrite.shouldFail([&](const BSONObj& data) {
@@ -510,15 +489,8 @@ public:
 
             doTransactionValidationForWrites(opCtx, ns());
             write_ops::UpdateCommandReply updateReply;
-            if (request().getEncryptionInformation().has_value()) {
-                {
-                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-                }
-                if (!request().getEncryptionInformation().value().getCrudProcessed()) {
-                    return processFLEUpdate(opCtx, request());
-                }
+            if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
+                return processFLEUpdate(opCtx, request());
             }
 
             auto [isTimeseriesViewRequest, bucketNs] =
@@ -636,19 +608,12 @@ public:
 
             UpdateRequest updateRequest(request().getUpdates()[0]);
             updateRequest.setNamespaceString(nss);
-            if (shouldDoFLERewrite(request())) {
-                {
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-                }
-
-                if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
-                    updateRequest.setQuery(
-                        processFLEWriteExplainD(opCtx,
-                                                write_ops::collationOf(request().getUpdates()[0]),
-                                                request(),
-                                                updateRequest.getQuery()));
-                }
+            if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
+                updateRequest.setQuery(
+                    processFLEWriteExplainD(opCtx,
+                                            write_ops::collationOf(request().getUpdates()[0]),
+                                            request(),
+                                            updateRequest.getQuery()));
             }
 
             updateRequest.setLegacyRuntimeConstants(request().getLegacyRuntimeConstants().value_or(
@@ -761,16 +726,8 @@ public:
             write_ops::DeleteCommandReply deleteReply;
             OperationSource source = OperationSource::kStandard;
 
-            if (request().getEncryptionInformation().has_value()) {
-                {
-                    // Flag set here and in fle_crud.cpp since this only executes on a mongod.
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-                }
-
-                if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
-                    return processFLEDelete(opCtx, request());
-                }
+            if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
+                return processFLEDelete(opCtx, request());
             }
 
             if (auto [isTimeseriesViewRequest, _] =
@@ -825,16 +782,10 @@ public:
 
             const auto& firstDelete = request().getDeletes()[0];
             BSONObj query = firstDelete.getQ();
-            if (shouldDoFLERewrite(request())) {
-                {
-                    stdx::lock_guard<Client> lk(*opCtx->getClient());
-                    CurOp::get(opCtx)->setShouldOmitDiagnosticInformation(lk, true);
-                }
 
-                if (!request().getEncryptionInformation()->getCrudProcessed().value_or(false)) {
-                    query = processFLEWriteExplainD(
-                        opCtx, write_ops::collationOf(firstDelete), request(), query);
-                }
+            if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
+                query = processFLEWriteExplainD(
+                    opCtx, write_ops::collationOf(firstDelete), request(), query);
             }
             deleteRequest.setQuery(std::move(query));
 

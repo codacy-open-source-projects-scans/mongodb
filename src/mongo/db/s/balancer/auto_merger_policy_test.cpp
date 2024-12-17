@@ -84,14 +84,13 @@ protected:
         client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace,
                              {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
 
-        // ReadWriteConcernDefaults::create(getServiceContext(), _lookupMock.getFetchDefaultsFn());
         LogicalSessionCache::set(getServiceContext(), std::make_unique<LogicalSessionCacheNoop>());
         TransactionCoordinatorService::get(operationContext())
-            ->onShardingInitialization(operationContext(), true);
+            ->initializeIfNeeded(operationContext(), /* term */ 1);
     }
 
     void tearDown() override {
-        TransactionCoordinatorService::get(operationContext())->onStepDown();
+        TransactionCoordinatorService::get(operationContext())->interrupt();
         ConfigServerTestFixture::tearDown();
     }
 
@@ -135,8 +134,7 @@ protected:
                 collVersion.incMinor();
 
                 auto max = BSON("x" << i);
-                chunk.setMin(min);
-                chunk.setMax(max);
+                chunk.setRange({min, max});
                 min = max;
 
                 chunks.push_back(chunk);
@@ -168,8 +166,7 @@ protected:
                 collVersion.incMinor();
 
                 auto max = (i == 2 ? _keyPattern.globalMax() : BSON("x" << i));
-                chunk.setMin(min);
-                chunk.setMax(max);
+                chunk.setRange({min, max});
                 min = max;
 
                 chunks.push_back(chunk);

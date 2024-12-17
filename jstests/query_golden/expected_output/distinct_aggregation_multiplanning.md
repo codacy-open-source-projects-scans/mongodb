@@ -24,6 +24,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -191,6 +192,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -311,6 +313,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -478,6 +481,7 @@
 {  "_id" : 5,  "accum" : 7 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -485,9 +489,6 @@
 			"$cursor" : {
 				"rejectedPlans" : [
 					[
-						{
-							"stage" : "FETCH"
-						},
 						{
 							"direction" : "forward",
 							"indexBounds" : {
@@ -499,7 +500,7 @@
 								]
 							},
 							"indexName" : "a_1_b_1",
-							"isFetching" : false,
+							"isFetching" : true,
 							"isMultiKey" : false,
 							"isPartial" : false,
 							"isShardFiltering" : false,
@@ -518,9 +519,6 @@
 					],
 					[
 						{
-							"stage" : "FETCH"
-						},
-						{
 							"direction" : "forward",
 							"indexBounds" : {
 								"a" : [
@@ -534,7 +532,7 @@
 								]
 							},
 							"indexName" : "a_1_b_1_d_1",
-							"isFetching" : false,
+							"isFetching" : true,
 							"isMultiKey" : false,
 							"isPartial" : false,
 							"isShardFiltering" : false,
@@ -636,6 +634,7 @@
 {  "_id" : 5,  "accum" : 7 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -643,9 +642,6 @@
 			"$cursor" : {
 				"rejectedPlans" : [
 					[
-						{
-							"stage" : "FETCH"
-						},
 						{
 							"direction" : "forward",
 							"indexBounds" : {
@@ -657,7 +653,7 @@
 								]
 							},
 							"indexName" : "a_1_b_1",
-							"isFetching" : false,
+							"isFetching" : true,
 							"isMultiKey" : false,
 							"isPartial" : false,
 							"isShardFiltering" : false,
@@ -676,9 +672,6 @@
 					],
 					[
 						{
-							"stage" : "FETCH"
-						},
-						{
 							"direction" : "forward",
 							"indexBounds" : {
 								"a" : [
@@ -692,7 +685,7 @@
 								]
 							},
 							"indexName" : "a_1_b_1_d_1",
-							"isFetching" : false,
+							"isFetching" : true,
 							"isMultiKey" : false,
 							"isPartial" : false,
 							"isShardFiltering" : false,
@@ -794,6 +787,7 @@
 {  "_id" : 5,  "accum" : 7 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -801,9 +795,6 @@
 			"$cursor" : {
 				"rejectedPlans" : [
 					[
-						{
-							"stage" : "FETCH"
-						},
 						{
 							"direction" : "backward",
 							"indexBounds" : {
@@ -815,7 +806,7 @@
 								]
 							},
 							"indexName" : "a_1_b_-1",
-							"isFetching" : false,
+							"isFetching" : true,
 							"isMultiKey" : false,
 							"isPartial" : false,
 							"isShardFiltering" : false,
@@ -835,9 +826,6 @@
 				],
 				"winningPlan" : [
 					{
-						"stage" : "FETCH"
-					},
-					{
 						"direction" : "forward",
 						"indexBounds" : {
 							"a" : [
@@ -848,7 +836,7 @@
 							]
 						},
 						"indexName" : "a_-1_b_1",
-						"isFetching" : false,
+						"isFetching" : true,
 						"isMultiKey" : false,
 						"isPartial" : false,
 						"isShardFiltering" : false,
@@ -899,6 +887,7 @@
 {  "_id" : 3,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -907,9 +896,6 @@
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
 					{
-						"stage" : "FETCH"
-					},
-					{
 						"direction" : "forward",
 						"indexBounds" : {
 							"_id" : [
@@ -917,7 +903,7 @@
 							]
 						},
 						"indexName" : "_id_",
-						"isFetching" : false,
+						"isFetching" : true,
 						"isMultiKey" : false,
 						"isPartial" : false,
 						"isShardFiltering" : false,
@@ -968,6 +954,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1088,6 +1075,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1202,6 +1190,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1283,6 +1272,7 @@
 {  "_id" : 5,  "accum" : 6 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1364,6 +1354,7 @@
 {  "_id" : 5,  "accum" : 6 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1450,6 +1441,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1536,6 +1528,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1621,6 +1614,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1707,6 +1701,7 @@
 {  "_id" : 5,  "accum" : 7 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1714,9 +1709,6 @@
 			"$cursor" : {
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
-					{
-						"stage" : "FETCH"
-					},
 					{
 						"direction" : "forward",
 						"indexBounds" : {
@@ -1728,7 +1720,7 @@
 							]
 						},
 						"indexName" : "a_1_b_1",
-						"isFetching" : false,
+						"isFetching" : true,
 						"isMultiKey" : false,
 						"isPartial" : false,
 						"isShardFiltering" : false,
@@ -1788,6 +1780,7 @@
 {  "_id" : 5,  "accum" : 7 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -1795,9 +1788,6 @@
 			"$cursor" : {
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
-					{
-						"stage" : "FETCH"
-					},
 					{
 						"direction" : "forward",
 						"indexBounds" : {
@@ -1809,7 +1799,7 @@
 							]
 						},
 						"indexName" : "a_1_b_1",
-						"isFetching" : false,
+						"isFetching" : true,
 						"isMultiKey" : false,
 						"isPartial" : false,
 						"isShardFiltering" : false,
@@ -1833,6 +1823,67 @@
 				"newRoot" : {
 					"_id" : "$a",
 					"accum" : "$c"
+				}
+			}
+		}
+	]
+}
+```
+
+### Pipeline
+```json
+[ { "$group" : { "_id" : "$a" } } ]
+```
+### Results
+```json
+{  "_id" : 4 }
+{  "_id" : 5 }
+```
+### Summarized explain
+Execution Engine: classic
+```json
+{
+	"stages" : [
+		{
+			"$cursor" : {
+				"rejectedPlans" : [ ],
+				"winningPlan" : [
+					{
+						"stage" : "PROJECTION_COVERED",
+						"transformBy" : {
+							"_id" : 0,
+							"a" : 1
+						}
+					},
+					{
+						"direction" : "forward",
+						"indexBounds" : {
+							"a" : [
+								"[MinKey, MaxKey]"
+							]
+						},
+						"indexName" : "a_1",
+						"isFetching" : false,
+						"isMultiKey" : false,
+						"isPartial" : false,
+						"isShardFiltering" : false,
+						"isSparse" : false,
+						"isUnique" : false,
+						"keyPattern" : {
+							"a" : 1
+						},
+						"multiKeyPaths" : {
+							"a" : [ ]
+						},
+						"stage" : "DISTINCT_SCAN"
+					}
+				]
+			}
+		},
+		{
+			"$groupByDistinctScan" : {
+				"newRoot" : {
+					"_id" : "$a"
 				}
 			}
 		}
@@ -1867,6 +1918,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -2034,6 +2086,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -2208,6 +2261,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
 	"rejectedPlans" : [ ],
@@ -2288,6 +2342,7 @@
 {  "_id" : 5,  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
 	"rejectedPlans" : [ ],
@@ -2314,6 +2369,9 @@
 		},
 		{
 			"direction" : "forward",
+			"filter" : {
+				
+			},
 			"stage" : "COLLSCAN"
 		}
 	]
@@ -2332,6 +2390,7 @@
 {  "_id" : 5 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -2405,6 +2464,7 @@
 {  "_id" : 5,  "accumB" : 4,  "accumC" : 7 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -2495,6 +2555,7 @@
 {  "_id" : 5,  "accumB" : 4,  "accumC" : 7,  "accumD" : 5 }
 ```
 ### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -2503,9 +2564,6 @@
 				"rejectedPlans" : [ ],
 				"winningPlan" : [
 					{
-						"stage" : "FETCH"
-					},
-					{
 						"direction" : "forward",
 						"indexBounds" : {
 							"a" : [
@@ -2513,7 +2571,7 @@
 							]
 						},
 						"indexName" : "a_1",
-						"isFetching" : false,
+						"isFetching" : true,
 						"isMultiKey" : false,
 						"isPartial" : false,
 						"isShardFiltering" : false,
@@ -2544,7 +2602,7 @@
 }
 ```
 
-### Multiplanning tie between DISTINCT_SCAN and IXSCAN
+### Multiplanning tie between DISTINCT_SCAN and IXSCAN favors DISTINCT_SCAN
 ### Pipeline
 ```json
 [
@@ -2579,6 +2637,152 @@
 {  "_id" : 4,  "accum" : -4 }
 ```
 ### Summarized explain
+Execution Engine: classic
+```json
+{
+	"stages" : [
+		{
+			"$cursor" : {
+				"rejectedPlans" : [
+					[
+						{
+							"stage" : "PROJECTION_COVERED",
+							"transformBy" : {
+								"_id" : 0,
+								"a" : 1,
+								"b" : 1
+							}
+						},
+						{
+							"direction" : "forward",
+							"indexBounds" : {
+								"a" : [
+									"[inf.0, 0.0)"
+								],
+								"b" : [
+									"[MinKey, MaxKey]"
+								]
+							},
+							"indexName" : "a_-1_b_1",
+							"isMultiKey" : false,
+							"isPartial" : false,
+							"isSparse" : false,
+							"isUnique" : false,
+							"keyPattern" : {
+								"a" : -1,
+								"b" : 1
+							},
+							"multiKeyPaths" : {
+								"a" : [ ],
+								"b" : [ ]
+							},
+							"stage" : "IXSCAN"
+						}
+					]
+				],
+				"winningPlan" : [
+					{
+						"stage" : "PROJECTION_COVERED",
+						"transformBy" : {
+							"_id" : 0,
+							"a" : 1,
+							"b" : 1
+						}
+					},
+					{
+						"direction" : "forward",
+						"indexBounds" : {
+							"a" : [
+								"(0.0, inf.0]"
+							],
+							"b" : [
+								"[MinKey, MaxKey]"
+							]
+						},
+						"indexName" : "a_1_b_1",
+						"isFetching" : false,
+						"isMultiKey" : false,
+						"isPartial" : false,
+						"isShardFiltering" : false,
+						"isSparse" : false,
+						"isUnique" : false,
+						"keyPattern" : {
+							"a" : 1,
+							"b" : 1
+						},
+						"multiKeyPaths" : {
+							"a" : [ ],
+							"b" : [ ]
+						},
+						"stage" : "DISTINCT_SCAN"
+					}
+				]
+			}
+		},
+		{
+			"$groupByDistinctScan" : {
+				"newRoot" : {
+					"_id" : "$a",
+					"accum" : "$b"
+				}
+			}
+		}
+	]
+}
+```
+
+### Prefer FETCH + filter + IXSCAN for more selective predicate on b
+### Pipeline
+```json
+[
+	{
+		"$match" : {
+			"a" : {
+				"$gt" : 0
+			},
+			"b" : {
+				"$gt" : -18
+			}
+		}
+	},
+	{
+		"$group" : {
+			"_id" : "$a",
+			"accum" : {
+				"$top" : {
+					"sortBy" : {
+						"a" : 1,
+						"b" : 1
+					},
+					"output" : "$b"
+				}
+			}
+		}
+	}
+]
+```
+### Results
+```json
+{  "_id" : 1,  "accum" : -1 }
+{  "_id" : 10,  "accum" : -10 }
+{  "_id" : 11,  "accum" : -11 }
+{  "_id" : 12,  "accum" : -12 }
+{  "_id" : 13,  "accum" : -13 }
+{  "_id" : 14,  "accum" : -14 }
+{  "_id" : 15,  "accum" : -15 }
+{  "_id" : 16,  "accum" : -16 }
+{  "_id" : 17,  "accum" : -17 }
+{  "_id" : 2,  "accum" : -2 }
+{  "_id" : 3,  "accum" : -3 }
+{  "_id" : 4,  "accum" : -4 }
+{  "_id" : 5,  "accum" : -5 }
+{  "_id" : 6,  "accum" : -6 }
+{  "_id" : 7,  "accum" : -7 }
+{  "_id" : 8,  "accum" : -8 }
+{  "_id" : 9,  "accum" : -9 }
+```
+### Summarized explain
+Execution Engine: classic
 ```json
 {
 	"stages" : [
@@ -2601,7 +2805,7 @@
 									"(0.0, inf.0]"
 								],
 								"b" : [
-									"[MinKey, MaxKey]"
+									"(-18.0, inf.0]"
 								]
 							},
 							"indexName" : "a_1_b_1",
@@ -2625,7 +2829,7 @@
 				],
 				"winningPlan" : [
 					{
-						"stage" : "PROJECTION_COVERED",
+						"stage" : "PROJECTION_SIMPLE",
 						"transformBy" : {
 							"_id" : 0,
 							"a" : 1,
@@ -2633,27 +2837,35 @@
 						}
 					},
 					{
+						"filter" : {
+							"a" : {
+								"$gt" : 0
+							}
+						},
+						"stage" : "FETCH"
+					},
+					{
 						"direction" : "forward",
 						"indexBounds" : {
-							"a" : [
-								"[inf.0, 0.0)"
-							],
 							"b" : [
+								"(-18.0, inf.0]"
+							],
+							"c" : [
 								"[MinKey, MaxKey]"
 							]
 						},
-						"indexName" : "a_-1_b_1",
+						"indexName" : "b_1_c_1",
 						"isMultiKey" : false,
 						"isPartial" : false,
 						"isSparse" : false,
 						"isUnique" : false,
 						"keyPattern" : {
-							"a" : -1,
-							"b" : 1
+							"b" : 1,
+							"c" : 1
 						},
 						"multiKeyPaths" : {
-							"a" : [ ],
-							"b" : [ ]
+							"b" : [ ],
+							"c" : [ ]
 						},
 						"stage" : "IXSCAN"
 					}
@@ -2662,6 +2874,7 @@
 		},
 		{
 			"$group" : {
+				"$willBeMerged" : false,
 				"_id" : "$a",
 				"accum" : {
 					"$top" : {
@@ -2710,154 +2923,138 @@
 {  "_id" : 5,  "accum" : 7 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
-	"stages" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [
-					[
-						{
-							"stage" : "PROJECTION_SIMPLE",
-							"transformBy" : {
-								"_id" : 0,
-								"a" : 1,
-								"b" : 1,
-								"c" : 1
-							}
-						},
-						{
-							"stage" : "FETCH"
-						},
-						{
-							"direction" : "forward",
-							"indexBounds" : {
-								"a" : [
-									"[MinKey, MaxKey]"
-								],
-								"b" : [
-									"[MinKey, MaxKey]"
-								]
-							},
-							"indexName" : "a_1_b_1",
-							"isMultiKey" : false,
-							"isPartial" : false,
-							"isSparse" : false,
-							"isUnique" : false,
-							"keyPattern" : {
-								"a" : 1,
-								"b" : 1
-							},
-							"multiKeyPaths" : {
-								"a" : [ ],
-								"b" : [ ]
-							},
-							"stage" : "IXSCAN"
-						}
+	"rejectedPlans" : [
+		[
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : 0,
+					"a" : 1,
+					"b" : 1,
+					"c" : 1
+				}
+			},
+			{
+				"stage" : "FETCH"
+			},
+			{
+				"direction" : "forward",
+				"indexBounds" : {
+					"a" : [
+						"[MinKey, MaxKey]"
 					],
-					[
-						{
-							"stage" : "PROJECTION_SIMPLE",
-							"transformBy" : {
-								"_id" : 0,
-								"a" : 1,
-								"b" : 1,
-								"c" : 1
-							}
-						},
-						{
-							"stage" : "FETCH"
-						},
-						{
-							"direction" : "forward",
-							"indexBounds" : {
-								"a" : [
-									"[MinKey, MaxKey]"
-								],
-								"b" : [
-									"[MinKey, MaxKey]"
-								],
-								"d" : [
-									"[MinKey, MaxKey]"
-								]
-							},
-							"indexName" : "a_1_b_1_d_1",
-							"isMultiKey" : true,
-							"isPartial" : false,
-							"isSparse" : false,
-							"isUnique" : false,
-							"keyPattern" : {
-								"a" : 1,
-								"b" : 1,
-								"d" : 1
-							},
-							"multiKeyPaths" : {
-								"a" : [ ],
-								"b" : [ ],
-								"d" : [
-									"d"
-								]
-							},
-							"stage" : "IXSCAN"
-						}
+					"b" : [
+						"[MinKey, MaxKey]"
 					]
-				],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_COVERED",
-						"transformBy" : {
-							"_id" : 0,
-							"a" : 1,
-							"b" : 1,
-							"c" : 1
-						}
-					},
-					{
-						"direction" : "forward",
-						"indexBounds" : {
-							"a" : [
-								"[MinKey, MaxKey]"
-							],
-							"b" : [
-								"[MinKey, MaxKey]"
-							],
-							"c" : [
-								"[MinKey, MaxKey]"
-							]
-						},
-						"indexName" : "a_1_b_1_c_1",
-						"isMultiKey" : false,
-						"isPartial" : false,
-						"isSparse" : false,
-						"isUnique" : false,
-						"keyPattern" : {
-							"a" : 1,
-							"b" : 1,
-							"c" : 1
-						},
-						"multiKeyPaths" : {
-							"a" : [ ],
-							"b" : [ ],
-							"c" : [ ]
-						},
-						"stage" : "IXSCAN"
-					}
-				]
+				},
+				"indexName" : "a_1_b_1",
+				"isMultiKey" : false,
+				"isPartial" : false,
+				"isSparse" : false,
+				"isUnique" : false,
+				"keyPattern" : {
+					"a" : 1,
+					"b" : 1
+				},
+				"multiKeyPaths" : {
+					"a" : [ ],
+					"b" : [ ]
+				},
+				"stage" : "IXSCAN"
+			}
+		],
+		[
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : 0,
+					"a" : 1,
+					"b" : 1,
+					"c" : 1
+				}
+			},
+			{
+				"stage" : "FETCH"
+			},
+			{
+				"direction" : "forward",
+				"indexBounds" : {
+					"a" : [
+						"[MinKey, MaxKey]"
+					],
+					"b" : [
+						"[MinKey, MaxKey]"
+					],
+					"d" : [
+						"[MinKey, MaxKey]"
+					]
+				},
+				"indexName" : "a_1_b_1_d_1",
+				"isMultiKey" : true,
+				"isPartial" : false,
+				"isSparse" : false,
+				"isUnique" : false,
+				"keyPattern" : {
+					"a" : 1,
+					"b" : 1,
+					"d" : 1
+				},
+				"multiKeyPaths" : {
+					"a" : [ ],
+					"b" : [ ],
+					"d" : [
+						"d"
+					]
+				},
+				"stage" : "IXSCAN"
+			}
+		]
+	],
+	"winningPlan" : [
+		{
+			"stage" : "GROUP"
+		},
+		{
+			"stage" : "PROJECTION_COVERED",
+			"transformBy" : {
+				"_id" : false,
+				"a" : true,
+				"b" : true,
+				"c" : true
 			}
 		},
 		{
-			"$group" : {
-				"_id" : "$a",
-				"accum" : {
-					"$top" : {
-						"output" : "$c",
-						"sortBy" : {
-							"a" : 1,
-							"b" : 1
-						}
-					}
-				}
-			}
+			"direction" : "forward",
+			"indexBounds" : {
+				"a" : [
+					"[MinKey, MaxKey]"
+				],
+				"b" : [
+					"[MinKey, MaxKey]"
+				],
+				"c" : [
+					"[MinKey, MaxKey]"
+				]
+			},
+			"indexName" : "a_1_b_1_c_1",
+			"isMultiKey" : false,
+			"isPartial" : false,
+			"isSparse" : false,
+			"isUnique" : false,
+			"keyPattern" : {
+				"a" : 1,
+				"b" : 1,
+				"c" : 1
+			},
+			"multiKeyPaths" : {
+				"a" : [ ],
+				"b" : [ ],
+				"c" : [ ]
+			},
+			"stage" : "IXSCAN"
 		}
 	]
 }
@@ -2894,154 +3091,138 @@
 {  "_id" : 5,  "accum" : 7 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
-	"stages" : [
-		{
-			"$cursor" : {
-				"rejectedPlans" : [
-					[
-						{
-							"stage" : "PROJECTION_SIMPLE",
-							"transformBy" : {
-								"_id" : 0,
-								"a" : 1,
-								"b" : 1,
-								"c" : 1
-							}
-						},
-						{
-							"stage" : "FETCH"
-						},
-						{
-							"direction" : "forward",
-							"indexBounds" : {
-								"a" : [
-									"[MinKey, MaxKey]"
-								],
-								"b" : [
-									"[MinKey, MaxKey]"
-								]
-							},
-							"indexName" : "a_1_b_1",
-							"isMultiKey" : false,
-							"isPartial" : false,
-							"isSparse" : false,
-							"isUnique" : false,
-							"keyPattern" : {
-								"a" : 1,
-								"b" : 1
-							},
-							"multiKeyPaths" : {
-								"a" : [ ],
-								"b" : [ ]
-							},
-							"stage" : "IXSCAN"
-						}
+	"rejectedPlans" : [
+		[
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : 0,
+					"a" : 1,
+					"b" : 1,
+					"c" : 1
+				}
+			},
+			{
+				"stage" : "FETCH"
+			},
+			{
+				"direction" : "forward",
+				"indexBounds" : {
+					"a" : [
+						"[MinKey, MaxKey]"
 					],
-					[
-						{
-							"stage" : "PROJECTION_SIMPLE",
-							"transformBy" : {
-								"_id" : 0,
-								"a" : 1,
-								"b" : 1,
-								"c" : 1
-							}
-						},
-						{
-							"stage" : "FETCH"
-						},
-						{
-							"direction" : "forward",
-							"indexBounds" : {
-								"a" : [
-									"[MinKey, MaxKey]"
-								],
-								"b" : [
-									"[MinKey, MaxKey]"
-								],
-								"d" : [
-									"[MinKey, MaxKey]"
-								]
-							},
-							"indexName" : "a_1_b_1_d_1",
-							"isMultiKey" : true,
-							"isPartial" : false,
-							"isSparse" : false,
-							"isUnique" : false,
-							"keyPattern" : {
-								"a" : 1,
-								"b" : 1,
-								"d" : 1
-							},
-							"multiKeyPaths" : {
-								"a" : [ ],
-								"b" : [ ],
-								"d" : [
-									"d"
-								]
-							},
-							"stage" : "IXSCAN"
-						}
+					"b" : [
+						"[MinKey, MaxKey]"
 					]
-				],
-				"winningPlan" : [
-					{
-						"stage" : "PROJECTION_COVERED",
-						"transformBy" : {
-							"_id" : 0,
-							"a" : 1,
-							"b" : 1,
-							"c" : 1
-						}
-					},
-					{
-						"direction" : "forward",
-						"indexBounds" : {
-							"a" : [
-								"[MinKey, MaxKey]"
-							],
-							"b" : [
-								"[MinKey, MaxKey]"
-							],
-							"c" : [
-								"[MinKey, MaxKey]"
-							]
-						},
-						"indexName" : "a_1_b_1_c_1",
-						"isMultiKey" : false,
-						"isPartial" : false,
-						"isSparse" : false,
-						"isUnique" : false,
-						"keyPattern" : {
-							"a" : 1,
-							"b" : 1,
-							"c" : 1
-						},
-						"multiKeyPaths" : {
-							"a" : [ ],
-							"b" : [ ],
-							"c" : [ ]
-						},
-						"stage" : "IXSCAN"
-					}
-				]
+				},
+				"indexName" : "a_1_b_1",
+				"isMultiKey" : false,
+				"isPartial" : false,
+				"isSparse" : false,
+				"isUnique" : false,
+				"keyPattern" : {
+					"a" : 1,
+					"b" : 1
+				},
+				"multiKeyPaths" : {
+					"a" : [ ],
+					"b" : [ ]
+				},
+				"stage" : "IXSCAN"
+			}
+		],
+		[
+			{
+				"stage" : "PROJECTION_SIMPLE",
+				"transformBy" : {
+					"_id" : 0,
+					"a" : 1,
+					"b" : 1,
+					"c" : 1
+				}
+			},
+			{
+				"stage" : "FETCH"
+			},
+			{
+				"direction" : "forward",
+				"indexBounds" : {
+					"a" : [
+						"[MinKey, MaxKey]"
+					],
+					"b" : [
+						"[MinKey, MaxKey]"
+					],
+					"d" : [
+						"[MinKey, MaxKey]"
+					]
+				},
+				"indexName" : "a_1_b_1_d_1",
+				"isMultiKey" : true,
+				"isPartial" : false,
+				"isSparse" : false,
+				"isUnique" : false,
+				"keyPattern" : {
+					"a" : 1,
+					"b" : 1,
+					"d" : 1
+				},
+				"multiKeyPaths" : {
+					"a" : [ ],
+					"b" : [ ],
+					"d" : [
+						"d"
+					]
+				},
+				"stage" : "IXSCAN"
+			}
+		]
+	],
+	"winningPlan" : [
+		{
+			"stage" : "GROUP"
+		},
+		{
+			"stage" : "PROJECTION_COVERED",
+			"transformBy" : {
+				"_id" : false,
+				"a" : true,
+				"b" : true,
+				"c" : true
 			}
 		},
 		{
-			"$group" : {
-				"_id" : "$a",
-				"accum" : {
-					"$bottom" : {
-						"output" : "$c",
-						"sortBy" : {
-							"a" : -1,
-							"b" : -1
-						}
-					}
-				}
-			}
+			"direction" : "forward",
+			"indexBounds" : {
+				"a" : [
+					"[MinKey, MaxKey]"
+				],
+				"b" : [
+					"[MinKey, MaxKey]"
+				],
+				"c" : [
+					"[MinKey, MaxKey]"
+				]
+			},
+			"indexName" : "a_1_b_1_c_1",
+			"isMultiKey" : false,
+			"isPartial" : false,
+			"isSparse" : false,
+			"isUnique" : false,
+			"keyPattern" : {
+				"a" : 1,
+				"b" : 1,
+				"c" : 1
+			},
+			"multiKeyPaths" : {
+				"a" : [ ],
+				"b" : [ ],
+				"c" : [ ]
+			},
+			"stage" : "IXSCAN"
 		}
 	]
 }
@@ -3074,6 +3255,7 @@
 {  "_id" : [ 1, 2, 3 ],  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
 	"rejectedPlans" : [
@@ -3208,6 +3390,36 @@
 }
 ```
 
+### Pipeline
+```json
+[ { "$group" : { "_id" : "$a" } } ]
+```
+### Results
+```json
+{  "_id" : 4 }
+{  "_id" : 5 }
+{  "_id" : [ 1, 2, 3 ] }
+```
+### Summarized explain
+Execution Engine: sbe
+```json
+{
+	"rejectedPlans" : [ ],
+	"winningPlan" : [
+		{
+			"stage" : "GROUP"
+		},
+		{
+			"direction" : "forward",
+			"filter" : {
+				
+			},
+			"stage" : "COLLSCAN"
+		}
+	]
+}
+```
+
 ### No available indexes
 ### Pipeline
 ```json
@@ -3235,6 +3447,7 @@
 {  "_id" : [ 1, 2, 3 ],  "accum" : 4 }
 ```
 ### Summarized explain
+Execution Engine: sbe
 ```json
 {
 	"rejectedPlans" : [ ],
@@ -3244,7 +3457,156 @@
 		},
 		{
 			"direction" : "forward",
+			"filter" : {
+				
+			},
 			"stage" : "COLLSCAN"
+		}
+	]
+}
+```
+
+## 6. $group by non-multikey field with $first/$last on a multikey field
+### Pipeline
+```json
+[
+	{
+		"$group" : {
+			"_id" : "$b",
+			"accum" : {
+				"$first" : "$a"
+			}
+		}
+	}
+]
+```
+### Results
+```json
+{  "_id" : 2,  "accum" : 4 }
+{  "_id" : 3,  "accum" : 4 }
+{  "_id" : 4,  "accum" : 1 }
+```
+### Summarized explain
+Execution Engine: classic
+```json
+{
+	"stages" : [
+		{
+			"$cursor" : {
+				"rejectedPlans" : [ ],
+				"winningPlan" : [
+					{
+						"stage" : "PROJECTION_COVERED",
+						"transformBy" : {
+							"_id" : 0,
+							"a" : 1,
+							"b" : 1
+						}
+					},
+					{
+						"direction" : "forward",
+						"indexBounds" : {
+							"a" : [
+								"[MinKey, MaxKey]"
+							],
+							"b" : [
+								"[MinKey, MaxKey]"
+							]
+						},
+						"indexName" : "b_1_a_1",
+						"isFetching" : false,
+						"isMultiKey" : true,
+						"isPartial" : false,
+						"isShardFiltering" : false,
+						"isSparse" : false,
+						"isUnique" : false,
+						"keyPattern" : {
+							"a" : 1,
+							"b" : 1
+						},
+						"multiKeyPaths" : {
+							"a" : [
+								"a"
+							],
+							"b" : [ ]
+						},
+						"stage" : "DISTINCT_SCAN"
+					}
+				]
+			}
+		},
+		{
+			"$groupByDistinctScan" : {
+				"newRoot" : {
+					"_id" : "$b",
+					"accum" : "$a"
+				}
+			}
+		}
+	]
+}
+```
+
+### Pipeline
+```json
+[
+	{
+		"$group" : {
+			"_id" : "$b",
+			"accum" : {
+				"$last" : "$a"
+			}
+		}
+	}
+]
+```
+### Results
+```json
+{  "_id" : 2,  "accum" : 4 }
+{  "_id" : 3,  "accum" : 4 }
+{  "_id" : 4,  "accum" : [ 1, 2, 3 ] }
+```
+### Summarized explain
+Execution Engine: classic
+```json
+{
+	"stages" : [
+		{
+			"$cursor" : {
+				"rejectedPlans" : [ ],
+				"winningPlan" : [
+					{
+						"direction" : "backward",
+						"indexBounds" : {
+							"b" : [
+								"[MaxKey, MinKey]"
+							]
+						},
+						"indexName" : "b_1",
+						"isFetching" : true,
+						"isMultiKey" : false,
+						"isPartial" : false,
+						"isShardFiltering" : false,
+						"isSparse" : false,
+						"isUnique" : false,
+						"keyPattern" : {
+							"b" : 1
+						},
+						"multiKeyPaths" : {
+							"b" : [ ]
+						},
+						"stage" : "DISTINCT_SCAN"
+					}
+				]
+			}
+		},
+		{
+			"$groupByDistinctScan" : {
+				"newRoot" : {
+					"_id" : "$b",
+					"accum" : "$a"
+				}
+			}
 		}
 	]
 }

@@ -30,11 +30,7 @@
 
 #include "mongo/db/s/sharding_ddl_coordinator_service.h"
 
-#include <boost/smart_ptr.hpp>
 #include <mutex>
-#include <string>
-#include <tuple>
-#include <type_traits>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
@@ -47,7 +43,6 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
@@ -59,7 +54,6 @@
 #include "mongo/db/s/create_collection_coordinator.h"
 #include "mongo/db/s/create_database_coordinator.h"
 #include "mongo/db/s/database_sharding_state.h"
-#include "mongo/db/s/ddl_lock_manager.h"
 #include "mongo/db/s/drop_collection_coordinator.h"
 #include "mongo/db/s/drop_database_coordinator.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
@@ -67,6 +61,7 @@
 #include "mongo/db/s/move_primary_coordinator.h"
 #include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/refine_collection_shard_key_coordinator.h"
+#include "mongo/db/s/remove_shard_commit_coordinator.h"
 #include "mongo/db/s/rename_collection_coordinator.h"
 #include "mongo/db/s/reshard_collection_coordinator.h"
 #include "mongo/db/s/set_allow_migrations_coordinator.h"
@@ -74,9 +69,7 @@
 #include "mongo/db/s/untrack_unsplittable_collection_coordinator.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/sharding_cluster_parameters_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -107,9 +100,6 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
             return std::make_shared<RenameCollectionCoordinator>(service, std::move(initialState));
         case DDLCoordinatorTypeEnum::kCreateCollection:
             return std::make_shared<CreateCollectionCoordinator>(service, std::move(initialState));
-        case DDLCoordinatorTypeEnum::kCreateCollectionPre80Compatible:
-            return std::make_shared<CreateCollectionCoordinatorLegacy>(service,
-                                                                       std::move(initialState));
         case DDLCoordinatorTypeEnum::kRefineCollectionShardKey:
             return std::make_shared<RefineCollectionShardKeyCoordinator>(service,
                                                                          std::move(initialState));
@@ -136,6 +126,8 @@ std::shared_ptr<ShardingDDLCoordinator> constructShardingDDLCoordinatorInstance(
                 service, std::move(initialState));
         case DDLCoordinatorTypeEnum::kCreateDatabase:
             return std::make_shared<CreateDatabaseCoordinator>(service, std::move(initialState));
+        case DDLCoordinatorTypeEnum::kRemoveShardCommit:
+            return std::make_shared<RemoveShardCommitCoordinator>(service, std::move(initialState));
         default:
             uasserted(ErrorCodes::BadValue,
                       str::stream()
@@ -246,7 +238,6 @@ void ShardingDDLCoordinatorService::_onServiceTermination() {
     _numCoordinatorsToWait = 0;
     _numActiveCoordinatorsPerType.clear();
     _recoveredOrCoordinatorCompletedCV.notify_all();
-    DDLLockManager::get(cc().getServiceContext())->setState(DDLLockManager::State::kPaused);
 }
 
 size_t ShardingDDLCoordinatorService::_countCoordinatorDocs(OperationContext* opCtx) {
@@ -271,7 +262,7 @@ size_t ShardingDDLCoordinatorService::_countCoordinatorDocs(OperationContext* op
     return numCoordField.numberLong();
 }
 
-void ShardingDDLCoordinatorService::waitForRecoveryCompletion(OperationContext* opCtx) const {
+void ShardingDDLCoordinatorService::waitForRecovery(OperationContext* opCtx) const {
     stdx::unique_lock lk(_mutex);
     opCtx->waitForConditionOrInterrupt(
         _recoveredOrCoordinatorCompletedCV, lk, [this]() { return _state != State::kRecovering; });
@@ -326,12 +317,13 @@ ShardingDDLCoordinatorService::getOrCreateInstance(OperationContext* opCtx,
                                                    bool checkOptions) {
 
     // Wait for all coordinators to be recovered before to allow the creation of new ones.
-    waitForRecoveryCompletion(opCtx);
+    waitForRecovery(opCtx);
 
     auto coorMetadata = extractShardingDDLCoordinatorMetadata(coorDoc);
     const auto& nss = coorMetadata.getId().getNss();
 
-    if (!nss.isConfigDB() && !nss.isAdminDB()) {
+    if (!nss.isConfigDB() && !nss.isAdminDB() &&
+        coorMetadata.getId().getOperationType() != DDLCoordinatorTypeEnum::kCreateDatabase) {
         // Check that the operation context has a database version for this namespace
         const auto clientDbVersion = OperationShardingState::get(opCtx).getDbVersion(nss.dbName());
         uassert(ErrorCodes::IllegalOperation,
@@ -385,7 +377,6 @@ std::shared_ptr<executor::TaskExecutor> ShardingDDLCoordinatorService::getInstan
 
 void ShardingDDLCoordinatorService::_transitionToRecovered(WithLock lk, OperationContext* opCtx) {
     _state = State::kRecovered;
-    DDLLockManager::get(opCtx)->setState(DDLLockManager::State::kPrimaryAndRecovered);
     _recoveredOrCoordinatorCompletedCV.notify_all();
 }
 
@@ -404,4 +395,5 @@ void ShardingDDLCoordinatorService::checkIfConflictsWithOtherInstances(
             "Cannot start ShardingDDLCoordinator because a topology change is in progress",
             !addOrRemoveShardInProgressVal);
 }
+
 }  // namespace mongo

@@ -49,9 +49,12 @@ executor:
     tests: true
   config:
     shell_options:
+      eval: >-
+        await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
       global_vars:
         TestData:
           runningWithBalancer: false
+          implicitlyShardOnCreateCollectionOnly: true
   hooks:
     - class: CheckShardFilteringMetadata
     # TODO (SERVER-63855): remove 'RunDBCheckInBackground' or put it back.
@@ -71,7 +74,6 @@ executor:
       set_parameters:
         enableTestCommands: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
     shard_options:
       mongod_options:
         oplogSize: 1024
@@ -81,7 +83,6 @@ executor:
         roleGraphInvalidationIsFatal: 1
         queryAnalysisWriterIntervalSecs: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
-        defaultConfigCommandTimeoutMS: 90000
         # TODO SERVER-89498 Re-enable.
         # featureFlagAllMongodsAreSharded: 1
     num_rs_nodes_per_shard: 3

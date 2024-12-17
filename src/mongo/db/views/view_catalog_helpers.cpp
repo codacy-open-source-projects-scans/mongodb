@@ -89,23 +89,25 @@ StatusWith<stdx::unordered_set<NamespaceString>> validatePipeline(OperationConte
     // correctly. In order to parse a pipeline we need to resolve any namespaces involved to a
     // collection and a pipeline, but in this case we don't need this map to be accurate since
     // we will not be evaluating the pipeline.
-    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+    StringMap<ResolvedNamespace> resolvedNamespaces;
 
     // Create copy of involved namespaces, as these can be moved into the result.
     for (const auto& nss : liteParsedPipeline.getInvolvedNamespaces()) {
         resolvedNamespaces[nss.coll()] = {nss, {}};
     }
-    boost::intrusive_ptr<ExpressionContext> expCtx =
-        new ExpressionContext(opCtx,
-                              AggregateCommandRequest(viewDef.viewOn(), viewDef.pipeline()),
-                              CollatorInterface::cloneCollator(viewDef.defaultCollator()),
-                              // We can use a stub MongoProcessInterface because we are only parsing
-                              // the Pipeline for validation here. We won't do anything with the
-                              // pipeline that will require a real implementation.
-                              std::make_shared<StubMongoProcessInterface>(),
-                              std::move(resolvedNamespaces),
-                              boost::none);
-
+    AggregateCommandRequest aggregateRequest(viewDef.viewOn(), viewDef.pipeline());
+    // We can use a stub MongoProcessInterface because we are only
+    // parsing the Pipeline for validation here. We won't do anything
+    // with the pipeline that will require a real implementation.
+    auto expCtx = ExpressionContextBuilder{}
+                      .fromRequest(opCtx, aggregateRequest)
+                      .collator(CollatorInterface::cloneCollator(viewDef.defaultCollator()))
+                      .resolvedNamespace(std::move(resolvedNamespaces))
+                      .mayDbProfile(true)
+                      // The pipeline parser needs to know that we're parsing a pipeline for a view
+                      // definition to apply some additional checks.
+                      .isParsingViewDefinition(true)
+                      .build();
     // If the feature compatibility version is not kLatest, and we are validating features as
     // primary, ban the use of new agg features introduced in kLatest to prevent them from being
     // persisted in the catalog.
@@ -114,12 +116,8 @@ StatusWith<stdx::unordered_set<NamespaceString>> validatePipeline(OperationConte
     if (serverGlobalParams.validateFeaturesAsPrimary.load() &&
         serverGlobalParams.featureCompatibility.acquireFCVSnapshot().isLessThan(
             multiversion::GenericFCV::kLatest, &fcv)) {
-        expCtx->maxFeatureCompatibilityVersion = fcv;
+        expCtx->setMaxFeatureCompatibilityVersion(fcv);
     }
-
-    // The pipeline parser needs to know that we're parsing a pipeline for a view definition
-    // to apply some additional checks.
-    expCtx->isParsingViewDefinition = true;
 
     try {
         auto pipeline =
@@ -157,8 +155,7 @@ StatusWith<stdx::unordered_set<NamespaceString>> validatePipeline(OperationConte
 
     return liteParsedPipeline.getInvolvedNamespaces();
 }
-// TODO SERVER-93638 add comment for expected behavior of $lookup/$unionWith which might have
-// multiple backing collections.
+
 NamespaceString findSourceCollectionNamespace(OperationContext* opCtx,
                                               std::shared_ptr<const CollectionCatalog> catalog,
                                               const NamespaceString& nss) {

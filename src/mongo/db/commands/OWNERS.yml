@@ -11,13 +11,13 @@ filters:
       - 10gen/server-security
   - "create_indexes*":
     approvers:
-      - 10gen/server-storage-execution
+      - 10gen/server-index-builds
   - "fle2_*":
     approvers:
       - 10gen/server-security
   - "fsync*":
     approvers:
-      - 10gen/server-storage-execution
+      - 10gen/server-storage-engine-integration
   - "user_management_commands*":
     approvers:
       - 10gen/server-security
@@ -26,11 +26,10 @@ filters:
       - 10gen/query-integration-search
   - "validate.cpp":
     approvers:
-      - 10gen/server-storage-execution
-      - 10gen/server-rss-sydney
+      - 10gen/server-validate
   - "vote*index_build*":
     approvers:
-      - 10gen/server-storage-execution
+      - 10gen/server-index-builds
   - "rotate_certificates*":
     approvers:
       - 10gen/server-security
@@ -57,7 +56,7 @@ filters:
       - 10gen/query-integration-observability
   - "dbcheck*":
     approvers:
-      - 10gen/server-replication
+      - 10gen/server-dbcheck
   - "feature_compatibility*":
     approvers:
       - 10gen/server-replication
@@ -88,3 +87,37 @@ filters:
   - "validate_db_metadata*":
     approvers:
       - 10gen/server-catalog-and-routing
+  - "set_index_commit_quorum*":
+    approvers:
+      - 10gen/server-index-builds
+  - "dbcommands*":
+    approvers:
+      - 10gen/server-storage-engine-integration
+  - "collection_to_capped*":
+    approvers:
+      - 10gen/server-collection-write-path
+  - "resize_oplog*":
+    approvers:
+      - 10gen/server-storage-engine-integration
+  - "apply_ops*":
+    approvers:
+      - 10gen/server-replication
+  - "set_feature_compatibility_version*":
+    approvers:
+      - 10gen/server-catalog-and-routing
+      - 10gen/server-replication
+  - "snapshot_management*":
+    approvers:
+      - 10gen/server-replication
+  - "*compact*":
+    approvers:
+      - 10gen/server-rss-sydney
+  - "dbhash*":
+    approvers:
+      - 10gen/server-rss-sydney
+  - "server_status*":
+    approvers:
+      - 10gen/query-integration-observability
+  - "sysprofile*":
+    approvers:
+      - 10gen/query-execution

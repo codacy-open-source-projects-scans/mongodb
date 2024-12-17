@@ -1,14 +1,19 @@
 // Confirm that implicitly created profile collections are successful and do not trigger assertions.
 // In order to implicitly create a profile collection with a read, we must set up the server with
 // some data to read without the profiler being active.
-// @tags: [requires_persistence]
+// @tags: [
+//   requires_fcv_81,
+//   requires_persistence,
+// ]
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 let rst = new ReplSetTest({nodes: {n0: {profile: "0"}}});
-rst.startSet();
+rst.startSet({setParameter: {buildInfoAuthMode: "allowedPreAuth"}});
 rst.initiate();
 let primary = rst.getPrimary();
 let primaryDB = primary.getDB('test');
+
+primaryDB.setLogLevel(5, 'assert');
 
 assert.commandWorked(primaryDB.foo.insert({_id: 1}));
 
@@ -19,10 +24,11 @@ rst.awaitReplication();
 primary = rst.getPrimary();
 primaryDB = primary.getDB('test');
 
+primaryDB.setLogLevel(5, 'assert');
+
 let oldAssertCounts = primaryDB.serverStatus().asserts;
 jsTestLog('Before running aggregation: Assert counts reported by db.serverStatus(): ' +
           tojson(oldAssertCounts));
-primaryDB.setLogLevel(1, 'assert');
 try {
     assert.eq(0, primaryDB.system.profile.count());
     assert.eq([{_id: 1}], primaryDB.foo.aggregate([]).toArray());

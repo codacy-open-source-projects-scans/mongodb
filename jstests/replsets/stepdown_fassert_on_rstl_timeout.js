@@ -21,6 +21,10 @@
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
+// Because this test intentionally crashes the server via an fassert, we need to instruct the
+// shell to clean up the core dump that is left behind.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
+
 var name = "interruptStepDown";
 // Set the fassert timeout to shorter than the default to avoid having a long-running test.
 var replSet = new ReplSetTest(
@@ -34,7 +38,9 @@ replSet.initiate({
         {"_id": 1, "host": nodes[1]},
         {"_id": 2, "host": nodes[2], "priority": 0}
     ]
-});
+},
+                 null,
+                 {initiateWithDefaultElectionTimeout: true});
 
 replSet.waitForState(replSet.nodes[0], ReplSetTest.State.PRIMARY);
 

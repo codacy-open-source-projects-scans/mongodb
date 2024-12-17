@@ -35,7 +35,6 @@
 #include <iosfwd>
 #include <string>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
@@ -429,11 +428,8 @@ public:
     using MutableOplogEntry::k_idFieldName;
     using MutableOplogEntry::kCheckExistenceForDiffInsertFieldName;
     using MutableOplogEntry::kDestinedRecipientFieldName;
-    using MutableOplogEntry::kDonorApplyOpsIndexFieldName;
-    using MutableOplogEntry::kDonorOpTimeFieldName;
     using MutableOplogEntry::kDurableReplOperationFieldName;
     using MutableOplogEntry::kFromMigrateFieldName;
-    using MutableOplogEntry::kFromTenantMigrationFieldName;
     using MutableOplogEntry::kMultiOpTypeFieldName;
     using MutableOplogEntry::kNssFieldName;
     using MutableOplogEntry::kObject2FieldName;
@@ -459,11 +455,8 @@ public:
     using MutableOplogEntry::get_id;
     using MutableOplogEntry::getCheckExistenceForDiffInsert;
     using MutableOplogEntry::getDestinedRecipient;
-    using MutableOplogEntry::getDonorApplyOpsIndex;
-    using MutableOplogEntry::getDonorOpTime;
     using MutableOplogEntry::getDurableReplOperation;
     using MutableOplogEntry::getFromMigrate;
-    using MutableOplogEntry::getFromTenantMigration;
     using MutableOplogEntry::getMultiOpType;
     using MutableOplogEntry::getNeedsRetryImage;
     using MutableOplogEntry::getNss;
@@ -709,12 +702,7 @@ public:
     static constexpr auto kFromMigrateFieldName = DurableOplogEntry::kFromMigrateFieldName;
     static constexpr auto kCheckExistenceForDiffInsertFieldName =
         DurableOplogEntry::kCheckExistenceForDiffInsertFieldName;
-    static constexpr auto kFromTenantMigrationFieldName =
-        DurableOplogEntry::kFromTenantMigrationFieldName;
     static constexpr auto kMultiOpTypeFieldName = DurableOplogEntry::kMultiOpTypeFieldName;
-    static constexpr auto kDonorOpTimeFieldName = DurableOplogEntry::kDonorOpTimeFieldName;
-    static constexpr auto kDonorApplyOpsIndexFieldName =
-        DurableOplogEntry::kDonorApplyOpsIndexFieldName;
     static constexpr auto kTidFieldName = DurableOplogEntry::kTidFieldName;
     static constexpr auto kNssFieldName = DurableOplogEntry::kNssFieldName;
     static constexpr auto kObject2FieldName = DurableOplogEntry::kObject2FieldName;
@@ -786,9 +774,6 @@ public:
     std::int64_t getVersion() const;
     boost::optional<bool> getFromMigrate() const&;
     bool getCheckExistenceForDiffInsert() const&;
-    const boost::optional<mongo::UUID>& getFromTenantMigration() const&;
-    const boost::optional<mongo::repl::OpTime>& getDonorOpTime() const&;
-    boost::optional<std::int64_t> getDonorApplyOpsIndex() const&;
     const boost::optional<mongo::repl::OpTime>& getPrevWriteOpTimeInTransaction() const&;
     const boost::optional<mongo::repl::OpTime>& getPostImageOpTime() const&;
     boost::optional<MultiOplogEntryType> getMultiOpType() const&;

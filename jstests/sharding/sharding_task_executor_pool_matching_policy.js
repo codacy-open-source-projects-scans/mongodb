@@ -4,7 +4,7 @@
 //
 // @tags: [
 //   sets_replica_set_matching_strategy,
-//   # TODO (SERVER-88125): Re-enable this test or add an explanation why it is incompatible.
+//   # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
 //   embedded_router_incompatible,
 // ]
 
@@ -32,7 +32,7 @@ function checkGetParameterOutputIsAuto(dbConn) {
 // Setup test fixture; get connection to mongos and each mongod.
 let paramsDoc = {
     mongosOptions: {setParameter: {ShardingTaskExecutorPoolReplicaSetMatching: "automatic"}},
-    shardOptions: {setParameter: {ShardingTaskExecutorPoolReplicaSetMatching: "automatic"}}
+    rsOptions: {setParameter: {ShardingTaskExecutorPoolReplicaSetMatching: "automatic"}}
 };
 let st = new ShardingTest({shards: 2, mongos: 1, other: paramsDoc});
 let mongos = st.s;

@@ -51,16 +51,16 @@ std::unique_ptr<NetworkInterface> makeNetworkInterface(
     std::string instanceName,
     std::unique_ptr<NetworkConnectionHook> hook,
     std::unique_ptr<rpc::EgressMetadataHook> metadataHook,
-    ConnectionPool::Options connPoolOptions) {
+    ConnectionPool::Options connPoolOptions,
+    transport::TransportProtocol protocol) {
 
     if (!connPoolOptions.egressConnectionCloserManager && hasGlobalServiceContext()) {
         connPoolOptions.egressConnectionCloserManager =
             &EgressConnectionCloserManager::get(getGlobalServiceContext());
     }
 
-    auto svcCtx = hasGlobalServiceContext() ? getGlobalServiceContext() : nullptr;
     return std::make_unique<NetworkInterfaceTL>(
-        instanceName, connPoolOptions, svcCtx, std::move(hook), std::move(metadataHook));
+        instanceName, protocol, connPoolOptions, std::move(hook), std::move(metadataHook));
 }
 
 }  // namespace executor

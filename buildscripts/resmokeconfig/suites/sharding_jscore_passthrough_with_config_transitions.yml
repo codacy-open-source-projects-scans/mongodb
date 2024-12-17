@@ -12,6 +12,8 @@ selector:
     - jstests/fle2/**/*.js
     - src/mongo/db/modules/*/jstests/fle2/**/*.js
   exclude_files:
+    # These tests move chunks, and they expect the balancer to be disabled.
+    - jstests/core_sharding/chunk_migration/*.js
     # These tests are run in sharded_jscore_txns.
     - jstests/core/txns/**/*.js
     # The following tests fail because a certain command or functionality is not supported on
@@ -35,10 +37,6 @@ selector:
     - jstests/core/**/geo_s2explain.js # inputStage in different spot in explain().
     - jstests/core/**/geo_s2sparse.js # keysPerIndex in different spot in validate().
     - jstests/core/**/operation_latency_histogram.js # Stats are counted differently on mongos, SERVER-24880.
-    # The following tests fail because of divergent dropCollection behavior between standalones and
-    # sharded clusters. These tests expect a second drop command to error, whereas in sharded clusters
-    # we expect a second drop to return status OK.
-    - jstests/core/**/explain_upsert.js
 
     # The following tests are excluded specifically for this passthrough suite.
     # TransitionTo/FromDedicated runs remove/addShard which implicitly will set a cluster parameter, which
@@ -61,6 +59,19 @@ selector:
     - jstests/core/administrative/cleanup_orphaned.js
     - jstests/core/views/views_all_commands.js
     - jstests/core/commands_namespace_parsing.js
+    # TODO SERVER-96199 Re-enable this test once FLE updates to a document's shard key work
+    - src/mongo/db/modules/enterprise/jstests/fle2/find_and_modify_replace.js
+    # TODO SERVER-86443 Enable test once featureFlagTrackUnshardedCollectionsUponCreation is enabled
+    - jstests/core/timeseries/write/timeseries_update_arbitrary_updates_not_enabled.js
+
+    # The resharding core tests expect the sharding topology to remain constant.
+    - jstests/core_sharding/resharding/**/*.js
+
+    # The resharding core tests expect the sharding topology to remain constant.
+    - jstests/core_sharding/resharding/**/*.js
+
+    # The resharding core tests expect the sharding topology to remain constant.
+    - jstests/core_sharding/resharding/**/*.js
 
   exclude_with_any_tags:
     - assumes_standalone_mongod
@@ -77,6 +88,8 @@ selector:
     # This suite executes random moveCollections in the background that cause open cursors on the
     # collection to be killed.
     - requires_getmore
+    - does_not_support_retryable_writes
+    - requires_non_retryable_writes
 
 executor:
   archive:
@@ -87,12 +100,16 @@ executor:
   config:
     shell_options:
       eval: >-
+        await import("jstests/libs/override_methods/enable_sessions.js");
         await import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
         await import("jstests/libs/override_methods/implicitly_retry_on_shard_transition_errors.js");
       global_vars:
         TestData:
+          alwaysInjectTransactionNumber: true
           runningWithBalancer: true
           shardsAddedRemoved: true
+          sessionOptions:
+            retryWrites: true
   hooks:
     - class: ContinuousAddRemoveShard
       random_balancer_on: false

@@ -9,6 +9,10 @@
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
 
+// Because this test intentionally crashes the server via an fassert, we need to instruct the
+// shell to clean up the core dump that is left behind.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
+
 const rst = new ReplSetTest({
     nodes: [
         {},
@@ -77,7 +81,7 @@ assert.soon(function() {
 
 // Secondary should crash on receiving the unexpected commitIndexBuild oplog entry.
 assert.eq(MongoRunner.EXIT_ABORT, res.exitCode);
-assert(rawMongoProgramOutput().match('Fatal assertion.*4698902'),
+assert(rawMongoProgramOutput(".*").match('Fatal assertion.*4698902'),
        'Index build should have aborted secondary due to unexpected commitIndexBuild oplog entry.');
 
 // Check indexes on primary.

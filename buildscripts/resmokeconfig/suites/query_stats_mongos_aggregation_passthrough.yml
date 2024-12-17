@@ -24,6 +24,8 @@ selector:
     # $unionWith explain output does not check whether the collection is sharded in a sharded
     # cluster.
     - jstests/aggregation/sources/unionWith/unionWith_explain.js
+    # TODO SERVER-96515 Re-enable this test.
+    - jstests/aggregation/expressions/expression_set_field_null_chars.js
   exclude_with_any_tags:
     # The following tests start their own ShardingTest or ReplSetTest, respectively.
     - requires_sharding
@@ -34,7 +36,8 @@ selector:
     - requires_profiling
     # Running $queryStats will increment these counters which can screw up some test assertions.
     - inspects_command_opcounters
-
+    - known_query_shape_computation_problem
+    - requires_2_or_more_shards
 executor:
   archive:
     hooks:

@@ -136,22 +136,6 @@ BSONObj listFiles(const BSONObj& _args, void* data) {
     return ret.obj();
 }
 
-BSONObj ls(const BSONObj& args, void* data) {
-    BSONArrayBuilder ret;
-    BSONObj o = listFiles(args, data);
-    if (!o.isEmpty()) {
-        for (auto&& elem : o.firstElement().Obj()) {
-            BSONObj f = elem.Obj();
-            string name = f["name"].String();
-            if (f["isDirectory"].trueValue()) {
-                name += '/';
-            }
-            ret << name;
-        }
-    }
-    return BSON("" << ret.arr());
-}
-
 /** Set process wide current working directory. */
 BSONObj cd(const BSONObj& args, void* data) {
     uassert(16830, "cd requires one argument -- cd(directory)", args.nFields() == 1);
@@ -274,6 +258,11 @@ BSONObj copyFileRange(const BSONObj& args, void* data) {
     out.write(buffer.data(), bytesRead);
     out.close();
 
+    uassert(9663000,
+            "Couldn't write {} bytes starting at {} from file {} to {}"_format(
+                length, offset, src, dest),
+            out);
+
     return BSON("n" << bytesRead << "earlyEOF" << earlyEOF);
 }
 
@@ -339,21 +328,6 @@ BSONObj copyDir(const BSONObj& args, void* data) {
     return undefinedReturn;
 }
 
-BSONObj removeFile(const BSONObj& args, void* data) {
-    BSONElement e = singleArg(args);
-    bool found = false;
-
-    boost::filesystem::path root(e.str());
-    if (boost::filesystem::exists(root)) {
-        found = true;
-        boost::filesystem::remove_all(root);
-    }
-
-    BSONObjBuilder b;
-    b.appendBool("removed", found);
-    return b.obj();
-}
-
 /**
  * @param args - [ source, destination ]
  * copies file 'source' to 'destination'. Errors if the 'destination' file already exists.
@@ -365,7 +339,9 @@ BSONObj copyFile(const BSONObj& args, void* data) {
     const std::string source = it.next().str();
     const std::string destination = it.next().str();
 
-    boost::filesystem::copy_file(source, destination);
+    bool success = boost::filesystem::copy_file(source, destination);
+    uassert(
+        9663001, str::stream() << "failed to copy " << source << " to " << destination, success);
 
     return undefinedReturn;
 }
@@ -750,6 +726,37 @@ BSONObj getStringWidth(const BSONObj& a, void* data) {
 }
 
 }  // namespace
+
+BSONObj ls(const BSONObj& args, void* data) {
+    BSONArrayBuilder ret;
+    BSONObj o = listFiles(args, data);
+    if (!o.isEmpty()) {
+        for (auto&& elem : o.firstElement().Obj()) {
+            BSONObj f = elem.Obj();
+            string name = f["name"].String();
+            if (f["isDirectory"].trueValue()) {
+                name += '/';
+            }
+            ret << name;
+        }
+    }
+    return BSON("" << ret.arr());
+}
+
+BSONObj removeFile(const BSONObj& args, void* data) {
+    BSONElement e = singleArg(args);
+    bool found = false;
+
+    boost::filesystem::path root(e.str());
+    if (boost::filesystem::exists(root)) {
+        found = true;
+        boost::filesystem::remove_all(root);
+    }
+
+    BSONObjBuilder b;
+    b.appendBool("removed", found);
+    return b.obj();
+}
 
 void installShellUtilsExtended(Scope& scope) {
     scope.injectNative("getHostName", getHostName);

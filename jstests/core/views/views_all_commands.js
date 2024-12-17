@@ -10,8 +10,6 @@
 //   requires_non_retryable_commands,
 //   requires_non_retryable_writes,
 //   uses_map_reduce_with_temp_collections,
-//   # Tenant migrations don't support applyOps.
-//   tenant_migration_incompatible,
 //   # Explain of a resolved view must be executed by mongos.
 //   directly_against_shardsvrs_incompatible,
 //   # This test has statements that do not support non-local read concern.
@@ -201,6 +199,7 @@ let viewsCommandTests = {
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
+    _shardsvrRunSearchIndexCommand: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
     _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
@@ -738,6 +737,12 @@ let viewsCommandTests = {
         expectedErrorCode: [ErrorCodes.NamespaceNotSharded, ErrorCodes.NamespaceNotFound],
         skipStandalone: true,
         expectFailure: true,
+        isAdminCommand: true,
+    },
+    untrackUnshardedCollection: {
+        command: {untrackUnshardedCollection: "test.view"},
+        skipStandalone: true,
+        expectFailure: false,
         isAdminCommand: true,
     },
     update: {command: {update: "view", updates: [{q: {x: 1}, u: {x: 2}}]}, expectFailure: true},

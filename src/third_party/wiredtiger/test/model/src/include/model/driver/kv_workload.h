@@ -213,6 +213,49 @@ operator<<(std::ostream &out, const begin_transaction &op)
 }
 
 /*
+ * breakpoint --
+ *     A representation of this workload operation.
+ */
+struct breakpoint : public without_txn_id, public without_table_id {
+    /*
+     * breakpoint::breakpoint --
+     *     Create the operation.
+     */
+    inline breakpoint() {}
+
+    /*
+     * breakpoint::operator== --
+     *     Compare for equality.
+     */
+    inline bool
+    operator==(const breakpoint &other) const noexcept
+    {
+        return true;
+    }
+
+    /*
+     * breakpoint::operator!= --
+     *     Compare for inequality.
+     */
+    inline bool
+    operator!=(const breakpoint &other) const noexcept
+    {
+        return !(*this == other);
+    }
+};
+
+/*
+ * operator<< --
+ *     Human-readable output.
+ */
+inline std::ostream &
+operator<<(std::ostream &out, const breakpoint &op)
+{
+    out << "breakpoint()";
+    return out;
+}
+
+/*
  * checkpoint --
  *     A representation of this workload operation.
  */
@@ -254,6 +297,51 @@ inline std::ostream &
 operator<<(std::ostream &out, const checkpoint &op)
 {
     out << "checkpoint(" << (op.name.empty() ? "" : quote(op.name)) << ")";
+    return out;
+}
+
+/*
+ * checkpoint_crash --
+ *     A representation of this workload operation.
+ */
+struct checkpoint_crash : public without_txn_id, public without_table_id {
+    uint64_t crash_step;
+
+    /*
+     * checkpoint_crash::checkpoint_crash --
+     *     Create the operation.
+     */
+    inline checkpoint_crash(const uint64_t crash_step) : crash_step(crash_step) {}
+
+    /*
+     * checkpoint_crash::operator== --
+     *     Compare for equality.
+     */
+    inline bool
+    operator==(const checkpoint_crash &other) const noexcept
+    {
+        return crash_step == other.crash_step;
+    }
+
+    /*
+     * checkpoint_crash::operator!= --
+     *     Compare for inequality.
+     */
+    inline bool
+    operator!=(const checkpoint_crash &other) const noexcept
+    {
+        return !(*this == other);
+    }
+};
+
+/*
+ * operator<< --
+ *     Human-readable output.
+ */
+inline std::ostream &
+operator<<(std::ostream &out, const checkpoint_crash &op)
+{
+    out << "checkpoint_crash(" << op.crash_step << ")";
     return out;
 }
 
@@ -1026,10 +1114,10 @@ operator<<(std::ostream &out, const wt_config &op)
  * any --
  *     Any workload operation.
  */
-using any =
-  std::variant<begin_transaction, checkpoint, commit_transaction, crash, create_table, evict,
-    insert, nop, prepare_transaction, remove, restart, rollback_to_stable, rollback_transaction,
-    set_commit_timestamp, set_oldest_timestamp, set_stable_timestamp, truncate, wt_config>;
+using any = std::variant<begin_transaction, breakpoint, checkpoint, checkpoint_crash,
+  commit_transaction, crash, create_table, evict, insert, nop, prepare_transaction, remove, restart,
+  rollback_to_stable, rollback_transaction, set_commit_timestamp, set_oldest_timestamp,
+  set_stable_timestamp, truncate, wt_config>;
 
 /*
  * operator<< --

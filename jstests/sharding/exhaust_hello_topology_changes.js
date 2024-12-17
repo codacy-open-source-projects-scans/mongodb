@@ -24,7 +24,12 @@ let overrideMaxAwaitTimeMS = {'mode': 'alwaysOn', 'data': {maxAwaitTimeMS: 5 * 6
 let st = new ShardingTest({
     mongos:
         {s0: {setParameter: {"failpoint.overrideMaxAwaitTimeMS": tojson(overrideMaxAwaitTimeMS)}}},
-    shards: {rs0: {nodes: [{}, {}, {rsConfig: {priority: 0}}]}}
+    shards: {rs0: {nodes: [{}, {}, {rsConfig: {priority: 0}}]}},
+    // By default, our test infrastructure sets the election timeout to a very high value (24
+    // hours). For this test, we need a shorter election timeout because it relies on nodes running
+    // an election when they do not detect an active primary. Therefore, we are setting the
+    // electionTimeoutMillis to its default value.
+    initiateWithDefaultElectionTimeout: true
 });
 
 let timeoutMS = 20000;
@@ -44,7 +49,7 @@ awaitRSClientHosts(mongos, {host: rsPrimary.name}, {ok: true, ismaster: true});
 jsTestLog("Stepping up a new primary node.");
 st.rs0.stepUp(electableRsSecondary);
 assert.eq(electableRsSecondary, st.rs0.getPrimary());
-st.rs0.waitForState(rsPrimary, ReplSetTest.State.SECONDARY);
+st.rs0.awaitSecondaryNodes(null, [rsPrimary]);
 awaitRSClientHosts(
     mongos, {host: electableRsSecondary.name}, {ok: true, ismaster: true}, st.rs0, timeoutMS);
 awaitRSClientHosts(mongos, {host: rsPrimary.name}, {ok: true, ismaster: false}, st.rs0, timeoutMS);
@@ -86,7 +91,7 @@ st.rs0.getReplSetConfig().members.forEach(node => {
 });
 
 jsTestLog("Wait for the electable secondary to reach the SECONDARY after initial sync.");
-st.rs0.waitForState(electableRsSecondary, ReplSetTest.State.SECONDARY);
+st.rs0.awaitSecondaryNodes(null, [electableRsSecondary]);
 
 // Terminate the primary and wait for the secondary to step up, trigger a topology change
 jsTestLog("Terminating the primary.");

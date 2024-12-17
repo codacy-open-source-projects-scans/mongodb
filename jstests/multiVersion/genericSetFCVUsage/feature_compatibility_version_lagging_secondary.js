@@ -14,7 +14,7 @@ function runTest(downgradeVersion) {
         settings: {chainingAllowed: false}
     });
     rst.startSet();
-    rst.initiate();
+    rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
     let primary = rst.getPrimary();
     let latestSecondary = rst.getSecondary();
@@ -51,7 +51,7 @@ function runTest(downgradeVersion) {
     rst.stop(latestSecondary);
 
     // The primary should step down, since it can no longer see a majority of the replica set.
-    rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+    rst.awaitSecondaryNodes(null, [primary]);
 
     restartServerReplication(downgradeSecondary);
     rst.stopSet();

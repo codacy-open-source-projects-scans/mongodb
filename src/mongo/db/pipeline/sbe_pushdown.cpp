@@ -82,16 +82,14 @@ boost::intrusive_ptr<DocumentSource> sbeCompatibleProjectionFromSingleDocumentTr
 
     const boost::intrusive_ptr<ExpressionContext>& expCtx = transformStage.getContext();
     SbeCompatibility originalSbeCompatibility =
-        std::exchange(expCtx->sbeCompatibility, SbeCompatibility::noRequirements);
-    ON_BLOCK_EXIT([&] { expCtx->sbeCompatibility = originalSbeCompatibility; });
+        expCtx->sbeCompatibilityExchange(SbeCompatibility::noRequirements);
+    ON_BLOCK_EXIT([&] { expCtx->setSbeCompatibility(originalSbeCompatibility); });
 
     boost::intrusive_ptr<DocumentSource> projectionStage =
         make_intrusive<DocumentSourceInternalProjection>(
-            expCtx,
-            transformStage.getTransformer().serializeTransformation(boost::none).toBson(),
-            policies);
+            expCtx, transformStage.getTransformer().serializeTransformation().toBson(), policies);
 
-    if (expCtx->sbeCompatibility < minRequiredCompatibility) {
+    if (expCtx->getSbeCompatibility() < minRequiredCompatibility) {
         return nullptr;
     }
 
@@ -555,7 +553,7 @@ bool findSbeCompatibleStagesForPushdown(
             feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
             !queryKnob.getSbeDisableTimeSeriesForOp() &&
-            cq->getExpCtx()->sbePipelineCompatibility == SbeCompatibility::noRequirements,
+            cq->getExpCtx()->getSbePipelineCompatibility() == SbeCompatibility::noRequirements,
     };
 
     bool allStagesPushedDown = true;
@@ -565,7 +563,7 @@ bool findSbeCompatibleStagesForPushdown(
             break;
         }
 
-        if (!pushDownPipelineStageIfCompatible(pipeline->getContext()->opCtx,
+        if (!pushDownPipelineStageIfCompatible(pipeline->getContext()->getOperationContext(),
                                                *itr,
                                                minRequiredCompatibility,
                                                allowedStages,

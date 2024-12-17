@@ -28,7 +28,6 @@
  */
 
 
-#include <cstdint>
 #include <iterator>
 #include <memory>
 #include <string>
@@ -65,7 +64,6 @@
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
-#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/member_state.h"
@@ -82,9 +80,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/rpc/op_msg.h"
 #include "mongo/s/catalog/type_database_gen.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
@@ -94,12 +90,10 @@
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/s/query/exec/establish_cursors.h"
 #include "mongo/s/request_types/sharded_ddl_commands_gen.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
@@ -109,6 +103,12 @@
 
 namespace mongo {
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(hangShardCheckMetadataBeforeDDLLock);
+MONGO_FAIL_POINT_DEFINE(tripwireShardCheckMetadataAfterDDLLock);
+
+MONGO_FAIL_POINT_DEFINE(hangShardCheckMetadataBeforeEstablishCursors);
+MONGO_FAIL_POINT_DEFINE(tripwireShardCheckMetadataAfterEstablishCursors);
 
 constexpr StringData kDDLLockReason = "checkMetadataConsistency"_sd;
 
@@ -222,8 +222,22 @@ public:
 
                 auto checkMetadataForDb = [&]() {
                     try {
+                        hangShardCheckMetadataBeforeDDLLock.pauseWhileSet();
+                        auto backoffStrategy = std::invoke([]() {
+                            static const size_t retryCount{60};
+                            static const size_t baseWaitTimeMs{50};
+                            static const size_t maxWaitTimeMs{1000};
+
+                            return DDLLockManager::TruncatedExponentialBackoffStrategy<
+                                retryCount,
+                                baseWaitTimeMs,
+                                maxWaitTimeMs>();
+                        });
                         DDLLockManager::ScopedDatabaseDDLLock dbDDLLock{
-                            opCtx, dbNss.dbName(), kDDLLockReason, MODE_S};
+                            opCtx, dbNss.dbName(), kDDLLockReason, MODE_S, backoffStrategy};
+                        tassert(9504001,
+                                "Expected interrupt before tripwireShardCheckMetadataAfterDDLLock",
+                                !tripwireShardCheckMetadataAfterDDLLock.shouldFail());
 
                         auto dbCursors = _establishCursorOnParticipants(opCtx, dbNss);
                         cursors.insert(cursors.end(),
@@ -256,7 +270,7 @@ public:
                     } else {
                         // In case the shard doesn't know about the database, we perform a refresh
                         // and re-try the metadata checks.
-                        (void)FilteringMetadataCache::get(opCtx)->onDbVersionMismatchNoExcept(
+                        (void)FilteringMetadataCache::get(opCtx)->onDbVersionMismatch(
                             opCtx, dbNss.dbName(), extraInfo->getVersionReceived());
 
                         skippedMetadataChecks = !checkMetadataForDb().isOK();
@@ -278,8 +292,12 @@ public:
 
         Response _runDatabaseLevel(OperationContext* opCtx, const NamespaceString& nss) {
             auto dbCursors = [&]() {
+                hangShardCheckMetadataBeforeDDLLock.pauseWhileSet();
                 DDLLockManager::ScopedDatabaseDDLLock dbDDLLock{
                     opCtx, nss.dbName(), kDDLLockReason, MODE_S};
+                tassert(9504002,
+                        "Expected interrupt before tripwireShardCheckMetadataAfterDDLLock",
+                        !tripwireShardCheckMetadataAfterDDLLock.shouldFail());
                 return _establishCursorOnParticipants(opCtx, nss);
             }();
 
@@ -288,8 +306,12 @@ public:
 
         Response _runCollectionLevel(OperationContext* opCtx, const NamespaceString& nss) {
             auto collCursors = [&]() {
+                hangShardCheckMetadataBeforeDDLLock.pauseWhileSet();
                 DDLLockManager::ScopedCollectionDDLLock dbDDLLock{
                     opCtx, nss, kDDLLockReason, MODE_S};
+                tassert(9504003,
+                        "Expected interrupt before tripwireShardCheckMetadataAfterDDLLock",
+                        !tripwireShardCheckMetadataAfterDDLLock.shouldFail());
                 return _establishCursorOnParticipants(opCtx, nss);
             }();
 
@@ -302,6 +324,8 @@ public:
          */
         std::vector<RemoteCursor> _establishCursorOnParticipants(OperationContext* opCtx,
                                                                  const NamespaceString& nss) {
+            hangShardCheckMetadataBeforeEstablishCursors.pauseWhileSet();
+
             // Shard requests
             const auto shardOpKey = UUID::gen();
             ShardsvrCheckMetadataConsistencyParticipant participantRequest{nss};
@@ -330,36 +354,33 @@ public:
             appendOpKey(configOpKey, &configRequestBob);
             requests.emplace_back(ShardId::kConfigServerId, configRequestBob.obj());
 
-            return establishCursors(opCtx,
-                                    Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
-                                    nss,
-                                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                    requests,
-                                    false /* allowPartialResults */,
-                                    Shard::RetryPolicy::kIdempotentOrCursorInvalidated,
-                                    {shardOpKey, configOpKey});
+            auto cursors = establishCursors(opCtx,
+                                            Grid::get(opCtx)->getExecutorPool()->getFixedExecutor(),
+                                            nss,
+                                            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                            requests,
+                                            false /* allowPartialResults */,
+                                            Shard::RetryPolicy::kIdempotentOrCursorInvalidated,
+                                            {shardOpKey, configOpKey});
+            tassert(9504004,
+                    "Expected interrupt before tripwireShardCheckMetadataAfterEstablishCursors",
+                    !tripwireShardCheckMetadataAfterEstablishCursors.shouldFail());
+            return cursors;
         }
 
         CursorInitialReply _mergeCursors(OperationContext* opCtx,
                                          const NamespaceString& nss,
                                          std::vector<RemoteCursor>&& cursors) {
 
-            StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+            StringMap<ResolvedNamespace> resolvedNamespaces;
             resolvedNamespaces[nss.coll()] = {nss, std::vector<BSONObj>{}};
 
-            auto expCtx = make_intrusive<ExpressionContext>(opCtx,
-                                                            boost::none, /* explain */
-                                                            false,       /* fromRouter */
-                                                            false,       /* needsMerge */
-                                                            false,       /* allowDiskUse */
-                                                            false, /* bypassDocumentValidation */
-                                                            false, /* isMapReduceCommand */
-                                                            nss,
-                                                            boost::none, /* runtimeConstants */
-                                                            nullptr,     /* collator */
-                                                            MongoProcessInterface::create(opCtx),
-                                                            std::move(resolvedNamespaces),
-                                                            boost::none /* collection UUID */);
+            auto expCtx = ExpressionContextBuilder{}
+                              .opCtx(opCtx)
+                              .mongoProcessInterface(MongoProcessInterface::create(opCtx))
+                              .ns(nss)
+                              .resolvedNamespace(std::move(resolvedNamespaces))
+                              .build();
 
             AsyncResultsMergerParams armParams{std::move(cursors), nss};
             auto docSourceMergeStage =

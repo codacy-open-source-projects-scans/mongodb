@@ -52,14 +52,18 @@ namespace mongo {
 
 namespace {
 
-static const StringDataSet kValidMetaSorts{
-    "textScore"_sd, "randVal"_sd, "geoNearDistance"_sd, "searchScore"_sd, "vectorSearchScore"_sd};
+static const StringDataSet kValidMetaSorts{"textScore"_sd,
+                                           "randVal"_sd,
+                                           "geoNearDistance"_sd,
+                                           "searchScore"_sd,
+                                           "vectorSearchScore"_sd,
+                                           "score"_sd};
 
 bool isSupportedMetaSort(const boost::intrusive_ptr<ExpressionContext>& expCtx, StringData name) {
-    if (name == "searchScore"_sd || name == "vectorSearchScore"_sd) {
+    if (name == "searchScore"_sd || name == "vectorSearchScore"_sd || name == "score"_sd) {
         expCtx->throwIfFeatureFlagIsNotEnabledOnFCV(
-            "sorting by searchScore or vectorSearchScore",
-            feature_flags::gFeatureFlagSearchHybridScoringPrerequisites);
+            "sorting by searchScore, vectorSearchScore, or score",
+            feature_flags::gFeatureFlagRankFusionFull);
     }
     return kValidMetaSorts.contains(name);
 }
@@ -197,5 +201,32 @@ bool SortPattern::isExtensionOf(const SortPattern& other) const {
         }
     }
     return true;
+}
+
+bool isSortOnSingleMetaField(const SortPattern& sortPattern,
+                             QueryMetadataBitSet metadataToConsider) {
+    // Exactly 1 expression in the sort pattern is needed.
+    if (sortPattern.begin() == sortPattern.end() ||
+        std::next(sortPattern.begin()) != sortPattern.end()) {
+        // 0 parts, or more than 1 part.
+        return false;
+    }
+    const auto& firstAndOnlyPart = *sortPattern.begin();
+    if (auto* expr = firstAndOnlyPart.expression.get()) {
+        if (auto metaExpr = dynamic_cast<ExpressionMeta*>(expr)) {
+            if (metadataToConsider.none()) {
+                // Any metadata field.
+                return true;
+            }
+            for (std::size_t i = 1; i < DocumentMetadataFields::kNumFields; ++i) {
+                if (metadataToConsider[i] &&
+                    metaExpr->getMetaType() == static_cast<DocumentMetadataFields::MetaType>(i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    }
+    return false;
 }
 }  // namespace mongo

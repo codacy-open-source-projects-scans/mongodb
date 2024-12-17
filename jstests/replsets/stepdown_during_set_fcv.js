@@ -14,7 +14,7 @@ import {ReplSetTest} from "jstests/libs/replsettest.js";
 function runTest(downgradeFCV) {
     const rst = new ReplSetTest({name: jsTestName(), nodes: 2});
     rst.startSet();
-    rst.initiate();
+    rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
     let primary = rst.getPrimary();
 
@@ -34,7 +34,7 @@ function runTest(downgradeFCV) {
 
     jsTestLog("Stepping down the primary");
     assert.commandWorked(primary.adminCommand({replSetStepDown: 10 * 60, force: 1}));
-    rst.waitForState(primary, ReplSetTest.State.SECONDARY);
+    rst.awaitSecondaryNodes(null, [primary]);
     rst.awaitNodesAgreeOnPrimary();
 
     primary = rst.getPrimary();

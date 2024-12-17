@@ -30,7 +30,6 @@
 #include "mongo/db/catalog/collection_impl.h"
 
 #include <absl/container/flat_hash_map.h>
-#include <algorithm>
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
@@ -41,7 +40,6 @@
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
-#include <map>
 #include <mutex>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
@@ -62,7 +60,7 @@
 #include "mongo/db/catalog/storage_engine_collection_options_flags_parser.h"
 #include "mongo/db/catalog/uncommitted_multikey.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
+#include "mongo/db/collection_crud/capped_visibility.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
@@ -75,16 +73,15 @@
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
-#include "mongo/db/matcher/implicit_validator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/fle/implicit_validator.h"
 #include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/repl/oplog.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/capped_snapshots.h"
@@ -99,15 +96,12 @@
 #include "mongo/db/ttl/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_tag.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -137,7 +131,7 @@ Status checkValidatorCanBeUsedOnNs(const BSONObj& validator,
         return Status::OK();
     }
 
-    if (nss.isSystem() && !nss.isDropPendingNamespace()) {
+    if (nss.isSystem()) {
         return {ErrorCodes::InvalidOptions,
                 str::stream() << "Document validators not allowed on system collection "
                               << nss.toStringForErrorMsg() << " with UUID " << uuid};
@@ -322,8 +316,7 @@ CollectionImpl::SharedState::SharedState(OperationContext* opCtx,
       // Capped collections must preserve insertion order, so we serialize writes. One exception are
       // clustered capped collections because they only guarantee insertion order when cluster keys
       // are inserted in monotonically-increasing order.
-      _isCapped(options.capped),
-      _needCappedLock(_isCapped && collection->ns().isReplicated() && !options.clusteredIndex),
+      _needCappedLock(options.capped && collection->ns().isReplicated() && !options.clusteredIndex),
       // The record store will be null when the collection is instantiated as part of the repair
       // path.
       _cappedObserver(_recordStore ? _recordStore->getIdent() : "") {
@@ -342,8 +335,8 @@ CollectionImpl::SharedState::~SharedState() {
     // The record store will be null when the collection is instantiated as part of the repair path.
     // The repair path intentionally doesn't create a record store because it directly accesses the
     // underlying storage engine.
-    if (_recordStore && _recordStore->getCappedInsertNotifier()) {
-        _recordStore->getCappedInsertNotifier()->kill();
+    if (_recordStore && _recordStore->capped()) {
+        _recordStore->capped()->getInsertNotifier()->kill();
     }
 }
 
@@ -612,12 +605,12 @@ Status CollectionImpl::checkValidatorAPIVersionCompatability(OperationContext* o
     const auto& apiParams = APIParameters::get(opCtx);
     const auto apiVersion = apiParams.getAPIVersion().value_or("");
     if (apiParams.getAPIStrict().value_or(false) && apiVersion == "1" &&
-        _validator.expCtxForFilter->exprUnstableForApiV1) {
+        _validator.expCtxForFilter->getExprUnstableForApiV1()) {
         return {ErrorCodes::APIStrictError,
                 "The validator uses unstable expression(s) for API Version 1."};
     }
     if (apiParams.getAPIDeprecationErrors().value_or(false) && apiVersion == "1" &&
-        _validator.expCtxForFilter->exprDeprectedForApiV1) {
+        _validator.expCtxForFilter->getExprDeprecatedForApiV1()) {
         return {ErrorCodes::APIDeprecationError,
                 "The validator uses deprecated expression(s) for API Version 1."};
     }
@@ -729,21 +722,22 @@ Collection::Validator CollectionImpl::parseValidator(
         return {validator, nullptr, canUseValidatorInThisContext};
     }
 
-    auto expCtx = make_intrusive<ExpressionContext>(
-        opCtx, CollatorInterface::cloneCollator(_shared->_collator.get()), ns());
+    auto expCtx = ExpressionContextBuilder{}
+                      .opCtx(opCtx)
+                      .collator(CollatorInterface::cloneCollator(_shared->_collator.get()))
+                      .ns(ns())
+                      // The match expression parser needs to know that we're parsing an expression
+                      // for a validator to apply some additional checks.
+                      .isParsingCollectionValidator(true)
+                      // Enforce a maximum feature version if requested.
+                      .maxFeatureCompatibilityVersion(maxFeatureCompatibilityVersion)
+                      .build();
 
     expCtx->variables.setDefaultRuntimeConstants(opCtx);
 
     // The MatchExpression and contained ExpressionContext created as part of the validator are
     // owned by the Collection and will outlive the OperationContext they were created under.
-    expCtx->opCtx = nullptr;
-
-    // Enforce a maximum feature version if requested.
-    expCtx->maxFeatureCompatibilityVersion = maxFeatureCompatibilityVersion;
-
-    // The match expression parser needs to know that we're parsing an expression for a
-    // validator to apply some additional checks.
-    expCtx->isParsingCollectionValidator = true;
+    expCtx->setOperationContext(nullptr);
 
     // If the validation action is printing logs or the level is "moderate", then disallow any
     // encryption keywords. This is to prevent any plaintext data from showing up in the logs. Also
@@ -824,7 +818,7 @@ bool CollectionImpl::isCappedAndNeedsDelete(OperationContext* opCtx) const {
         return false;
     }
 
-    if (ns().isOplog() && getRecordStore()->selfManagedOplogTruncation()) {
+    if (getRecordStore()->oplog() && getRecordStore()->oplog()->selfManagedTruncation()) {
         // Storage engines can choose to manage oplog truncation internally.
         return false;
     }
@@ -874,6 +868,12 @@ boost::optional<bool> CollectionImpl::timeseriesBucketingParametersHaveChanged()
         MONGO_unlikely(sfp.isActive())) {
         const auto& data = sfp.getData();
         return data["value"].Bool();
+    }
+
+    // Offline validation doesn't initialize FCV in order to validate older MongoDB instances
+    // TODO(SERVER-96993) Re-evaluate if true makes sense as default for older versions
+    if (storageGlobalParams.validate) {
+        return true;
     }
 
     if (!feature_flags::gTSBucketingParametersUnchanged.isEnabled(
@@ -1005,14 +1005,14 @@ Status CollectionImpl::updateCappedSize(OperationContext* opCtx,
               "Expected newCappedSize or newCappedMax to be non-empty");
 
 
-    if (!_shared->_isCapped) {
+    if (!isCapped()) {
         return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "Cannot update size on a non-capped collection "
                                     << ns().toStringForErrorMsg());
     }
 
     if (ns().isOplog() && newCappedSize) {
-        Status status = _shared->_recordStore->updateOplogSize(opCtx, *newCappedSize);
+        Status status = _shared->_recordStore->oplog()->updateSize(*newCappedSize);
         if (!status.isOK()) {
             return status;
         }
@@ -1086,7 +1086,7 @@ bool CollectionImpl::areRecordIdsReplicated() const {
 }
 
 bool CollectionImpl::isCapped() const {
-    return _shared->_isCapped;
+    return _metadata->options.capped;
 }
 
 long long CollectionImpl::getCappedMaxDocs() const {
@@ -1114,7 +1114,7 @@ std::vector<RecordId> CollectionImpl::reserveCappedRecordIds(OperationContext* o
     // in the process of committing uncommitted records.
     auto cappedObserver = getCappedVisibilityObserver();
     cappedObserver->registerWriter(shard_role_details::getRecoveryUnit(opCtx), [this]() {
-        _shared->_recordStore->notifyCappedWaitersIfNeeded();
+        _shared->_recordStore->capped()->notifyWaitersIfNeeded();
     });
 
     std::vector<RecordId> ids;
@@ -1155,11 +1155,11 @@ CappedVisibilitySnapshot CollectionImpl::takeCappedVisibilitySnapshot() const {
 }
 
 long long CollectionImpl::numRecords(OperationContext* opCtx) const {
-    return _shared->_recordStore->numRecords(opCtx);
+    return _shared->_recordStore->numRecords();
 }
 
 long long CollectionImpl::dataSize(OperationContext* opCtx) const {
-    return _shared->_recordStore->dataSize(opCtx);
+    return _shared->_recordStore->dataSize();
 }
 
 bool CollectionImpl::isEmpty(OperationContext* opCtx) const {

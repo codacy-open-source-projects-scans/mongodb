@@ -140,7 +140,8 @@
 namespace mongo {
 namespace {
 
-class ReshardingTxnClonerTest : public ShardServerTestFixtureWithCatalogCacheLoaderMock {
+class ReshardingTxnClonerTest : service_context_test::WithSetupTransportLayer,
+                                public ShardServerTestFixtureWithCatalogCacheLoaderMock {
     void setUp() override {
         ShardServerTestFixtureWithCatalogCacheLoaderMock::setUp();
 
@@ -607,7 +608,7 @@ private:
         threadPoolOptions.threadNamePrefix = "TestReshardCloneConfigTransactions-";
         threadPoolOptions.poolName = "TestReshardCloneConfigTransactionsThreadPool";
         threadPoolOptions.onCreateThread = [](const std::string& threadName) {
-            Client::initThread(threadName.c_str(), getGlobalServiceContext()->getService());
+            Client::initThread(threadName, getGlobalServiceContext()->getService());
             auto* client = Client::getCurrent();
             AuthorizationSession::get(*client)->grantInternalAuthorization();
         };

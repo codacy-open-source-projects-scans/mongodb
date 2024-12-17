@@ -143,6 +143,9 @@ enum class Builtin : uint16_t {
     // Agg function to concatenate arrays, failing when the accumulator reaches a specified size.
     aggConcatArraysCapped,
 
+    concatArraysCapped,  // Agg function to add the elements of an array to an accumulator array,
+                         // fails when the array reaches specified size.
+
     // Agg functions to compute the set union of two arrays (no size cap).
     aggSetUnion,
     aggCollSetUnion,
@@ -285,6 +288,10 @@ enum class Builtin : uint16_t {
     aggRemovablePushAdd,
     aggRemovablePushRemove,
     aggRemovablePushFinalize,
+    aggRemovableConcatArraysInit,
+    aggRemovableConcatArraysAdd,
+    aggRemovableConcatArraysRemove,
+    aggRemovableConcatArraysFinalize,
     aggRemovableStdDevAdd,
     aggRemovableStdDevRemove,
     aggRemovableStdDevSampFinalize,

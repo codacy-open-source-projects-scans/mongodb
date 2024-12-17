@@ -6,8 +6,9 @@
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {
     getLatestQueryStatsEntry,
+    getQueryStatsServerParameters,
     getValueAtPath,
-    runCommandAndValidateQueryStats,
+    runCommandAndValidateQueryStats
 } from "jstests/libs/query/query_stats_utils.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -99,6 +100,9 @@ function validateResumeTokenQueryShape(conn, coll) {
     assert.soon(() => changeStream.hasNext());
     changeStream.next();
     const invalidateResumeToken = changeStream.getResumeToken();
+    const decodedToken = decodeResumeToken(invalidateResumeToken);
+    assert.eq(decodedToken.tokenType, eventResumeTokenType);
+    assert.eq(decodedToken.fromInvalidate, false);
 
     // Resume the change stream using 'startAfter' field.
     coll.watch([], {startAfter: invalidateResumeToken});
@@ -175,7 +179,7 @@ function validateChangeStreamAggKey(conn) {
 {
     // Test the non-sharded case.
     const rst = new ReplSetTest({nodes: 2});
-    rst.startSet({setParameter: {internalQueryStatsRateLimit: -1}});
+    rst.startSet(getQueryStatsServerParameters());
     rst.initiate();
     rst.getPrimary().getDB("admin").setLogLevel(3, "queryStats");
 

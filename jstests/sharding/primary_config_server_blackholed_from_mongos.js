@@ -4,7 +4,7 @@
  *
  * @tags: [
  *    config_shard_incompatible,
- *    # TODO (SERVER-88129): Re-enable this test or add an explanation why it is incompatible.
+ *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
  *    embedded_router_incompatible,
  * ]
  */
@@ -19,7 +19,15 @@ TestData.skipCheckingIndexesConsistentAcrossCluster = true;
 TestData.skipCheckOrphans = true;
 TestData.skipCheckShardFilteringMetadata = true;
 
-var st = new ShardingTest({shards: 2, mongos: 1, useBridge: true, config: 3});
+var st = new ShardingTest({
+    shards: 2,
+    mongos: 1,
+    useBridge: true,
+    config: 3,
+    // ShardingTest use a high config command timeout to avoid spurious failures but this test may
+    // require a timeout to complete, so we restore the default value to avoid failures.
+    other: {mongosOptions: {setParameter: {defaultConfigCommandTimeoutMS: 30000}}}
+});
 
 var testDB = st.s.getDB('BlackHoleDB');
 var configDB = st.s.getDB('config');

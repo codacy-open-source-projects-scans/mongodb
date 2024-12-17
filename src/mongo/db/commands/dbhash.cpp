@@ -282,10 +282,6 @@ public:
                 desiredCollections.count(collNss.coll().toString()) == 0)
                 return true;
 
-            // Don't include 'drop pending' collections.
-            if (collNss.isDropPendingNamespace())
-                return true;
-
             if (collection->isCapped()) {
                 cappedCollectionSet.insert(collNss.coll().toString());
             }
@@ -389,7 +385,7 @@ private:
                 opCtx, &collection, PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
         } else {
             LOGV2(20455, "Can't find _id index for namespace", logAttrs(collection->ns()));
-            return "no _id _index";
+            return "no _id index";
         }
 
         md5_state_t st;

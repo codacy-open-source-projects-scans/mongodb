@@ -49,6 +49,7 @@
 #include "mongo/db/catalog/collection_uuid_mismatch.h"
 #include "mongo/db/catalog/collection_yield_restore.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/snapshot_helper.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
@@ -65,7 +66,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/storage/capped_snapshots.h"
-#include "mongo/db/storage/snapshot_helper.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/transaction_resources.h"
@@ -279,14 +279,14 @@ AutoStatsTracker::~AutoStatsTracker() {
 
     // Update stats for each namespace.
     auto curOp = CurOp::get(_opCtx);
-    Top::get(_opCtx->getServiceContext())
-        .record(_opCtx,
-                std::span<const NamespaceString>{_nssSet.begin(), _nssSet.end()},
-                curOp->getLogicalOp(),
-                _lockType,
-                durationCount<Microseconds>(curOp->elapsedTimeExcludingPauses()),
-                curOp->isCommand(),
-                curOp->getReadWriteType());
+    Top::getDecoration(_opCtx).record(
+        _opCtx,
+        std::span<const NamespaceString>{_nssSet.begin(), _nssSet.end()},
+        curOp->getLogicalOp(),
+        _lockType,
+        curOp->elapsedTimeExcludingPauses(),
+        curOp->isCommand(),
+        curOp->getReadWriteType());
 }
 
 AutoGetCollectionForRead::AutoGetCollectionForRead(OperationContext* opCtx,
@@ -848,8 +848,7 @@ const Collection* AutoGetCollectionForReadLockFree::_restoreFromYield(OperationC
 
 AutoGetCollectionForReadLockFree::AutoGetCollectionForReadLockFree(
     OperationContext* opCtx, NamespaceStringOrUUID nsOrUUID, AutoGetCollection::Options options)
-    : _originalReadSource(shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource()),
-      _isLockFreeReadSubOperation(opCtx->isLockFreeReadsOp()),  // This has to come before LFRBlock.
+    : _isLockFreeReadSubOperation(opCtx->isLockFreeReadsOp()),  // This has to come before LFRBlock.
       _lockFreeReadsBlock(opCtx),
       _globalLock(opCtx,
                   MODE_IS,
@@ -1188,15 +1187,15 @@ OldClientContext::~OldClientContext() {
 
     invariant(shard_role_details::getLocker(_opCtx)->isLocked());
     auto currentOp = CurOp::get(_opCtx);
-    Top::get(_opCtx->getClient()->getServiceContext())
-        .record(_opCtx,
-                currentOp->getNSS(),
-                currentOp->getLogicalOp(),
-                shard_role_details::getLocker(_opCtx)->isWriteLocked() ? Top::LockType::WriteLocked
-                                                                       : Top::LockType::ReadLocked,
-                _timer.micros(),
-                currentOp->isCommand(),
-                currentOp->getReadWriteType());
+    Top::getDecoration(_opCtx).record(_opCtx,
+                                      currentOp->getNSS(),
+                                      currentOp->getLogicalOp(),
+                                      shard_role_details::getLocker(_opCtx)->isWriteLocked()
+                                          ? Top::LockType::WriteLocked
+                                          : Top::LockType::ReadLocked,
+                                      _timer.elapsed(),
+                                      currentOp->isCommand(),
+                                      currentOp->getReadWriteType());
 }
 
 LockMode getLockModeForQuery(OperationContext* opCtx, const NamespaceStringOrUUID& nssOrUUID) {

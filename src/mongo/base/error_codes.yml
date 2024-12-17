@@ -36,9 +36,10 @@ error_categories:
   # Codes for internal use only. The codes can be passed between servers in a cluster, but must
   # never be returned to the client in a network response.
   - InternalOnly
-  - TenantMigrationError
-  - TenantMigrationConflictError
   - CursorInvalidatedError
+  - PlannerEstimationError
+  # This category contains all errors due to the system being under pressure
+  - SystemOverloadedError
 
 error_codes:
   - {code: 0, name: OK}
@@ -108,7 +109,7 @@ error_codes:
   - {code: 61, name: ShardKeyNotFound}
   - {code: 62, name: OplogOperationUnsupported}
   - {code: 63, name: OBSOLETE_StaleShardVersion}
-  - {code: 64, name: WriteConcernFailed, categories: [WriteConcernError]}
+  - {code: 64, name: WriteConcernTimeout, categories: [WriteConcernError]}
   - {code: 65, name: MultipleErrorsOccurred, extra: MultipleErrorsOccurredInfo}
   - {code: 66, name: ImmutableField}
   - {code: 67, name: CannotCreateIndex}
@@ -510,39 +511,11 @@ error_codes:
     }
   - {code: 319, name: MovePrimaryInProgress}
 
-  - {
-      code: 320,
-      name: TenantMigrationConflict,
-      extra: TenantMigrationConflictInfo,
-      categories: [TenantMigrationError, TenantMigrationConflictError],
-    }
-  - {
-      code: 321,
-      name: TenantMigrationCommitted,
-      categories: [TenantMigrationError],
-    }
-
   - {code: 322, name: APIVersionError, categories: [VersionedAPIError]}
   - {code: 323, name: APIStrictError, categories: [VersionedAPIError]}
   - {code: 324, name: APIDeprecationError, categories: [VersionedAPIError]}
 
-  - {
-      code: 325,
-      name: TenantMigrationAborted,
-      categories: [TenantMigrationError],
-    }
-
   - {code: 326, name: OplogQueryMinTsMissing}
-
-  - {code: 327, name: NoSuchTenantMigration}
-
-  - {
-      code: 328,
-      name: TenantMigrationAccessBlockerShuttingDown,
-      categories: [InternalOnly],
-    }
-
-  - {code: 329, name: TenantMigrationInProgress}
 
   - {code: 330, name: SkipCommandExecution}
 
@@ -556,8 +529,6 @@ error_codes:
       categories: [ShutdownError, CancellationError, InternalOnly],
     }
   - {code: 334, name: MechanismUnavailable}
-
-  - {code: 335, name: TenantMigrationForgotten}
 
   - {code: 336, name: TimeseriesBucketCleared, categories: [InternalOnly]}
 
@@ -606,13 +577,6 @@ error_codes:
       extra: ChangeStreamStartAfterInvalidateInfo,
     }
   - {code: 352, name: UnsupportedOpQueryCommand}
-
-  - {
-      code: 353,
-      name: NonRetryableTenantMigrationConflict,
-      extra: NonRetryableTenantMigrationConflictInfo,
-      categories: [TenantMigrationError, TenantMigrationConflictError],
-    }
 
   - {
       code: 354,
@@ -849,6 +813,17 @@ error_codes:
 
   - {code: 431, name: ChunkMetadataInconsistency}
   - {code: 432, name: OfflineValidationFailedToComplete}
+  - {
+      code: 433,
+      name: AdmissionQueueOverflow,
+      categories: [SystemOverloadedError],
+    }
+  - {code: 434, name: NoDistinctScansForDistinctEligibleQuery}
+  - {
+      code: 435,
+      name: QueryStatsFailedToRecord,
+      extra: QueryStatsFailedToRecordInfo,
+    }
 
   # Error codes 4000-8999 are reserved.
 
@@ -938,3 +913,15 @@ error_codes:
       categories: [Interruption, RetriableError],
     }
   - {code: 4938500, name: IndexNotFoundCachedPlan}
+
+  # CBR error codes
+  - {
+      code: 9751901,
+      name: HistogramCEFailure,
+      categories: [PlannerEstimationError],
+    }
+  - {
+      code: 9751902,
+      name: SamplingCEFailure,
+      categories: [PlannerEstimationError],
+    }

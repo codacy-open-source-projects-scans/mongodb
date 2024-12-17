@@ -238,14 +238,20 @@ public:
                      sbe::value::TypeTags tag,
                      double weight,
                      size_t ndv,
-                     double nullsRatio = 0.0)
+                     double nullsRatio = 0.0,
+                     double nanRatio = 0.0)
         : _mixedDistrDescriptor(distrDescriptor),
           _tag(tag),
           _weight(weight),
           _ndv(ndv),
-          _nullsRatio(nullsRatio) {
+          _nullsRatio(nullsRatio),
+          _nanRatio(nanRatio) {
         uassert(6660542, "NDV must be > 0.", ndv > 0);
         uassert(6660543, "nullsRatio must be in [0, 1].", nullsRatio >= 0 && nullsRatio <= 1);
+        uassert(9497300, "NaN Ratio must be in [0, 1].", nanRatio >= 0 && nanRatio <= 1);
+        uassert(9497301,
+                "The sum of NaN Ratio and nullsRatio must be in [0, 1].",
+                (nullsRatio + nanRatio) >= 0 && (nullsRatio + nanRatio) <= 1);
     }
 
     virtual ~DataTypeDistrNew() = default;
@@ -296,12 +302,53 @@ protected:
     std::unique_ptr<MixedDistribution> _idxDist;
     // Percent of null values in the dataset.
     double _nullsRatio;
-    std::uniform_real_distribution<double> _nullSelector{0, 1};
+    // Percent of NaN values in the dataset.
+    double _nanRatio;
+    // Random generator to decide between null/NaN/some number vaule.
+    std::uniform_real_distribution<double> _selector{0, 1};
 
     friend class DatasetDescriptorNew;
 };
 
 using TypeDistrVector = std::vector<std::unique_ptr<DataTypeDistrNew>>;
+
+/**
+ * Null data distribution.
+ */
+class NullDistribution : public DataTypeDistrNew {
+public:
+    NullDistribution(MixedDistributionDescriptor distrDescriptor, double weight, size_t ndv);
+
+    /*
+     * Generate a set of null values, and store them in _valSet.
+     */
+    void init(DatasetDescriptorNew* parentDesc, std::mt19937_64& gen) override;
+};
+
+/**
+ * Boolean data distribution.
+ */
+class BooleanDistribution : public DataTypeDistrNew {
+public:
+    BooleanDistribution(MixedDistributionDescriptor distrDescriptor,
+                        double weight,
+                        size_t ndv,
+                        bool includeFalse,
+                        bool includeTrue,
+                        double nullsRatio = 0);
+
+    /*
+     * Generate a set of random booleans, and store them in _valSet.
+     */
+    void init(DatasetDescriptorNew* parentDesc, std::mt19937_64& gen) override;
+
+protected:
+    // _includeFalse and _includeTrue define which of true/false values will appear in the dataset.
+    // if _includeFalse is true, then 'false' values will be generated, otherwise not.
+    // Similarly for _includeTrue.
+    bool _includeFalse;
+    bool _includeTrue;
+};
 
 /**
  * Integer data distribution.
@@ -313,7 +360,8 @@ public:
                     size_t ndv,
                     int minInt,
                     int maxInt,
-                    double nullsRatio = 0);
+                    double nullsRatio = 0,
+                    double nanRatio = 0);
 
     /*
      * Generate a set of random integers, and store them in _valSet.
@@ -382,7 +430,8 @@ public:
                        size_t ndv,
                        double min,
                        double max,
-                       double nullsRatio = 0);
+                       double nullsRatio = 0,
+                       double nanRatio = 0);
 
     void init(DatasetDescriptorNew*, std::mt19937_64& gen) override;
 

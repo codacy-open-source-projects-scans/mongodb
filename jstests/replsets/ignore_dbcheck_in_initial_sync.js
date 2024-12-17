@@ -39,7 +39,7 @@ const replSet = new ReplSetTest({
     nodeOptions: {setParameter: {dbCheckHealthLogEveryNBatches: 1}}
 });
 replSet.startSet();
-replSet.initiateWithHighElectionTimeout();
+replSet.initiate();
 
 const primary = replSet.getPrimary();
 const secondary = replSet.getSecondary();
@@ -72,7 +72,7 @@ runDbCheck(
 assert.commandWorked(initialSyncNode.adminCommand(
     {configureFailPoint: 'initialSyncHangBeforeSplittingControlFlow', mode: 'off'}));
 
-replSet.waitForState(initialSyncNode, ReplSetTest.State.SECONDARY);
+replSet.awaitSecondaryNodes(null, [initialSyncNode]);
 
 // Check that the primary logged an error health log entry for each document with missing index key.
 checkHealthLog(primaryHealthlog, logQueries.missingIndexKeysQuery, nDocs);

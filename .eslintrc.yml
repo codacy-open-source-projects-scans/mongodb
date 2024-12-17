@@ -147,6 +147,8 @@ globals:
   _resultSetsEqualUnordered: true
   getStringWidth: true
   _compareStringsWithCollation: true
+  eventResumeTokenType: true
+  highWaterMarkResumeTokenType: true
 
   # likely could be replaced with `path`
   _copyFileRange: true
@@ -157,6 +159,7 @@ globals:
   pathExists: true
   umask: true
   getFileMode: true
+  copyDir: true
 
   # likely could be replaced with `child_process`
   MongoRunner: true
@@ -200,6 +203,7 @@ globals:
   Timestamp: true
   MD5: true
   Geo: true
+  decodeResumeToken: true
   bsonWoCompare: true
   bsonUnorderedFieldsCompare: true
   bsonBinaryEqual: true
@@ -235,6 +239,7 @@ globals:
   disablePrint: true
   enablePrint: true
   replSetMemberStatePrompt: true
+  hasErrorCode: true
   helloStatePrompt: true
   _validateMemberIndex: true
   help: true

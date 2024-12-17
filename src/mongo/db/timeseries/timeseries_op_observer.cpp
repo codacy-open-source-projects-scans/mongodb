@@ -29,8 +29,6 @@
 
 #include "mongo/db/timeseries/timeseries_op_observer.h"
 
-#include <memory>
-#include <set>
 #include <utility>
 #include <vector>
 
@@ -38,7 +36,6 @@
 #include <boost/optional/optional.hpp>
 
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/oid.h"
 #include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/concurrency/lock_manager_defs.h"
@@ -49,9 +46,8 @@
 #include "mongo/db/timeseries/bucket_catalog/tracking_contexts.h"
 #include "mongo/db/timeseries/timeseries_extended_range.h"
 #include "mongo/db/transaction_resources.h"
-#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/tracked_types.h"
+#include "mongo/util/tracking/vector.h"
 
 namespace mongo {
 
@@ -168,7 +164,6 @@ repl::OpTime TimeSeriesOpObserver::onDropCollection(OperationContext* opCtx,
                                                     const NamespaceString& collectionName,
                                                     const UUID& uuid,
                                                     std::uint64_t numRecords,
-                                                    CollectionDropType dropType,
                                                     bool markFromMigrate) {
     if (collectionName.isTimeseriesBucketsCollection()) {
         auto& bucketCatalog =
@@ -190,7 +185,7 @@ void TimeSeriesOpObserver::onReplicationRollback(OperationContext* opCtx,
 
     auto& bucketCatalog =
         timeseries::bucket_catalog::GlobalBucketCatalog::get(opCtx->getServiceContext());
-    tracked_vector<UUID> clearedCollectionUUIDs = make_tracked_vector<UUID>(
+    tracking::vector<UUID> clearedCollectionUUIDs = tracking::make_vector<UUID>(
         timeseries::bucket_catalog::getTrackingContext(
             bucketCatalog.trackingContexts,
             timeseries::bucket_catalog::TrackingScope::kBucketStateRegistry),

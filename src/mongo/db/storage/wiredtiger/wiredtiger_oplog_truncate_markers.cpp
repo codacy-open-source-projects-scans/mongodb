@@ -29,9 +29,11 @@
 
 #include <memory>
 
+#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/wiredtiger/oplog_truncate_marker_parameters_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_truncate_markers.h"
+#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
@@ -49,9 +51,8 @@ const double kNumMSInHour = 1000 * 60 * 60;
 
 std::shared_ptr<WiredTigerOplogTruncateMarkers>
 WiredTigerOplogTruncateMarkers::createOplogTruncateMarkers(OperationContext* opCtx,
-                                                           WiredTigerRecordStore* rs,
-                                                           const NamespaceString& ns) {
-    long long maxSize = rs->getOplogMaxSize();
+                                                           WiredTigerRecordStore* rs) {
+    long long maxSize = checked_cast<WiredTigerRecordStore::Oplog*>(rs->oplog())->getMaxSize();
     invariant(maxSize > 0);
     invariant(rs->keyFormat() == KeyFormat::Long);
 
@@ -80,7 +81,6 @@ WiredTigerOplogTruncateMarkers::createOplogTruncateMarkers(OperationContext* opC
     auto initialSetOfMarkers = CollectionTruncateMarkers::createFromCollectionIterator(
         opCtx,
         iterator,
-        ns,
         minBytesPerTruncateMarker,
         [](const Record& record) {
             BSONObj obj = record.data.toBson();
@@ -111,12 +111,13 @@ WiredTigerOplogTruncateMarkers::WiredTigerOplogTruncateMarkers(
     Microseconds totalTimeSpentBuilding,
     CollectionTruncateMarkers::MarkersCreationMethod creationMethod,
     WiredTigerRecordStore* rs)
-    : CollectionTruncateMarkers(
-          std::move(markers), partialMarkerRecords, partialMarkerBytes, minBytesPerMarker),
-      _rs(rs),
-      _totalTimeProcessing(totalTimeSpentBuilding),
-      _processBySampling(creationMethod ==
-                         CollectionTruncateMarkers::MarkersCreationMethod::Sampling) {}
+    : CollectionTruncateMarkers(std::move(markers),
+                                partialMarkerRecords,
+                                partialMarkerBytes,
+                                minBytesPerMarker,
+                                totalTimeSpentBuilding,
+                                creationMethod),
+      _rs(rs) {}
 
 bool WiredTigerOplogTruncateMarkers::isDead() {
     stdx::lock_guard<stdx::mutex> lk(_reclaimMutex);
@@ -173,14 +174,6 @@ void WiredTigerOplogTruncateMarkers::updateMarkersAfterCappedTruncateAfter(
     });
 }
 
-void WiredTigerOplogTruncateMarkers::getOplogTruncateMarkersStats(BSONObjBuilder& builder) const {
-    builder.append("totalTimeProcessingMicros", _totalTimeProcessing.count());
-    builder.append("processingMethod", _processBySampling ? "sampling" : "scanning");
-    if (auto oplogMinRetentionHours = storageGlobalParams.oplogMinRetentionHours.load()) {
-        builder.append("oplogMinRetentionHours", oplogMinRetentionHours);
-    }
-}
-
 bool WiredTigerOplogTruncateMarkers::awaitHasExcessMarkersOrDead(OperationContext* opCtx) {
     // Wait until kill() is called or there are too many collection markers.
     stdx::unique_lock<stdx::mutex> lock(_reclaimMutex);
@@ -217,7 +210,7 @@ bool WiredTigerOplogTruncateMarkers::_hasExcessMarkers(OperationContext* opCtx) 
     }
 
     // check that oplog truncate markers is at capacity
-    if (totalBytes <= _rs->getOplogMaxSize()) {
+    if (totalBytes <= checked_cast<WiredTigerRecordStore::Oplog*>(_rs->oplog())->getMaxSize()) {
         return false;
     }
 
@@ -245,7 +238,7 @@ bool WiredTigerOplogTruncateMarkers::_hasExcessMarkers(OperationContext* opCtx) 
     return currRetentionHours >= minRetentionHours;
 }
 
-void WiredTigerOplogTruncateMarkers::adjust(OperationContext* opCtx, int64_t maxSize) {
+void WiredTigerOplogTruncateMarkers::adjust(int64_t maxSize) {
     const unsigned int oplogTruncateMarkerSize =
         std::max(gOplogTruncateMarkerSizeMB * 1024 * 1024, BSONObjMaxInternalSize);
 

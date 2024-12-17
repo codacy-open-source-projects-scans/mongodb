@@ -21,7 +21,7 @@ const collName = "testcoll";
 const rst = new ReplSetTest(
     {name: testName, nodes: 1, settings: {chainingAllowed: false}, useBridge: true});
 rst.startSet();
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 
 const primary = rst.getPrimary();
 const primaryDb = primary.getDB(dbName);
@@ -38,7 +38,7 @@ const secondary = rst.add({
     }
 });
 rst.reInitiate();
-rst.waitForState(secondary, ReplSetTest.State.SECONDARY);
+rst.awaitSecondaryNodes(null, [secondary]);
 
 jsTestLog("Checking that the primary has initiated the removal of 'newlyAdded'");
 hangBeforeNewlyAddedRemovalFP.wait();

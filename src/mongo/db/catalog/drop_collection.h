@@ -73,11 +73,14 @@ Status dropCollection(OperationContext* opCtx,
                       bool fromMigrate = false);
 
 /**
- * Drops the collection "collectionName" only if its uuid is not matching "expectedUUID".
+ * Drops the collection with the given namespace only if its uuid is not matching 'expectedUUID'.
+ * When 'fromMigrate' is set, the related oplog entry will be marked accordingly using the
+ * 'fromMigrate' field to reduce its visibility (e.g. in change streams).
  */
 Status dropCollectionIfUUIDNotMatching(OperationContext* opCtx,
                                        const NamespaceString& ns,
-                                       const UUID& expectedUUID);
+                                       const UUID& expectedUUID,
+                                       bool fromMigrate);
 
 /**
  * Drops the collection "collectionName". When applying a 'drop' oplog entry on a secondary, the
@@ -89,14 +92,12 @@ Status dropCollectionForApplyOps(OperationContext* opCtx,
                                  DropCollectionSystemCollectionMode systemCollectionMode);
 
 /**
- * If we are in a replset, every replicated collection must have an _id index. As we scan each
- * database, we also gather a list of drop-pending collection namespaces for the
- * DropPendingCollectionReaper to clean up eventually.
+ * If we are in a replset, every replicated collection must have an _id index. Issues a warning if
+ * one is not found.
  *
  * The caller must have the database locked in at least IX mode.
  */
-void checkForIdIndexesAndDropPendingCollections(OperationContext* opCtx,
-                                                const DatabaseName& dbName);
+void checkForIdIndexes(OperationContext* opCtx, const DatabaseName& dbName);
 
 /**
  * Deletes all temporary collections under the specified database.

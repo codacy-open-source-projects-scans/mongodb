@@ -13,6 +13,10 @@
 import {configureFailPoint, kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
+// Because this test intentionally causes the server to crash, we need to instruct the
+// shell to clean up the core dump that is left behind.
+TestData.cleanUpCoreDumpsFromExpectedCrash = true;
+
 const dbName = TestData.testName;
 const logLevel = tojson({storage: {recovery: 2}});
 
@@ -29,7 +33,7 @@ const startParams = {
 };
 const nodes = rst.startSet({setParameter: startParams});
 let restoreNode = nodes[1];
-rst.initiateWithHighElectionTimeout();
+rst.initiate();
 const primary = rst.getPrimary();
 const db = primary.getDB(dbName);
 const collName = "testcoll";
@@ -150,7 +154,8 @@ assert.commandWorked(restoreNode.adminCommand(
     {'configureFailPoint': 'hangBeforeUnrecoverableRollbackError', 'mode': 'off'}));
 
 // This node should not come back up, because it has no stable timestamp to recover to.
-assert.soon(() => (rawMongoProgramOutput().search("UnrecoverableRollbackError") >= 0));
+const subStr = "UnrecoverableRollbackError";
+assert.soon(() => (rawMongoProgramOutput(subStr).search(subStr) >= 0));
 // Hide the exit code from stopSet.
 waitMongoProgram(parseInt(restoreNode.port));
 

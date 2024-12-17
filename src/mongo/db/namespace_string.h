@@ -65,12 +65,14 @@ namespace mongo {
 class NamespaceString : private DatabaseName {
 public:
     constexpr static size_t MaxNSCollectionLenFCV42 = 120U;
-    constexpr static size_t MaxNsCollectionLen = 255;
+    constexpr static size_t MaxUserNsCollectionLen = 255;
+    constexpr static size_t MaxInternalNsCollectionLen = 511;
 
     // The maximum namespace length of sharded collections is less than that of unsharded ones since
     // the namespace of the cached chunks metadata, local to each shard, is composed by the
     // namespace of the related sharded collection (i.e., config.cache.chunks.<ns>).
-    constexpr static size_t MaxNsShardedCollectionLen = 235;  // 255 - len(ChunkType::ShardNSPrefix)
+    constexpr static size_t MaxUserNsShardedCollectionLen =
+        235;  // 255 - len(ChunkType::ShardNSPrefix)
 
     // Reserved system namespaces
 
@@ -232,6 +234,13 @@ public:
      * namespace is "<dbName>.$cmd.listCollections".
      */
     static NamespaceString makeListCollectionsNSS(const DatabaseName& dbName);
+
+    /**
+     * Constructs a NamespaceString representing a shardsvrParticipantBlock namespace. The format
+     * for this namespace is "<dbName>.$cmd.shardsvrParticipantBlock".
+     */
+    static NamespaceString makeCollectionlessShardsvrParticipantBlockNSS(
+        const DatabaseName& dbName);
 
     /**
      * Constructs the cluster parameters NamespaceString for the specified tenant. The format for
@@ -559,7 +568,7 @@ public:
     bool isConfigTransactionsCollection() const;
 
     /**
-     * Returns whether the specified namespace is <database>.enxcol_.<.+>.(esc|ecc|ecoc).
+     * Returns whether the specified namespace is <database>.enxcol_.<.+>.(esc|ecoc).
      */
     bool isFLE2StateCollection() const;
 
@@ -627,6 +636,7 @@ public:
      */
     bool isCollectionlessAggregateNS() const;
     bool isListCollectionsCursorNS() const;
+    bool isCollectionlessShardsvrParticipantBlockNS() const;
 
     /**
      * Returns true if a client can modify this namespace even though it is under ".system."
@@ -635,28 +645,9 @@ public:
     bool isLegalClientSystemNS() const;
 
     /**
-     * Returns true if this namespace refers to a drop-pending collection.
-     */
-    bool isDropPendingNamespace() const;
-
-    /**
      * Returns true if operations on this namespace must be applied in their own oplog batch.
      */
     bool mustBeAppliedInOwnOplogBatch() const;
-
-    /**
-     * Returns the drop-pending namespace name for this namespace, provided the given optime.
-     *
-     * Example:
-     *     test.foo -> test.system.drop.<timestamp seconds>i<timestamp increment>t<term>.foo
-     */
-    NamespaceString makeDropPendingNamespace(const repl::OpTime& opTime) const;
-
-    /**
-     * Returns the optime used to generate the drop-pending namespace.
-     * Returns an error if this namespace is not drop-pending.
-     */
-    StatusWith<repl::OpTime> getDropPendingNamespaceOpTime() const;
 
     /**
      * Returns true if the namespace is valid. Special namespaces for internal use are considered as
@@ -731,18 +722,6 @@ public:
 
         return StringData{_data.data() + kDataOffset, _data.size() - kDataOffset}.compare(
             StringData{other._data.data() + kDataOffset, other._data.size() - kDataOffset});
-    }
-
-    /**
-     * Checks if a given tenant prefixes or matches the tenantId from this NamespaceString.
-     * TODO SERVER-63517 Since we are removing tenant migration code we might be able to remove this
-     * method from the codebase.
-     */
-    bool isNamespaceForTenant(StringData tenant) const {
-        if (auto tid = tenantId()) {
-            return tid->toString() == tenant;
-        }
-        return db_deprecated().startsWith(tenant + "_");
     }
 
     /**

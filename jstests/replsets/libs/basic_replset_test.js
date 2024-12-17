@@ -4,6 +4,9 @@ import {
 } from "jstests/replsets/libs/election_metrics.js";
 import {reconnect} from "jstests/replsets/rslib.js";
 
+// Go to `replsettest_api_usage_examples.js` to see more examples of starting up / initiating
+// replica sets and the behaviors of the nodes.
+
 export function basicReplsetTest(signal, ssl_options1, ssl_options2, ssl_name) {
     // Test basic replica set functionality.
     // -- Replication
@@ -23,7 +26,7 @@ export function basicReplsetTest(signal, ssl_options1, ssl_options2, ssl_name) {
 
     // Call initiate() to send the replSetInitiate command
     // This will wait for initiation
-    replTest.initiate();
+    replTest.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
     // Call getPrimary to return a reference to the node that's been
     // elected primary.

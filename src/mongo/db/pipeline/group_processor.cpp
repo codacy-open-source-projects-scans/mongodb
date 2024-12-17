@@ -32,7 +32,6 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
-#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/util/spill_util.h"
@@ -115,7 +114,7 @@ boost::optional<Document> GroupProcessor::getNextSpilled() {
         _firstPartOfNextGroup = _sorterIterator->next();
     }
 
-    return makeDocument(currentId, _currentAccumulators, _expCtx->needsMerge);
+    return makeDocument(currentId, _currentAccumulators);
 }
 
 boost::optional<Document> GroupProcessor::getNextStandard() {
@@ -125,7 +124,7 @@ boost::optional<Document> GroupProcessor::getNextStandard() {
 
     auto& it = *_groupsIterator;
 
-    Document out = makeDocument(it->first, it->second, _expCtx->needsMerge);
+    Document out = makeDocument(it->first, it->second);
     ++it;
     return out;
 }
@@ -231,9 +230,9 @@ bool GroupProcessor::shouldSpillWithAttemptToSaveMemory() {
 
 bool GroupProcessor::shouldSpillOnEveryDuplicateId(bool isNewGroup) {
     // Spill every time we have a duplicate id to stress merge logic.
-    return (internalQueryEnableAggressiveSpillsInGroup && !_expCtx->opCtx->readOnly() &&
-            !isNewGroup &&                    // is not a new group
-            !_expCtx->inRouter &&             // can't spill to disk in router
+    return (internalQueryEnableAggressiveSpillsInGroup &&
+            !_expCtx->getOperationContext()->readOnly() && !isNewGroup &&  // is not a new group
+            !_expCtx->getInRouter() &&        // can't spill to disk in router
             _memoryTracker.allowDiskUse() &&  // never spill when disk use is explicitly prohibited
             _sortedFiles.size() < 20);
 }
@@ -241,7 +240,7 @@ bool GroupProcessor::shouldSpillOnEveryDuplicateId(bool isNewGroup) {
 void GroupProcessor::spill() {
     // Ensure there is sufficient disk space for spilling
     uassertStatusOK(ensureSufficientDiskSpaceForSpilling(
-        _expCtx->tempDir, internalQuerySpillingMinAvailableDiskSpaceBytes.load()));
+        _expCtx->getTempDir(), internalQuerySpillingMinAvailableDiskSpaceBytes.load()));
 
     std::vector<const GroupProcessorBase::GroupsMap::value_type*>
         ptrs;  // using pointers to speed sorting
@@ -256,9 +255,9 @@ void GroupProcessor::spill() {
     if (!_file) {
         _spillStats = std::make_unique<SorterFileStats>(nullptr /* sorterTracker */);
         _file = std::make_shared<Sorter<Value, Value>::File>(
-            _expCtx->tempDir + "/" + nextFileName(), _spillStats.get());
+            _expCtx->getTempDir() + "/" + nextFileName(), _spillStats.get());
     }
-    SortedFileWriter<Value, Value> writer(SortOptions().TempDir(_expCtx->tempDir), _file);
+    SortedFileWriter<Value, Value> writer(SortOptions().TempDir(_expCtx->getTempDir()), _file);
     switch (_accumulatedFields.size()) {  // same as ptrs[i]->second.size() for all i.
         case 0:                           // no values, essentially a distinct
             for (size_t i = 0; i < ptrs.size(); i++) {

@@ -38,7 +38,6 @@
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 
 namespace mongo::stage_builder {
-namespace {
 inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result) {}
 
 template <typename... Ts>
@@ -79,7 +78,6 @@ inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
     result.emplace_back(std::move(p.first), p.second);
     makeSbExprOptSbSlotVecHelper(result, std::forward<Ts>(rest)...);
 }
-}  // namespace
 
 template <typename... Ts>
 auto makeSbExprOptSbSlotVec(Ts&&... pack) {
@@ -312,8 +310,7 @@ public:
         const SbScanBounds& scanBounds = {},
         const SbIndexInfoSlots& indexInfoSlots = {},
         sbe::ScanCallbacks scanCallbacks = {},
-        boost::optional<SbSlot> oplogTsSlot = boost::none,
-        bool lowPriority = false);
+        boost::optional<SbSlot> oplogTsSlot = boost::none);
 
     std::tuple<SbStage, SbSlot, SbSlotVector, SbIndexInfoSlots> makeSimpleIndexScan(
         UUID collectionUuid,
@@ -324,8 +321,7 @@ public:
         SbExpr lowKeyExpr = SbExpr{},
         SbExpr highKeyExpr = SbExpr{},
         sbe::IndexKeysInclusionSet indexKeysToInclude = sbe::IndexKeysInclusionSet{},
-        SbIndexInfoType indexInfoTypeMask = SbIndexInfoType::kNoInfo,
-        bool lowPriority = false) {
+        SbIndexInfoType indexInfoTypeMask = SbIndexInfoType::kNoInfo) {
         return makeSimpleIndexScan(VariableTypes{},
                                    std::move(collectionUuid),
                                    std::move(dbName),
@@ -335,8 +331,7 @@ public:
                                    std::move(lowKeyExpr),
                                    std::move(highKeyExpr),
                                    std::move(indexKeysToInclude),
-                                   indexInfoTypeMask,
-                                   lowPriority);
+                                   indexInfoTypeMask);
     }
 
     std::tuple<SbStage, SbSlot, SbSlotVector, SbIndexInfoSlots> makeSimpleIndexScan(
@@ -349,8 +344,7 @@ public:
         SbExpr lowKeyExpr = SbExpr{},
         SbExpr highKeyExpr = SbExpr{},
         sbe::IndexKeysInclusionSet indexKeysToInclude = sbe::IndexKeysInclusionSet{},
-        SbIndexInfoType indexInfoTypeMask = SbIndexInfoType::kNoInfo,
-        bool lowPriority = false);
+        SbIndexInfoType indexInfoTypeMask = SbIndexInfoType::kNoInfo);
 
     std::tuple<SbStage, SbSlot, SbSlotVector, SbIndexInfoSlots> makeGenericIndexScan(
         UUID collectionUuid,

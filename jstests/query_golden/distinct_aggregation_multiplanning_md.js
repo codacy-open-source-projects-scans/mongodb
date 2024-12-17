@@ -69,6 +69,7 @@ outputAggregationPlanAndResults(
     coll,
     [{$group: {_id: "$a", accum: {$bottom: {sortBy: {a: -1, b: -1}, output: "$c"}}}}],
     {hint: "a_1_b_1"});
+outputAggregationPlanAndResults(coll, [{$group: {_id: "$a"}}]);
 
 section("Both DISTINCT_SCAN and non-DISTINCT_SCAN candidates considered");
 coll.insertMany([{a: 4, b: 2, c: 3}, {a: 4, b: 3, c: 6}, {a: 5, b: 4, c: 7, d: [1, 2, 3]}]);
@@ -101,8 +102,7 @@ outputAggregationPlanAndResults(coll, [
     {$group: {_id: "$a", accumB: {$first: "$b"}, accumC: {$first: "$c"}, accumD: {$first: "$d"}}}
 ]);
 
-// TODO SERVER-92468: See if we have to do something to break the tie.
-subSection("Multiplanning tie between DISTINCT_SCAN and IXSCAN");
+subSection("Multiplanning tie between DISTINCT_SCAN and IXSCAN favors DISTINCT_SCAN");
 const coll2 = db[jsTestName() + "-2"];
 coll2.drop();
 const distinctDocs = [];
@@ -114,6 +114,19 @@ coll2.createIndex({a: -1, b: 1});
 coll2.createIndex({a: 1, b: 1});
 outputAggregationPlanAndResults(coll2, [
     {$match: {a: {$gt: 0}}},
+    {$group: {_id: "$a", accum: {$top: {sortBy: {a: 1, b: 1}, output: "$b"}}}}
+]);
+
+subSection("Prefer FETCH + filter + IXSCAN for more selective predicate on b");
+const coll3 = db[jsTestName() + "-3"];
+coll3.drop();
+for (let i = 0; i < 20; i++) {
+    coll3.insertOne({a: i, b: -i, c: i % 5});
+}
+coll3.createIndex({a: 1, b: 1});
+coll3.createIndex({b: 1, c: 1});
+outputAggregationPlanAndResults(coll3, [
+    {$match: {a: {$gt: 0}, b: {$gt: -18}}},
     {$group: {_id: "$a", accum: {$top: {sortBy: {a: 1, b: 1}, output: "$b"}}}}
 ]);
 
@@ -134,6 +147,12 @@ section("No DISTINCT_SCAN candidates considered due to multikey index");
 coll.insertMany([{a: 4, b: 2, c: 3}, {a: 4, b: 3, c: 6}, {a: [1, 2, 3], b: 4, c: 7, d: 5}]);
 outputAggregationPlanAndResults(
     coll, [{$sort: {a: 1, b: 1}}, {$group: {_id: "$a", accum: {$first: "$b"}}}]);
+outputAggregationPlanAndResults(coll, [{$group: {_id: "$a"}}]);
 subSection("No available indexes");
 outputAggregationPlanAndResults(
     coll, [{$group: {_id: "$a", accum: {$top: {sortBy: {a: 1, b: 1}, output: "$b"}}}}]);
+
+// TODO SERVER-97238: Ensure we don't unwind the array here (i.e. we should fetch).
+section("$group by non-multikey field with $first/$last on a multikey field");
+outputAggregationPlanAndResults(coll, [{$group: {_id: "$b", accum: {$first: "$a"}}}]);
+outputAggregationPlanAndResults(coll, [{$group: {_id: "$b", accum: {$last: "$a"}}}]);
