@@ -6098,6 +6098,20 @@ if "SANITIZER_RUNTIME_LIBS" in env:
         AIB_COMPONENTS_EXTRA=["dist-test"],
     )
 
+for benchmark_tag in env.get_bazel_benchmark_tags():
+    env.AddPackageNameAlias(
+        component=benchmark_tag,
+        role="runtime",
+        name=benchmark_tag,
+    )
+
+    env.AutoInstall(
+        ".",
+        f"$BUILD_ROOT/{benchmark_tag}.txt",
+        AIB_COMPONENT=benchmark_tag,
+        AIB_ROLE="runtime",
+    )
+
 env["RPATH_ESCAPED_DOLLAR_ORIGIN"] = "\\$$$$ORIGIN"
 
 
@@ -6774,17 +6788,19 @@ if env.get("__NINJA_NO") != "1":
         else:
             pass
 
-        for debug_file in debug_files:
-            setattr(debug_file.attributes, "debug_file_for", bazel_node)
-        setattr(bazel_node.attributes, "separate_debug_files", debug_files)
+        if debug_symbols:
+            for debug_file in debug_files:
+                setattr(debug_file.attributes, "debug_file_for", bazel_node)
+            setattr(bazel_node.attributes, "separate_debug_files", debug_files)
 
         installed_prog = env.BazelAutoInstallSingleTarget(bazel_node, suffix, bazel_node)
 
         installed_debugs = []
-        for debug_file in debug_files:
-            installed_debugs.append(
-                env.BazelAutoInstallSingleTarget(debug_file, debug_suffix, debug_file)
-            )
+        if debug_symbols:
+            for debug_file in debug_files:
+                installed_debugs.append(
+                    env.BazelAutoInstallSingleTarget(debug_file, debug_suffix, debug_file)
+                )
 
         libs = []
         debugs = []
