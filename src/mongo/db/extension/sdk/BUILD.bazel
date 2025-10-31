@@ -1,0 +1,43 @@
+load("//bazel:mongo_src_rules.bzl", "mongo_cc_library")
+
+exports_files(
+    glob([
+        "*.h",
+    ]),
+)
+
+mongo_cc_library(
+    name = "sdk_cpp",
+    srcs = [
+        "aggregation_stage.cpp",
+        "extension_helper.cpp",
+        "host_services.cpp",
+        "query_execution_context_handle.cpp",
+        "query_shape_opts_handle.cpp",
+    ],
+    hdrs = [
+        "aggregation_stage.h",
+        "assert_util.h",
+        "extension.h",
+        "extension_factory.h",
+        "extension_helper.h",
+        "extension_operation_metrics_handle.h",
+        "host_portal.h",
+        "host_services.h",
+        "operation_metrics_adapter.h",
+        "query_execution_context_handle.h",
+        "query_shape_opts_handle.h",
+        "test_extension_factory.h",
+        "test_extension_util.h",
+        "versioned_extension.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db/extension/public:extensions_api_public",
+        "//src/mongo/db/extension/shared",
+        "//src/mongo/db/extension/shared/handle/aggregation_stage",
+        "//src/third_party/yaml-cpp:yaml",
+    ],
+)
